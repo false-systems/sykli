@@ -59,6 +59,10 @@ defmodule Sykli.CLI do
       ["context" | context_args] ->
         handle_context(context_args)
 
+      ["mcp" | _mcp_args] ->
+        Sykli.MCP.Server.start()
+        halt(0)
+
       # Support explicit 'run' command: sykli run [path]
       ["run" | run_args] ->
         run_sykli(run_args)
@@ -105,6 +109,7 @@ defmodule Sykli.CLI do
       sykli history    List recent runs
       sykli daemon     Manage daemon (see: sykli daemon --help)
       sykli cache      Manage cache (see: sykli cache --help)
+      sykli mcp        Start MCP server (for AI assistants)
 
     Examples:
       sykli                           Run pipeline in current directory
