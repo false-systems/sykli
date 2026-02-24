@@ -50,6 +50,9 @@ defmodule Sykli.Context do
         },
         "last_run": {...}
       }
+
+  Optional sections (`health`, `last_run`) are omitted when no data is
+  available, rather than included as `null`.
   """
 
   alias Sykli.Graph.Task
