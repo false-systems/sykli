@@ -58,6 +58,7 @@ defmodule Sykli.Context do
   alias Sykli.Services.MergeQueueDetector
 
   @context_version "1.0"
+  @default_task_duration_ms 1000
 
   @doc """
   Generates the full context.json file.
@@ -318,6 +319,7 @@ defmodule Sykli.Context do
       "languages" => detect_languages(abs_workdir),
       "sdk" => detect_sdk_type(abs_workdir)
     }
+    |> reject_nil_values()
   end
 
   @language_markers %{
@@ -344,16 +346,17 @@ defmodule Sykli.Context do
     |> Enum.sort()
   end
 
-  @sdk_type_map %{
-    "sykli.go" => "go",
-    "sykli.rs" => "rust",
-    "sykli.exs" => "elixir",
-    "sykli.ts" => "typescript",
-    "sykli.py" => "python"
-  }
+  # Ordered to match Detector.@sdk_files priority
+  @sdk_type_list [
+    {"sykli.go", "go"},
+    {"sykli.rs", "rust"},
+    {"sykli.exs", "elixir"},
+    {"sykli.ts", "typescript"},
+    {"sykli.py", "python"}
+  ]
 
   defp detect_sdk_type(workdir) do
-    @sdk_type_map
+    @sdk_type_list
     |> Enum.find_value(fn {file, sdk_type} ->
       if File.exists?(Path.join(workdir, file)), do: sdk_type
     end)
@@ -428,7 +431,7 @@ defmodule Sykli.Context do
     levels
     |> Enum.map(fn {_level, names} ->
       names
-      |> Enum.map(fn name -> Map.get(duration_map, name, 1000) end)
+      |> Enum.map(fn name -> Map.get(duration_map, name, @default_task_duration_ms) end)
       |> Enum.max(fn -> 0 end)
     end)
     |> Enum.sum()
