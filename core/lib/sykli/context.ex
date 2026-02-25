@@ -347,7 +347,7 @@ defmodule Sykli.Context do
         Path.join([workdir, "*", "*", marker])
       ]
 
-      if Enum.any?(patterns, fn p -> Path.wildcard(p) != [] end) do
+      if Enum.any?(patterns, fn p -> Path.wildcard(p, match_dot: false) != [] end) do
         [lang | acc]
       else
         acc
