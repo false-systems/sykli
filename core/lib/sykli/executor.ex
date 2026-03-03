@@ -781,8 +781,8 @@ defmodule Sykli.Executor do
 
   defp maybe_emit_task_retrying(_task_name, _attempt, _max_attempts, _reason, nil), do: :ok
 
-  defp maybe_emit_task_retrying(task_name, attempt, max_attempts, _reason, run_id) do
-    OccPubSub.task_retrying(run_id, task_name, attempt, max_attempts)
+  defp maybe_emit_task_retrying(task_name, attempt, max_attempts, reason, run_id) do
+    OccPubSub.task_retrying(run_id, task_name, attempt, max_attempts, error: reason)
   end
 
   # Build a map of task_name => status for the graph visualization

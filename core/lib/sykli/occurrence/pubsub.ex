@@ -94,8 +94,8 @@ defmodule Sykli.Occurrence.PubSub do
   end
 
   @doc "Broadcast a ci.task.retrying occurrence. Returns the Occurrence."
-  def task_retrying(run_id, task_name, attempt, max_attempts) do
-    occ = Occurrence.task_retrying(run_id, task_name, attempt, max_attempts)
+  def task_retrying(run_id, task_name, attempt, max_attempts, opts \\ []) do
+    occ = Occurrence.task_retrying(run_id, task_name, attempt, max_attempts, opts)
     broadcast(occ)
     occ
   end

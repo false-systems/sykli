@@ -163,7 +163,9 @@ defmodule Sykli.Occurrence do
   @doc "Create a ci.task.retrying occurrence."
   @spec task_retrying(String.t(), String.t(), pos_integer(), pos_integer(), keyword()) :: t()
   def task_retrying(run_id, task_name, attempt, max_attempts, opts \\ []) do
-    new("ci.task.retrying", run_id, TaskRetrying.new(task_name, attempt, max_attempts),
+    error = Keyword.get(opts, :error)
+
+    new("ci.task.retrying", run_id, TaskRetrying.new(task_name, attempt, max_attempts, error),
       severity: :warning,
       opts: opts
     )
