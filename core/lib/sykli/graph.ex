@@ -114,7 +114,9 @@ defmodule Sykli.Graph do
       # OIDC credential binding
       :oidc,
       # Cross-platform verification mode ("cross_platform", "always", "never", or nil)
-      :verify
+      :verify,
+      # Secret references (env or file-based)
+      :secret_refs
     ]
 
     @type t :: %__MODULE__{}
@@ -361,7 +363,8 @@ defmodule Sykli.Graph do
            Task.Capability.from_map(%{"provides" => map["provides"], "needs" => map["needs"]}),
          gate: Task.Gate.from_map(map["gate"]),
          oidc: Task.CredentialBinding.from_map(map["oidc"]),
-         verify: map["verify"]
+         verify: map["verify"],
+         secret_refs: parse_secret_refs(map["secret_refs"])
        }}
     end
   end
@@ -374,6 +377,18 @@ defmodule Sykli.Graph do
         from_task: ti["from_task"],
         output: ti["output"],
         dest: ti["dest"]
+      }
+    end)
+  end
+
+  defp parse_secret_refs(nil), do: []
+
+  defp parse_secret_refs(refs) when is_list(refs) do
+    Enum.map(refs, fn ref ->
+      %{
+        name: ref["name"],
+        source: ref["source"] || "env",
+        key: ref["key"] || ref["name"]
       }
     end)
   end

@@ -34,7 +34,14 @@ defmodule Sykli.Occurrence.Enrichment do
           :ok | {:error, term()}
   def enrich_and_persist(%Occurrence{} = occ, graph, executor_result, workdir) do
     enriched = enrich(occ, graph, executor_result, workdir)
-    persist(enriched, workdir)
+    result = persist(enriched, workdir)
+
+    # Fire-and-forget webhook notification for terminal events
+    if occ.type in ["ci.run.passed", "ci.run.failed"] do
+      Sykli.Services.NotificationService.notify(to_persistence_map(enriched))
+    end
+
+    result
   end
 
   @doc """
@@ -629,6 +636,17 @@ defmodule Sykli.Occurrence.Enrichment do
 
   defp persist(%Occurrence{} = occ, workdir) do
     occurrence_map = to_persistence_map(occ)
+
+    # Mask any resolved secrets from the occurrence data before persisting
+    secrets = collect_secrets_from_env()
+
+    occurrence_map =
+      if secrets != [] do
+        Sykli.Services.SecretMasker.mask_deep(occurrence_map, secrets)
+      else
+        occurrence_map
+      end
+
     dir = Path.join(workdir, ".sykli")
 
     with :ok <- File.mkdir_p(dir) do
@@ -779,5 +797,16 @@ defmodule Sykli.Occurrence.Enrichment do
     map
     |> Enum.reject(fn {_k, v} -> is_nil(v) or v == [] end)
     |> Map.new()
+  end
+
+  # Collect secret values from common env var patterns for masking
+  @secret_env_patterns ["_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_PASS", "_API_KEY"]
+  defp collect_secrets_from_env do
+    System.get_env()
+    |> Enum.filter(fn {key, _val} ->
+      Enum.any?(@secret_env_patterns, &String.contains?(key, &1))
+    end)
+    |> Enum.map(fn {_key, val} -> val end)
+    |> Enum.filter(&(byte_size(&1) >= 4))
   end
 end

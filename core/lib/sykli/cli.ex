@@ -265,6 +265,12 @@ defmodule Sykli.CLI do
   defp do_parse_run_args(["--git-token-secret=" <> secret | tail], opts, rest),
     do: do_parse_run_args(tail, [{:git_token_secret, secret} | opts], rest)
 
+  defp do_parse_run_args(["--max-parallel=" <> n | tail], opts, rest),
+    do: do_parse_run_args(tail, [{:max_parallel, String.to_integer(n)} | opts], rest)
+
+  defp do_parse_run_args(["--continue-on-failure" | tail], opts, rest),
+    do: do_parse_run_args(tail, [{:continue_on_failure, true} | opts], rest)
+
   defp do_parse_run_args(["--timeout=" <> timeout_str | tail], opts, rest),
     do: do_parse_run_args(tail, [{:timeout, parse_timeout(timeout_str)} | opts], rest)
 
@@ -642,6 +648,8 @@ defmodule Sykli.CLI do
       sykli init              Auto-detect and create sykli file
       sykli init --go         Create sykli.go
       sykli init --rust       Create sykli.rs
+      sykli init --typescript Create sykli.ts
+      sykli init --python     Create sykli.py
       sykli init --force      Overwrite existing file
     """)
 
@@ -675,8 +683,8 @@ defmodule Sykli.CLI do
       {:error, :unknown_project} ->
         IO.puts("#{IO.ANSI.red()}Could not detect project type#{IO.ANSI.reset()}")
         IO.puts("")
-        IO.puts("No go.mod, Cargo.toml, or mix.exs found.")
-        IO.puts("Use --go, --rust, or --elixir to specify language:")
+        IO.puts("No go.mod, Cargo.toml, mix.exs, package.json, or pyproject.toml found.")
+        IO.puts("Use --go, --rust, --elixir, --typescript, or --python to specify language:")
         IO.puts("")
         IO.puts("  #{IO.ANSI.cyan()}sykli init --go#{IO.ANSI.reset()}")
         halt(1)
@@ -696,6 +704,12 @@ defmodule Sykli.CLI do
           arg == "--elixir" ->
             {[{:language, :elixir} | opts], rest}
 
+          arg == "--typescript" or arg == "--ts" ->
+            {[{:language, :typescript} | opts], rest}
+
+          arg == "--python" or arg == "--py" ->
+            {[{:language, :python} | opts], rest}
+
           arg == "--force" or arg == "-f" ->
             {[{:force, true} | opts], rest}
 
@@ -713,6 +727,8 @@ defmodule Sykli.CLI do
   defp sykli_filename(:go), do: "sykli.go"
   defp sykli_filename(:rust), do: "sykli.rs"
   defp sykli_filename(:elixir), do: "sykli.exs"
+  defp sykli_filename(:typescript), do: "sykli.ts"
+  defp sykli_filename(:python), do: "sykli.py"
 
   # ----- VALIDATE SUBCOMMAND -----
 

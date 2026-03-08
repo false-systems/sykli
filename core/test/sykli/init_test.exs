@@ -24,6 +24,24 @@ defmodule Sykli.InitTest do
       assert Init.detect_language(tmp_dir) == {:ok, :elixir}
     end
 
+    test "detects TypeScript from package.json", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "package.json"), ~s({"name": "my-ts-app"}))
+
+      assert Init.detect_language(tmp_dir) == {:ok, :typescript}
+    end
+
+    test "detects Python from pyproject.toml", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "pyproject.toml"), ~s(name = "my-py-app"))
+
+      assert Init.detect_language(tmp_dir) == {:ok, :python}
+    end
+
+    test "detects Python from setup.py fallback", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "setup.py"), "from setuptools import setup")
+
+      assert Init.detect_language(tmp_dir) == {:ok, :python}
+    end
+
     test "returns error when no marker files found", %{tmp_dir: tmp_dir} do
       assert Init.detect_language(tmp_dir) == {:error, :unknown_project}
     end
@@ -79,6 +97,34 @@ defmodule Sykli.InitTest do
       content = File.read!(sykli_path)
       assert content =~ "Sykli.pipeline"
       assert content =~ "mix test"
+    end
+
+    test "generates TypeScript sykli file", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "package.json"), ~s({"name": "my-ts-app"}))
+
+      assert :ok = Init.generate(tmp_dir, :typescript)
+
+      sykli_path = Path.join(tmp_dir, "sykli.ts")
+      assert File.exists?(sykli_path)
+
+      content = File.read!(sykli_path)
+      assert content =~ "Pipeline"
+      assert content =~ "npm test"
+      assert content =~ "p.emit()"
+    end
+
+    test "generates Python sykli file", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "pyproject.toml"), ~s(name = "my-py-app"))
+
+      assert :ok = Init.generate(tmp_dir, :python)
+
+      sykli_path = Path.join(tmp_dir, "sykli.py")
+      assert File.exists?(sykli_path)
+
+      content = File.read!(sykli_path)
+      assert content =~ "from sykli import Pipeline"
+      assert content =~ "pytest"
+      assert content =~ "p.emit()"
     end
 
     test "returns error if sykli file already exists", %{tmp_dir: tmp_dir} do
@@ -143,6 +189,18 @@ defmodule Sykli.InitTest do
       File.write!(Path.join(tmp_dir, "mix.exs"), content)
 
       assert Init.project_name(tmp_dir, :elixir) == "my_elixir_app"
+    end
+
+    test "extracts name from package.json", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "package.json"), ~s({"name": "my-ts-app"}))
+
+      assert Init.project_name(tmp_dir, :typescript) == "my-ts-app"
+    end
+
+    test "extracts name from pyproject.toml", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "pyproject.toml"), ~s(name = "my-python-app"))
+
+      assert Init.project_name(tmp_dir, :python) == "my-python-app"
     end
 
     test "returns directory name as fallback", %{tmp_dir: tmp_dir} do

@@ -58,6 +58,26 @@ defmodule Sykli.Executor do
           }
   end
 
+  defmodule Config do
+    @moduledoc "Executor configuration to avoid parameter explosion."
+
+    defstruct [
+      :target,
+      :timeout,
+      :run_id,
+      max_parallel: :infinity,
+      continue_on_failure: false
+    ]
+
+    @type t :: %__MODULE__{
+            target: module(),
+            timeout: pos_integer(),
+            run_id: String.t() | nil,
+            max_parallel: pos_integer() | :infinity,
+            continue_on_failure: boolean()
+          }
+  end
+
   @default_target Sykli.Target.Local
 
   # 5 minutes
@@ -68,8 +88,18 @@ defmodule Sykli.Executor do
     target = Keyword.get(opts, :target) || Keyword.get(opts, :executor, @default_target)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     run_id = Keyword.get(opts, :run_id)
+    max_parallel = Keyword.get(opts, :max_parallel, :infinity)
+    continue_on_failure = Keyword.get(opts, :continue_on_failure, false)
     start_time = System.monotonic_time(:millisecond)
     total_tasks = length(tasks)
+
+    config = %Config{
+      target: target,
+      timeout: timeout,
+      run_id: run_id,
+      max_parallel: max_parallel,
+      continue_on_failure: continue_on_failure
+    }
 
     # Validate artifact graph BEFORE executing anything
     # This catches issues like missing outputs or invalid dependencies early
@@ -81,21 +111,23 @@ defmodule Sykli.Executor do
 
       :ok ->
         # Setup target with all options
-        do_run(tasks, graph, target, opts, timeout, start_time, total_tasks, run_id)
+        do_run(tasks, graph, config, opts, start_time, total_tasks)
     end
   end
 
-  defp do_run(tasks, graph, target, opts, timeout, start_time, total_tasks, run_id) do
-    case target.setup(opts) do
+  defp do_run(tasks, graph, %Config{} = config, opts, start_time, _total_tasks) do
+    case config.target.setup(opts) do
       {:ok, state} ->
         try do
+          # Apply select hooks to filter tasks
+          tasks = apply_select_hooks(tasks, graph, config)
+          total_tasks = length(tasks)
+
           # Group tasks by "level" - tasks at same level can run in parallel
           levels = group_by_level(tasks, graph)
 
           # Execute level by level, collecting results with timing
-          # Pass progress state: {completed_count, total_count}
-          # Also pass graph for resolving task_inputs
-          result = run_levels(levels, state, [], {0, total_tasks}, graph, target, timeout, run_id)
+          result = run_levels(levels, state, [], {0, total_tasks}, graph, config)
 
           # Print summary with status graph
           total_time = System.monotonic_time(:millisecond) - start_time
@@ -104,7 +136,7 @@ defmodule Sykli.Executor do
           # Return results (run history saved by Sykli.run)
           result
         after
-          target.teardown(state)
+          config.target.teardown(state)
         end
 
       {:error, reason} ->
@@ -170,10 +202,17 @@ defmodule Sykli.Executor do
 
   # ----- EXECUTING LEVELS -----
 
-  defp run_levels([], _state, acc, _progress, _graph, _target, _timeout, _run_id),
+  defp run_levels([], _state, acc, _progress, _graph, _config),
     do: {:ok, Enum.reverse(acc)}
 
-  defp run_levels([level | rest], state, acc, {completed, total}, graph, target, timeout, run_id) do
+  defp run_levels(
+         [level | rest],
+         state,
+         acc,
+         {completed, total},
+         graph,
+         %Config{} = config
+       ) do
     level_size = length(level)
     next_tasks = rest |> List.flatten() |> Enum.map(& &1.name)
 
@@ -188,71 +227,134 @@ defmodule Sykli.Executor do
       )
     end
 
-    # THIS IS THE PARALLEL BIT!
-    # Task.async spawns a new process for each task
-    # Task.await_many waits for all to complete
+    # Chunk level tasks for concurrency limiting
+    chunks = chunk_tasks(level, config.max_parallel)
 
-    {:ok, tracker} = ProgressTracker.start_link(initial: completed, total: total)
-
-    async_tasks =
-      level
-      |> Enum.map(fn task ->
-        Task.async(fn ->
-          task_num = ProgressTracker.increment(tracker)
-          start_time = System.monotonic_time(:millisecond)
-
-          # Resolve task_inputs before running the task
-          case resolve_task_inputs(task, graph, state, target) do
-            :ok ->
-              %TaskResult{} = result = run_single(task, state, {task_num, total}, target, run_id)
-              duration = System.monotonic_time(:millisecond) - start_time
-              %TaskResult{result | duration_ms: duration}
-
-            {:error, reason} ->
-              duration = System.monotonic_time(:millisecond) - start_time
-
-              %TaskResult{
-                name: task.name,
-                status: :failed,
-                duration_ms: duration,
-                error: reason
-              }
-          end
-        end)
-      end)
-
-    # Wait for all tasks in this level.
-    # Per-task timeouts are enforced by the runtime (killing the OS process).
-    # We use :infinity here so Task.await_many doesn't race with the runtime timeout
-    # and orphan OS processes.
-    results = Task.await_many(async_tasks, :infinity)
-    ProgressTracker.stop(tracker)
+    results = run_level_chunks(chunks, state, completed, total, graph, config)
 
     new_completed = completed + level_size
 
     # Check if any failed
-    failed = Enum.find(results, fn %TaskResult{status: status} -> status == :failed end)
+    failed_results =
+      Enum.filter(results, fn %TaskResult{status: status} -> status == :failed end)
 
-    if failed do
+    has_failures = failed_results != []
+
+    if has_failures and not config.continue_on_failure do
+      failed = hd(failed_results)
       IO.puts("#{IO.ANSI.red()}✗ #{failed.name} failed, stopping#{IO.ANSI.reset()}")
 
       # Mark remaining tasks as blocked
-      blocked_results = mark_remaining_as_blocked(rest, run_id)
+      blocked_results = mark_remaining_as_blocked(rest, config.run_id)
 
       {:error, Enum.reverse(acc) ++ results ++ blocked_results}
     else
-      # Continue to next level
-      run_levels(
-        rest,
-        state,
-        Enum.reverse(results) ++ acc,
-        {new_completed, total},
-        graph,
-        target,
-        timeout,
-        run_id
-      )
+      if has_failures and config.continue_on_failure do
+        # Track failed task names for transitive blocking
+        failed_names =
+          failed_results
+          |> Enum.map(fn %TaskResult{name: n} -> n end)
+          |> MapSet.new()
+
+        all_failed_names =
+          (acc ++ results)
+          |> Enum.filter(fn %TaskResult{status: s} -> s in [:failed, :blocked] end)
+          |> Enum.map(fn %TaskResult{name: n} -> n end)
+          |> MapSet.new()
+
+        # Filter remaining levels: skip tasks transitively blocked by failures
+        {rest, blocked} = partition_blocked(rest, all_failed_names, graph)
+        blocked_results = mark_remaining_as_blocked([blocked], config.run_id)
+
+        IO.puts(
+          "#{IO.ANSI.yellow()}! #{length(Enum.map(failed_names, & &1))} task(s) failed, continuing#{IO.ANSI.reset()}"
+        )
+
+        run_levels(
+          rest,
+          state,
+          Enum.reverse(results ++ blocked_results) ++ acc,
+          {new_completed, total},
+          graph,
+          config
+        )
+      else
+        # All passed, continue to next level
+        run_levels(
+          rest,
+          state,
+          Enum.reverse(results) ++ acc,
+          {new_completed, total},
+          graph,
+          config
+        )
+      end
     end
+  end
+
+  # Execute level tasks in chunks for concurrency limiting
+  defp run_level_chunks(chunks, state, completed, total, graph, config) do
+    {results, _} =
+      Enum.reduce(chunks, {[], completed}, fn chunk, {acc_results, current_completed} ->
+        {:ok, tracker} = ProgressTracker.start_link(initial: current_completed, total: total)
+
+        async_tasks =
+          chunk
+          |> Enum.map(fn task ->
+            Task.async(fn ->
+              task_num = ProgressTracker.increment(tracker)
+              start_time = System.monotonic_time(:millisecond)
+
+              # Resolve task_inputs before running the task
+              case resolve_task_inputs(task, graph, state, config.target) do
+                :ok ->
+                  %TaskResult{} =
+                    result =
+                    run_single(task, state, {task_num, total}, config.target, config.run_id)
+
+                  duration = System.monotonic_time(:millisecond) - start_time
+                  %TaskResult{result | duration_ms: duration}
+
+                {:error, reason} ->
+                  duration = System.monotonic_time(:millisecond) - start_time
+
+                  %TaskResult{
+                    name: task.name,
+                    status: :failed,
+                    duration_ms: duration,
+                    error: reason
+                  }
+              end
+            end)
+          end)
+
+        chunk_results = Task.await_many(async_tasks, :infinity)
+        ProgressTracker.stop(tracker)
+
+        {acc_results ++ chunk_results, current_completed + length(chunk)}
+      end)
+
+    results
+  end
+
+  defp chunk_tasks(level, :infinity), do: [level]
+  defp chunk_tasks(level, n) when is_integer(n) and n > 0, do: Enum.chunk_every(level, n)
+
+  # Partition remaining levels into runnable and blocked by failed tasks
+  defp partition_blocked(levels, failed_names, _graph) do
+    {runnable_levels, blocked_tasks} =
+      Enum.reduce(levels, {[], []}, fn level, {run_acc, block_acc} ->
+        {runnable, blocked} =
+          Enum.split_with(level, fn task ->
+            deps = task.depends_on || []
+            not Enum.any?(deps, &MapSet.member?(failed_names, &1))
+          end)
+
+        run_acc = if runnable != [], do: run_acc ++ [runnable], else: run_acc
+        {run_acc, block_acc ++ blocked}
+      end)
+
+    {runnable_levels, blocked_tasks}
   end
 
   defp mark_remaining_as_blocked(remaining_levels, run_id) do
@@ -269,6 +371,63 @@ defmodule Sykli.Executor do
       }
     end)
   end
+
+  # ----- AI HOOKS -----
+
+  # Apply select hooks to filter tasks before execution
+  defp apply_select_hooks(tasks, _graph, _config) do
+    # Get affected task names for :smart selection (lazy, computed once)
+    affected =
+      lazy_affected_tasks(tasks)
+
+    Enum.filter(tasks, fn task ->
+      check_select_hook(task, affected)
+    end)
+  end
+
+  defp check_select_hook(%Sykli.Graph.Task{ai_hooks: nil} = _task, _affected), do: true
+
+  defp check_select_hook(%Sykli.Graph.Task{ai_hooks: hooks} = task, affected) do
+    case hooks.select do
+      :smart ->
+        case affected do
+          {:ok, names} -> task.name in names
+          # If delta fails (e.g., not a git repo), run everything
+          {:error, _} -> true
+        end
+
+      :manual ->
+        false
+
+      # :always or nil — run
+      _ ->
+        true
+    end
+  end
+
+  defp lazy_affected_tasks(tasks) do
+    case Sykli.Delta.affected_tasks(tasks) do
+      {:ok, names} -> {:ok, names}
+      error -> error
+    end
+  end
+
+  # Apply on_fail hook to transform result after execution
+  defp apply_on_fail_hook(%TaskResult{status: :failed} = result, %Sykli.Graph.Task{
+         ai_hooks: %{on_fail: :skip}
+       }) do
+    %TaskResult{result | status: :skipped}
+  end
+
+  defp apply_on_fail_hook(result, _task), do: result
+
+  # Boost retry count for on_fail: :retry
+  defp apply_on_fail_retry_boost(%Sykli.Graph.Task{ai_hooks: %{on_fail: :retry}} = task) do
+    current = task.retry || 0
+    %{task | retry: max(current, 2)}
+  end
+
+  defp apply_on_fail_retry_boost(task), do: task
 
   # ----- RUNNING A SINGLE TASK -----
 
@@ -289,6 +448,9 @@ defmodule Sykli.Executor do
     else
       # Check condition first
       if should_run?(task) do
+        # Resolve secret_refs before execution
+        task = resolve_secret_refs(task)
+
         # OIDC credential exchange (if configured)
         try do
           case OIDCService.exchange(task, state) do
@@ -474,19 +636,25 @@ defmodule Sykli.Executor do
           String.t() | nil
         ) :: TaskResult.t()
   defp run_with_retry(task, state, cache_key, progress, target, start_time, run_id) do
+    # Apply on_fail: :retry boost before calculating max_attempts
+    task = apply_on_fail_retry_boost(task)
     max_attempts = (task.retry || 0) + 1
 
-    do_run_with_retry(
-      task,
-      state,
-      cache_key,
-      1,
-      max_attempts,
-      progress,
-      target,
-      start_time,
-      run_id
-    )
+    result =
+      do_run_with_retry(
+        task,
+        state,
+        cache_key,
+        1,
+        max_attempts,
+        progress,
+        target,
+        start_time,
+        run_id
+      )
+
+    # Apply on_fail: :skip transformation
+    apply_on_fail_hook(result, task)
   end
 
   @spec do_run_with_retry(
@@ -511,7 +679,9 @@ defmodule Sykli.Executor do
          start_time,
          run_id
        ) do
-    case run_and_cache(task, state, cache_key, progress, target) do
+    case Sykli.Telemetry.span_task(task.name, %{}, fn ->
+           run_and_cache(task, state, cache_key, progress, target)
+         end) do
       result when result == :ok or (is_tuple(result) and elem(result, 0) == :ok) ->
         duration = System.monotonic_time(:millisecond) - start_time
 
@@ -641,10 +811,41 @@ defmodule Sykli.Executor do
   end
 
   defp maybe_github_status(task_name, state) do
-    if Sykli.GitHub.enabled?() do
-      Sykli.GitHub.update_status(task_name, state)
+    Sykli.SCM.update_status(task_name, state)
+  end
+
+  # ----- SECRET REF RESOLUTION -----
+
+  defp resolve_secret_refs(%Sykli.Graph.Task{secret_refs: refs} = task)
+       when is_list(refs) and refs != [] do
+    resolved =
+      Enum.reduce(refs, %{}, fn ref, acc ->
+        case resolve_single_secret_ref(ref) do
+          {:ok, value} -> Map.put(acc, ref.name, value)
+          {:error, _} -> acc
+        end
+      end)
+
+    %{task | env: Map.merge(task.env || %{}, resolved)}
+  end
+
+  defp resolve_secret_refs(task), do: task
+
+  defp resolve_single_secret_ref(%{source: "env", key: key}) do
+    case System.get_env(key) do
+      nil -> {:error, {:missing_env, key}}
+      value -> {:ok, value}
     end
   end
+
+  defp resolve_single_secret_ref(%{source: "file", key: path}) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, String.trim(content)}
+      {:error, reason} -> {:error, {:file_read_failed, path, reason}}
+    end
+  end
+
+  defp resolve_single_secret_ref(_), do: {:error, :unknown_source}
 
   # ----- SECRET VALIDATION -----
 

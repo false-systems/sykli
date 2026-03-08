@@ -7,16 +7,21 @@ defmodule Sykli.Init do
   smart defaults.
   """
 
-  @marker_files %{
-    go: "go.mod",
-    rust: "Cargo.toml",
-    elixir: "mix.exs"
-  }
+  # Detection order matches detector.ex: Go > Rust > Elixir > TypeScript > Python
+  @marker_files [
+    {:go, "go.mod"},
+    {:rust, "Cargo.toml"},
+    {:elixir, "mix.exs"},
+    {:typescript, "package.json"},
+    {:python, "pyproject.toml"}
+  ]
 
   @sykli_files %{
     go: "sykli.go",
     rust: "sykli.rs",
-    elixir: "sykli.exs"
+    elixir: "sykli.exs",
+    typescript: "sykli.ts",
+    python: "sykli.py"
   }
 
   # ----- PUBLIC API -----
@@ -66,8 +71,17 @@ defmodule Sykli.Init do
       end)
 
     case found do
-      {lang, _file} -> {:ok, lang}
-      nil -> {:error, :unknown_project}
+      {lang, _file} ->
+        {:ok, lang}
+
+      nil ->
+        # Also check alternative Python markers
+        if File.exists?(Path.join(path, "setup.py")) or
+             File.exists?(Path.join(path, "requirements.txt")) do
+          {:ok, :python}
+        else
+          {:error, :unknown_project}
+        end
     end
   end
 
@@ -107,6 +121,8 @@ defmodule Sykli.Init do
       :go -> extract_go_module(path)
       :rust -> extract_cargo_name(path)
       :elixir -> extract_mix_app(path)
+      :typescript -> extract_package_name(path)
+      :python -> extract_python_name(path)
     end
     |> case do
       nil -> Path.basename(path)
@@ -191,6 +207,52 @@ defmodule Sykli.Init do
     """
   end
 
+  defp generate_content(path, :typescript) do
+    _name = project_name(path, :typescript)
+
+    """
+    import { Pipeline } from "@sykli/sdk";
+
+    const p = new Pipeline();
+
+    // Test
+    p.task("test")
+      .run("npm test")
+      .inputs(["src/**/*.ts", "package.json", "tsconfig.json"]);
+
+    // Build
+    p.task("build")
+      .run("npm run build")
+      .after(["test"])
+      .inputs(["src/**/*.ts", "package.json", "tsconfig.json"]);
+
+    p.emit();
+    """
+  end
+
+  defp generate_content(path, :python) do
+    name = project_name(path, :python)
+
+    """
+    from sykli import Pipeline
+
+    p = Pipeline()
+
+    # Test
+    p.task("test") \\
+        .run("pytest") \\
+        .inputs(["#{name}/**/*.py", "tests/**/*.py", "pyproject.toml"])
+
+    # Build
+    p.task("build") \\
+        .run("python -m build") \\
+        .after(["test"]) \\
+        .inputs(["#{name}/**/*.py", "pyproject.toml"])
+
+    p.emit()
+    """
+  end
+
   defp extract_go_module(path) do
     go_mod = Path.join(path, "go.mod")
 
@@ -243,6 +305,44 @@ defmodule Sykli.Init do
         {:ok, content} ->
           case Regex.run(~r/app:\s*:(\w+)/, content) do
             [_, app] -> app
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp extract_package_name(path) do
+    package_json = Path.join(path, "package.json")
+
+    if File.exists?(package_json) do
+      case File.read(package_json) do
+        {:ok, content} ->
+          case Jason.decode(content) do
+            {:ok, %{"name" => name}} when is_binary(name) -> name
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp extract_python_name(path) do
+    pyproject = Path.join(path, "pyproject.toml")
+
+    if File.exists?(pyproject) do
+      case File.read(pyproject) do
+        {:ok, content} ->
+          case Regex.run(~r/name\s*=\s*"([^"]+)"/, content) do
+            [_, name] -> name
             _ -> nil
           end
 

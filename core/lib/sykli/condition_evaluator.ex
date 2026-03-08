@@ -10,7 +10,7 @@ defmodule Sykli.ConditionEvaluator do
   - Logical: and, or, not
   """
 
-  @allowed_vars [:branch, :tag, :event, :pr_number, :ci]
+  @allowed_vars [:branch, :tag, :event, :pr_number, :ci, :platform, :runner]
 
   @doc """
   Evaluates a condition string against a context map.
@@ -52,6 +52,35 @@ defmodule Sykli.ConditionEvaluator do
     with :ok <- validate_ast(left),
          :ok <- validate_ast(right) do
       :ok
+    end
+  end
+
+  # Allow regex match operator =~
+  defp validate_ast({:=~, _meta, [left, right]}) do
+    with :ok <- validate_ast(left) do
+      # Right side must be a string literal (regex pattern)
+      if is_binary(right) do
+        case Regex.compile(right) do
+          {:ok, _} -> :ok
+          {:error, _} -> {:error, "invalid regex pattern: #{right}"}
+        end
+      else
+        {:error, "=~ right-hand side must be a string regex pattern"}
+      end
+    end
+  end
+
+  # Allow matches/2 function call (glob matching)
+  defp validate_ast({{:., _meta1, [{:matches, _meta2, nil}]}, _meta3, [left, right]}) do
+    with :ok <- validate_ast(left) do
+      if is_binary(right), do: :ok, else: {:error, "matches/2 pattern must be a string"}
+    end
+  end
+
+  # Allow matches(var, pattern) as a direct function call
+  defp validate_ast({:matches, _meta, [left, right]}) do
+    with :ok <- validate_ast(left) do
+      if is_binary(right), do: :ok, else: {:error, "matches/2 pattern must be a string"}
     end
   end
 
@@ -105,5 +134,39 @@ defmodule Sykli.ConditionEvaluator do
 
   defp eval_ast({:not, _meta, [expr]}, context) do
     !eval_ast(expr, context)
+  end
+
+  # Regex match operator =~
+  defp eval_ast({:=~, _meta, [left, right]}, context) when is_binary(right) do
+    value = eval_ast(left, context)
+
+    case value do
+      nil -> false
+      val when is_binary(val) -> Regex.match?(Regex.compile!(right), val)
+      _ -> false
+    end
+  end
+
+  # Glob matching: matches(var, pattern)
+  defp eval_ast({:matches, _meta, [left, right]}, context) when is_binary(right) do
+    value = eval_ast(left, context)
+
+    case value do
+      nil -> false
+      val when is_binary(val) -> glob_match?(val, right)
+      _ -> false
+    end
+  end
+
+  # Convert glob pattern to regex
+  defp glob_match?(string, pattern) do
+    regex_str =
+      pattern
+      |> Regex.escape()
+      |> String.replace("\\*\\*", ".*")
+      |> String.replace("\\*", "[^/]*")
+      |> String.replace("\\?", ".")
+
+    Regex.match?(Regex.compile!("^" <> regex_str <> "$"), string)
   end
 end

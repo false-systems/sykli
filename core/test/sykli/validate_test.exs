@@ -165,6 +165,47 @@ defmodule Sykli.ValidateTest do
     end
   end
 
+  describe "validate_json/1 -- missing command" do
+    test "detects task with no command" do
+      json = ~s({"tasks": [{"name": "test"}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == false
+      assert Enum.any?(result.errors, &(&1.type == :missing_command))
+
+      error = Enum.find(result.errors, &(&1.type == :missing_command))
+      assert error.task == "test"
+    end
+
+    test "detects task with empty command" do
+      json = ~s({"tasks": [{"name": "test", "command": ""}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == false
+      assert Enum.any?(result.errors, &(&1.type == :missing_command))
+    end
+
+    test "exempts gate tasks from command requirement" do
+      json =
+        ~s({"tasks": [{"name": "approval", "gate": {"strategy": "prompt", "message": "ok?"}}]})
+
+      result = Validate.validate_json(json)
+
+      refute Enum.any?(result.errors, &(&1.type == :missing_command))
+    end
+
+    test "passes when command is present" do
+      json = ~s({"tasks": [{"name": "test", "command": "echo hello"}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == true
+      refute Enum.any?(result.errors, &(&1.type == :missing_command))
+    end
+  end
+
   describe "format_errors/1" do
     test "formats errors for CLI output" do
       result = %Validate.Result{

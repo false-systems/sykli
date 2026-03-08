@@ -23,12 +23,15 @@ defmodule Sykli.Services.CacheService do
   def check_and_restore(task, workdir) do
     case Cache.check_detailed(task, workdir) do
       {:hit, key} ->
+        Sykli.Telemetry.emit_cache_check(task.name, :hit)
+
         case Cache.restore(key, workdir) do
           :ok -> {:hit, key}
           {:error, _} -> {:miss, key, :restore_failed}
         end
 
       {:miss, key, reason} ->
+        Sykli.Telemetry.emit_cache_check(task.name, :miss, reason)
         {:miss, key, reason}
     end
   end

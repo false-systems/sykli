@@ -301,10 +301,88 @@ defmodule Sykli.Target.K8s do
   end
 
   @impl true
-  def copy_artifact(_source_path, _dest_path, _workdir, _state) do
-    # In K8s, artifacts are on shared PVC
-    # The init container will handle copying
-    # TODO: Implement via kubectl cp or shared PVC
+  def copy_artifact(source_path, dest_path, _workdir, state) do
+    # Use an ephemeral pod that mounts the artifact PVC to perform the copy
+    pvc_name = state.artifact_pvc || "sykli-artifacts"
+    pod_name = "sykli-copy-#{:rand.uniform(100_000)}"
+    copy_timeout = 60
+
+    manifest = %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "name" => pod_name,
+        "namespace" => state.namespace,
+        "labels" => %{"app" => "sykli", "role" => "artifact-copy"}
+      },
+      "spec" => %{
+        "restartPolicy" => "Never",
+        "containers" => [
+          %{
+            "name" => "copy",
+            "image" => "busybox:latest",
+            "command" => ["cp", "-r", source_path, dest_path],
+            "volumeMounts" => [
+              %{"name" => "artifacts", "mountPath" => "/artifacts"}
+            ]
+          }
+        ],
+        "volumes" => [
+          %{
+            "name" => "artifacts",
+            "persistentVolumeClaim" => %{"claimName" => pvc_name}
+          }
+        ]
+      }
+    }
+
+    path = "/api/v1/namespaces/#{state.namespace}/pods"
+
+    with {:ok, _} <- Client.request(:post, path, manifest, state.auth_config, []),
+         {:ok, :succeeded} <- wait_for_pod(pod_name, state, copy_timeout) do
+      cleanup_pod(pod_name, state)
+      :ok
+    else
+      {:ok, :failed} ->
+        cleanup_pod(pod_name, state)
+        {:error, {:artifact_copy_failed, "copy pod failed"}}
+
+      {:error, reason} ->
+        cleanup_pod(pod_name, state)
+        {:error, {:artifact_copy_failed, reason}}
+    end
+  end
+
+  defp wait_for_pod(pod_name, state, timeout_seconds) do
+    path = "/api/v1/namespaces/#{state.namespace}/pods/#{pod_name}"
+    deadline = System.monotonic_time(:millisecond) + timeout_seconds * 1000
+    do_wait_for_pod(path, state, deadline)
+  end
+
+  defp do_wait_for_pod(path, state, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      {:error, :timeout}
+    else
+      case Client.request(:get, path, nil, state.auth_config, []) do
+        {:ok, %{"status" => %{"phase" => "Succeeded"}}} ->
+          {:ok, :succeeded}
+
+        {:ok, %{"status" => %{"phase" => "Failed"}}} ->
+          {:ok, :failed}
+
+        {:ok, _} ->
+          Process.sleep(1_000)
+          do_wait_for_pod(path, state, deadline)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp cleanup_pod(pod_name, state) do
+    path = "/api/v1/namespaces/#{state.namespace}/pods/#{pod_name}"
+    Client.request(:delete, path, nil, state.auth_config, [])
     :ok
   end
 

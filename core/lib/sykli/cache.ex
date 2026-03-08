@@ -21,12 +21,22 @@ defmodule Sykli.Cache do
 
   @version "0.1.0"
 
+  defp repo do
+    cond do
+      System.get_env("SYKLI_CACHE_S3_BUCKET") != nil ->
+        Sykli.Cache.TieredRepository
+
+      true ->
+        Sykli.Cache.FileRepository
+    end
+  end
+
   # Env vars that affect builds (PATH excluded - too volatile)
   @relevant_env_vars ["GOPATH", "GOROOT", "CARGO_HOME", "NODE_ENV", "GOOS", "GOARCH"]
 
-  def init, do: Repo.init()
+  def init, do: repo().init()
 
-  def get_cache_dir, do: Repo.get_cache_dir()
+  def get_cache_dir, do: Sykli.Cache.FileRepository.get_cache_dir()
 
   @doc """
   Check if task can be skipped (cache hit).
@@ -152,7 +162,7 @@ defmodule Sykli.Cache do
   Returns :ok or {:error, reason}
   """
   def restore(key, workdir) do
-    case Repo.get(key) do
+    case repo().get(key) do
       {:ok, entry} ->
         restore_outputs(entry.outputs || [], workdir)
 
@@ -166,7 +176,7 @@ defmodule Sykli.Cache do
   Returns :ok or {:error, reason}
   """
   def store(key, task, outputs, duration_ms, workdir) do
-    Repo.init()
+    repo().init()
     abs_workdir = Path.expand(workdir)
 
     # Collect output file info
@@ -201,24 +211,24 @@ defmodule Sykli.Cache do
         sykli_version: @version
       })
 
-    Repo.put(key, entry)
+    repo().put(key, entry)
   end
 
   @doc """
   Get cache statistics.
   """
-  def stats, do: Repo.stats()
+  def stats, do: repo().stats()
 
   @doc """
   Clean all cache entries.
   """
-  def clean, do: Repo.clean()
+  def clean, do: repo().clean()
 
   @doc """
   Clean cache entries older than given duration.
   Duration is in seconds.
   """
-  def clean_older_than(seconds), do: Repo.clean_older_than(seconds)
+  def clean_older_than(seconds), do: repo().clean_older_than(seconds)
 
   # ----- CACHE KEY GENERATION -----
 
@@ -333,7 +343,7 @@ defmodule Sykli.Cache do
   defp store_blob(abs_path, workdir) do
     case File.read(abs_path) do
       {:ok, content} ->
-        {:ok, blob_hash} = Repo.store_blob(content)
+        {:ok, blob_hash} = repo().store_blob(content)
 
         # Get file mode
         mode =
@@ -378,7 +388,7 @@ defmodule Sykli.Cache do
 
     dest_path = Path.join(workdir, rel_path)
 
-    case Repo.get_blob(blob_hash) do
+    case repo().get_blob(blob_hash) do
       {:ok, content} ->
         with :ok <- dest_path |> Path.dirname() |> File.mkdir_p(),
              :ok <- File.write(dest_path, content),

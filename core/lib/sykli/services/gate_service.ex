@@ -21,9 +21,8 @@ defmodule Sykli.Services.GateService do
     wait_file(gate)
   end
 
-  def wait(%Gate{strategy: :webhook} = _gate) do
-    # Webhook strategy is a future enhancement
-    {:denied, "webhook strategy not yet implemented"}
+  def wait(%Gate{strategy: :webhook} = gate) do
+    wait_webhook(gate)
   end
 
   defp wait_prompt(%Gate{message: message, timeout: timeout}) do
@@ -117,6 +116,65 @@ defmodule Sykli.Services.GateService do
         Process.sleep(poll_interval)
         do_wait_file(file_path, poll_interval, deadline)
       end
+    end
+  end
+
+  defp wait_webhook(%Gate{webhook_url: url, message: message, timeout: timeout})
+       when is_binary(url) and url != "" do
+    body =
+      Jason.encode!(%{
+        type: "gate_approval_request",
+        message: message || "Gate approval requested",
+        timestamp: DateTime.to_iso8601(DateTime.utc_now())
+      })
+
+    url_charlist = String.to_charlist(url)
+    timeout_ms = timeout * 1000
+
+    headers = [
+      {~c"content-type", ~c"application/json"},
+      {~c"accept", ~c"application/json"}
+    ]
+
+    http_opts = [timeout: timeout_ms, connect_timeout: 5_000]
+
+    case :httpc.request(
+           :post,
+           {url_charlist, headers, ~c"application/json", body},
+           http_opts,
+           []
+         ) do
+      {:ok, {{_, status, _}, _headers, resp_body}} when status in 200..299 ->
+        parse_webhook_response(to_string(resp_body))
+
+      {:ok, {{_, status, _}, _headers, _resp_body}} ->
+        {:denied, "webhook returned HTTP #{status}"}
+
+      {:error, :timeout} ->
+        {:timed_out}
+
+      {:error, reason} ->
+        {:denied, "webhook request failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp wait_webhook(_), do: {:denied, "webhook strategy requires webhook_url to be set"}
+
+  defp parse_webhook_response(body) do
+    case Jason.decode(body) do
+      {:ok, %{"approved" => true} = resp} ->
+        approver = resp["approver"] || "webhook"
+        {:approved, approver}
+
+      {:ok, %{"approved" => false} = resp} ->
+        reason = resp["reason"] || "denied by webhook"
+        {:denied, reason}
+
+      {:ok, _} ->
+        {:denied, "invalid webhook response format"}
+
+      {:error, _} ->
+        {:denied, "webhook returned invalid JSON"}
     end
   end
 end
