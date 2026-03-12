@@ -29,7 +29,8 @@ defmodule Sykli.MixProject do
       {:libcluster, "~> 3.3"},
       {:burrito, "~> 1.5"},
       {:yaml_elixir, "~> 2.9"},
-      {:file_system, "~> 1.0"}
+      {:file_system, "~> 1.0"},
+      {:telemetry, "~> 1.3"}
     ]
   end
 

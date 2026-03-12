@@ -16,6 +16,7 @@ defmodule Sykli.Occurrence.Enrichment do
   alias Sykli.Occurrence.HistoryAnalyzer
   alias Sykli.Occurrence.Store
   alias Sykli.RunHistory
+  alias Sykli.Services.CausalityService
 
   @max_output_lines 200
 
@@ -34,7 +35,16 @@ defmodule Sykli.Occurrence.Enrichment do
           :ok | {:error, term()}
   def enrich_and_persist(%Occurrence{} = occ, graph, executor_result, workdir) do
     enriched = enrich(occ, graph, executor_result, workdir)
-    persist(enriched, workdir)
+    result = persist(enriched, workdir)
+
+    # Fire-and-forget webhook notification for terminal events (masked)
+    if occ.type in ["ci.run.passed", "ci.run.failed"] do
+      secrets = collect_secrets_from_env()
+      masked = Sykli.Services.SecretMasker.mask_deep(to_persistence_map(enriched), secrets)
+      Sykli.Services.NotificationService.notify(masked)
+    end
+
+    result
   end
 
   @doc """
@@ -46,7 +56,14 @@ defmodule Sykli.Occurrence.Enrichment do
     results = extract_results(executor_result)
     task_names = Enum.map(results, & &1.name)
     history_map = HistoryAnalyzer.analyze(task_names, workdir)
-    likely_causes = compute_likely_causes(results, graph, workdir)
+
+    failed_names =
+      results
+      |> Enum.filter(&(&1.status == :failed))
+      |> Enum.map(& &1.name)
+
+    likely_causes =
+      CausalityService.analyze(failed_names, graph, workdir, get_field: &get_field/2)
 
     # Build domain-specific data (was ci_data, now goes into data per spec)
     ci_data = build_ci_data(results, graph, history_map, occ.run_id, workdir)
@@ -551,77 +568,6 @@ defmodule Sykli.Occurrence.Enrichment do
   defdelegate error_to_map(error), to: __MODULE__, as: :error_detail_map
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # CAUSALITY
-  # ─────────────────────────────────────────────────────────────────────────────
-
-  defp compute_likely_causes(results, graph, workdir) do
-    failed =
-      results
-      |> Enum.filter(&(&1.status == :failed))
-      |> Enum.map(& &1.name)
-
-    if failed == [] do
-      %{}
-    else
-      changed_files =
-        case RunHistory.load_last_good(path: workdir) do
-          {:ok, last_good} -> changed_files_since(last_good.git_ref, workdir)
-          _ -> MapSet.new()
-        end
-
-      if MapSet.size(changed_files) == 0 do
-        Map.new(
-          failed,
-          &{&1, %{changed_files: [], explanation: "no previous good run to compare"}}
-        )
-      else
-        Map.new(failed, fn name ->
-          task = Map.get(graph, name, %{})
-          inputs = get_field(task, :inputs) || []
-
-          task_files =
-            inputs
-            |> Enum.flat_map(fn pattern -> expand_glob(pattern, workdir) end)
-            |> MapSet.new()
-
-          matching = MapSet.intersection(changed_files, task_files) |> MapSet.to_list()
-
-          cause =
-            if matching != [] do
-              %{
-                changed_files: matching,
-                explanation: "files matching task inputs changed since last passing run"
-              }
-            else
-              %{
-                changed_files: [],
-                explanation: "no direct file match; failure may be environmental"
-              }
-            end
-
-          {name, cause}
-        end)
-      end
-    end
-  end
-
-  defp changed_files_since(ref, workdir) do
-    case Sykli.Git.run(["diff", "--name-only", ref], cd: workdir) do
-      {:ok, output} -> output |> String.split("\n", trim: true) |> MapSet.new()
-      _ -> MapSet.new()
-    end
-  end
-
-  defp expand_glob(pattern, workdir) do
-    full = Path.join(workdir, pattern)
-
-    case Path.wildcard(full) do
-      [] -> []
-      files -> Enum.map(files, &Path.relative_to(&1, workdir))
-    end
-  end
-
-  # ─────────────────────────────────────────────────────────────────────────────
   # PERSISTENCE
   # ─────────────────────────────────────────────────────────────────────────────
 
@@ -629,6 +575,17 @@ defmodule Sykli.Occurrence.Enrichment do
 
   defp persist(%Occurrence{} = occ, workdir) do
     occurrence_map = to_persistence_map(occ)
+
+    # Mask any resolved secrets from the occurrence data before persisting
+    secrets = collect_secrets_from_env()
+
+    occurrence_map =
+      if secrets != [] do
+        Sykli.Services.SecretMasker.mask_deep(occurrence_map, secrets)
+      else
+        occurrence_map
+      end
+
     dir = Path.join(workdir, ".sykli")
 
     with :ok <- File.mkdir_p(dir) do
@@ -779,5 +736,16 @@ defmodule Sykli.Occurrence.Enrichment do
     map
     |> Enum.reject(fn {_k, v} -> is_nil(v) or v == [] end)
     |> Map.new()
+  end
+
+  # Collect secret values from common env var patterns for masking
+  @secret_env_patterns ["_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_PASS", "_API_KEY"]
+  defp collect_secrets_from_env do
+    System.get_env()
+    |> Enum.filter(fn {key, _val} ->
+      Enum.any?(@secret_env_patterns, &String.contains?(key, &1))
+    end)
+    |> Enum.map(fn {_key, val} -> val end)
+    |> Enum.filter(&(byte_size(&1) >= 4))
   end
 end

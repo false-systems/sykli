@@ -14,6 +14,7 @@ defmodule Sykli.RunHistory do
   """
 
   @runs_dir ".sykli/runs"
+  @default_max_runs 100
 
   # ----- STRUCTS -----
 
@@ -109,7 +110,55 @@ defmodule Sykli.RunHistory do
       update_symlink(runs_dir, filename, "last_good.json")
     end
 
+    # Prune old runs
+    prune(runs_dir, opts)
+
     :ok
+  end
+
+  @doc """
+  Prune old run files beyond the maximum limit.
+
+  Configurable via `SYKLI_MAX_RUNS` env var (default: #{@default_max_runs}).
+  Preserves symlinks (latest.json, last_good.json).
+  """
+  @spec prune(String.t(), keyword()) :: :ok
+  def prune(runs_dir, opts \\ []) do
+    max_runs =
+      Keyword.get_lazy(opts, :max_runs, fn ->
+        case System.get_env("SYKLI_MAX_RUNS") do
+          nil ->
+            @default_max_runs
+
+          val ->
+            case Integer.parse(val) do
+              {int, ""} when int > 0 -> int
+              _ -> @default_max_runs
+            end
+        end
+      end)
+
+    case File.ls(runs_dir) do
+      {:ok, files} ->
+        # Only timestamp-based JSON files (not symlinks like latest.json, last_good.json)
+        run_files =
+          files
+          |> Enum.filter(&String.match?(&1, ~r/^\d{4}-\d{2}-\d{2}.*\.json$/))
+          |> Enum.sort()
+
+        if length(run_files) > max_runs do
+          excess = Enum.take(run_files, length(run_files) - max_runs)
+
+          Enum.each(excess, fn file ->
+            File.rm(Path.join(runs_dir, file))
+          end)
+        end
+
+        :ok
+
+      {:error, _} ->
+        :ok
+    end
   end
 
   @doc """

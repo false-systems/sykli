@@ -6,7 +6,7 @@ defmodule Sykli.Graph.Task.Gate do
   an approval signal is received.
   """
 
-  defstruct [:strategy, :timeout, :message, :env_var, :file_path]
+  defstruct [:strategy, :timeout, :message, :env_var, :file_path, :webhook_url]
 
   @type strategy :: :prompt | :env | :file | :webhook
   @type t :: %__MODULE__{
@@ -14,7 +14,8 @@ defmodule Sykli.Graph.Task.Gate do
           timeout: pos_integer(),
           message: String.t() | nil,
           env_var: String.t() | nil,
-          file_path: String.t() | nil
+          file_path: String.t() | nil,
+          webhook_url: String.t() | nil
         }
 
   @default_timeout 3600
@@ -43,7 +44,8 @@ defmodule Sykli.Graph.Task.Gate do
       timeout: timeout,
       message: map["message"],
       env_var: map["env_var"],
-      file_path: map["file_path"]
+      file_path: map["file_path"],
+      webhook_url: map["webhook_url"]
     }
   end
 
@@ -57,6 +59,7 @@ defmodule Sykli.Graph.Task.Gate do
     |> maybe_put("message", gate.message)
     |> maybe_put("env_var", gate.env_var)
     |> maybe_put("file_path", gate.file_path)
+    |> maybe_put("webhook_url", gate.webhook_url)
   end
 
   defp maybe_put(map, _key, nil), do: map

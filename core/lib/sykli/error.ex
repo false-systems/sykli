@@ -332,6 +332,7 @@ defmodule Sykli.Error do
         :rust -> ["run 'cargo build' to see full errors"]
         :typescript -> ["run 'npx tsc sykli.ts' to see full errors"]
         :elixir -> ["check sykli.exs for syntax errors"]
+        :python -> ["run 'python sykli.py' to see full errors"]
         _ -> []
       end
 
@@ -580,6 +581,8 @@ defmodule Sykli.Error do
   def wrap({:elixir_timeout, msg}), do: sdk_timeout(:elixir, 120_000) |> add_note(msg)
   def wrap({:typescript_failed, output}), do: sdk_failed(:typescript, output)
   def wrap({:typescript_timeout, msg}), do: sdk_timeout(:typescript, 120_000) |> add_note(msg)
+  def wrap({:python_failed, output}), do: sdk_failed(:python, output)
+  def wrap({:python_timeout, msg}), do: sdk_timeout(:python, 120_000) |> add_note(msg)
   def wrap({:missing_tool, tool, hint}), do: missing_tool(tool, hint)
 
   # Validation errors
@@ -764,5 +767,6 @@ defmodule Sykli.Error do
   defp lang_to_string(:rust), do: "Rust"
   defp lang_to_string(:typescript), do: "TypeScript"
   defp lang_to_string(:elixir), do: "Elixir"
+  defp lang_to_string(:python), do: "Python"
   defp lang_to_string(other), do: to_string(other)
 end

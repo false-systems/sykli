@@ -64,7 +64,7 @@ sykli.go ──emit──▶ JSON task graph (stdout) ──▶ Elixir engine �
 | `CLI` | `cli.ex` | Command dispatch (17 commands) |
 | `Graph` | `graph.ex` | JSON → Task DAG, validation, matrix expansion |
 | `Graph.Task` | `graph.ex` + `graph/task/*.ex` | Task struct with semantic/ai_hooks/history fields |
-| `Executor` | `executor.ex` | DAG execution, `run_id` threaded through entire chain |
+| `Executor` | `executor.ex` | DAG execution with `Executor.Config` struct, AI hooks, concurrency limiting |
 | `Target.Local` | `target/local.ex` | Local execution via Runtime (Docker or Shell) |
 | `Target.K8s` | `target/k8s.ex` | Kubernetes Job execution |
 | `Occurrence` | `occurrence.ex` | FALSE Protocol event factory (12 types) |
@@ -79,7 +79,10 @@ sykli.go ──emit──▶ JSON task graph (stdout) ──▶ Elixir engine �
 | `MCP.Server` | `mcp/server.ex` | MCP server (stdio, 5 tools) |
 | `Delta` | `delta.ex` | Git-change-based task selection |
 | `Services.*` | `services/*.ex` | CacheService, RetryService, ConditionService, GateService, ProgressTracker, etc. |
-| `Cache` | `cache.ex` + `cache/*.ex` | Content-addressed caching (SHA256), repository pattern |
+| `Cache` | `cache.ex` + `cache/*.ex` | Content-addressed caching (SHA256), tiered repository (local + S3) |
+| `SCM` | `scm.ex` + `scm/*.ex` | Multi-provider commit status (GitHub/GitLab/Bitbucket) |
+| `Telemetry` | `telemetry.ex` | `:telemetry` spans/events for tasks, cache, runs |
+| `HTTP` | `http.ex` | Shared TLS verification opts for `:httpc` callers |
 | `Error` | `error.ex` | Structured error types with formatter |
 
 ### Task Schema (Three Layers)
@@ -132,7 +135,12 @@ The project dogfoods itself via `sykli.exs` (root-level pipeline) and `.github/w
 - **Services** are stateless modules in `services/` — no GenServers, just functions
 - **Structured errors** via `Sykli.Error` — never bare strings. Use `Sykli.Error.task_failed/5`, etc.
 - **JSON output** — most commands support `--json` for machine-readable output
+- **Executor.Config** — executor options flow through `%Executor.Config{}` struct (target, timeout, run_id, max_parallel, continue_on_failure)
+- **HTTP with TLS** — all `:httpc` callers use `Sykli.HTTP.ssl_opts/1` for `verify_peer` + hostname checking
+- **Cache backend selection** — `Sykli.Cache.repo/0` dynamically selects FileRepository or TieredRepository (L1 local + L2 S3) based on env vars
+- **Secret masking** — `SecretMasker.mask_deep/2` applied to occurrence data before persistence and webhook delivery
 - **Elixir heredoc gotcha** — `"""` embeds literal newlines that break JSON. Use `~s()` for single-line JSON in test fixtures
+- **~s() with parens gotcha** — `~s()` uses `()` as delimiters, so `~s(matches(x, "y"))` breaks. Use `~s[]` or `~S||` instead
 
 ## Git Workflow
 
@@ -143,5 +151,4 @@ The project dogfoods itself via `sykli.exs` (root-level pipeline) and `.github/w
 ## Known Issues
 
 - `--timeout` flag doesn't enforce timeouts on local target (tasks run to completion)
-- Tasks without `command` field pass `validate` — only caught at runtime
 - 1 test requires Docker daemon running (skipped when unavailable)

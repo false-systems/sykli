@@ -81,6 +81,82 @@ defmodule Sykli.RunHistoryTest do
     end
   end
 
+  describe "prune/2" do
+    test "prunes old run files beyond max limit", %{tmp_dir: tmp_dir} do
+      runs_dir = Path.join([tmp_dir, ".sykli", "runs"])
+      File.mkdir_p!(runs_dir)
+
+      # Create 150 fake run files
+      for i <- 1..150 do
+        filename =
+          "2024-01-#{String.pad_leading("#{div(i, 100) + 1}", 2, "0")}-#{String.pad_leading("#{rem(i, 24)}", 2, "0")}-#{String.pad_leading("#{rem(i, 60)}", 2, "0")}-00Z.json"
+
+        File.write!(Path.join(runs_dir, filename), "{}")
+      end
+
+      # Also create symlinks that should survive
+      File.ln_s!("2024-01-02-05-29-00Z.json", Path.join(runs_dir, "latest.json"))
+      File.ln_s!("2024-01-02-05-29-00Z.json", Path.join(runs_dir, "last_good.json"))
+
+      RunHistory.prune(runs_dir, max_runs: 100)
+
+      {:ok, files} = File.ls(runs_dir)
+
+      run_files = Enum.filter(files, &String.match?(&1, ~r/^\d{4}-\d{2}-\d{2}.*\.json$/))
+      assert length(run_files) == 100
+
+      # Symlinks survived
+      assert File.exists?(Path.join(runs_dir, "latest.json"))
+      assert File.exists?(Path.join(runs_dir, "last_good.json"))
+    end
+
+    test "does nothing when under limit", %{tmp_dir: tmp_dir} do
+      runs_dir = Path.join([tmp_dir, ".sykli", "runs"])
+      File.mkdir_p!(runs_dir)
+
+      for i <- 1..5 do
+        File.write!(
+          Path.join(runs_dir, "2024-01-15-#{String.pad_leading("#{i}", 2, "0")}-00-00Z.json"),
+          "{}"
+        )
+      end
+
+      RunHistory.prune(runs_dir, max_runs: 100)
+
+      {:ok, files} = File.ls(runs_dir)
+      assert length(files) == 5
+    end
+
+    test "save calls prune automatically", %{tmp_dir: tmp_dir} do
+      runs_dir = Path.join([tmp_dir, ".sykli", "runs"])
+      File.mkdir_p!(runs_dir)
+
+      # Pre-populate with 5 files
+      for i <- 1..5 do
+        File.write!(
+          Path.join(runs_dir, "2024-01-15-#{String.pad_leading("#{i}", 2, "0")}-00-00Z.json"),
+          "{}"
+        )
+      end
+
+      # Save a new run with max_runs: 3
+      run = %RunHistory.Run{
+        id: "new-run",
+        timestamp: ~U[2024-01-16 10:00:00Z],
+        git_ref: "abc123",
+        git_branch: "main",
+        tasks: [],
+        overall: :passed
+      }
+
+      :ok = RunHistory.save(run, path: tmp_dir, max_runs: 3)
+
+      {:ok, files} = File.ls(runs_dir)
+      run_files = Enum.filter(files, &String.match?(&1, ~r/^\d{4}-\d{2}-\d{2}.*\.json$/))
+      assert length(run_files) == 3
+    end
+  end
+
   describe "load_latest/1" do
     test "returns latest run", %{tmp_dir: tmp_dir} do
       run = %RunHistory.Run{

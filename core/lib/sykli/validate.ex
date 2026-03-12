@@ -95,6 +95,7 @@ defmodule Sykli.Validate do
       |> check_duplicates(task_names)
       |> check_self_deps(tasks)
       |> check_missing_deps(tasks, task_names)
+      |> check_missing_commands(tasks)
       |> check_cycles(tasks)
 
     warnings =
@@ -227,6 +228,32 @@ defmodule Sykli.Validate do
     end
   end
 
+  defp check_missing_commands(errors, tasks) do
+    tasks
+    |> Enum.filter(fn t -> valid_name?(t["name"]) end)
+    |> Enum.reject(fn t ->
+      # Gate tasks don't need a command
+      t["gate"] != nil
+    end)
+    |> Enum.filter(fn t ->
+      cmd = t["command"]
+      is_nil(cmd) or (is_binary(cmd) and String.trim(cmd) == "")
+    end)
+    |> Enum.reduce(errors, fn t, acc ->
+      name = t["name"]
+
+      [
+        %{
+          type: :missing_command,
+          task: name,
+          message: "Task '#{name}' has no command"
+        }
+        | acc
+      ]
+    end)
+  end
+
+  defp format_error(%{type: :missing_command, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :cycle, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :missing_dependency, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :duplicate_task, message: msg}), do: "Error: #{msg}"
