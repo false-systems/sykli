@@ -46,6 +46,7 @@ defmodule Sykli.Occurrence do
   }
 
   @occurrence_version "1.0"
+  @default_source "sykli"
 
   @type severity :: :info | :warning | :error | :critical
   @type t :: %__MODULE__{
@@ -219,13 +220,14 @@ defmodule Sykli.Occurrence do
       %{}
       |> maybe_put("trace_id", opts[:trace_id])
       |> maybe_put("span_id", opts[:span_id])
+      |> maybe_put("chain_id", opts[:chain_id])
 
     %__MODULE__{
       id: Sykli.ULID.generate(),
       timestamp: opts[:timestamp] || DateTime.utc_now(),
       protocol_version: @occurrence_version,
       type: type,
-      source: "sykli",
+      source: opts[:source] || configured_source(),
       severity: Keyword.get(kw, :severity, :info),
       outcome: Keyword.get(kw, :outcome),
       run_id: run_id,
@@ -240,4 +242,9 @@ defmodule Sykli.Occurrence do
 
   defp run_completed_fields(:success), do: {"ci.run.passed", :info, "success"}
   defp run_completed_fields(:failure), do: {"ci.run.failed", :error, "failure"}
+
+  defp configured_source do
+    System.get_env("SYKLI_SOURCE_URI") ||
+      Application.get_env(:sykli, :source, @default_source)
+  end
 end

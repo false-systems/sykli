@@ -135,7 +135,9 @@ defmodule Sykli.Executor.Output do
         end)
 
       failed =
-        Enum.count(results, fn %Sykli.Executor.TaskResult{status: s} -> s == :failed end)
+        Enum.count(results, fn %Sykli.Executor.TaskResult{status: s} ->
+          s in [:failed, :errored]
+        end)
 
       {icon, color} = if status == :ok, do: {"✓", IO.ANSI.green()}, else: {"✗", IO.ANSI.red()}
 
@@ -188,6 +190,7 @@ defmodule Sykli.Executor.Output do
           :passed -> :passed
           :cached -> :passed
           :failed -> :failed
+          :errored -> :failed
           :skipped -> :skipped
           :blocked -> :skipped
         end

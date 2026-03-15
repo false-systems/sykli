@@ -2112,7 +2112,7 @@ defmodule Sykli.CLI do
         task.status == :passed and task.streak > 1 ->
           "#{IO.ANSI.faint()}(streak: #{task.streak})#{IO.ANSI.reset()}"
 
-        task.status == :failed ->
+        task.status in [:failed, :errored] ->
           "#{IO.ANSI.faint()}(streak: 0)#{IO.ANSI.reset()}"
 
         true ->
@@ -2124,14 +2124,14 @@ defmodule Sykli.CLI do
     )
 
     # Show likely cause for failed tasks
-    if task.status == :failed and task.likely_cause do
+    if task.status in [:failed, :errored] and task.likely_cause do
       Enum.each(task.likely_cause, fn file ->
         IO.puts("    #{IO.ANSI.faint()}└─ Likely cause: #{file}#{IO.ANSI.reset()}")
       end)
     end
 
     # Show error for failed tasks
-    if task.status == :failed and task.error do
+    if task.status in [:failed, :errored] and task.error do
       IO.puts("    #{IO.ANSI.red()}└─ #{task.error}#{IO.ANSI.reset()}")
     end
   end
@@ -2250,7 +2250,7 @@ defmodule Sykli.CLI do
         end
 
       passed = Enum.count(run.tasks, &(&1.status == :passed))
-      failed = Enum.count(run.tasks, &(&1.status == :failed))
+      failed = Enum.count(run.tasks, &(&1.status in [:failed, :errored]))
       total = length(run.tasks)
 
       summary =
@@ -2278,7 +2278,7 @@ defmodule Sykli.CLI do
             overall: Atom.to_string(run.overall),
             task_count: length(run.tasks),
             passed_count: Enum.count(run.tasks, &(&1.status == :passed)),
-            failed_count: Enum.count(run.tasks, &(&1.status == :failed))
+            failed_count: Enum.count(run.tasks, &(&1.status in [:failed, :errored]))
           }
         end)
     }
