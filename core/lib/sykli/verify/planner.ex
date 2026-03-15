@@ -142,7 +142,7 @@ defmodule Sykli.Verify.Planner do
   end
 
   defp decide_with_mode(task_result, _task, _mode, local_labels, remote_nodes, entries, skipped)
-       when task_result.status in [:failed, :errored] do
+       when task_result.status == :failed do
     # Failed locally — retry on a different platform if available
     case find_different_platform_node(local_labels, remote_nodes) do
       nil ->

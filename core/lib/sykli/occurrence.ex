@@ -244,7 +244,10 @@ defmodule Sykli.Occurrence do
   defp run_completed_fields(:failure), do: {"ci.run.failed", :error, "failure"}
 
   defp configured_source do
-    System.get_env("SYKLI_SOURCE_URI") ||
-      Application.get_env(:sykli, :source, @default_source)
+    case System.get_env("SYKLI_SOURCE_URI") do
+      nil -> Application.get_env(:sykli, :source, @default_source)
+      "" -> Application.get_env(:sykli, :source, @default_source)
+      uri -> uri
+    end
   end
 end
