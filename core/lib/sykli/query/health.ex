@@ -28,7 +28,7 @@ defmodule Sykli.Query.Health do
       end)
       |> Enum.map(fn {name, results} ->
         total = length(results)
-        failures = Enum.count(results, &(&1.status == :failed))
+        failures = Enum.count(results, &(&1.status in [:failed, :errored]))
 
         %{
           name: name,

@@ -25,9 +25,11 @@ defmodule Sykli.Query.Output do
 
   # -- History: failure --
 
-  def format(%{type: :history, data: %{status: :failed} = data}) do
-    header("Failure: #{data.task}")
-    IO.puts("  Status:  #{red("failed")}")
+  def format(%{type: :history, data: %{status: status} = data})
+      when status in [:failed, :errored] do
+    label = if status == :errored, do: "Error", else: "Failure"
+    header("#{label}: #{data.task}")
+    IO.puts("  Status:  #{red(Atom.to_string(status))}")
     if data[:error], do: IO.puts("  Error:   #{red(data.error)}")
     IO.puts("  Run:     #{data.run_id}")
     IO.puts("  When:    #{data.timestamp}")

@@ -59,7 +59,7 @@ defmodule Sykli.Occurrence.Enrichment do
 
     failed_names =
       results
-      |> Enum.filter(&(&1.status == :failed))
+      |> Enum.filter(&(&1.status in [:failed, :errored]))
       |> Enum.map(& &1.name)
 
     likely_causes =
@@ -104,7 +104,7 @@ defmodule Sykli.Occurrence.Enrichment do
   # ─────────────────────────────────────────────────────────────────────────────
 
   defp build_error_block(results, graph, likely_causes, workdir) do
-    failed = Enum.filter(results, &(&1.status == :failed))
+    failed = Enum.filter(results, &(&1.status in [:failed, :errored]))
 
     case failed do
       [] ->
@@ -152,7 +152,7 @@ defmodule Sykli.Occurrence.Enrichment do
 
   # Build CI-specific error fields that move into data (not spec Error)
   defp build_error_data(results, workdir) do
-    failed = Enum.filter(results, &(&1.status == :failed))
+    failed = Enum.filter(results, &(&1.status in [:failed, :errored]))
     if failed == [], do: nil, else: do_build_error_data(failed, workdir)
   end
 
@@ -246,7 +246,7 @@ defmodule Sykli.Occurrence.Enrichment do
 
   # Returns {reasoning_block | nil, extra_data | nil}
   defp build_reasoning_block(results, _graph, likely_causes, workdir) do
-    failed = Enum.filter(results, &(&1.status == :failed))
+    failed = Enum.filter(results, &(&1.status in [:failed, :errored]))
     if failed == [], do: {nil, nil}, else: do_build_reasoning(failed, likely_causes, workdir)
   end
 
@@ -382,6 +382,7 @@ defmodule Sykli.Occurrence.Enrichment do
   defp map_step_outcome(:passed), do: "success"
   defp map_step_outcome(:cached), do: "success"
   defp map_step_outcome(:failed), do: "failure"
+  defp map_step_outcome(:errored), do: "error"
   defp map_step_outcome(:blocked), do: "failure"
   defp map_step_outcome(:skipped), do: "skipped"
 
@@ -431,7 +432,7 @@ defmodule Sykli.Occurrence.Enrichment do
   end
 
   defp detect_regression(results, previous_occurrences) do
-    failed_now = Enum.filter(results, &(&1.status == :failed))
+    failed_now = Enum.filter(results, &(&1.status in [:failed, :errored]))
     if failed_now == [], do: nil, else: do_detect_regression(failed_now, previous_occurrences)
   end
 
@@ -470,6 +471,7 @@ defmodule Sykli.Occurrence.Enrichment do
   defp normalize_task_outcome("passed"), do: "pass"
   defp normalize_task_outcome("cached"), do: "pass"
   defp normalize_task_outcome("failed"), do: "fail"
+  defp normalize_task_outcome("errored"), do: "fail"
   defp normalize_task_outcome("skipped"), do: "skip"
   defp normalize_task_outcome("blocked"), do: "skip"
   defp normalize_task_outcome(other), do: other
@@ -481,6 +483,7 @@ defmodule Sykli.Occurrence.Enrichment do
   defp build_ci_data(results, graph, history_map, run_id, workdir) do
     passed = Enum.count(results, &(&1.status in [:passed, :cached]))
     failed = Enum.count(results, &(&1.status == :failed))
+    errored = Enum.count(results, &(&1.status == :errored))
     cached = Enum.count(results, &(&1.status == :cached))
     skipped = Enum.count(results, &(&1.status in [:skipped, :blocked]))
 
@@ -489,6 +492,7 @@ defmodule Sykli.Occurrence.Enrichment do
       "summary" => %{
         "passed" => passed,
         "failed" => failed,
+        "errored" => errored,
         "cached" => cached,
         "skipped" => skipped
       },

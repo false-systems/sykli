@@ -40,7 +40,8 @@ defmodule Sykli.Executor do
 
     Status values:
     - `:passed` - Task ran and succeeded
-    - `:failed` - Task ran and failed
+    - `:failed` - Task ran and its command failed (non-zero exit code)
+    - `:errored` - Task failed due to infrastructure (crash, timeout, missing secrets, OIDC)
     - `:cached` - Task was skipped due to cache hit
     - `:skipped` - Task was skipped due to condition not met
     - `:blocked` - Task didn't run because a dependency failed
@@ -49,7 +50,7 @@ defmodule Sykli.Executor do
     @enforce_keys [:name, :status, :duration_ms]
     defstruct [:name, :status, :duration_ms, :error, :output]
 
-    @type status :: :passed | :failed | :cached | :skipped | :blocked
+    @type status :: :passed | :failed | :errored | :cached | :skipped | :blocked
     @type t :: %__MODULE__{
             name: String.t(),
             status: status(),
@@ -235,7 +236,7 @@ defmodule Sykli.Executor do
 
     # Check if any failed
     failed_results =
-      Enum.filter(results, fn %TaskResult{status: status} -> status == :failed end)
+      Enum.filter(results, fn %TaskResult{status: status} -> status in [:failed, :errored] end)
 
     has_failures = failed_results != []
 
@@ -257,7 +258,7 @@ defmodule Sykli.Executor do
 
         all_failed_names =
           (acc ++ results)
-          |> Enum.filter(fn %TaskResult{status: s} -> s in [:failed, :blocked] end)
+          |> Enum.filter(fn %TaskResult{status: s} -> s in [:failed, :errored, :blocked] end)
           |> Enum.map(fn %TaskResult{name: n} -> n end)
           |> MapSet.new()
 
@@ -322,7 +323,7 @@ defmodule Sykli.Executor do
 
                   %TaskResult{
                     name: task.name,
-                    status: :failed,
+                    status: :errored,
                     duration_ms: duration,
                     error: reason
                   }
@@ -343,7 +344,7 @@ defmodule Sykli.Executor do
 
               %TaskResult{
                 name: original.name,
-                status: :failed,
+                status: :errored,
                 duration_ms: 0,
                 error: Error.internal("task process crashed: #{inspect(reason)}")
               }
@@ -353,7 +354,7 @@ defmodule Sykli.Executor do
 
               %TaskResult{
                 name: original.name,
-                status: :failed,
+                status: :errored,
                 duration_ms: 0,
                 error: Error.internal("task process timed out")
               }
@@ -471,9 +472,10 @@ defmodule Sykli.Executor do
   end
 
   # Apply on_fail hook to transform result after execution
-  defp apply_on_fail_hook(%TaskResult{status: :failed} = result, %Sykli.Graph.Task{
+  defp apply_on_fail_hook(%TaskResult{status: status} = result, %Sykli.Graph.Task{
          ai_hooks: %{on_fail: :skip}
-       }) do
+       })
+       when status in [:failed, :errored] do
     %TaskResult{result | status: :skipped}
   end
 
@@ -533,7 +535,7 @@ defmodule Sykli.Executor do
 
                   %TaskResult{
                     name: task.name,
-                    status: :failed,
+                    status: :errored,
                     duration_ms: duration,
                     error: Error.missing_secrets(task.name, missing)
                   }
@@ -546,7 +548,7 @@ defmodule Sykli.Executor do
 
               %TaskResult{
                 name: task.name,
-                status: :failed,
+                status: :errored,
                 duration_ms: duration,
                 error: Error.internal("OIDC credential exchange failed: #{reason}")
               }
@@ -678,6 +680,9 @@ defmodule Sykli.Executor do
     task = apply_on_fail_retry_boost(task)
     max_attempts = (task.retry || 0) + 1
 
+    # Generate a chain_id to correlate retry occurrences for this task
+    chain_id = if max_attempts > 1, do: Sykli.ULID.generate(), else: nil
+
     result =
       do_run_with_retry(
         task,
@@ -688,7 +693,8 @@ defmodule Sykli.Executor do
         progress,
         target,
         start_time,
-        run_id
+        run_id,
+        chain_id
       )
 
     # Apply on_fail: :skip transformation
@@ -704,6 +710,7 @@ defmodule Sykli.Executor do
           {pos_integer(), pos_integer()} | nil,
           module(),
           integer(),
+          String.t() | nil,
           String.t() | nil
         ) :: TaskResult.t()
   defp do_run_with_retry(
@@ -715,7 +722,8 @@ defmodule Sykli.Executor do
          progress,
          target,
          start_time,
-         run_id
+         run_id,
+         chain_id
        ) do
     case Sykli.Telemetry.span_task(task.name, %{}, fn ->
            run_and_cache(task, state, cache_key, progress, target)
@@ -740,7 +748,7 @@ defmodule Sykli.Executor do
       {:error, reason} when attempt < max_attempts ->
         Output.task_retrying(task.name, attempt, max_attempts)
 
-        maybe_emit_task_retrying(task.name, attempt, max_attempts, reason, run_id)
+        maybe_emit_task_retrying(task.name, attempt, max_attempts, reason, run_id, chain_id)
 
         do_run_with_retry(
           task,
@@ -751,7 +759,8 @@ defmodule Sykli.Executor do
           progress,
           target,
           start_time,
-          run_id
+          run_id,
+          chain_id
         )
 
       {:error, reason} ->
@@ -958,9 +967,13 @@ defmodule Sykli.Executor do
     OccPubSub.task_skipped(run_id, task_name, reason)
   end
 
-  defp maybe_emit_task_retrying(_task_name, _attempt, _max_attempts, _reason, nil), do: :ok
+  defp maybe_emit_task_retrying(_task_name, _attempt, _max_attempts, _reason, nil, _chain_id),
+    do: :ok
 
-  defp maybe_emit_task_retrying(task_name, attempt, max_attempts, reason, run_id) do
-    OccPubSub.task_retrying(run_id, task_name, attempt, max_attempts, error: reason)
+  defp maybe_emit_task_retrying(task_name, attempt, max_attempts, reason, run_id, chain_id) do
+    OccPubSub.task_retrying(run_id, task_name, attempt, max_attempts,
+      error: reason,
+      chain_id: chain_id
+    )
   end
 end

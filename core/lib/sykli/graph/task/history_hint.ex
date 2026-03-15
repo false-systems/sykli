@@ -116,7 +116,7 @@ defmodule Sykli.Graph.Task.HistoryHint do
     # Find failure patterns from error messages
     failure_patterns =
       results
-      |> Enum.filter(&(&1[:status] == :failed))
+      |> Enum.filter(&(&1[:status] in [:failed, :errored]))
       |> Enum.map(& &1[:error])
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
@@ -125,7 +125,7 @@ defmodule Sykli.Graph.Task.HistoryHint do
     # Find last failure
     last_failure =
       results
-      |> Enum.filter(&(&1[:status] == :failed))
+      |> Enum.filter(&(&1[:status] in [:failed, :errored]))
       |> Enum.map(& &1[:timestamp])
       |> Enum.max(DateTime, fn -> nil end)
 

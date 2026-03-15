@@ -356,7 +356,7 @@ defmodule Sykli do
   defp add_likely_causes(task_results, path) do
     failed_names =
       task_results
-      |> Enum.filter(&(&1.status == :failed))
+      |> Enum.filter(&(&1.status in [:failed, :errored]))
       |> Enum.map(& &1.name)
 
     if failed_names == [] do
@@ -430,6 +430,7 @@ defmodule Sykli do
           :cached -> {:passed, prev_streak + 1}
           :skipped -> {:skipped, prev_streak}
           :failed -> {:failed, 0}
+          :errored -> {:failed, 0}
           :blocked -> {:skipped, prev_streak}
         end
 

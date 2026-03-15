@@ -48,7 +48,7 @@ defmodule Sykli.Query.History do
   defp find_failure(task_name, runs) do
     result =
       Enum.find_value(runs, fn run ->
-        task = Enum.find(run.tasks, &(&1.name == task_name and &1.status == :failed))
+        task = Enum.find(run.tasks, &(&1.name == task_name and &1.status in [:failed, :errored]))
         if task, do: {run, task}
       end)
 

@@ -107,7 +107,7 @@ defmodule Sykli.Run do
   def failed?(%__MODULE__{status: :failed}), do: true
 
   def failed?(%__MODULE__{tasks: tasks}),
-    do: Enum.any?(tasks, fn {_, t} -> t.status == :failed end)
+    do: Enum.any?(tasks, fn {_, t} -> t.status in [:failed, :errored] end)
 
   @doc "Returns true if the run completed successfully."
   @spec passed?(t()) :: boolean()

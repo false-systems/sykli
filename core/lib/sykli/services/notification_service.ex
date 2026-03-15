@@ -87,6 +87,14 @@ defmodule Sykli.Services.NotificationService do
 
   defp format_generic(event) do
     vsn = to_string(Application.spec(:sykli, :vsn) || "unknown")
-    Jason.encode!(Map.merge(event, %{"source" => "sykli", "version" => vsn}))
+
+    source =
+      case System.get_env("SYKLI_SOURCE_URI") do
+        nil -> Application.get_env(:sykli, :source, "sykli")
+        "" -> Application.get_env(:sykli, :source, "sykli")
+        uri -> uri
+      end
+
+    Jason.encode!(Map.merge(event, %{"source" => source, "version" => vsn}))
   end
 end

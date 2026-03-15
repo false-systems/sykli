@@ -344,7 +344,7 @@ defmodule Sykli.MCP.Tools do
               overall: Atom.to_string(run.overall),
               task_count: length(run.tasks),
               passed: Enum.count(run.tasks, &(&1.status == :passed)),
-              failed: Enum.count(run.tasks, &(&1.status == :failed))
+              failed: Enum.count(run.tasks, &(&1.status in [:failed, :errored]))
             }
           end)
 
