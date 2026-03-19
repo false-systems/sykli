@@ -605,9 +605,11 @@ defmodule Sykli.Occurrence.Enrichment do
       json = Jason.encode!(occurrence_map, pretty: true)
       :ok = File.write(json_path, json)
 
-      # Also write latest as occurrence.json for quick access
+      # Atomic write for latest occurrence.json (tmp + rename avoids race)
       latest_path = Path.join(dir, "occurrence.json")
-      :ok = File.write(latest_path, json)
+      tmp_path = latest_path <> ".tmp.#{occ.run_id}"
+      :ok = File.write(tmp_path, json)
+      File.rename(tmp_path, latest_path)
 
       # Evict old JSON files (keep last N)
       evict_old_files(json_dir, @max_json_occurrences, ".json")
@@ -812,14 +814,40 @@ defmodule Sykli.Occurrence.Enrichment do
     |> Map.new()
   end
 
-  # Collect secret values from common env var patterns for masking
-  @secret_env_patterns ["_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_PASS", "_API_KEY"]
+  # Collect secret values from common env var patterns for masking.
+  # Also includes any env vars explicitly listed in task secrets/secret_refs
+  # to catch non-standard secret names like DATABASE_URL.
+  @secret_env_patterns [
+    "_TOKEN",
+    "_SECRET",
+    "_KEY",
+    "_PASSWORD",
+    "_PASS",
+    "_API_KEY",
+    "_CREDENTIAL",
+    "_AUTH"
+  ]
   defp collect_secrets_from_env do
-    System.get_env()
-    |> Enum.filter(fn {key, _val} ->
-      Enum.any?(@secret_env_patterns, &String.contains?(key, &1))
-    end)
-    |> Enum.map(fn {_key, val} -> val end)
+    env = System.get_env()
+
+    pattern_matched =
+      env
+      |> Enum.filter(fn {key, _val} ->
+        Enum.any?(@secret_env_patterns, &String.contains?(key, &1))
+      end)
+      |> Enum.map(fn {_key, val} -> val end)
+
+    # Also collect values of any env vars that look like connection strings
+    connection_strings =
+      env
+      |> Enum.filter(fn {key, val} ->
+        (String.contains?(key, "URL") or String.contains?(key, "DSN")) and
+          String.contains?(val, "://")
+      end)
+      |> Enum.map(fn {_key, val} -> val end)
+
+    (pattern_matched ++ connection_strings)
+    |> Enum.uniq()
     |> Enum.filter(&(byte_size(&1) >= 4))
   end
 end
