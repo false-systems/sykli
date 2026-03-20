@@ -260,6 +260,21 @@ defmodule Sykli.RunHistoryTest do
     end
   end
 
+  describe "list/1 error handling" do
+    test "returns {:error, reason} for non-enoent filesystem errors", %{tmp_dir: tmp_dir} do
+      # Create a file where the runs directory should be — File.ls on a file returns :enotdir
+      runs_dir = Path.join([tmp_dir, ".sykli", "runs"])
+      File.mkdir_p!(Path.join(tmp_dir, ".sykli"))
+      File.write!(runs_dir, "not a directory")
+
+      assert {:error, :enotdir} = RunHistory.list(path: tmp_dir)
+    end
+
+    test "returns {:ok, []} when runs directory doesn't exist", %{tmp_dir: tmp_dir} do
+      assert {:ok, []} = RunHistory.list(path: tmp_dir)
+    end
+  end
+
   describe "Run struct" do
     test "has required fields" do
       run = %RunHistory.Run{

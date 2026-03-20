@@ -13,10 +13,16 @@
 
 ```go
 // sykli.go — your CI config is a Go program
-s := sykli.New()
-s.Task("test").Run("go test ./...").Inputs("**/*.go")
-s.Task("build").Run("go build -o app").After("test")
-s.Emit()
+package main
+
+import sykli "github.com/yairfalse/sykli/sdk/go"
+
+func main() {
+    s := sykli.New()
+    s.Task("test").Run("go test ./...").Inputs("**/*.go")
+    s.Task("build").Run("go build -o app").After("test")
+    s.Emit()
+}
 ```
 
 ```
@@ -42,6 +48,7 @@ Not YAML with string interpolation hacks. Real variables, real functions, real t
 
 ```go
 // Templates — define once, reuse everywhere
+src := s.Dir(".")
 golang := s.Template("golang").Container("golang:1.22").Mount(src, "/src")
 
 s.Task("test").From(golang).Run("go test ./...")
@@ -139,6 +146,7 @@ s.Task("test").
     Container("golang:1.22").
     Mount(s.Dir("."), "/src").
     MountCache(s.Cache("go-mod"), "/go/pkg/mod").
+    Workdir("/src").
     Run("go test ./...")
 ```
 
