@@ -45,12 +45,23 @@ FAILURES=""
 
 # --- Argument parsing ---
 
+usage() {
+  echo "Usage: eval/oracle/run.sh [--case 001] [--category pipeline] [--verbose] [--help]"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --case)    CASE_FILTER="$2"; shift 2 ;;
-    --category) CATEGORY_FILTER="$2"; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    --case)
+      if [[ $# -lt 2 || "$2" == --* ]]; then echo "Error: --case requires an argument" >&2; exit 1; fi
+      CASE_FILTER="$2"; shift 2 ;;
+    --case=*) CASE_FILTER="${1#--case=}"; shift ;;
+    --category)
+      if [[ $# -lt 2 || "$2" == --* ]]; then echo "Error: --category requires an argument" >&2; exit 1; fi
+      CATEGORY_FILTER="$2"; shift 2 ;;
+    --category=*) CATEGORY_FILTER="${1#--category=}"; shift ;;
     --verbose) VERBOSE=true; shift ;;
-    *)         echo "Unknown arg: $1"; exit 1 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
 done
 
@@ -72,14 +83,7 @@ make_pipeline() {
 run_sykli() {
   local dir="$1"
   shift
-  cd "$dir" && "$SYKLI_BIN" "$@" 2>&1
-}
-
-run_sykli_exit() {
-  local dir="$1"
-  shift
-  cd "$dir" && "$SYKLI_BIN" "$@" 2>&1
-  return $?
+  (cd "$dir" && "$SYKLI_BIN" "$@" 2>&1)
 }
 
 # Settlement: wait for async effects (file writes, etc.)
@@ -313,7 +317,7 @@ fi
 if begin_case "008" "AI Context: git context in occurrence"; then
   dir=$(tmp_workdir)
   # Initialize a git repo so git context is available
-  (cd "$dir" && git init -q && git commit --allow-empty -m "init" -q)
+  (cd "$dir" && git init -q && git -c user.name="Oracle" -c user.email="oracle@test" commit --allow-empty -m "init" -q)
   make_pipeline "$dir" "pass.exs"
   run_sykli "$dir" >/dev/null 2>&1 || true
   settle
@@ -361,7 +365,7 @@ if begin_case "010" "AI Context: context command writes context.json"; then
 fi
 
 # ============================================================================
-# CACHING (011-013)
+# CACHING (011)
 # ============================================================================
 
 printf "\n${BOLD}Caching${RESET}\n"
@@ -415,7 +419,7 @@ if begin_case "015" "Supply Chain: SLSA v1 provenance in payload"; then
   if assert_file_exists "$dir/.sykli/attestation.json"; then
     # Decode the DSSE payload
     payload=$(cat "$dir/.sykli/attestation.json" | jq -r '.payload' 2>/dev/null)
-    decoded=$(echo "$payload" | base64 -d 2>/dev/null) || decoded=""
+    decoded=$(echo "$payload" | base64 --decode 2>/dev/null || echo "$payload" | base64 -D 2>/dev/null) || decoded=""
     if [[ -n "$decoded" ]]; then
       stmt_type=$(echo "$decoded" | jq -r '._type' 2>/dev/null)
       if [[ "$stmt_type" == "https://in-toto.io/Statement/v1" ]]; then
@@ -487,8 +491,10 @@ if begin_case "019" "Validation: empty task graph"; then
   dir=$(tmp_workdir)
   make_pipeline "$dir" "empty.exs"
   LAST_OUTPUT=$(run_sykli "$dir" validate --json 2>&1) && exit_code=0 || exit_code=$?
-  # Empty graph should either pass validation or produce a clear error
-  pass 0
+  # Empty graph should pass validation (valid JSON, zero tasks)
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
   rm -rf "$dir"
 fi
 
