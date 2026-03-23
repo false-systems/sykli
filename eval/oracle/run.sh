@@ -591,8 +591,12 @@ if begin_case "026" "Adversarial: duplicate task names handled"; then
   dir=$(tmp_workdir)
   make_pipeline "$dir" "duplicate_names.exs"
   LAST_OUTPUT=$(run_sykli "$dir" validate --json 2>&1) && exit_code=0 || exit_code=$?
-  # Should either reject or deduplicate — must not crash
-  pass 0
+  # Must not crash (signal death = exit >= 128)
+  if [[ "$exit_code" -lt 128 ]]; then
+    pass 0
+  else
+    fail "process crashed with signal (exit code $exit_code)"
+  fi
   rm -rf "$dir"
 fi
 
@@ -634,8 +638,12 @@ if begin_case "029" "Scale: task with no command doesn't crash"; then
   make_pipeline "$dir" "no_command.exs"
   # Should either skip gracefully or produce clear error — must not crash
   LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
-  # We just care it doesn't segfault/hang
-  pass 0
+  # Must not crash (signal death = exit >= 128)
+  if [[ "$exit_code" -lt 128 ]]; then
+    pass 0
+  else
+    fail "process crashed with signal (exit code $exit_code)"
+  fi
   rm -rf "$dir"
 fi
 
@@ -651,7 +659,9 @@ if begin_case "030" "Semantics: --continue-on-failure runs independent tasks"; t
   make_pipeline "$dir" "continue_on_fail.exs"
   LAST_OUTPUT=$(run_sykli "$dir" --continue-on-failure 2>&1) && exit_code=0 || exit_code=$?
   # Pipeline should fail overall but "independent" should still run
-  if assert_contains "$LAST_OUTPUT" "still-ran"; then
+  if [[ "$exit_code" -eq 0 ]]; then
+    fail "pipeline should fail overall even with --continue-on-failure"
+  elif assert_contains "$LAST_OUTPUT" "still-ran"; then
     pass 0
   fi
   rm -rf "$dir"

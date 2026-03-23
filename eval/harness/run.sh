@@ -113,6 +113,10 @@ for case_file in "${cases[@]}"; do
   oracle_case=$(grep '^oracle_case:' "$case_file" | head -1 | sed 's/oracle_case: *//' | tr -d '"')
   prompt=$(sed -n '/^task_prompt:/,/^[a-z]/{ /^task_prompt:/d; /^[a-z]/d; p; }' "$case_file" | sed 's/^  //')
 
+  # Per-case timeout override
+  case_timeout=$(grep '^timeout_secs:' "$case_file" | head -1 | sed 's/timeout_secs: *//' | tr -d '"')
+  case_timeout="${case_timeout:-$TIMEOUT}"
+
   # Filter
   if [[ -n "$CASE_FILTER" && "$id" != *"$CASE_FILTER"* ]]; then
     continue
@@ -130,8 +134,10 @@ for case_file in "${cases[@]}"; do
 
   # Step 2: Run Claude Code with the task prompt
   printf "  ${DIM}running claude...${RESET}\n"
-  claude_output=$(cd "$REPO_ROOT" && timeout "${TIMEOUT}s" claude --print --dangerously-skip-permissions "$prompt" 2>&1) || true
+  set +e
+  claude_output=$(cd "$REPO_ROOT" && timeout "${case_timeout}s" claude --print --dangerously-skip-permissions "$prompt" 2>&1)
   claude_exit=$?
+  set -e
 
   # Step 3: Rebuild sykli
   printf "  ${DIM}rebuilding sykli...${RESET}\n"
@@ -139,8 +145,10 @@ for case_file in "${cases[@]}"; do
 
   # Step 4: Run the oracle case
   printf "  ${DIM}running oracle case ${oracle_case}...${RESET}\n"
-  oracle_output=$("$ORACLE" --case "$oracle_case" 2>&1) || true
+  set +e
+  oracle_output=$("$ORACLE" --case "$oracle_case" 2>&1)
   oracle_exit=$?
+  set -e
 
   elapsed=$(($(date +%s) - start_s))
 

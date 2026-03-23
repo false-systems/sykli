@@ -242,7 +242,7 @@ defmodule Sykli.Cache do
 
   @doc """
   Generate cache key from all factors that affect output.
-  Includes v2 fields: container, task env, mounts.
+  Includes v2 fields (container, task env, mounts) and v3 project fingerprint.
   """
   def cache_key(task, workdir) do
     abs_workdir = Path.expand(workdir)
@@ -285,25 +285,36 @@ defmodule Sykli.Cache do
   # Priority: git remote URL > absolute workdir path.
   # This ensures different projects get different cache keys even if
   # their task names and commands are identical.
+  # Memoized per workdir via :persistent_term to avoid shelling out to git
+  # on every cache key computation.
   @doc false
   def project_fingerprint(workdir) do
-    case git_remote_url(workdir) do
-      {:ok, url} ->
-        :crypto.hash(:sha256, url) |> Base.encode16(case: :lower) |> String.slice(0, 16)
+    key = {:sykli_project_fingerprint, workdir}
+
+    case safe_persistent_get(key) do
+      {:ok, fingerprint} ->
+        fingerprint
 
       :error ->
-        :crypto.hash(:sha256, workdir) |> Base.encode16(case: :lower) |> String.slice(0, 16)
+        fingerprint = compute_fingerprint(workdir)
+        :persistent_term.put(key, fingerprint)
+        fingerprint
     end
   end
 
-  defp git_remote_url(workdir) do
-    case Sykli.Git.run(["remote", "get-url", "origin"], cd: workdir) do
-      {:ok, url} ->
-        trimmed = String.trim(url)
-        if trimmed == "", do: :error, else: {:ok, trimmed}
+  defp safe_persistent_get(key) do
+    {:ok, :persistent_term.get(key)}
+  rescue
+    ArgumentError -> :error
+  end
+
+  defp compute_fingerprint(workdir) do
+    case Sykli.Git.remote_url(cd: workdir) do
+      {:ok, url} when is_binary(url) and url != "" ->
+        :crypto.hash(:sha256, url) |> Base.encode16(case: :lower)
 
       _ ->
-        :error
+        :crypto.hash(:sha256, workdir) |> Base.encode16(case: :lower)
     end
   end
 
