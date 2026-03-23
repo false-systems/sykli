@@ -80,6 +80,11 @@ make_pipeline() {
   cp "$FIXTURES_DIR/$fixture" "$dir/sykli.exs"
 }
 
+# Clean the global cache to prevent cross-case pollution
+clean_cache() {
+  rm -rf "${HOME}/.sykli/cache/meta" "${HOME}/.sykli/cache/blobs" 2>/dev/null || true
+}
+
 run_sykli() {
   local dir="$1"
   shift
@@ -372,6 +377,7 @@ printf "\n${BOLD}Caching${RESET}\n"
 
 # --- case_011: second run uses cache ---
 if begin_case "011" "Caching: second run hits cache"; then
+  clean_cache
   dir=$(tmp_workdir)
   make_pipeline "$dir" "cached.exs"
   # First run
@@ -563,6 +569,7 @@ fi
 
 # --- case_024: shell special characters in command ---
 if begin_case "024" "Adversarial: shell special chars in command"; then
+  clean_cache
   dir=$(tmp_workdir)
   make_pipeline "$dir" "shell_special.exs"
   LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
@@ -646,6 +653,7 @@ printf "\n${BOLD}Execution Semantics${RESET}\n"
 
 # --- case_030: continue-on-failure runs independent tasks ---
 if begin_case "030" "Semantics: --continue-on-failure runs independent tasks"; then
+  clean_cache
   dir=$(tmp_workdir)
   make_pipeline "$dir" "continue_on_fail.exs"
   LAST_OUTPUT=$(run_sykli "$dir" --continue-on-failure 2>&1) && exit_code=0 || exit_code=$?
@@ -766,6 +774,7 @@ printf "\n${BOLD}Cache Correctness${RESET}\n"
 
 # --- case_037: changing command busts cache ---
 if begin_case "037" "Cache: command change invalidates cache"; then
+  clean_cache
   dir=$(tmp_workdir)
   # First run with cached.exs (command: echo cached)
   make_pipeline "$dir" "cached.exs"
@@ -906,6 +915,252 @@ if begin_case "042" "Attestation: per-task attestation file written"; then
     fi
   else
     fail "attestations/ directory not created"
+  fi
+  rm -rf "$dir"
+fi
+
+# ============================================================================
+# COMMAND EDGE CASES (043-048)
+# ============================================================================
+
+printf "\n${BOLD}Command Edge Cases${RESET}\n"
+
+# --- case_043: pipe in command works ---
+if begin_case "043" "Command: pipe works (echo | grep)"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pipe_command.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_044: exit code 2 is still failure ---
+if begin_case "044" "Command: exit code 2 is failure (not just 1)"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "exit_code_2.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if [[ "$exit_code" -ne 0 ]]; then
+    pass 0
+  else
+    fail "exit code 2 should be treated as failure"
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_045: stderr doesn't break execution ---
+if begin_case "045" "Command: stderr output doesn't prevent success"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "stderr_output.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_046: JSON in task output doesn't corrupt occurrence ---
+if begin_case "046" "Command: JSON in task output doesn't corrupt occurrence"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "json_in_output.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  if assert_file_exists "$dir/.sykli/occurrence.json"; then
+    if assert_valid_json "$dir/.sykli/occurrence.json"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_047: task name with slash works (log path sanitization) ---
+if begin_case "047" "Command: task name with slash (sdk/go) works"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "slash_name.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    # Check occurrence is valid even with slash in name
+    run_sykli "$dir" >/dev/null 2>&1 || true
+    settle
+    if assert_file_exists "$dir/.sykli/occurrence.json"; then
+      if assert_valid_json "$dir/.sykli/occurrence.json"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_048: 200-char task name doesn't crash ---
+if begin_case "048" "Command: 200-char task name doesn't crash"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "long_name.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
+  rm -rf "$dir"
+fi
+
+# ============================================================================
+# STRUCTURAL CORRECTNESS (049-055)
+# ============================================================================
+
+printf "\n${BOLD}Structural Correctness${RESET}\n"
+
+# --- case_049: diamond DAG (join after split) ---
+if begin_case "049" "Structure: diamond DAG (root→left+right→join)"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "diamond_dag.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_contains "$LAST_OUTPUT" "4 passed"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_050: duration_ms is non-zero for real task ---
+if begin_case "050" "Structure: duration_ms is non-zero in occurrence"; then
+  clean_cache
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "slow_task.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  if assert_file_exists "$dir/.sykli/occurrence.json"; then
+    json=$(cat "$dir/.sykli/occurrence.json")
+    duration=$(echo "$json" | jq '.history.duration_ms' 2>/dev/null)
+    if [[ "$duration" -gt 500 ]]; then
+      pass 0
+    else
+      fail "duration_ms should be >500 for a 1s sleep task, got $duration"
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_051: occurrence reflects the LAST run, not a stale one ---
+if begin_case "051" "Structure: occurrence.json reflects last run"; then
+  dir=$(tmp_workdir)
+  # First run: passing
+  make_pipeline "$dir" "pass.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  # Second run: failing
+  make_pipeline "$dir" "fail.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  if assert_file_exists "$dir/.sykli/occurrence.json"; then
+    json=$(cat "$dir/.sykli/occurrence.json")
+    outcome=$(echo "$json" | jq -r '.outcome' 2>/dev/null)
+    if [[ "$outcome" == "failure" ]]; then
+      pass 0
+    else
+      fail "occurrence should reflect last (failing) run, got outcome=$outcome"
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_052: explain --json produces valid JSON ---
+if begin_case "052" "Structure: explain --json is valid JSON"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pass.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  LAST_OUTPUT=$(run_sykli "$dir" explain --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if echo "$LAST_OUTPUT" | jq empty 2>/dev/null; then
+      pass 0
+    else
+      fail "explain --json is not valid JSON"
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_053: report command after run ---
+if begin_case "053" "Structure: report command works after run"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pass.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  LAST_OUTPUT=$(run_sykli "$dir" report 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_054: cache stats command works ---
+if begin_case "054" "Structure: cache stats command works"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(run_sykli "$dir" cache stats 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_055: multiline output captured in occurrence ---
+if begin_case "055" "Structure: multiline output doesn't corrupt occurrence"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "multiline_output.exs"
+  run_sykli "$dir" >/dev/null 2>&1 || true
+  settle
+  if assert_file_exists "$dir/.sykli/occurrence.json"; then
+    if assert_valid_json "$dir/.sykli/occurrence.json"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# ============================================================================
+# CONCURRENT RUNS (056-057)
+# ============================================================================
+
+printf "\n${BOLD}Concurrent Runs${RESET}\n"
+
+# --- case_056: two concurrent runs both complete ---
+if begin_case "056" "Concurrent: two parallel runs both complete"; then
+  dir1=$(tmp_workdir)
+  dir2=$(tmp_workdir)
+  make_pipeline "$dir1" "pass.exs"
+  make_pipeline "$dir2" "dag.exs"
+
+  # Run both in background
+  (run_sykli "$dir1" >/dev/null 2>&1) &
+  pid1=$!
+  (run_sykli "$dir2" >/dev/null 2>&1) &
+  pid2=$!
+
+  wait $pid1 && exit1=0 || exit1=$?
+  wait $pid2 && exit2=0 || exit2=$?
+
+  if [[ "$exit1" -eq 0 && "$exit2" -eq 0 ]]; then
+    # Both should have produced occurrence.json
+    settle
+    if [[ -f "$dir1/.sykli/occurrence.json" && -f "$dir2/.sykli/occurrence.json" ]]; then
+      pass 0
+    else
+      fail "one or both runs missing occurrence.json"
+    fi
+  else
+    fail "concurrent runs failed: exit1=$exit1 exit2=$exit2"
+  fi
+  rm -rf "$dir1" "$dir2"
+fi
+
+# --- case_057: env vars don't leak between tasks ---
+if begin_case "057" "Concurrent: env vars set in task config"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "env_vars.exs"
+  LAST_OUTPUT=$(run_sykli "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    pass 0
   fi
   rm -rf "$dir"
 fi
