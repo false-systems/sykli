@@ -87,6 +87,12 @@ jobs:
           done
           ls -la release/
 
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum sykli-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:

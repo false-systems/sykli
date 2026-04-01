@@ -29,9 +29,18 @@ jobs:
         working-directory: core
         run: mix deps.get
 
+      - name: Check formatting
+        working-directory: core
+        run: mix format --check-formatted
+
       - name: Run tests
         working-directory: core
         run: mix test
+
+      - name: Security audit
+        working-directory: core
+        run: mix deps.audit
+        continue-on-error: true
 
       - name: Build escript
         working-directory: core
@@ -48,6 +57,10 @@ jobs:
         with:
           go-version: '1.21'
 
+      - name: Vet
+        working-directory: sdk/go
+        run: go vet ./...
+
       - name: Run tests
         working-directory: sdk/go
         run: go test ./...
@@ -60,6 +73,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Clippy
+        working-directory: sdk/rust
+        run: cargo clippy -- -D warnings
 
       - name: Run tests
         working-directory: sdk/rust
@@ -86,6 +103,10 @@ jobs:
       - name: Install dependencies
         working-directory: sdk/elixir
         run: mix deps.get
+
+      - name: Check formatting
+        working-directory: sdk/elixir
+        run: mix format --check-formatted
 
       - name: Run tests
         working-directory: sdk/elixir

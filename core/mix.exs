@@ -30,7 +30,8 @@ defmodule Sykli.MixProject do
       {:burrito, "~> 1.5"},
       {:yaml_elixir, "~> 2.9"},
       {:file_system, "~> 1.0"},
-      {:telemetry, "~> 1.3"}
+      {:telemetry, "~> 1.3"},
+      {:mix_audit, "~> 2.1", only: :dev, runtime: false}
     ]
   end
 

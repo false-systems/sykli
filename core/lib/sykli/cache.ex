@@ -259,6 +259,9 @@ defmodule Sykli.Cache do
     # or falls back to workdir hash (non-git projects scoped by directory).
     fingerprint = project_fingerprint(abs_workdir)
 
+    # Include secret_refs names in cache key so credential rotation causes cache miss
+    secret_refs_hash = hash_secret_refs(task.secret_refs || [])
+
     data =
       Enum.join(
         [
@@ -270,6 +273,7 @@ defmodule Sykli.Cache do
           container,
           task_env_hash,
           mounts_hash,
+          secret_refs_hash,
           @version
         ],
         "|"
@@ -332,6 +336,16 @@ defmodule Sykli.Cache do
   end
 
   # Hash mount configuration (resource + path + type)
+  defp hash_secret_refs([]), do: ""
+
+  defp hash_secret_refs(refs) do
+    refs
+    |> Enum.map(fn r -> "#{r[:name]}:#{r[:source]}:#{r[:key]}" end)
+    |> Enum.sort()
+    |> Enum.join("|")
+    |> then(fn data -> :crypto.hash(:sha256, data) |> Base.encode16(case: :lower) end)
+  end
+
   defp hash_mounts([]), do: ""
 
   defp hash_mounts(mounts) do
@@ -341,6 +355,10 @@ defmodule Sykli.Cache do
     |> Enum.join("|")
     |> then(fn data -> :crypto.hash(:sha256, data) |> Base.encode16(case: :lower) end)
   end
+
+  # Maximum file size for content hashing (100 MB). Files larger than this
+  # use metadata-only hashing (path + mtime + size) to avoid excessive I/O.
+  @max_hash_file_size 100 * 1024 * 1024
 
   defp hash_inputs(inputs, workdir) do
     inputs
@@ -356,9 +374,43 @@ defmodule Sykli.Cache do
   end
 
   defp hash_file(path) do
-    case File.read(path) do
-      {:ok, content} -> :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
-      _ -> ""
+    case File.stat(path, time: :posix) do
+      {:ok, %{size: size}} when size > @max_hash_file_size ->
+        # Oversized file: use metadata hash to avoid excessive I/O
+        hash_file_metadata(path)
+
+      {:ok, %{size: size}} when size == 0 ->
+        hash_file_metadata(path)
+
+      {:ok, _stat} ->
+        # Stream file content for hash to avoid loading into memory
+        hash_file_streaming(path)
+
+      {:error, _} ->
+        ""
+    end
+  end
+
+  defp hash_file_streaming(path) do
+    path
+    |> File.stream!([], 65_536)
+    |> Enum.reduce(:crypto.hash_init(:sha256), fn chunk, acc ->
+      :crypto.hash_update(acc, chunk)
+    end)
+    |> :crypto.hash_final()
+    |> Base.encode16(case: :lower)
+  rescue
+    _ -> hash_file_metadata(path)
+  end
+
+  defp hash_file_metadata(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{size: size, mtime: mtime}} ->
+        :crypto.hash(:sha256, "#{path}:#{mtime}:#{size}")
+        |> Base.encode16(case: :lower)
+
+      {:error, _} ->
+        ""
     end
   end
 

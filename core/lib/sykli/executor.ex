@@ -67,7 +67,7 @@ defmodule Sykli.Executor do
       :target,
       :timeout,
       :run_id,
-      max_parallel: :infinity,
+      max_parallel: nil,
       continue_on_failure: false
     ]
 
@@ -75,7 +75,7 @@ defmodule Sykli.Executor do
             target: module(),
             timeout: pos_integer(),
             run_id: String.t() | nil,
-            max_parallel: pos_integer() | :infinity,
+            max_parallel: pos_integer(),
             continue_on_failure: boolean()
           }
   end
@@ -85,12 +85,20 @@ defmodule Sykli.Executor do
   # 5 minutes
   @default_timeout 300_000
 
+  @doc """
+  Default max_parallel: 2x logical processors.
+  Override via --max-parallel CLI flag or max_parallel option.
+  """
+  def default_max_parallel do
+    :erlang.system_info(:logical_processors_available) * 2
+  end
+
   def run(tasks, graph, opts \\ []) do
     # Support both :target (new) and :executor (legacy for Mesh)
     target = Keyword.get(opts, :target) || Keyword.get(opts, :executor, @default_target)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     run_id = Keyword.get(opts, :run_id)
-    max_parallel = Keyword.get(opts, :max_parallel, :infinity)
+    max_parallel = Keyword.get(opts, :max_parallel, default_max_parallel())
     continue_on_failure = Keyword.get(opts, :continue_on_failure, false)
     start_time = System.monotonic_time(:millisecond)
     total_tasks = length(tasks)
@@ -247,7 +255,7 @@ defmodule Sykli.Executor do
       # Mark remaining tasks as blocked
       blocked_results = mark_remaining_as_blocked(rest, config.run_id)
 
-      {:error, Enum.reverse(acc) ++ results ++ blocked_results}
+      {:error, Enum.reverse(acc, results ++ blocked_results)}
     else
       if has_failures and config.continue_on_failure do
         # Track failed task names for transitive blocking
@@ -271,7 +279,7 @@ defmodule Sykli.Executor do
         run_levels(
           rest,
           state,
-          Enum.reverse(results ++ blocked_results) ++ acc,
+          Enum.reverse(results ++ blocked_results, acc),
           {new_completed, total},
           graph,
           config
@@ -281,7 +289,7 @@ defmodule Sykli.Executor do
         run_levels(
           rest,
           state,
-          Enum.reverse(results) ++ acc,
+          Enum.reverse(results, acc),
           {new_completed, total},
           graph,
           config

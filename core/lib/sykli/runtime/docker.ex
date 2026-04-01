@@ -74,7 +74,7 @@ defmodule Sykli.Runtime.Docker do
     args = if network, do: args ++ ["--network", network], else: args
 
     # Mounts
-    args = args ++ build_mount_args(mounts)
+    args = args ++ build_mount_args(mounts, Path.expand(workdir))
 
     # Working directory inside container
     args = if container_workdir, do: args ++ ["-w", container_workdir], else: args
@@ -160,11 +160,18 @@ defmodule Sykli.Runtime.Docker do
   # HELPERS
   # ─────────────────────────────────────────────────────────────────────────────
 
-  defp build_mount_args(mounts) do
+  defp build_mount_args(mounts, abs_workdir) do
     Enum.flat_map(mounts, fn mount ->
       case mount.type do
         :directory ->
-          ["-v", "#{mount.host_path}:#{mount.container_path}"]
+          abs_host = Path.expand(mount.host_path)
+
+          if path_within?(abs_host, abs_workdir) do
+            ["-v", "#{abs_host}:#{mount.container_path}"]
+          else
+            raise ArgumentError,
+                  "Docker mount host path #{mount.host_path} escapes workdir #{abs_workdir}"
+          end
 
         :cache ->
           # Caches use named volumes
@@ -175,6 +182,10 @@ defmodule Sykli.Runtime.Docker do
           []
       end
     end)
+  end
+
+  defp path_within?(path, base) do
+    path == base or String.starts_with?(path, base <> "/")
   end
 
   defp docker_executable do

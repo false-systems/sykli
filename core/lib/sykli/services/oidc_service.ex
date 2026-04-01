@@ -16,7 +16,8 @@ defmodule Sykli.Services.OIDCService do
   def exchange(%{oidc: nil}, _state), do: {:ok, %{}}
 
   def exchange(%{oidc: %CredentialBinding{} = binding}, _state) do
-    with {:ok, id_token} <- acquire_identity_token(binding) do
+    with {:ok, id_token} <- acquire_identity_token(binding),
+         :ok <- verify_jwt_signature(id_token) do
       exchange_for_credentials(binding, id_token)
     end
   end
@@ -90,6 +91,138 @@ defmodule Sykli.Services.OIDCService do
         {:error, "GitHub OIDC request failed: #{inspect(reason)}"}
     end
   end
+
+  # ----- JWT SIGNATURE VERIFICATION -----
+
+  require Logger
+
+  defp verify_jwt_signature(jwt) do
+    with {:ok, header, _payload} <- decode_jwt_parts(jwt),
+         {:ok, jwks_url} <- resolve_jwks_url(header),
+         {:ok, jwks} <- fetch_jwks(jwks_url),
+         {:ok, key} <- find_matching_key(jwks, header),
+         :ok <- verify_signature(jwt, key, header) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.error("[OIDCService] JWT verification failed: #{inspect(reason)}")
+        {:error, "OIDC token signature verification failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp decode_jwt_parts(jwt) do
+    case String.split(jwt, ".") do
+      [header_b64, payload_b64, _sig] ->
+        with {:ok, header_json} <- Base.url_decode64(header_b64, padding: false),
+             {:ok, header} <- Jason.decode(header_json),
+             {:ok, payload_json} <- Base.url_decode64(payload_b64, padding: false),
+             {:ok, payload} <- Jason.decode(payload_json) do
+          {:ok, header, payload}
+        else
+          _ -> {:error, :malformed_jwt}
+        end
+
+      _ ->
+        {:error, :malformed_jwt}
+    end
+  end
+
+  defp resolve_jwks_url(%{"iss" => issuer}) do
+    # Fetch OpenID Connect discovery document to find JWKS URI
+    discovery_url = String.trim_trailing(issuer, "/") <> "/.well-known/openid-configuration"
+    ssl_opts = Sykli.HTTP.ssl_opts(discovery_url)
+
+    case :httpc.request(:get, {String.to_charlist(discovery_url), []}, [{:timeout, 10_000}] ++ ssl_opts, []) do
+      {:ok, {{_, 200, _}, _, body}} ->
+        case Jason.decode(to_string(body)) do
+          {:ok, %{"jwks_uri" => jwks_uri}} -> {:ok, jwks_uri}
+          _ -> {:error, :no_jwks_uri_in_discovery}
+        end
+
+      _ ->
+        {:error, :discovery_fetch_failed}
+    end
+  end
+
+  defp resolve_jwks_url(_), do: {:error, :no_issuer_in_jwt}
+
+  defp fetch_jwks(url) do
+    ssl_opts = Sykli.HTTP.ssl_opts(url)
+
+    case :httpc.request(:get, {String.to_charlist(url), []}, [{:timeout, 10_000}] ++ ssl_opts, []) do
+      {:ok, {{_, 200, _}, _, body}} ->
+        case Jason.decode(to_string(body)) do
+          {:ok, %{"keys" => keys}} -> {:ok, keys}
+          _ -> {:error, :invalid_jwks}
+        end
+
+      _ ->
+        {:error, :jwks_fetch_failed}
+    end
+  end
+
+  defp find_matching_key(keys, %{"kid" => kid}) do
+    case Enum.find(keys, fn k -> k["kid"] == kid end) do
+      nil -> {:error, {:kid_not_found, kid}}
+      key -> {:ok, key}
+    end
+  end
+
+  defp find_matching_key(_keys, _header), do: {:error, :no_kid_in_header}
+
+  defp verify_signature(jwt, jwk, header) do
+    [header_b64, payload_b64, sig_b64] = String.split(jwt, ".")
+    signing_input = header_b64 <> "." <> payload_b64
+
+    with {:ok, signature} <- Base.url_decode64(sig_b64, padding: false),
+         {:ok, public_key} <- jwk_to_public_key(jwk),
+         {:ok, algorithm} <- map_algorithm(header["alg"]) do
+      if :public_key.verify(signing_input, algorithm, signature, public_key) do
+        :ok
+      else
+        {:error, :signature_mismatch}
+      end
+    end
+  end
+
+  defp jwk_to_public_key(%{"kty" => "RSA", "n" => n_b64, "e" => e_b64}) do
+    with {:ok, n_bin} <- Base.url_decode64(n_b64, padding: false),
+         {:ok, e_bin} <- Base.url_decode64(e_b64, padding: false) do
+      n = :crypto.bytes_to_integer(n_bin)
+      e = :crypto.bytes_to_integer(e_bin)
+      {:ok, {:RSAPublicKey, n, e}}
+    end
+  end
+
+  defp jwk_to_public_key(%{"kty" => "EC", "crv" => crv, "x" => x_b64, "y" => y_b64}) do
+    with {:ok, x_bin} <- Base.url_decode64(x_b64, padding: false),
+         {:ok, y_bin} <- Base.url_decode64(y_b64, padding: false) do
+      curve =
+        case crv do
+          "P-256" -> :secp256r1
+          "P-384" -> :secp384r1
+          "P-521" -> :secp521r1
+          other -> {:error, {:unsupported_curve, other}}
+        end
+
+      case curve do
+        {:error, _} = err -> err
+        named_curve ->
+          point = <<4>> <> x_bin <> y_bin
+          {:ok, {{:ECPoint, point}, {:namedCurve, :pubkey_cert_records.namedCurves(named_curve)}}}
+      end
+    end
+  end
+
+  defp jwk_to_public_key(_), do: {:error, :unsupported_key_type}
+
+  defp map_algorithm("RS256"), do: {:ok, :sha256}
+  defp map_algorithm("RS384"), do: {:ok, :sha384}
+  defp map_algorithm("RS512"), do: {:ok, :sha512}
+  defp map_algorithm("ES256"), do: {:ok, :sha256}
+  defp map_algorithm("ES384"), do: {:ok, :sha384}
+  defp map_algorithm("ES512"), do: {:ok, :sha512}
+  defp map_algorithm(alg), do: {:error, {:unsupported_algorithm, alg}}
 
   # Exchange identity token for cloud credentials
   defp exchange_for_credentials(%CredentialBinding{provider: :aws} = binding, id_token) do
@@ -175,9 +308,20 @@ defmodule Sykli.Services.OIDCService do
   end
 
   defp extract_xml_value(xml, tag) do
-    case Regex.run(~r/<#{tag}>([^<]+)<\/#{tag}>/, xml) do
-      [_, value] -> value
+    tag_atom = String.to_atom(tag)
+
+    try do
+      {doc, _} = :xmerl_scan.string(String.to_charlist(xml), quiet: true)
+      xpath = ~c"//#{tag}/text()"
+
+      case :xmerl_xpath.string(xpath, doc) do
+        [%{value: value} | _] -> to_string(value)
+        _ -> nil
+      end
+    rescue
       _ -> nil
+    catch
+      :exit, _ -> nil
     end
   end
 

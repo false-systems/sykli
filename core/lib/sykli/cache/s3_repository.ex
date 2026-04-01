@@ -203,11 +203,7 @@ defmodule Sykli.Cache.S3Repository do
 
     case :httpc.request(:get, {String.to_charlist(url), headers}, http_opts(), []) do
       {:ok, {{_, 200, _}, _, body}} ->
-        # Simple XML key extraction
-        keys =
-          Regex.scan(~r/<Key>([^<]+)<\/Key>/, to_string(body))
-          |> Enum.map(fn [_, key] -> key end)
-
+        keys = extract_xml_keys(to_string(body))
         {:ok, keys}
 
       {:ok, {{_, code, _}, _, _}} ->
@@ -237,6 +233,19 @@ defmodule Sykli.Cache.S3Repository do
       secret_key: System.get_env("SYKLI_CACHE_S3_SECRET_KEY"),
       region: region()
     }
+  end
+
+  defp extract_xml_keys(xml) do
+    try do
+      {doc, _} = :xmerl_scan.string(String.to_charlist(xml), quiet: true)
+
+      :xmerl_xpath.string(~c"//Key/text()", doc)
+      |> Enum.map(fn %{value: value} -> to_string(value) end)
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
   end
 
   defp http_opts do
