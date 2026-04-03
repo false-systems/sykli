@@ -229,8 +229,8 @@ defmodule Sykli.ValidateTest do
     end
   end
 
-  describe "to_json/1" do
-    test "returns JSON representation" do
+  describe "to_map/1" do
+    test "returns map representation" do
       result = %Validate.Result{
         valid: true,
         tasks: ["test", "build"],
@@ -238,12 +238,11 @@ defmodule Sykli.ValidateTest do
         warnings: []
       }
 
-      json = Validate.to_json(result)
-      decoded = Jason.decode!(json)
+      map = Validate.to_map(result)
 
-      assert decoded["valid"] == true
-      assert decoded["tasks"] == ["test", "build"]
-      assert decoded["errors"] == []
+      assert map.valid == true
+      assert map.tasks == ["test", "build"]
+      assert map.errors == []
     end
   end
 end

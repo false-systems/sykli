@@ -66,17 +66,16 @@ defmodule Sykli.Validate do
   end
 
   @doc """
-  Convert result to JSON.
+  Convert result to a plain map (for JSON serialization).
   """
-  @spec to_json(Result.t()) :: String.t()
-  def to_json(%Result{} = result) do
+  @spec to_map(Result.t()) :: map()
+  def to_map(%Result{} = result) do
     %{
       valid: result.valid,
       tasks: result.tasks,
       errors: result.errors,
       warnings: Enum.map(result.warnings, fn {type, msg} -> %{type: type, message: msg} end)
     }
-    |> Jason.encode!(pretty: true)
   end
 
   # ----- PRIVATE -----
