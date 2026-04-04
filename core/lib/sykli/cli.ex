@@ -137,26 +137,32 @@ defmodule Sykli.CLI do
   defp run_sykli(args) do
     {path, opts} = parse_run_args(args)
     start_time = System.monotonic_time(:millisecond)
-
-    # Build run options
-    run_opts = []
-
-    # Handle K8s target - prepare git context first
     json_output = Keyword.get(opts, :json, false)
 
-    case prepare_target_context(path, opts) do
-      {:ok, target_opts} ->
-        run_opts = target_opts ++ run_opts
-        do_run_sykli(path, opts, run_opts, start_time, json_output)
+    # Suppress stdout before any work so target setup lines don't leak
+    original_gl = if json_output, do: suppress_stdout(), else: nil
 
-      {:error, reason} ->
-        if json_output do
-          IO.puts(JsonResponse.error(Error.wrap(reason)))
-        else
-          display_error(reason)
-        end
+    try do
+      run_opts = []
 
-        halt(1)
+      case prepare_target_context(path, opts) do
+        {:ok, target_opts} ->
+          run_opts = target_opts ++ run_opts
+          do_run_sykli(path, opts, run_opts, start_time, json_output, original_gl)
+
+        {:error, reason} ->
+          if original_gl, do: restore_stdout(original_gl)
+
+          if json_output do
+            IO.puts(JsonResponse.error(Error.wrap(reason)))
+          else
+            display_error(reason)
+          end
+
+          halt(1)
+      end
+    after
+      if original_gl, do: restore_stdout(original_gl)
     end
   end
 
@@ -189,13 +195,10 @@ defmodule Sykli.CLI do
     end
   end
 
-  defp do_run_sykli(path, opts, run_opts, start_time, json_output) do
+  defp do_run_sykli(path, opts, run_opts, start_time, json_output, original_gl) do
     # Select executor based on --mesh flag
     run_opts =
       if opts[:mesh] do
-        unless json_output,
-          do: IO.puts("#{IO.ANSI.cyan()}Running with mesh executor#{IO.ANSI.reset()}")
-
         [{:executor, Sykli.Executor.Mesh} | run_opts]
       else
         run_opts
@@ -218,14 +221,11 @@ defmodule Sykli.CLI do
         run_opts
       end
 
-    # In JSON mode, capture all stdout during execution so only JSON is emitted
-    original_gl = if json_output, do: suppress_stdout(), else: nil
-
     result = Sykli.run(path, run_opts)
     duration = System.monotonic_time(:millisecond) - start_time
 
-    # Restore stdout before writing JSON
-    if original_gl, do: Process.group_leader(self(), original_gl)
+    # Restore stdout before writing output
+    if original_gl, do: restore_stdout(original_gl)
 
     case result do
       {:ok, results} ->
@@ -2790,10 +2790,45 @@ defmodule Sykli.CLI do
   # Returns the original group leader for restoration.
   defp suppress_stdout do
     original = Process.group_leader()
-    {:ok, sink} = StringIO.open("")
+    parent = self()
+
+    sink =
+      spawn(fn ->
+        ref = Process.monitor(parent)
+        discard_io_loop(ref)
+      end)
+
     Process.group_leader(self(), sink)
     original
   end
+
+  defp restore_stdout(original_gl) do
+    Process.group_leader(self(), original_gl)
+  end
+
+  # IO server process that discards all writes (zero memory).
+  defp discard_io_loop(parent_ref) do
+    receive do
+      {:io_request, from, reply_as, request} ->
+        send(from, {:io_reply, reply_as, discard_io_reply(request)})
+        discard_io_loop(parent_ref)
+
+      {:DOWN, ^parent_ref, :process, _pid, _reason} ->
+        :ok
+
+      _other ->
+        discard_io_loop(parent_ref)
+    end
+  end
+
+  defp discard_io_reply({:put_chars, _}), do: :ok
+  defp discard_io_reply({:put_chars, _, _}), do: :ok
+  defp discard_io_reply({:put_chars, _, _, _}), do: :ok
+  defp discard_io_reply({:put_chars, _, _, _, _}), do: :ok
+  defp discard_io_reply({:requests, reqs}), do: Enum.each(reqs, &discard_io_reply/1)
+  defp discard_io_reply(:getopts), do: {:ok, [encoding: :unicode]}
+  defp discard_io_reply({:setopts, _}), do: :ok
+  defp discard_io_reply(_), do: {:error, :enotsup}
 
   # ----- ERROR DISPLAY -----
 
