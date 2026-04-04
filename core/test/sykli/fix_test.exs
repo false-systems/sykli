@@ -173,24 +173,24 @@ defmodule Sykli.FixTest do
     end
   end
 
-  describe "to_json/1" do
+  describe "to_map/1" do
     test "formats nothing_to_fix" do
-      json = Fix.to_json(%{status: :nothing_to_fix, run_id: "abc"})
-      assert json["status"] == "nothing_to_fix"
+      result = Fix.to_map(%{status: :nothing_to_fix, run_id: "abc"})
+      assert result["status"] == "nothing_to_fix"
     end
 
     test "formats failure_found" do
-      json =
-        Fix.to_json(%{
+      result =
+        Fix.to_map(%{
           status: :failure_found,
           summary: %{"failed_count" => 1},
           tasks: [%{"name" => "test"}],
           diff_since_last_good: nil
         })
 
-      assert json["status"] == "failure_found"
-      assert json["summary"]["failed_count"] == 1
-      assert length(json["tasks"]) == 1
+      assert result["status"] == "failure_found"
+      assert result["summary"]["failed_count"] == 1
+      assert length(result["tasks"]) == 1
     end
   end
 

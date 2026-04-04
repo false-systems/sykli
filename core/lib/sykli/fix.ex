@@ -272,11 +272,11 @@ defmodule Sykli.Fix do
   @doc """
   Convert analysis result to JSON-serializable map.
   """
-  def to_json(%{status: :nothing_to_fix} = result) do
+  def to_map(%{status: :nothing_to_fix} = result) do
     %{"status" => "nothing_to_fix", "run_id" => result[:run_id]}
   end
 
-  def to_json(%{status: :failure_found} = result) do
+  def to_map(%{status: :failure_found} = result) do
     %{
       "status" => "failure_found",
       "summary" => result.summary,

@@ -19,7 +19,9 @@
       "command": "sykli",
       "expect_exit": 0,
       "expect_stdout": "All tasks completed",
-      "expect_stdout_contains": ["hello"]
+      "expect_stdout_contains": [
+        "hello"
+      ]
     },
     {
       "id": "POS-002",
@@ -51,7 +53,9 @@
       "fixture": "dependency_chain",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "POS-006",
@@ -67,7 +71,11 @@
       "fixture": "single_task",
       "command": "sykli --help",
       "expect_exit": 0,
-      "expect_stdout_contains": ["Usage:", "Options:", "Commands:"]
+      "expect_stdout_contains": [
+        "Usage:",
+        "Options:",
+        "Commands:"
+      ]
     },
     {
       "id": "POS-008",
@@ -91,7 +99,9 @@
       "fixture": "dependency_chain",
       "command": "sykli graph",
       "expect_exit": 0,
-      "expect_stdout_contains": ["graph TD"]
+      "expect_stdout_contains": [
+        "graph TD"
+      ]
     },
     {
       "id": "POS-011",
@@ -99,7 +109,9 @@
       "fixture": "dependency_chain",
       "command": "sykli graph --dot",
       "expect_exit": 0,
-      "expect_stdout_contains": ["digraph"]
+      "expect_stdout_contains": [
+        "digraph"
+      ]
     },
     {
       "id": "POS-012",
@@ -107,7 +119,9 @@
       "fixture": "matrix_build",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "POS-013",
@@ -115,7 +129,9 @@
       "fixture": "condition_skip",
       "command": "sykli",
       "expect_exit": 0,
-      "expect_stdout_contains": ["skipped"]
+      "expect_stdout_contains": [
+        "skipped"
+      ]
     },
     {
       "id": "POS-014",
@@ -130,7 +146,9 @@
       "fixture": "single_task",
       "command": "sykli validate --help",
       "expect_exit": 0,
-      "expect_stdout_contains": ["Usage:"]
+      "expect_stdout_contains": [
+        "Usage:"
+      ]
     },
     {
       "id": "POS-016",
@@ -138,7 +156,9 @@
       "fixture": "capabilities",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "POS-017",
@@ -146,7 +166,9 @@
       "fixture": "gate_task",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "POS-018",
@@ -154,16 +176,21 @@
       "fixture": "semantic_task",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
-
     {
       "id": "POS-022",
       "name": "Plan help text exits 0 with usage",
       "fixture": "single_task",
       "command": "sykli plan --help",
       "expect_exit": 0,
-      "expect_stdout_contains": ["Usage:", "--from=", "--json"]
+      "expect_stdout_contains": [
+        "Usage:",
+        "--from=",
+        "--json"
+      ]
     },
     {
       "id": "POS-023",
@@ -172,16 +199,20 @@
       "command": "git init -q && git add . && git commit -q -m init && sykli plan --json --from=HEAD",
       "shell": true,
       "expect_exit": 0,
-      "expect_json_contains": {"version": "1.0"}
+      "expect_json_contains": {
+        "ok": true,
+        "version": "1"
+      }
     },
-
     {
       "id": "NEG-001",
       "name": "Cycle detection rejects circular deps",
       "fixture": "cycle_ab",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-002",
@@ -189,7 +220,9 @@
       "fixture": "self_dep",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-003",
@@ -197,7 +230,9 @@
       "fixture": "missing_dep",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-004",
@@ -205,7 +240,9 @@
       "fixture": "duplicate_names",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-005",
@@ -213,7 +250,9 @@
       "fixture": "empty_name",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-006",
@@ -221,7 +260,9 @@
       "fixture": "empty_dir",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_stdout_contains": ["not_found"]
+      "expect_stdout_contains": [
+        "not_found"
+      ]
     },
     {
       "id": "NEG-007",
@@ -229,7 +270,9 @@
       "fixture": "failing_task",
       "command": "sykli",
       "expect_exit": 1,
-      "expect_stdout_contains": ["failed"]
+      "expect_stdout_contains": [
+        "failed"
+      ]
     },
     {
       "id": "NEG-008",
@@ -244,7 +287,9 @@
       "fixture": "cycle_abc",
       "command": "sykli validate --json",
       "expect_exit": 1,
-      "expect_json_contains": {"valid": false}
+      "expect_json_contains": {
+        "ok": false
+      }
     },
     {
       "id": "NEG-010",
@@ -252,7 +297,9 @@
       "fixture": "fail_blocks_downstream",
       "command": "sykli",
       "expect_exit": 1,
-      "expect_stdout_contains": ["failed"]
+      "expect_stdout_contains": [
+        "failed"
+      ]
     },
     {
       "id": "NEG-011",
@@ -260,17 +307,21 @@
       "fixture": "empty_tasks",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json_contains": {"valid": true},
+      "expect_json_contains": {
+        "ok": true
+      },
       "note": "Empty tasks may be valid with warnings"
     },
     {
       "id": "NEG-012",
-      "name": "Task with no command field accepted by validate",
+      "name": "Task with no command field rejected by validate",
       "fixture": "no_command",
       "command": "sykli validate --json",
-      "expect_exit": 0,
-      "expect_json": {"valid": true},
-      "note": "Missing command is caught at runtime, not validation"
+      "expect_exit": 1,
+      "expect_json": {
+        "ok": false
+      },
+      "note": "Validate catches missing command field"
     },
     {
       "id": "NEG-013",
@@ -278,7 +329,9 @@
       "fixture": "retry_exhausted",
       "command": "sykli",
       "expect_exit": 1,
-      "expect_stdout_contains": ["failed"]
+      "expect_stdout_contains": [
+        "failed"
+      ]
     },
     {
       "id": "NEG-014",
@@ -286,9 +339,10 @@
       "fixture": "missing_secret",
       "command": "sykli",
       "expect_exit": 1,
-      "expect_stdout_contains": ["missing"]
+      "expect_stdout_contains": [
+        "missing"
+      ]
     },
-
     {
       "id": "SYS-001",
       "name": "Validate then run same pipeline",
@@ -311,7 +365,9 @@
       "fixture": "cacheable_task",
       "command": "sykli && sykli",
       "expect_exit": 0,
-      "expect_stdout_contains": ["CACHED"],
+      "expect_stdout_contains": [
+        "CACHED"
+      ],
       "shell": true
     },
     {
@@ -344,7 +400,9 @@
       "fixture": "parallel_tasks",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "SYS-008",
@@ -352,7 +410,9 @@
       "fixture": "slow_task",
       "command": "sykli --timeout=2s",
       "expect_exit": 1,
-      "expect_stdout_contains": ["timeout"],
+      "expect_stdout_contains": [
+        "timeout"
+      ],
       "max_duration_ms": 10000
     },
     {
@@ -361,7 +421,9 @@
       "fixture": "task_timeout",
       "command": "sykli",
       "expect_exit": 1,
-      "expect_stdout_contains": ["timeout"],
+      "expect_stdout_contains": [
+        "timeout"
+      ],
       "max_duration_ms": 10000
     },
     {
@@ -372,7 +434,6 @@
       "expect_exit": 0,
       "expect_stdout": "1 passed"
     },
-
     {
       "id": "SYS-011",
       "name": "Plan with no changes shows empty plan",
@@ -380,16 +441,20 @@
       "command": "git init -q && git add . && git commit -q -m init && sykli plan --from=HEAD --json",
       "shell": true,
       "expect_exit": 0,
-      "expect_json_contains": {"version": "1.0"}
+      "expect_json_contains": {
+        "ok": true,
+        "version": "1"
+      }
     },
-
     {
       "id": "INT-001",
       "name": "Go-like pipeline (Elixir proxy) validates",
       "fixture": "sdk_go",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "go"
     },
     {
@@ -398,7 +463,9 @@
       "fixture": "sdk_ts",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "node"
     },
     {
@@ -407,7 +474,9 @@
       "fixture": "sdk_rust",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "cargo"
     },
     {
@@ -416,7 +485,9 @@
       "fixture": "sdk_elixir",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "INT-005",
@@ -442,7 +513,9 @@
       "fixture": "sdk_go_real",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "go"
     },
     {
@@ -460,7 +533,9 @@
       "fixture": "sdk_rust_real",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "cargo"
     },
     {
@@ -478,7 +553,9 @@
       "fixture": "sdk_ts_real",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true},
+      "expect_json": {
+        "ok": true
+      },
       "requires": "node"
     },
     {
@@ -490,7 +567,6 @@
       "expect_stdout": "3 passed",
       "requires": "node"
     },
-
     {
       "id": "PERF-001",
       "name": "Single echo task completes under 3 seconds",
@@ -531,7 +607,6 @@
       "expect_exit": 0,
       "max_duration_ms": 2000
     },
-
     {
       "id": "LOAD-001",
       "name": "20 independent tasks all pass",
@@ -546,7 +621,9 @@
       "fixture": "fifty_tasks",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "LOAD-003",
@@ -554,7 +631,9 @@
       "fixture": "deep_chain",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "LOAD-004",
@@ -563,14 +642,15 @@
       "command": "sykli graph",
       "expect_exit": 0
     },
-
     {
       "id": "ABN-001",
       "name": "SDK outputs garbage before JSON",
       "fixture": "noisy_sdk",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "ABN-002",
@@ -592,7 +672,9 @@
       "fixture": "special_chars_cmd",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "ABN-005",
@@ -607,7 +689,9 @@
       "fixture": "slow_task",
       "command": "sykli --timeout=2s",
       "expect_exit": 1,
-      "expect_stdout_contains": ["timeout"],
+      "expect_stdout_contains": [
+        "timeout"
+      ],
       "max_duration_ms": 10000
     },
     {
@@ -616,7 +700,9 @@
       "fixture": "single_task",
       "command": "sykli --nonexistent-flag",
       "expect_exit": 0,
-      "expect_stdout_contains": ["Warning"]
+      "expect_stdout_contains": [
+        "Warning"
+      ]
     },
     {
       "id": "ABN-008",
@@ -624,7 +710,9 @@
       "fixture": "null_fields",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "ABN-009",
@@ -632,7 +720,9 @@
       "fixture": "extra_fields",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "ABN-010",
@@ -647,7 +737,9 @@
       "fixture": "nested_env",
       "command": "sykli validate --json",
       "expect_exit": 0,
-      "expect_json": {"valid": true}
+      "expect_json": {
+        "ok": true
+      }
     },
     {
       "id": "ABN-012",
@@ -702,7 +794,7 @@
       "command": "sykli verify --dry-run --json",
       "expect_exit": 1,
       "expect_json": {
-        "error": "No runs found"
+        "ok": false
       }
     },
     {
@@ -712,8 +804,65 @@
       "command": "sykli >/dev/null 2>&1 && sykli verify --from=nonexistent --json",
       "shell": true,
       "expect_exit": 1,
-      "expect_json_contains": {
-        "error": "Run not found: nonexistent"
+      "expect_json": {
+        "ok": false,
+        "version": "1"
+      }
+    },
+    {
+      "id": "SYS-020",
+      "name": "validate --json returns envelope with ok and version",
+      "fixture": "single_task",
+      "command": "sykli validate --json",
+      "expect_exit": 0,
+      "expect_json": {
+        "ok": true,
+        "version": "1"
+      }
+    },
+    {
+      "id": "SYS-021",
+      "name": "validate --json error returns envelope with error code",
+      "fixture": "empty_dir",
+      "command": "sykli validate --json",
+      "expect_exit": 1,
+      "expect_json": {
+        "ok": false,
+        "version": "1"
+      }
+    },
+    {
+      "id": "SYS-022",
+      "name": "explain --pipeline --json returns envelope",
+      "fixture": "single_task",
+      "command": "sykli explain --pipeline --json",
+      "expect_exit": 0,
+      "expect_json": {
+        "ok": true,
+        "version": "1"
+      }
+    },
+    {
+      "id": "SYS-023",
+      "name": "fix --json returns envelope",
+      "fixture": "single_task",
+      "command": "sykli >/dev/null 2>&1; sykli fix --json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json": {
+        "ok": true,
+        "version": "1"
+      }
+    },
+    {
+      "id": "SYS-024",
+      "name": "history --json returns envelope",
+      "fixture": "single_task",
+      "command": "sykli history --json",
+      "expect_exit": 0,
+      "expect_json": {
+        "ok": true,
+        "version": "1"
       }
     }
   ]

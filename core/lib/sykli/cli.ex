@@ -3,6 +3,7 @@ defmodule Sykli.CLI do
   CLI entry point for escript.
   """
 
+  alias Sykli.CLI.JsonResponse
   alias Sykli.Delta
   alias Sykli.Error
   alias Sykli.Error.Formatter
@@ -415,7 +416,7 @@ defmodule Sykli.CLI do
         case Sykli.Delta.affected_tasks_detailed(tasks, from: from, path: path) do
           {:ok, []} ->
             if json do
-              IO.puts(Jason.encode!(%{affected: [], changed_files: []}))
+              IO.puts(JsonResponse.ok(%{affected: [], changed_files: []}))
             else
               IO.puts("#{IO.ANSI.green()}No tasks affected by changes#{IO.ANSI.reset()}")
             end
@@ -440,7 +441,7 @@ defmodule Sykli.CLI do
 
           {:error, reason} ->
             if json do
-              IO.puts(Jason.encode!(%{error: Sykli.Delta.format_error(reason)}))
+              IO.puts(JsonResponse.error(Sykli.Delta.format_error(reason)))
             else
               IO.puts("#{IO.ANSI.red()}#{Sykli.Delta.format_error(reason)}#{IO.ANSI.reset()}")
             end
@@ -450,8 +451,7 @@ defmodule Sykli.CLI do
 
       {:error, reason} ->
         if json do
-          error = Error.wrap(reason)
-          IO.puts(Jason.encode!(%{error: error.message, code: error.code}))
+          IO.puts(JsonResponse.error(Error.wrap(reason)))
         else
           display_error(reason)
         end
@@ -463,7 +463,7 @@ defmodule Sykli.CLI do
   defp output_delta_json(affected, from, path) do
     {:ok, changed_files} = Sykli.Delta.get_changed_files(from, path)
 
-    output = %{
+    data = %{
       affected:
         Enum.map(affected, fn a ->
           %{
@@ -477,7 +477,7 @@ defmodule Sykli.CLI do
       from: from
     }
 
-    IO.puts(Jason.encode!(output, pretty: true))
+    IO.puts(JsonResponse.ok(data))
   end
 
   defp output_delta_dry_run(affected, verbose) do
@@ -773,7 +773,13 @@ defmodule Sykli.CLI do
     case Sykli.Validate.validate(path) do
       {:ok, result} ->
         if json_output do
-          IO.puts(Sykli.Validate.to_json(result))
+          data = Sykli.Validate.to_map(result)
+
+          if result.valid do
+            IO.puts(JsonResponse.ok(data))
+          else
+            IO.puts(JsonResponse.error_with_data(data))
+          end
         else
           output_validation_result(result)
         end
@@ -781,12 +787,10 @@ defmodule Sykli.CLI do
         if result.valid, do: halt(0), else: halt(1)
 
       {:error, reason} ->
-        error = Error.wrap(reason)
-
         if json_output do
-          IO.puts(Jason.encode!(%{valid: false, error: error.message, code: error.code}))
+          IO.puts(JsonResponse.error(Error.wrap(reason)))
         else
-          display_error(error)
+          display_error(reason)
         end
 
         halt(1)
@@ -887,7 +891,7 @@ defmodule Sykli.CLI do
 
         {:error, :no_runs} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: "No runs found"}))
+            IO.puts(JsonResponse.error("No runs found"))
           else
             IO.puts("#{IO.ANSI.red()}No runs found#{IO.ANSI.reset()}")
 
@@ -900,7 +904,7 @@ defmodule Sykli.CLI do
 
         {:error, {:run_not_found, run_id}} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: "Run not found: #{run_id}"}))
+            IO.puts(JsonResponse.error("Run not found: #{run_id}"))
           else
             IO.puts("#{IO.ANSI.red()}Run not found: #{run_id}#{IO.ANSI.reset()}")
           end
@@ -909,7 +913,7 @@ defmodule Sykli.CLI do
 
         {:error, reason} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: inspect(reason)}))
+            IO.puts(JsonResponse.error(inspect(reason)))
           else
             display_error(reason)
           end
@@ -929,7 +933,7 @@ defmodule Sykli.CLI do
 
         {:error, :no_runs} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: "No runs found"}))
+            IO.puts(JsonResponse.error("No runs found"))
           else
             IO.puts("#{IO.ANSI.red()}No runs found#{IO.ANSI.reset()}")
 
@@ -942,7 +946,7 @@ defmodule Sykli.CLI do
 
         {:error, {:run_not_found, run_id}} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: "Run not found: #{run_id}"}))
+            IO.puts(JsonResponse.error("Run not found: #{run_id}"))
           else
             IO.puts("#{IO.ANSI.red()}Run not found: #{run_id}#{IO.ANSI.reset()}")
           end
@@ -951,7 +955,7 @@ defmodule Sykli.CLI do
 
         {:error, reason} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: inspect(reason)}))
+            IO.puts(JsonResponse.error(inspect(reason)))
           else
             display_error(reason)
           end
@@ -1067,7 +1071,7 @@ defmodule Sykli.CLI do
         end)
     }
 
-    IO.puts(Jason.encode!(output, pretty: true))
+    IO.puts(JsonResponse.ok(output))
   end
 
   defp format_skip_reason(:cached), do: "cached"
@@ -1146,7 +1150,7 @@ defmodule Sykli.CLI do
 
           {:error, reason} ->
             if json_output do
-              IO.puts(Jason.encode!(%{error: Delta.format_error(reason)}))
+              IO.puts(JsonResponse.error(Delta.format_error(reason)))
             else
               IO.puts("#{IO.ANSI.red()}#{Delta.format_error(reason)}#{IO.ANSI.reset()}")
             end
@@ -1156,8 +1160,7 @@ defmodule Sykli.CLI do
 
       {:error, reason} ->
         if json_output do
-          error = Error.wrap(reason)
-          IO.puts(Jason.encode!(%{error: error.message, code: error.code}))
+          IO.puts(JsonResponse.error(Error.wrap(reason)))
         else
           display_error(reason)
         end
@@ -1192,7 +1195,7 @@ defmodule Sykli.CLI do
   end
 
   defp output_plan_json(plan) do
-    IO.puts(Jason.encode!(plan, pretty: true))
+    IO.puts(JsonResponse.ok(plan))
   end
 
   defp output_plan_text(plan, verbose) do
@@ -1365,7 +1368,7 @@ defmodule Sykli.CLI do
     case Sykli.Fix.analyze(path, analyze_opts) do
       {:ok, %{status: :nothing_to_fix} = result} ->
         if json_output do
-          IO.puts(Jason.encode!(Sykli.Fix.to_json(result)))
+          IO.puts(JsonResponse.ok(Sykli.Fix.to_map(result)))
         else
           IO.puts("#{IO.ANSI.green()}Nothing to fix — last run passed.#{IO.ANSI.reset()}")
         end
@@ -1374,7 +1377,7 @@ defmodule Sykli.CLI do
 
       {:ok, result} ->
         if json_output do
-          IO.puts(Jason.encode!(Sykli.Fix.to_json(result), pretty: true))
+          IO.puts(JsonResponse.ok(Sykli.Fix.to_map(result)))
         else
           IO.puts("")
           IO.puts(Sykli.Fix.Output.format(result))
@@ -1385,7 +1388,7 @@ defmodule Sykli.CLI do
 
       {:error, :no_occurrence} ->
         if json_output do
-          IO.puts(Jason.encode!(%{error: "no occurrence data found"}))
+          IO.puts(JsonResponse.error("no occurrence data found"))
         else
           IO.puts("#{IO.ANSI.yellow()}No occurrence data found#{IO.ANSI.reset()}")
 
@@ -1398,7 +1401,7 @@ defmodule Sykli.CLI do
 
       {:error, :no_failures} ->
         if json_output do
-          IO.puts(Jason.encode!(%{status: "no_failures", message: "no matching failed tasks"}))
+          IO.puts(JsonResponse.ok(%{status: "no_failures", message: "no matching failed tasks"}))
         else
           IO.puts("#{IO.ANSI.yellow()}No matching failed tasks found#{IO.ANSI.reset()}")
         end
@@ -1494,7 +1497,7 @@ defmodule Sykli.CLI do
 
       occurrence ->
         if json_output do
-          IO.puts(Jason.encode!(occurrence, pretty: true))
+          IO.puts(JsonResponse.ok(occurrence))
         else
           output_explain_summary(occurrence)
         end
@@ -1525,7 +1528,7 @@ defmodule Sykli.CLI do
             Explain.pipeline(expanded, sdk_file: sdk_name, run_history: run_history)
 
           if json_output do
-            IO.puts(Jason.encode!(explanation, pretty: true))
+            IO.puts(JsonResponse.ok(explanation))
           else
             output_pipeline_summary(explanation)
           end
@@ -1925,7 +1928,7 @@ defmodule Sykli.CLI do
       case Sykli.Query.execute(query_str, path: ".") do
         {:ok, result} ->
           if json_output do
-            IO.puts(Jason.encode!(result, pretty: true))
+            IO.puts(JsonResponse.ok(result))
           else
             Sykli.Query.Output.format(result)
           end
@@ -1934,7 +1937,7 @@ defmodule Sykli.CLI do
 
         {:error, reason} ->
           if json_output do
-            IO.puts(Jason.encode!(%{error: Sykli.Query.format_error(reason)}))
+            IO.puts(JsonResponse.error(Sykli.Query.format_error(reason)))
           else
             IO.puts("#{IO.ANSI.red()}#{Sykli.Query.format_error(reason)}#{IO.ANSI.reset()}")
           end
@@ -2001,7 +2004,7 @@ defmodule Sykli.CLI do
 
       {:error, :no_runs} ->
         if json_output do
-          IO.puts(Jason.encode!(%{error: "No runs found"}))
+          IO.puts(JsonResponse.error("No runs found"))
         else
           IO.puts("#{IO.ANSI.yellow()}No runs found#{IO.ANSI.reset()}")
           IO.puts("#{IO.ANSI.faint()}Run 'sykli' first to create a run record#{IO.ANSI.reset()}")
@@ -2011,7 +2014,7 @@ defmodule Sykli.CLI do
 
       {:error, :no_passing_runs} ->
         if json_output do
-          IO.puts(Jason.encode!(%{error: "No passing runs found"}))
+          IO.puts(JsonResponse.error("No passing runs found"))
         else
           IO.puts("#{IO.ANSI.yellow()}No passing runs found#{IO.ANSI.reset()}")
         end
@@ -2157,7 +2160,7 @@ defmodule Sykli.CLI do
         end)
     }
 
-    IO.puts(Jason.encode!(output, pretty: true))
+    IO.puts(JsonResponse.ok(output))
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -2194,7 +2197,7 @@ defmodule Sykli.CLI do
     case Sykli.RunHistory.list(path: path, limit: limit) do
       {:ok, []} ->
         if json_output do
-          IO.puts(Jason.encode!(%{runs: []}))
+          IO.puts(JsonResponse.ok(%{runs: []}))
         else
           IO.puts("#{IO.ANSI.yellow()}No runs found#{IO.ANSI.reset()}")
         end
@@ -2283,7 +2286,7 @@ defmodule Sykli.CLI do
         end)
     }
 
-    IO.puts(Jason.encode!(output, pretty: true))
+    IO.puts(JsonResponse.ok(output))
   end
 
   defp format_timestamp(%DateTime{} = dt) do
