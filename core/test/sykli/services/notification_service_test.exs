@@ -55,31 +55,6 @@ defmodule Sykli.Services.NotificationServiceTest do
   end
 
   describe "notify/1" do
-    test "returns :ok even when no URLs configured" do
-      saved = System.get_env("SYKLI_WEBHOOK_URLS")
-      System.delete_env("SYKLI_WEBHOOK_URLS")
-
-      on_exit(fn ->
-        if saved,
-          do: System.put_env("SYKLI_WEBHOOK_URLS", saved),
-          else: System.delete_env("SYKLI_WEBHOOK_URLS")
-      end)
-
-      assert :ok =
-               NotificationService.notify(%{"type" => "ci.run.passed", "run_id" => "test-123"})
-    end
-  end
-
-  # Testing private functions indirectly through module behavior.
-  # The private_ip? and validate_url_not_private functions are tested via
-  # the notification path — a private IP webhook URL will be rejected with a warning.
-  # We test format_payload indirectly through notify behavior.
-
-  describe "format detection (integration)" do
-    # These tests verify that the format_payload function detects Slack URLs.
-    # Since format_payload is private, we verify through the module's behavior
-    # by checking that notify/1 doesn't crash with different URL patterns.
-
     setup do
       saved = System.get_env("SYKLI_WEBHOOK_URLS")
 
@@ -92,17 +67,19 @@ defmodule Sykli.Services.NotificationServiceTest do
       :ok
     end
 
-    test "notify does not crash with Slack-style URL" do
-      # This URL won't resolve but notify is fire-and-forget
-      System.put_env("SYKLI_WEBHOOK_URLS", "https://hooks.slack.com/services/T00/B00/xxx")
+    test "returns :ok even when no URLs configured" do
+      System.delete_env("SYKLI_WEBHOOK_URLS")
 
-      assert :ok = NotificationService.notify(%{"type" => "ci.run.passed", "run_id" => "r1"})
+      assert :ok =
+               NotificationService.notify(%{"type" => "ci.run.passed", "run_id" => "test-123"})
     end
 
-    test "notify does not crash with generic webhook URL" do
-      System.put_env("SYKLI_WEBHOOK_URLS", "https://webhook.example.com/ci")
+    test "returns :ok with SSRF-blocked URL (no network call made)" do
+      # Private IP will be rejected by SSRF guard before any network call
+      System.put_env("SYKLI_WEBHOOK_URLS", "http://127.0.0.1:8080/hook")
 
-      assert :ok = NotificationService.notify(%{"type" => "ci.run.failed", "run_id" => "r2"})
+      assert :ok =
+               NotificationService.notify(%{"type" => "ci.run.failed", "run_id" => "test-456"})
     end
   end
 end

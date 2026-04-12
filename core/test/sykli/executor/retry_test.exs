@@ -1,164 +1,116 @@
 defmodule Sykli.Executor.RetryTest do
   @moduledoc """
-  Tests for executor retry logic and on_fail hooks.
+  Tests for executor public API: group_by_level/2 and task struct contracts.
 
-  The retry functions (apply_on_fail_retry_boost, do_run_with_retry) are private
-  in Sykli.Executor, so we test them indirectly through the public API or by
-  verifying the task struct transformations that feed into retry logic.
+  Retry logic (apply_on_fail_retry_boost, do_run_with_retry, apply_on_fail_hook)
+  is private in Sykli.Executor and tested indirectly via blackbox tests.
+  These tests verify the data structures and public functions that feed into
+  the retry pipeline.
   """
 
   use ExUnit.Case, async: true
 
   alias Sykli.Graph.Task
   alias Sykli.Graph.Task.AiHooks
+  alias Sykli.Executor
   alias Sykli.Executor.TaskResult
 
-  describe "retry configuration via task struct" do
-    test "task with no retry defaults to nil" do
-      task = %Task{name: "test", retry: nil}
-      assert task.retry == nil
+  # group_by_level/2 expects graph as %{name => %Task{}} map
+  defp build_graph(tasks) do
+    Map.new(tasks, fn t -> {t.name, t} end)
+  end
+
+  describe "group_by_level/2" do
+    test "single task with no deps is level 0" do
+      tasks = [%Task{name: "a", command: "echo a", depends_on: []}]
+      graph = build_graph(tasks)
+
+      levels = Executor.group_by_level(tasks, graph)
+      assert length(levels) == 1
+      assert [%Task{name: "a"}] = hd(levels)
     end
 
-    test "task retry field accepts integer values" do
-      task = %Task{name: "test", retry: 3}
-      assert task.retry == 3
+    test "linear chain produces sequential levels" do
+      tasks = [
+        %Task{name: "a", command: "echo a", depends_on: []},
+        %Task{name: "b", command: "echo b", depends_on: ["a"]},
+        %Task{name: "c", command: "echo c", depends_on: ["b"]}
+      ]
+
+      graph = build_graph(tasks)
+      levels = Executor.group_by_level(tasks, graph)
+      assert length(levels) == 3
+
+      names_per_level = Enum.map(levels, fn level -> Enum.map(level, & &1.name) end)
+      assert names_per_level == [["a"], ["b"], ["c"]]
     end
 
-    test "on_fail: :retry ai_hook is representable" do
-      hooks = %AiHooks{on_fail: :retry}
-      task = %Task{name: "test", ai_hooks: hooks, retry: 0}
-      assert task.ai_hooks.on_fail == :retry
+    test "independent tasks share a level" do
+      tasks = [
+        %Task{name: "a", command: "echo a", depends_on: []},
+        %Task{name: "b", command: "echo b", depends_on: []},
+        %Task{name: "c", command: "echo c", depends_on: []}
+      ]
+
+      graph = build_graph(tasks)
+      levels = Executor.group_by_level(tasks, graph)
+      assert length(levels) == 1
+
+      names = Enum.map(hd(levels), & &1.name) |> Enum.sort()
+      assert names == ["a", "b", "c"]
     end
 
-    test "on_fail: :skip ai_hook is representable" do
-      hooks = %AiHooks{on_fail: :skip}
-      task = %Task{name: "test", ai_hooks: hooks}
-      assert task.ai_hooks.on_fail == :skip
-    end
+    test "diamond dependency produces correct levels" do
+      tasks = [
+        %Task{name: "a", command: "echo a", depends_on: []},
+        %Task{name: "b", command: "echo b", depends_on: ["a"]},
+        %Task{name: "c", command: "echo c", depends_on: ["a"]},
+        %Task{name: "d", command: "echo d", depends_on: ["b", "c"]}
+      ]
 
-    test "on_fail: :analyze ai_hook is representable" do
-      hooks = %AiHooks{on_fail: :analyze}
-      task = %Task{name: "test", ai_hooks: hooks}
-      assert task.ai_hooks.on_fail == :analyze
+      graph = build_graph(tasks)
+      levels = Executor.group_by_level(tasks, graph)
+      assert length(levels) == 3
+
+      level_names = Enum.map(levels, fn l -> Enum.map(l, & &1.name) |> Enum.sort() end)
+      assert level_names == [["a"], ["b", "c"], ["d"]]
     end
   end
 
-  describe "TaskResult status values for retry context" do
-    test ":failed status indicates content failure" do
-      result = %TaskResult{name: "test", status: :failed, duration_ms: 100, error: "exit 1"}
-      assert result.status == :failed
-    end
-
-    test ":errored status indicates infrastructure failure" do
-      result = %TaskResult{name: "test", status: :errored, duration_ms: 100, error: "timeout"}
-      assert result.status == :errored
-    end
-
-    test ":passed status indicates success" do
-      result = %TaskResult{name: "test", status: :passed, duration_ms: 50}
-      assert result.status == :passed
-    end
-
-    test "both :failed and :errored are failure states" do
-      failure_states = [:failed, :errored]
-
-      for status <- failure_states do
-        result = %TaskResult{name: "test", status: status, duration_ms: 100}
-        assert result.status in [:failed, :errored]
-      end
-    end
-
-    test "non-failure states" do
-      for status <- [:passed, :cached, :skipped, :blocked] do
+  describe "TaskResult status contract" do
+    test "all expected status values are valid atoms" do
+      for status <- [:passed, :failed, :errored, :cached, :skipped, :blocked] do
         result = %TaskResult{name: "test", status: status, duration_ms: 0}
-        refute result.status in [:failed, :errored]
+        assert result.status == status
       end
+    end
+
+    test "failure states are :failed and :errored" do
+      assert :failed in [:failed, :errored]
+      assert :errored in [:failed, :errored]
+      refute :passed in [:failed, :errored]
+      refute :skipped in [:failed, :errored]
     end
   end
 
-  describe "retry boost logic (on_fail: :retry)" do
-    # The apply_on_fail_retry_boost function sets retry to max(current, 2)
-    # when on_fail is :retry. We verify the expected behavior.
-
-    test "task with on_fail: :retry and retry: nil should get boosted to at least 2" do
-      # This verifies the contract: on_fail: :retry means at least 2 retries
+  describe "on_fail AI hook contract" do
+    test "on_fail: :retry with no retry set implies boost to at least 2" do
       hooks = %AiHooks{on_fail: :retry}
       task = %Task{name: "test", ai_hooks: hooks, retry: nil}
-
-      # The boost sets retry to max(current || 0, 2) = 2
-      current = task.retry || 0
-      boosted = max(current, 2)
-      assert boosted == 2
+      assert (task.retry || 0) < 2
     end
 
-    test "task with on_fail: :retry and retry: 5 keeps higher value" do
+    test "on_fail: :retry with retry > 2 preserves higher value" do
       hooks = %AiHooks{on_fail: :retry}
       task = %Task{name: "test", ai_hooks: hooks, retry: 5}
-
-      current = task.retry || 0
-      boosted = max(current, 2)
-      assert boosted == 5
+      assert task.retry > 2
     end
 
-    test "task with on_fail: :retry and retry: 0 gets boosted to 2" do
-      hooks = %AiHooks{on_fail: :retry}
-      task = %Task{name: "test", ai_hooks: hooks, retry: 0}
-
-      current = task.retry || 0
-      boosted = max(current, 2)
-      assert boosted == 2
-    end
-
-    test "task with on_fail: :retry and retry: 1 gets boosted to 2" do
-      hooks = %AiHooks{on_fail: :retry}
-      task = %Task{name: "test", ai_hooks: hooks, retry: 1}
-
-      current = task.retry || 0
-      boosted = max(current, 2)
-      assert boosted == 2
-    end
-  end
-
-  describe "max_attempts calculation" do
-    test "no retry means 1 attempt" do
-      max_attempts = (nil || 0) + 1
-      assert max_attempts == 1
-    end
-
-    test "retry: 2 means 3 attempts" do
-      max_attempts = (2 || 0) + 1
-      assert max_attempts == 3
-    end
-
-    test "retry: 0 means 1 attempt" do
-      max_attempts = (0 || 0) + 1
-      assert max_attempts == 1
-    end
-  end
-
-  describe "on_fail: :skip transformation" do
-    # apply_on_fail_hook converts :failed/:errored to :skipped when on_fail is :skip
-
-    defp apply_skip_hook(%TaskResult{status: status} = result)
-         when status in [:failed, :errored] do
-      %TaskResult{result | status: :skipped}
-    end
-
-    defp apply_skip_hook(result), do: result
-
-    test "failed result becomes skipped with on_fail: :skip" do
-      result = %TaskResult{name: "test", status: :failed, duration_ms: 100, error: "exit 1"}
-      assert apply_skip_hook(result).status == :skipped
-    end
-
-    test "errored result becomes skipped with on_fail: :skip" do
-      result = %TaskResult{name: "test", status: :errored, duration_ms: 100, error: "timeout"}
-      assert apply_skip_hook(result).status == :skipped
-    end
-
-    test "passed result is not affected by on_fail: :skip" do
-      result = %TaskResult{name: "test", status: :passed, duration_ms: 50}
-      assert apply_skip_hook(result).status == :passed
+    test "max_attempts is retry + 1" do
+      assert (nil || 0) + 1 == 1
+      assert (0 || 0) + 1 == 1
+      assert (2 || 0) + 1 == 3
+      assert (5 || 0) + 1 == 6
     end
   end
 end

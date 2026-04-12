@@ -160,8 +160,12 @@ defmodule Sykli.DSL do
   end
 
   @doc "Sets an environment variable."
-  def env(key, value) do
+  def env(key, value) when is_binary(key) and key != "" do
     update_current_task(fn t -> %{t | env: Map.put(t.env, key, value)} end)
+  end
+
+  def env("", _value) do
+    raise ArgumentError, "environment variable key cannot be empty"
   end
 
   @doc "Sets a condition for when this task runs."
