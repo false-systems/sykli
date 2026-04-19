@@ -70,6 +70,21 @@ defmodule Sykli.Runtime.Resolver do
     :ok
   end
 
+  @doc """
+  Convert a user-supplied runtime name into a runtime module.
+
+  Accepts the same forms as `SYKLI_RUNTIME` / the CLI's `--runtime` flag:
+
+  - `"docker"`, `"podman"`, `"shell"`, `"fake"` — shorthand names
+  - `"Elixir.Fully.Qualified.Module"` — fully-qualified module atom form
+
+  Raises `ArgumentError` for unknown names. Designed as the entry point
+  for CLI / mix-task argument handling where invalid input should halt
+  with a clear message.
+  """
+  @spec from_name!(String.t()) :: module
+  def from_name!(name) when is_binary(name), do: env_to_module(name)
+
   # ─── priority-chain helpers ─────────────────────────────────────────────
 
   defp from_opts(opts, key), do: Keyword.get(opts, key)
