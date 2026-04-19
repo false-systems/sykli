@@ -18,6 +18,7 @@ mix test test/sykli/executor_test.exs           # single test file
 mix test test/sykli/executor_test.exs:42        # single test at line
 mix test --only integration                      # tagged tests
 mix format                # format code
+mix credo                 # lint (includes custom NoWallClock check)
 mix escript.build         # build the sykli binary → core/sykli
 ./sykli --help            # smoke test the binary
 ```
@@ -92,6 +93,7 @@ sykli.go ──emit──▶ JSON task graph (stdout) ──▶ Elixir engine �
 | `Occurrence.Store` | `occurrence/store.ex` | Three-tier storage: ETS (hot) → ETF (warm) → JSON (cold) |
 | `Cache` | `cache.ex` + `cache/*.ex` | Content-addressed caching (SHA256), tiered repository (local + S3) |
 | `Error` | `error.ex` | Structured error types with formatter |
+| `Mesh` | `mesh.ex` + `mesh/transport/*.ex` | Distributed task dispatch across BEAM nodes (libcluster); pluggable transport (simulator + real) |
 
 Other modules in `lib/sykli/`: Context, Explain, Fix, Plan, Query, Delta, MCP.Server, SCM, Services, Telemetry, HTTP, Attestation, Target.K8s.
 
@@ -189,6 +191,7 @@ Key env vars (see `cli.ex` and module docs for full details):
 - **TLS everywhere** — all `:httpc` calls must include `Sykli.HTTP.ssl_opts/1` (OIDC, S3, SCM, webhooks)
 - **Elixir heredoc gotcha** — `"""` embeds literal newlines that break JSON. Use `~s()` for single-line JSON in test fixtures
 - **~s() with parens gotcha** — `~s()` uses `()` as delimiters, so `~s(matches(x, "y"))` breaks. Use `~s[]` or `~S||` instead
+- **No wall-clock or global RNG in simulator-facing code** — the custom `CredoSykli.Check.NoWallClock` check (`core/lib/credo_sykli/check/no_wall_clock.ex`) fails on `System.monotonic_time/os_time/system_time`, `DateTime.utc_now`, `NaiveDateTime.utc_now`, `:os.system_time`, `:erlang.now`, and bare `:rand.uniform`. Route time through transport APIs (e.g. `now_ms/0`) and randomness through explicit seeded state
 
 ## Git Workflow
 
