@@ -46,6 +46,26 @@ defmodule Sykli.Mesh.Transport.SimTest do
     assert [:hello] == Sim.inbox(sim, pid_ref)
   end
 
+  test "named instances can use explicit server helpers" do
+    {:ok, sim} =
+      Sim.start_link(
+        name: nil,
+        nodes: [%{id: "node-a", profile: :worker, capabilities: [:cpu]}],
+        seed: 42
+      )
+
+    try do
+      assert [%{id: "node-a", profile: :worker, status: :up}] == Sim.list_nodes(sim)
+      assert {:ok, pid_ref} = Sim.spawn_remote(sim, "node-a", {Kernel, :self, []})
+      assert :ok = Sim.send_msg(sim, pid_ref, :hello)
+      assert 0 == Sim.now_ms(sim)
+      assert :ok = Sim.advance(sim, 1)
+      assert [:hello] == Sim.inbox(sim, pid_ref)
+    after
+      GenServer.stop(sim)
+    end
+  end
+
   test "multiple messages preserve send order in inbox", %{sim: sim} do
     {:ok, pid_ref} = Sim.spawn_remote("node-a", {Kernel, :self, []})
 
@@ -88,6 +108,14 @@ defmodule Sykli.Mesh.Transport.SimTest do
     assert :ok = Sim.advance(sim, 0)
     assert before_ms == Sim.now_ms()
     assert [] == Sim.inbox(sim, pid_ref)
+  end
+
+  test "unknown destinations are dropped without crashing", %{sim: sim} do
+    unknown = %PidRef{node_id: "node-a", local_id: 99, spawned_at_ms: 0}
+
+    assert :ok = Sim.send_msg(unknown, :hello)
+    assert :ok = Sim.advance(sim, 1)
+    assert [] == Sim.inbox(sim, unknown)
   end
 
   defp deterministic_run(seed) do

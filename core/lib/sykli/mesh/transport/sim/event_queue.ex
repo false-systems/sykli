@@ -4,37 +4,39 @@ defmodule Sykli.Mesh.Transport.Sim.EventQueue do
   """
 
   @type entry :: {non_neg_integer(), non_neg_integer(), term()}
-  @opaque t :: {non_neg_integer(), :gb_sets.set(entry())}
+  @opaque t :: :gb_sets.set(entry())
 
   @spec new() :: t()
   def new do
-    {0, :gb_sets.empty()}
+    :gb_sets.empty()
   end
 
   @spec insert(t(), non_neg_integer(), non_neg_integer(), term()) :: t()
-  def insert({size, set}, at_ms, seq, event) do
-    {size + 1, :gb_sets.add({at_ms, seq, event}, set)}
+  def insert(set, at_ms, seq, event) do
+    :gb_sets.add({at_ms, seq, event}, set)
   end
 
   @spec pop(t()) :: {:empty, t()} | {:ok, entry(), t()}
-  def pop({0, _set} = queue), do: {:empty, queue}
-
-  def pop({size, set}) do
-    {entry, next_set} = :gb_sets.take_smallest(set)
-    {:ok, entry, {size - 1, next_set}}
+  def pop(set) do
+    if :gb_sets.is_empty(set) do
+      {:empty, set}
+    else
+      {entry, next_set} = :gb_sets.take_smallest(set)
+      {:ok, entry, next_set}
+    end
   end
 
   @spec peek(t()) :: :empty | {:ok, entry()}
-  def peek({_size, set}) do
-    try do
+  def peek(set) do
+    if :gb_sets.is_empty(set) do
+      :empty
+    else
       {:ok, :gb_sets.smallest(set)}
-    catch
-      :error, :function_clause -> :empty
     end
   end
 
   @spec size(t()) :: non_neg_integer()
-  def size({size, _set}), do: size
+  def size(set), do: :gb_sets.size(set)
 
   @spec drain_until(t(), non_neg_integer()) :: {[entry()], t()}
   def drain_until(queue, until_ms) do

@@ -318,7 +318,7 @@ export class Template {
   /** Set an environment variable */
   env(key: string, value: string): this {
     if (!key) {
-      throw new Error(`gate '${this._name}': env key cannot be empty`);
+      throw new Error(`gate '${this.name}': env key cannot be empty`);
     }
     this._env[key] = value;
     return this;
@@ -475,7 +475,7 @@ export class Task {
   /** Set an environment variable */
   env(key: string, value: string): this {
     if (!key) {
-      throw new Error(`task '${this._name}': env key cannot be empty`);
+      throw new Error(`task '${this.name}': env key cannot be empty`);
     }
     this._env[key] = value;
     return this;

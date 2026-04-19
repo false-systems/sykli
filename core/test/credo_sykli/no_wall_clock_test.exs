@@ -36,6 +36,12 @@ defmodule CredoSykli.NoWallClockTest do
     |> assert_issue(%{trigger: "System.os_time"})
   end
 
+  test "detects System.system_time" do
+    fixture("bad_system_system_time.ex", "lib/sykli/foo.ex")
+    |> run_check(NoWallClock, severity: :error)
+    |> assert_issue(%{trigger: "System.system_time"})
+  end
+
   test "detects :os.system_time" do
     fixture("bad_os_system_time.ex", "lib/sykli/foo.ex")
     |> run_check(NoWallClock, severity: :error)
@@ -62,6 +68,12 @@ defmodule CredoSykli.NoWallClockTest do
 
   test "detects unary :rand.uniform" do
     fixture("bad_rand_uniform.ex", "lib/sykli/foo.ex")
+    |> run_check(NoWallClock, severity: :error)
+    |> assert_issue(%{trigger: ":rand.uniform"})
+  end
+
+  test "detects zero-arity :rand.uniform" do
+    fixture("bad_rand_uniform_zero_arity.ex", "lib/sykli/foo.ex")
     |> run_check(NoWallClock, severity: :error)
     |> assert_issue(%{trigger: ":rand.uniform"})
   end

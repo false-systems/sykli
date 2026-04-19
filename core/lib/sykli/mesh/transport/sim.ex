@@ -14,7 +14,8 @@ defmodule Sykli.Mesh.Transport.Sim do
 
   @behaviour Sykli.Mesh.Transport
 
-  @type process_info :: %{mfa: {module(), atom(), [term()]}, inbox: [term()]}
+  @type server :: GenServer.server()
+  @type process_info :: %{mfa: {module(), atom(), [term()]}, inbox: :queue.queue(term())}
   @type trace_state :: %{
           seed: integer(),
           next_local_id: non_neg_integer(),
@@ -37,44 +38,44 @@ defmodule Sykli.Mesh.Transport.Sim do
     GenServer.call(sim, {:advance, ms})
   end
 
-  @spec inbox(pid(), term()) :: [term()]
+  @spec inbox(server(), term()) :: [term()]
   def inbox(sim, pid_ref) do
     GenServer.call(sim, {:inbox, pid_ref})
   end
 
-  @spec reset(pid()) :: :ok
+  @spec reset(server()) :: :ok
   def reset(sim) do
     GenServer.call(sim, :reset)
   end
 
   @impl true
   def list_nodes do
-    GenServer.call(__MODULE__, :list_nodes)
+    list_nodes(__MODULE__)
   end
 
   @impl true
   def spawn_remote(node_id, mfa) do
-    GenServer.call(__MODULE__, {:spawn_remote, node_id, mfa})
+    spawn_remote(__MODULE__, node_id, mfa)
   end
 
   @impl true
   def send_msg(destination, message) do
-    GenServer.call(__MODULE__, {:send_msg, destination, message})
+    send_msg(__MODULE__, destination, message)
   end
 
   @impl true
   def monitor(target) do
-    GenServer.call(__MODULE__, {:monitor, target})
+    monitor(__MODULE__, target)
   end
 
   @impl true
   def demonitor(reference) do
-    GenServer.call(__MODULE__, {:demonitor, reference})
+    demonitor(__MODULE__, reference)
   end
 
   @impl true
   def now_ms do
-    GenServer.call(__MODULE__, :now_ms)
+    now_ms(__MODULE__)
   end
 
   @impl true
@@ -85,6 +86,37 @@ defmodule Sykli.Mesh.Transport.Sim do
   @impl true
   def subscribe(_opts) do
     raise RuntimeError, ":not_implemented"
+  end
+
+  @spec list_nodes(server()) :: [Sykli.Mesh.Transport.node_info()]
+  def list_nodes(sim) do
+    GenServer.call(sim, :list_nodes)
+  end
+
+  @spec spawn_remote(server(), String.t(), {module(), atom(), [term()]}) ::
+          {:ok, term()} | {:error, term()}
+  def spawn_remote(sim, node_id, mfa) do
+    GenServer.call(sim, {:spawn_remote, node_id, mfa})
+  end
+
+  @spec send_msg(server(), term(), term()) :: :ok
+  def send_msg(sim, destination, message) do
+    GenServer.call(sim, {:send_msg, destination, message})
+  end
+
+  @spec monitor(server(), term()) :: reference()
+  def monitor(sim, target) do
+    GenServer.call(sim, {:monitor, target})
+  end
+
+  @spec demonitor(server(), reference()) :: :ok
+  def demonitor(sim, reference) do
+    GenServer.call(sim, {:demonitor, reference})
+  end
+
+  @spec now_ms(server()) :: non_neg_integer()
+  def now_ms(sim) do
+    GenServer.call(sim, :now_ms)
   end
 
   @impl true
@@ -113,6 +145,7 @@ defmodule Sykli.Mesh.Transport.Sim do
       |> Enum.map(fn %SimNode{id: id, profile: profile, status: status} ->
         %{id: id, profile: profile, status: status}
       end)
+      |> Enum.sort_by(& &1.id)
 
     {:reply, nodes, state}
   end
@@ -126,7 +159,7 @@ defmodule Sykli.Mesh.Transport.Sim do
           spawned_at_ms: state.clock
         }
 
-        process_info = %{mfa: mfa, inbox: []}
+        process_info = %{mfa: mfa, inbox: :queue.new()}
 
         next_state =
           put_in(state.nodes[node_id], %{
@@ -146,17 +179,21 @@ defmodule Sykli.Mesh.Transport.Sim do
   end
 
   def handle_call({:send_msg, %PidRef{} = destination, message}, _from, state) do
-    next_seq = state.seq + 1
-    deliver_at = state.clock + 1
-    event = {:deliver, destination, message}
+    if process_exists?(state, destination) do
+      next_seq = state.seq + 1
+      deliver_at = state.clock + 1
+      event = {:deliver, destination, message}
 
-    next_state = %{
-      state
-      | seq: next_seq,
-        event_queue: EventQueue.insert(state.event_queue, deliver_at, next_seq, event)
-    }
+      next_state = %{
+        state
+        | seq: next_seq,
+          event_queue: EventQueue.insert(state.event_queue, deliver_at, next_seq, event)
+      }
 
-    {:reply, :ok, next_state}
+      {:reply, :ok, next_state}
+    else
+      {:reply, :ok, state}
+    end
   end
 
   def handle_call({:monitor, target}, _from, state) do
@@ -189,8 +226,9 @@ defmodule Sykli.Mesh.Transport.Sim do
       state.nodes
       |> Map.get(pid_ref.node_id, %SimNode{processes: %{}})
       |> Map.get(:processes, %{})
-      |> Map.get(pid_ref, %{inbox: []})
-      |> Map.get(:inbox, [])
+      |> Map.get(pid_ref, %{inbox: :queue.new()})
+      |> Map.get(:inbox, :queue.new())
+      |> :queue.to_list()
 
     {:reply, inbox, state}
   end
@@ -230,7 +268,14 @@ defmodule Sykli.Mesh.Transport.Sim do
   end
 
   defp apply_event(state, {:deliver, %PidRef{} = destination, message}) do
-    update_in(state.nodes[destination.node_id].processes[destination].inbox, &(&1 ++ [message]))
+    if process_exists?(state, destination) do
+      update_in(
+        state.nodes[destination.node_id].processes[destination].inbox,
+        &:queue.in(message, &1)
+      )
+    else
+      state
+    end
   end
 
   defp reset_state(state) do
@@ -250,5 +295,12 @@ defmodule Sykli.Mesh.Transport.Sim do
     Map.new(nodes, fn {id, node} ->
       {id, %{node | processes: %{}, inbox: []}}
     end)
+  end
+
+  defp process_exists?(state, %PidRef{node_id: node_id} = destination) do
+    case Map.fetch(state.nodes, node_id) do
+      {:ok, node} -> Map.has_key?(node.processes, destination)
+      :error -> false
+    end
   end
 end

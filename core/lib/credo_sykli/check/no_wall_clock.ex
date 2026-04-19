@@ -54,6 +54,10 @@ defmodule CredoSykli.Check.NoWallClock do
     {:ok, meta, "System.os_time"}
   end
 
+  defp offense({{:., meta, [{:__aliases__, _, [:System]}, :system_time]}, _, _args}) do
+    {:ok, meta, "System.system_time"}
+  end
+
   defp offense({{:., meta, [{:__aliases__, _, [:DateTime]}, :utc_now]}, _, _args}) do
     {:ok, meta, "DateTime.utc_now"}
   end
@@ -71,6 +75,10 @@ defmodule CredoSykli.Check.NoWallClock do
   end
 
   defp offense({{:., meta, [:rand, :uniform]}, _, [_arg]}) do
+    {:ok, meta, ":rand.uniform"}
+  end
+
+  defp offense({{:., meta, [:rand, :uniform]}, _, []}) do
     {:ok, meta, ":rand.uniform"}
   end
 
