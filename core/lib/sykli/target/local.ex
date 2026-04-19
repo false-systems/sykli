@@ -31,13 +31,13 @@ defmodule Sykli.Target.Local do
 
   ## Example
 
-      # Setup with Docker runtime (default)
+      # Setup with the resolved default runtime (see `Sykli.Runtime.Resolver`).
       {:ok, state} = Sykli.Target.Local.setup(workdir: "/tmp/build")
 
-      # Setup with Shell runtime (no containers)
+      # Setup with an explicit runtime override.
       {:ok, state} = Sykli.Target.Local.setup(
         workdir: "/tmp/build",
-        runtime: Sykli.Runtime.Shell
+        runtime: runtime_module
       )
 
       # Run a task
@@ -50,8 +50,6 @@ defmodule Sykli.Target.Local do
   @behaviour Sykli.Target.Behaviour
 
   defstruct [:workdir, :runtime, :timeout_ms]
-
-  @default_runtime Sykli.Runtime.Docker
 
   # ─────────────────────────────────────────────────────────────────────────────
   # STATELESS CONVENIENCE (for RPC / Mesh)
@@ -68,7 +66,7 @@ defmodule Sykli.Target.Local do
 
   Same as `setup/1`:
   - `:workdir` - Working directory (default: ".")
-  - `:runtime` - Runtime module (default: Docker)
+  - `:runtime` - Runtime module (default: resolved via `Sykli.Runtime.Resolver`)
 
   ## Example
 
@@ -99,17 +97,12 @@ defmodule Sykli.Target.Local do
 
   @impl true
   def available? do
-    # Check if at least one runtime is available
-    case @default_runtime.available?() do
-      {:ok, info} ->
-        {:ok, %{runtime: @default_runtime.name(), info: info}}
+    # Delegate runtime selection to the Resolver (priority chain + fallback).
+    runtime = Sykli.Runtime.Resolver.resolve([])
 
-      {:error, _} ->
-        # Fall back to shell
-        case Sykli.Runtime.Shell.available?() do
-          {:ok, info} -> {:ok, %{runtime: "shell", info: info}}
-          error -> error
-        end
+    case runtime.available?() do
+      {:ok, info} -> {:ok, %{runtime: runtime.name(), info: info}}
+      {:error, _} = err -> err
     end
   end
 
@@ -120,7 +113,7 @@ defmodule Sykli.Target.Local do
   @impl true
   def setup(opts) do
     workdir = Keyword.get(opts, :workdir, ".")
-    runtime = Keyword.get(opts, :runtime, @default_runtime)
+    runtime = Sykli.Runtime.Resolver.resolve(opts)
 
     # Verify runtime is available
     case runtime.available?() do

@@ -19,21 +19,12 @@ defmodule Sykli.Target.LocalCharacterizationTest do
   alias Sykli.Target.Local
 
   describe "setup/1 — runtime selection (characterization)" do
-    test "with no opts, either resolves a Runtime.Behaviour impl or fails consistently" do
-      case Local.setup(workdir: System.tmp_dir!()) do
-        {:ok, state} ->
-          assert is_atom(state.runtime)
-          assert function_exported?(state.runtime, :name, 0)
-          assert function_exported?(state.runtime, :available?, 0)
-          assert function_exported?(state.runtime, :run, 4)
-          Local.teardown(state)
+    test "with no opts, under :test config, resolves to Sykli.Runtime.Fake" do
+      {:ok, state} = Local.setup(workdir: System.tmp_dir!())
 
-        {:error, _reason} ->
-          # Pre-refactor: setup fails when the hardcoded Docker default is
-          # unavailable. This branch disappears in RC.4b when the Resolver
-          # picks the Fake runtime under test config.
-          :ok
-      end
+      assert state.runtime == Sykli.Runtime.Fake
+
+      Local.teardown(state)
     end
 
     test "explicit runtime: Sykli.Runtime.Shell is honored" do
