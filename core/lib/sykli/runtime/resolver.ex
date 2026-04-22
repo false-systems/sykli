@@ -91,6 +91,7 @@ defmodule Sykli.Runtime.Resolver do
     case Keyword.get(opts, key) do
       nil -> nil
       module when is_atom(module) -> ensure_runtime_module!(module, "opts[:#{key}]")
+      value -> bad_option!(key, value)
     end
   end
 
@@ -136,6 +137,12 @@ defmodule Sykli.Runtime.Resolver do
     raise ArgumentError,
           "SYKLI_RUNTIME=#{name} is not recognised. " <>
             "Use one of: docker, podman, shell, fake, or Elixir.Fully.Qualified.Module"
+  end
+
+  defp bad_option!(key, value) do
+    raise ArgumentError,
+          "invalid #{inspect(key)} option: expected a module atom implementing " <>
+            "Sykli.Runtime.Behaviour, got: #{inspect(value)}"
   end
 
   defp ensure_runtime_module!(module, source) do

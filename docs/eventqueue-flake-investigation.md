@@ -40,7 +40,7 @@ Previous reported failure text from the earlier verification run that triggered 
 
 That report was emitted from the property test at:
 
-- [core/test/sykli/mesh/transport/sim/event_queue_test.exs:56](/home/yair/projects/sykli/core/test/sykli/mesh/transport/sim/event_queue_test.exs:56)
+- `core/test/sykli/mesh/transport/sim/event_queue_test.exs:56`
 
 ## Classification
 
@@ -48,9 +48,9 @@ Class: **A — Test generator bug** `[INFERRED]`
 
 Evidence:
 
-- The property test at [core/test/sykli/mesh/transport/sim/event_queue_test.exs:56](/home/yair/projects/sykli/core/test/sykli/mesh/transport/sim/event_queue_test.exs:56) generates `seqs` via `StreamData.uniq_list_of(StreamData.integer())`.
+- The property test at `core/test/sykli/mesh/transport/sim/event_queue_test.exs:56` generates `seqs` via `StreamData.uniq_list_of(StreamData.integer())`.
 - The earlier reported failure was `StreamData.TooManyDuplicatesError`, which is raised by `StreamData.uniq_list_of/2` while generating unique values, before the property body executes.
-- The EventQueue implementation at [core/lib/sykli/mesh/transport/sim/event_queue.ex:8](/home/yair/projects/sykli/core/lib/sykli/mesh/transport/sim/event_queue.ex:8) through [event_queue.ex:49](/home/yair/projects/sykli/core/lib/sykli/mesh/transport/sim/event_queue.ex:49) is pure and does not contain randomness, concurrency, or VM-order-sensitive logic. It stores full `{at_ms, seq, event}` tuples in `:gb_sets` and reads them via `smallest` / `take_smallest`.
+- The EventQueue implementation at `core/lib/sykli/mesh/transport/sim/event_queue.ex:8-49` is pure and does not contain randomness, concurrency, or VM-order-sensitive logic. It stores full `{at_ms, seq, event}` tuples in `:gb_sets` and reads them via `smallest` / `take_smallest`.
 
 Why this is `[INFERRED]` rather than fully proven:
 

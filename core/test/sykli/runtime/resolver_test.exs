@@ -68,6 +68,12 @@ defmodule Sykli.Runtime.ResolverTest do
       end
     end
 
+    test "opts[:runtime] rejects non-module values with a clear error" do
+      assert_raise ArgumentError, ~r/invalid :runtime option/, fn ->
+        Resolver.resolve(runtime: "shell")
+      end
+    end
+
     test "Application.get_env(:default_runtime) wins over SYKLI_RUNTIME" do
       Application.put_env(:sykli, :default_runtime, Sykli.Runtime.Fake)
       System.put_env("SYKLI_RUNTIME", "docker")
@@ -202,6 +208,12 @@ defmodule Sykli.Runtime.ResolverTest do
     test "validates containerless runtime modules from opts" do
       assert_raise ArgumentError, ~r/containerless_runtime.*does not implement/, fn ->
         Resolver.resolve_containerless(containerless_runtime: NotARuntime)
+      end
+    end
+
+    test "rejects invalid containerless runtime option types clearly" do
+      assert_raise ArgumentError, ~r/invalid :containerless_runtime option/, fn ->
+        Resolver.resolve_containerless(containerless_runtime: "shell")
       end
     end
   end

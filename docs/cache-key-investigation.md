@@ -2,7 +2,7 @@
 
 ## What `cache_key/2` currently includes
 
-`Sykli.Cache.cache_key/2` in [core/lib/sykli/cache.ex](/home/yair/projects/sykli/core/lib/sykli/cache.ex) currently hashes these inputs, in order:
+`Sykli.Cache.cache_key/2` in `core/lib/sykli/cache.ex` currently hashes these inputs, in order:
 
 - `project_fingerprint(abs_workdir)`
 - `task.name`
@@ -24,7 +24,7 @@ So for any two directories inside the same Git repo with the same `origin`, the 
 
 ## What the test expects
 
-The failing test at [core/test/sykli/cache_unit_test.exs:88](/home/yair/projects/sykli/core/test/sykli/cache_unit_test.exs:88) creates:
+The failing test at `core/test/sykli/cache_unit_test.exs:88` creates:
 
 - `dir`
 - `other_dir = Path.join(dir, "other_project")`
@@ -85,20 +85,20 @@ S1.5b added the required grep pass before implementing the fix. That pass found 
 
 Meaningful hits:
 
-- [core/lib/sykli/occurrence/task_cached.ex](/home/yair/projects/sykli/core/lib/sykli/occurrence/task_cached.ex)
+- `core/lib/sykli/occurrence/task_cached.ex`
   - `TaskCached` persists `cache_key` in the occurrence payload struct.
-- [core/lib/sykli/occurrence/cache_miss.ex](/home/yair/projects/sykli/core/lib/sykli/occurrence/cache_miss.ex)
+- `core/lib/sykli/occurrence/cache_miss.ex`
   - `CacheMiss` persists `cache_key` in the occurrence payload struct.
-- [core/lib/sykli/occurrence/pubsub.ex](/home/yair/projects/sykli/core/lib/sykli/occurrence/pubsub.ex)
+- `core/lib/sykli/occurrence/pubsub.ex`
   - occurrence pubsub publishes those payloads with cache keys.
-- [core/lib/sykli/occurrence.ex](/home/yair/projects/sykli/core/lib/sykli/occurrence.ex)
+- `core/lib/sykli/occurrence.ex`
   - `task_cached/4` and `cache_miss/5` build persisted occurrences containing the key.
-- [core/lib/sykli/executor.ex](/home/yair/projects/sykli/core/lib/sykli/executor.ex)
+- `core/lib/sykli/executor.ex`
   - executor emits those occurrences on cache hit and miss paths.
 
 Non-blocking / not meaningful for this decision:
 
-- [core/lib/sykli/attestation.ex](/home/yair/projects/sykli/core/lib/sykli/attestation.ex)
+- `core/lib/sykli/attestation.ex`
   - calls `Cache.cache_key/2` for lookup, but the grep did not show the key being serialized into persisted attestation output.
 - `sdk/typescript/node_modules/rollup/dist/rollup.d.ts`
   - third-party dependency type definition mentioning `cacheKey`; not a Sykli SDK output contract.
