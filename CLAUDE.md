@@ -34,11 +34,11 @@ tests/conformance/run.sh --sdk go           # single SDK
 tests/conformance/run.sh case-name          # single case
 ```
 
-Black-box tests (run against the built binary):
+Black-box tests (run against the built binary — cases listed in `test/blackbox/dataset.json`):
 ```bash
-test/blackbox/run.sh              # all 84 cases, 7 categories
+test/blackbox/run.sh              # all cases
 test/blackbox/run.sh --verbose    # show failure details
-test/blackbox/run.sh --filter=POS # filter by category
+test/blackbox/run.sh --filter=POS # substring-filter case names
 ```
 
 Eval harness (AI agent evaluation against oracle ground-truth cases):
@@ -50,6 +50,14 @@ eval/oracle/run.sh --verbose                # show command output on failure
 eval/harness/run.sh                         # full eval loop (Claude Code → build → oracle → report)
 eval/harness/run.sh --case 001 --dry-run    # preview without running
 ```
+`eval/harness/run.sh` requires the `claude` CLI (Claude Code) on PATH; `eval/oracle/run.sh` does not.
+
+### Test tree layout
+
+- `core/test/` — Elixir unit/integration tests run by `mix test`.
+- `test/blackbox/` — shell-driven black-box suite against the built `sykli` binary (dataset in `dataset.json`).
+- `tests/conformance/` (repo root, note the `s`) — cross-SDK JSON-output conformance cases.
+- `eval/oracle/` + `eval/harness/` — ground-truth cases and the AI-agent eval loop.
 
 Before every commit: `mix format && mix test && mix escript.build`
 
@@ -85,7 +93,7 @@ sykli.go ──emit──▶ JSON task graph (stdout) ──▶ Elixir engine �
 
 | Module | File | Role |
 |--------|------|------|
-| `CLI` | `cli.ex` | Command dispatch (17 commands) |
+| `CLI` | `cli.ex` | Command dispatch (see CLI Commands section for the list) |
 | `Graph` | `graph.ex` | JSON → Task DAG, validation, matrix expansion |
 | `Graph.Task` | `graph.ex` + `graph/task/*.ex` | Task struct with semantic/ai_hooks/history fields |
 | `Executor` | `executor.ex` | DAG execution with `Executor.Config` struct, AI hooks, concurrency limiting |
@@ -211,6 +219,5 @@ Key env vars (see `cli.ex` and module docs for full details):
 ## Known Issues
 
 - `--timeout` flag doesn't enforce timeouts on local target (tasks run to completion)
-- 1 test requires Docker daemon running (skipped when unavailable)
-- ~51 pre-existing test failures (Docker-dependent tests that require Docker daemon)
+- Docker-tagged tests are skipped when no Docker daemon is available; run them explicitly with `mix test.docker`.
 - See `docs/deep-dive-findings.md` for tracked issues — security (SEC-001–007) and reliability (REL-001–008) items are all resolved; test coverage (TEST-001–010) resolved; architecture items (ARCH-001–010) remain as long-term structural improvements
