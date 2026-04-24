@@ -430,7 +430,6 @@ defmodule Sykli.Target.K8s do
     progress = Keyword.get(opts, :progress)
     prefix = progress_prefix(progress)
     job_module = Keyword.get(opts, :job_module, Job)
-    namespace = task_namespace(task, state)
 
     # Get timestamp
     {_, {h, m, s}} = :calendar.local_time()
@@ -446,6 +445,7 @@ defmodule Sykli.Target.K8s do
 
     # Build and apply Job
     manifest = build_job_manifest(task, job_name, state, opts)
+    namespace = get_in(manifest, ["metadata", "namespace"]) || state.namespace
 
     case apply_job(manifest, state, job_module) do
       :ok ->
@@ -907,10 +907,6 @@ defmodule Sykli.Target.K8s do
     # Best effort cleanup - ignore errors
     job_module.delete(job_name, namespace, state.auth_config)
     :ok
-  end
-
-  defp task_namespace(task, state) do
-    (task.k8s && task.k8s.namespace) || state.namespace
   end
 
   defp ensure_namespace(state) do
