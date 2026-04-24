@@ -4,6 +4,28 @@ defmodule Sykli.Target.K8sTest do
   alias Sykli.Target.K8s
   alias Sykli.Target.K8sOptions
 
+  defmodule FakeJob do
+    def create(manifest, _auth_config) do
+      send(self(), {:job_create, get_in(manifest, ["metadata", "namespace"])})
+      {:ok, manifest}
+    end
+
+    def wait_complete(job_name, namespace, _auth_config, _opts) do
+      send(self(), {:job_wait_complete, job_name, namespace})
+      {:ok, :succeeded}
+    end
+
+    def logs(job_name, namespace, _auth_config) do
+      send(self(), {:job_logs, job_name, namespace})
+      {:ok, "logs"}
+    end
+
+    def delete(job_name, namespace, _auth_config) do
+      send(self(), {:job_delete, job_name, namespace})
+      {:ok, %{"status" => "Success"}}
+    end
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB MANIFEST BUILDING - GIT CLONE INIT CONTAINER
   # ─────────────────────────────────────────────────────────────────────────────
@@ -104,6 +126,32 @@ defmodule Sykli.Target.K8sTest do
 
       # Should have no init containers
       assert init_containers == nil or init_containers == []
+    end
+  end
+
+  describe "run_task/3 namespace handling" do
+    test "uses task k8s namespace consistently for wait and delete lifecycle calls" do
+      task = %Sykli.Graph.Task{
+        name: "build",
+        command: "echo hi",
+        container: "alpine:latest",
+        k8s: %K8sOptions{namespace: "task-ns"}
+      }
+
+      state = %K8s{
+        namespace: "state-ns",
+        auth_config: %{},
+        artifact_pvc: "sykli-artifacts",
+        in_cluster: false
+      }
+
+      assert :ok = K8s.run_task(task, state, job_module: FakeJob)
+
+      assert_receive {:job_create, "task-ns"}
+      assert_receive {:job_wait_complete, job_name, "task-ns"}
+      assert_receive {:job_delete, ^job_name, "task-ns"}
+      refute_received {:job_wait_complete, _, "state-ns"}
+      refute_received {:job_delete, _, "state-ns"}
     end
   end
 

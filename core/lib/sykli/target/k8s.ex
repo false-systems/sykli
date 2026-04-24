@@ -429,6 +429,7 @@ defmodule Sykli.Target.K8s do
   def run_task(task, state, opts) do
     progress = Keyword.get(opts, :progress)
     prefix = progress_prefix(progress)
+    job_module = Keyword.get(opts, :job_module, Job)
 
     # Get timestamp
     {_, {h, m, s}} = :calendar.local_time()
@@ -444,11 +445,12 @@ defmodule Sykli.Target.K8s do
 
     # Build and apply Job
     manifest = build_job_manifest(task, job_name, state, opts)
+    namespace = get_in(manifest, ["metadata", "namespace"]) || state.namespace
 
-    case apply_job(manifest, state) do
+    case apply_job(manifest, state, job_module) do
       :ok ->
         # Wait for completion
-        case wait_for_job(job_name, state, task.timeout || 300) do
+        case wait_for_job(job_name, namespace, state, task.timeout || 300, job_module) do
           {:ok, :succeeded} ->
             duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -456,19 +458,19 @@ defmodule Sykli.Target.K8s do
               "#{IO.ANSI.green()}✓ #{task.name}#{IO.ANSI.reset()} #{IO.ANSI.faint()}#{format_duration(duration_ms)}#{IO.ANSI.reset()}"
             )
 
-            cleanup_job(job_name, state)
+            cleanup_job(job_name, namespace, state, job_module)
             :ok
 
           {:ok, :failed} ->
             duration_ms = System.monotonic_time(:millisecond) - start_time
-            logs = get_job_logs(job_name, state)
+            logs = get_job_logs(job_name, namespace, state, job_module)
 
             IO.puts(
               "#{IO.ANSI.red()}✗ #{task.name}#{IO.ANSI.reset()} #{IO.ANSI.faint()}#{format_duration(duration_ms)}#{IO.ANSI.reset()}"
             )
 
             IO.puts("#{IO.ANSI.faint()}#{logs}#{IO.ANSI.reset()}")
-            cleanup_job(job_name, state)
+            cleanup_job(job_name, namespace, state, job_module)
             {:error, :job_failed}
 
           {:error, :timeout} ->
@@ -476,7 +478,7 @@ defmodule Sykli.Target.K8s do
               "#{IO.ANSI.red()}✗ #{task.name}#{IO.ANSI.reset()} #{IO.ANSI.faint()}(timeout)#{IO.ANSI.reset()}"
             )
 
-            cleanup_job(job_name, state)
+            cleanup_job(job_name, namespace, state, job_module)
             {:error, :timeout}
 
           {:error, reason} ->
@@ -484,7 +486,7 @@ defmodule Sykli.Target.K8s do
               "#{IO.ANSI.red()}✗ #{task.name}#{IO.ANSI.reset()} #{IO.ANSI.faint()}(#{inspect(reason)})#{IO.ANSI.reset()}"
             )
 
-            cleanup_job(job_name, state)
+            cleanup_job(job_name, namespace, state, job_module)
             {:error, reason}
         end
 
@@ -873,8 +875,8 @@ defmodule Sykli.Target.K8s do
   # K8S API OPERATIONS
   # ─────────────────────────────────────────────────────────────────────────────
 
-  defp apply_job(manifest, state) do
-    case Job.create(manifest, state.auth_config) do
+  defp apply_job(manifest, state, job_module) do
+    case job_module.create(manifest, state.auth_config) do
       {:ok, _job} -> :ok
       # Job already exists, that's fine
       {:error, %Error{type: :conflict}} -> :ok
@@ -882,10 +884,10 @@ defmodule Sykli.Target.K8s do
     end
   end
 
-  defp wait_for_job(job_name, state, timeout_seconds) do
+  defp wait_for_job(job_name, namespace, state, timeout_seconds, job_module) do
     timeout_ms = timeout_seconds * 1000
 
-    case Job.wait_complete(job_name, state.namespace, state.auth_config, timeout: timeout_ms) do
+    case job_module.wait_complete(job_name, namespace, state.auth_config, timeout: timeout_ms) do
       {:ok, :succeeded} -> {:ok, :succeeded}
       {:ok, :failed} -> {:ok, :failed}
       {:error, %Error{type: :timeout}} -> {:error, :timeout}
@@ -893,17 +895,17 @@ defmodule Sykli.Target.K8s do
     end
   end
 
-  defp get_job_logs(job_name, state) do
-    case Job.logs(job_name, state.namespace, state.auth_config) do
+  defp get_job_logs(job_name, namespace, state, job_module) do
+    case job_module.logs(job_name, namespace, state.auth_config) do
       {:ok, logs} -> logs
       {:error, :no_pods} -> "(no pods found for job)"
       {:error, error} -> "Failed to get logs: #{format_error(error)}"
     end
   end
 
-  defp cleanup_job(job_name, state) do
+  defp cleanup_job(job_name, namespace, state, job_module) do
     # Best effort cleanup - ignore errors
-    Job.delete(job_name, state.namespace, state.auth_config)
+    job_module.delete(job_name, namespace, state.auth_config)
     :ok
   end
 
