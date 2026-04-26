@@ -48,7 +48,7 @@ defmodule Sykli.Executor do
     """
 
     @enforce_keys [:name, :status, :duration_ms]
-    defstruct [:name, :status, :duration_ms, :error, :output]
+    defstruct [:name, :status, :duration_ms, :error, :output, :command]
 
     @type status :: :passed | :failed | :errored | :cached | :skipped | :blocked
     @type t :: %__MODULE__{
@@ -56,7 +56,8 @@ defmodule Sykli.Executor do
             status: status(),
             duration_ms: non_neg_integer(),
             error: term() | nil,
-            output: String.t() | nil
+            output: String.t() | nil,
+            command: String.t() | nil
           }
   end
 
@@ -334,7 +335,8 @@ defmodule Sykli.Executor do
                     name: task.name,
                     status: :errored,
                     duration_ms: duration,
-                    error: reason
+                    error: reason,
+                    command: task.command
                   }
               end
             end)
@@ -355,7 +357,8 @@ defmodule Sykli.Executor do
                 name: original.name,
                 status: :errored,
                 duration_ms: 0,
-                error: Error.internal("task process crashed: #{inspect(reason)}")
+                error: Error.internal("task process crashed: #{inspect(reason)}"),
+                command: original.command
               }
 
             {{task_ref, nil}, original} ->
@@ -365,7 +368,8 @@ defmodule Sykli.Executor do
                 name: original.name,
                 status: :errored,
                 duration_ms: 0,
-                error: Error.internal("task process timed out")
+                error: Error.internal("task process timed out"),
+                command: original.command
               }
           end)
 
@@ -435,7 +439,8 @@ defmodule Sykli.Executor do
         name: task.name,
         status: :blocked,
         duration_ms: 0,
-        error: :dependency_failed
+        error: :dependency_failed,
+        command: task.command
       }
     end)
   end
@@ -546,7 +551,8 @@ defmodule Sykli.Executor do
                     name: task.name,
                     status: :errored,
                     duration_ms: duration,
-                    error: Error.missing_secrets(task.name, missing)
+                    error: Error.missing_secrets(task.name, missing),
+                    command: task.command
                   }
               end
 
@@ -559,7 +565,8 @@ defmodule Sykli.Executor do
                 name: task.name,
                 status: :errored,
                 duration_ms: duration,
-                error: Error.internal("OIDC credential exchange failed: #{reason}")
+                error: Error.internal("OIDC credential exchange failed: #{reason}"),
+                command: task.command
               }
           end
         after
@@ -575,7 +582,8 @@ defmodule Sykli.Executor do
           name: task.name,
           status: :skipped,
           duration_ms: duration,
-          error: nil
+          error: nil,
+          command: task.command
         }
       end
     end
@@ -600,7 +608,13 @@ defmodule Sykli.Executor do
 
         Output.gate_approved(prefix, task.name, approver)
 
-        %TaskResult{name: task.name, status: :passed, duration_ms: duration, error: nil}
+        %TaskResult{
+          name: task.name,
+          status: :passed,
+          duration_ms: duration,
+          error: nil,
+          command: task.command
+        }
 
       {:denied, reason} ->
         maybe_emit_gate_resolved(run_id, task.name, :denied, reason, duration)
@@ -611,7 +625,8 @@ defmodule Sykli.Executor do
           name: task.name,
           status: :failed,
           duration_ms: duration,
-          error: Error.internal("gate '#{task.name}' denied: #{reason}")
+          error: Error.internal("gate '#{task.name}' denied: #{reason}"),
+          command: task.command
         }
 
       {:timed_out} ->
@@ -623,7 +638,8 @@ defmodule Sykli.Executor do
           name: task.name,
           status: :failed,
           duration_ms: duration,
-          error: Error.internal("gate '#{task.name}' timed out after #{gate.timeout}s")
+          error: Error.internal("gate '#{task.name}' timed out after #{gate.timeout}s"),
+          command: task.command
         }
     end
   end
@@ -660,7 +676,8 @@ defmodule Sykli.Executor do
           name: task.name,
           status: :cached,
           duration_ms: duration,
-          error: nil
+          error: nil,
+          command: task.command
         }
 
       {:miss, cache_key, reason} ->
@@ -751,7 +768,8 @@ defmodule Sykli.Executor do
           status: :passed,
           duration_ms: duration,
           error: nil,
-          output: output
+          output: output,
+          command: task.command
         }
 
       {:error, reason} when attempt < max_attempts ->
@@ -787,7 +805,8 @@ defmodule Sykli.Executor do
           status: :failed,
           duration_ms: duration,
           error: reason,
-          output: output
+          output: output,
+          command: task.command
         }
     end
   end
