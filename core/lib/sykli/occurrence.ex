@@ -21,6 +21,8 @@ defmodule Sykli.Occurrence do
       ci.cache.miss        — cache miss with reason
       ci.gate.waiting      — gate awaiting approval
       ci.gate.resolved     — gate approved/denied/timed out
+      ci.github.webhook.received — GitHub webhook accepted
+      ci.github.check_suite.opened — GitHub check suite opened
 
   ## Enrichment
 
@@ -205,6 +207,24 @@ defmodule Sykli.Occurrence do
 
     new("ci.gate.resolved", run_id, GateResolved.new(gate_name, outcome, approver, duration_ms),
       severity: severity,
+      opts: opts
+    )
+  end
+
+  @doc "Create a ci.github.webhook.received occurrence."
+  @spec github_webhook_received(String.t(), map(), keyword()) :: t()
+  def github_webhook_received(run_id, data, opts \\ []) do
+    new("ci.github.webhook.received", run_id, data,
+      severity: :info,
+      opts: opts
+    )
+  end
+
+  @doc "Create a ci.github.check_suite.opened occurrence."
+  @spec github_check_suite_opened(String.t(), map(), keyword()) :: t()
+  def github_check_suite_opened(run_id, data, opts \\ []) do
+    new("ci.github.check_suite.opened", run_id, data,
+      severity: :info,
       opts: opts
     )
   end
