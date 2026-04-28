@@ -19,6 +19,8 @@ defmodule Sykli.Application do
 
   @impl true
   def start(_type, _args) do
+    Sykli.Mesh.Roles.bootstrap_local_roles()
+
     children = [
       # ULID generator - must start first (other services may generate IDs on init)
       Sykli.ULID,
@@ -30,7 +32,10 @@ defmodule Sykli.Application do
       {Task.Supervisor, name: Sykli.TaskSupervisor},
 
       # Run registry - tracks all local runs
-      Sykli.RunRegistry
+      Sykli.RunRegistry,
+
+      # GitHub-native receiver, active only on the node holding :webhook_receiver
+      Sykli.GitHub.Webhook.Server
     ]
 
     # rest_for_one: if PubSub crashes, restart TaskSupervisor + RunRegistry

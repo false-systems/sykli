@@ -30,6 +30,8 @@ defmodule Sykli.Occurrence.PubSub do
       "ci.cache.miss"      — cache miss with reason
       "ci.gate.waiting"    — gate awaiting approval
       "ci.gate.resolved"   — gate approved/denied/timed out
+      "ci.github.webhook.received" — GitHub webhook accepted
+      "ci.github.check_suite.opened" — GitHub check suite opened
   """
 
   alias Sykli.Occurrence
@@ -119,6 +121,20 @@ defmodule Sykli.Occurrence.PubSub do
   @doc "Broadcast a ci.gate.resolved occurrence. Returns the Occurrence."
   def gate_resolved(run_id, gate_name, outcome, approver, duration_ms) do
     occ = Occurrence.gate_resolved(run_id, gate_name, outcome, approver, duration_ms)
+    broadcast(occ)
+    occ
+  end
+
+  @doc "Broadcast a ci.github.webhook.received occurrence. Returns the Occurrence."
+  def github_webhook_received(run_id, data) do
+    occ = Occurrence.github_webhook_received(run_id, data)
+    broadcast(occ)
+    occ
+  end
+
+  @doc "Broadcast a ci.github.check_suite.opened occurrence. Returns the Occurrence."
+  def github_check_suite_opened(run_id, data) do
+    occ = Occurrence.github_check_suite_opened(run_id, data)
     broadcast(occ)
     occ
   end
