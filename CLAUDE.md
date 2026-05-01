@@ -206,6 +206,12 @@ Key env vars (see `cli.ex` and module docs for full details):
 - Some tests use `async: false` due to GenServer state (coordinator, events, delta, watch) or Application/env manipulation (resolver).
 - No global test helpers — each test file is self-contained.
 
+### Black-box dataset (`test/blackbox/dataset.json`) categories
+
+Cases use prefixed IDs. Original 7 categories: `POS` (positive — works as promised), `NEG` (rejects what it should), `SYS` (cross-boundary behavior), `INT` (SDK-to-engine integration), `PERF` (speed/resources), `LOAD` (volume), `ABN` (abnormal inputs). Phase 2.5 added 6 contract-driven prefixes: `CACHE` (cache contract + isolation), `JSON` (envelope contract), `DET` (determinism / NoWallClock replay contract), `SDK` (cross-language parity), `UI` (visual reset contract — banned vocabulary, glyph language), `GH` (GitHub-native receiver security contract).
+
+Some cases carry `expected_failure: true`, which marks them as known-broken contract assertions hiding open bugs (see `eval/oracle/findings-phase-2-5.md`). When fixing the underlying bug, **remove the flag**; the case must pass naturally without it. Adding new `expected_failure: true` cases is an anti-pattern — open a tracking issue instead.
+
 ## Patterns & Conventions
 
 - **Behaviours over protocols** for targets/runtimes — `Sykli.Target.Behaviour`, `Sykli.Runtime.Behaviour`
@@ -244,8 +250,9 @@ The visual reset has output rules that are tested. Touching anything that emits 
 
 ## Architectural references (ADRs)
 
-- **ADR-020** (`docs/adr/020-positioning-and-visual-direction.md`) — locks positioning ("local-first CI for the next generation of software developers") and the visual aesthetic. Constrains every product decision: rules in (peer-to-peer mesh, single-binary install, AI-readability), rules out (hosted SaaS, multi-tenant, YAML).
-- **ADR-021** (`docs/adr/021-github-native-via-webhook-mesh-receiver.md`) — supersedes ADR-004. Sykli ships a GitHub App and a webhook receiver on the user's mesh; replaces "run inside GitHub Actions." Phase 1 (App + Receiver + Checks client + Mesh.Roles) shipped in PR #125. Phase 2 (webhook → executor → check run lifecycle) is queued. Phase 3 is `sykli fix` annotations on the PR diff.
+- **ADR-022** (`docs/adr/022-execution-graph-compiler-reframing.md`) — **canonical positioning**. Status: Accepted. *"sykli is a compiler for programmable execution graphs."* CI is a primary but non-exclusive use case. Tasks include computation (build/test), validation (lint/security), and reasoning (review primitives). Agents (Claude, Codex, deterministic linters) are executors inside the graph, not magical reviewers. Supersedes the *positioning* section of ADR-020.
+- **ADR-020** (`docs/adr/020-positioning-and-visual-direction.md`) — **visual direction is canonical**; positioning section is superseded by ADR-022. The Nordic-Minimal aesthetic, accent color, glyph language, and output rules in §"CLI output rules" above all derive from this ADR. ADR-020's local-first commitment ("user's hardware is the execution authority", "no hosted SaaS", "network is opt-in") is preserved by ADR-022 in full.
+- **ADR-021** (`docs/adr/021-github-native-via-webhook-mesh-receiver.md`) — supersedes ADR-004. sykli ships a GitHub App and a webhook receiver on the user's mesh; replaces "run inside GitHub Actions." Phase 1 (App + Receiver + Checks client + Mesh.Roles) shipped in PR #125. Phase 2 (webhook → executor → check run lifecycle) is queued. Phase 3 is `sykli fix` / review-primitive annotations on the PR diff.
 
 ## Git Workflow
 
