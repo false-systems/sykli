@@ -19,13 +19,16 @@ All core development happens in `core/` (requires Elixir 1.14+):
 ```bash
 cd core
 mix deps.get              # install dependencies (first time)
-mix test                  # run all tests
+mix test                  # run all tests (excludes :integration, :docker, :podman by default)
 mix test test/sykli/executor_test.exs           # single test file
 mix test test/sykli/executor_test.exs:42        # single test at line
-mix test --only integration                      # tagged tests
+mix test.docker           # alias: mix test --only docker
+mix test.podman           # alias: mix test --only podman
+mix test.integration      # alias: mix test --only integration
 mix format                # format code
 mix credo                 # lint (includes custom NoWallClock check)
-mix escript.build         # build the sykli binary → core/sykli
+mix escript.build         # dev binary → core/sykli (escript, requires Erlang on PATH)
+mix release sykli         # production release via Burrito (self-contained, see RELEASE.md)
 ./sykli --help            # smoke test the binary
 ```
 
@@ -60,6 +63,14 @@ eval/harness/run.sh --case 001 --dry-run    # preview without running
 - `test/blackbox/` — shell-driven black-box suite against the built `sykli` binary (dataset in `dataset.json`).
 - `tests/conformance/` (repo root, note the `s`) — cross-SDK JSON-output conformance cases.
 - `eval/oracle/` + `eval/harness/` — ground-truth cases and the AI-agent eval loop.
+
+### Other docs (don't duplicate; defer to)
+
+- `README.md` — user-facing pitch + quickstart.
+- `GETTING_STARTED.md` — installation and first-pipeline walkthrough.
+- `RELEASE.md` — release process (Burrito builds, signing, tagging).
+- `CHANGELOG.md` — Keep-a-Changelog format; current line is 0.6.x.
+- `examples/` and `test_projects/` — runnable sample pipelines for manual testing.
 
 Before every commit: `mix format && mix test && mix escript.build`
 
