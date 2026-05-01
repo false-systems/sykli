@@ -12,7 +12,7 @@ id: ORACLE-STATUS-002
 category: status
 source: "CLAUDE.md §TaskResult Status Values"
 validated_by: "If timeout handling is mapped to failed, ABN-015 fails."
-finding: "ABN-015 currently fails: task timeout reports status failed instead of errored."
+finding: "ABN-015 is expected-red: task timeout reports status failed instead of errored."
 fixture: "test/blackbox/fixtures/task_timeout.exs"
 command: "sykli --json"
 assertions:

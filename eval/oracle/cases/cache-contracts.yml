@@ -12,7 +12,7 @@ id: ORACLE-CACHE-002
 category: cache
 source: "CLAUDE.md §JSON output"
 validated_by: "If cache subcommands bypass JsonResponse, CACHE-006 fails with no JSON object."
-finding: "CACHE-006 currently fails: `sykli cache stats --json` prints command help instead of a shared JSON envelope."
+finding: "CACHE-006 is expected-red: `sykli cache stats --json` prints command help instead of a shared JSON envelope."
 fixture: "test/blackbox/fixtures/single_task.exs"
 command: "sykli cache stats --json"
 assertions:

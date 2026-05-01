@@ -2,7 +2,7 @@ id: ORACLE-DET-001
 category: determinism
 source: "ADR-020 §What local-first commits us to; CLAUDE.md §FALSE Protocol Occurrences"
 validated_by: "If occurrences contain undeclared volatile fields, DET-003 fails after stripping known variable fields."
-finding: "DET-003 currently fails: normalized occurrence payloads differ across identical runs."
+finding: "DET-003 is expected-red: normalized occurrence payloads differ across identical runs."
 fixture: "test/blackbox/fixtures/single_task.exs"
 command: "test/blackbox/run.sh --filter=DET-003"
 assertions:

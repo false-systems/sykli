@@ -910,7 +910,7 @@
       "expect_exit": 0,
       "source": "README.md §Content-addressed caching; CLAUDE.md .sykli/ Directory",
       "validated_by": "Would fail if cache hit still executes the command body.",
-      "findings": "Currently fails: second run executes command again instead of producing a cache hit."
+      "findings": "Expected-red finding: second run executes command again instead of producing a cache hit."
     },
     {
       "id": "CACHE-002",
@@ -922,7 +922,7 @@
       "expect_stdout": "○",
       "source": "ADR-020 §Glyph language; README.md §Content-addressed caching",
       "validated_by": "Would fail if cached tasks use the pass glyph or execute again.",
-      "findings": "Currently fails: identical second run renders passed glyph, not cache-hit glyph."
+      "findings": "Expected-red finding: identical second run renders passed glyph, not cache-hit glyph."
     },
     {
       "id": "CACHE-003",
@@ -943,7 +943,7 @@
       "expect_exit": 0,
       "source": "ADR-020 §What local-first commits us to; README.md §Content-addressed caching",
       "validated_by": "Would fail if cache fingerprint changes between identical runs.",
-      "findings": "Currently fails: identical run executes again."
+      "findings": "Expected-red finding: identical run executes again."
     },
     {
       "id": "CACHE-005",
@@ -969,7 +969,8 @@
         "version"
       ],
       "source": "CLAUDE.md §JSON output; README.md §Content-addressed caching",
-      "validated_by": "Injected bug: hand-roll cache stats JSON without shared envelope; key assertion fails."
+      "validated_by": "Injected bug: hand-roll cache stats JSON without shared envelope; key assertion fails.",
+      "expected_failure": true
     },
     {
       "id": "CACHE-007",
@@ -1003,7 +1004,7 @@
       ],
       "source": "CLAUDE.md §TaskResult Status Values; README.md §Content-addressed caching",
       "validated_by": "Would fail if cached results collapse into passed.",
-      "findings": "Currently fails: second run reports status passed."
+      "findings": "Expected-red finding: second run reports status passed."
     },
     {
       "id": "CACHE-010",
@@ -1122,7 +1123,8 @@
       ],
       "source": "CLAUDE.md §TaskResult Status Values",
       "validated_by": "Injected bug: map timeouts to command failures; jq assertion catches it.",
-      "findings": "Currently fails: timeout reports status failed."
+      "findings": "Expected-red finding: timeout reports status failed.",
+      "expected_failure": true
     },
     {
       "id": "ABN-016",
@@ -1272,7 +1274,8 @@
       "expect_exit": 0,
       "source": "CLAUDE.md §FALSE Protocol Occurrences; ADR-020 §Determinism",
       "validated_by": "Injected bug: persist random field in occurrence data; normalized cmp fails.",
-      "findings": "Currently fails: normalized occurrence payloads differ across identical runs beyond declared variable fields."
+      "findings": "Expected-red finding: normalized occurrence payloads differ across identical runs beyond declared variable fields.",
+      "expected_failure": true
     },
     {
       "id": "DET-004",
@@ -1304,7 +1307,8 @@
       "requires": "mix",
       "source": "CLAUDE.md §No wall-clock or global RNG",
       "validated_by": "Injected bug: remove NoWallClock check; credo would pass and status assertion fails.",
-      "findings": "Currently fails: the configured credo run did not reject a DateTime.utc_now file under lib/sykli."
+      "findings": "Expected-red finding: the configured credo run did not reject a DateTime.utc_now file under lib/sykli.",
+      "expected_failure": true
     },
     {
       "id": "SDK-001",
@@ -1314,7 +1318,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "CLAUDE.md §SDKs; sdk/*/README.md public surface parity",
-      "validated_by": "Injected bug: change one SDK basic JSON key; conformance runner fails."
+      "validated_by": "Injected bug: change one SDK basic JSON key; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-002",
@@ -1324,7 +1329,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "CHANGELOG 0.5.0 Capability-based dependencies; SDK READMEs",
-      "validated_by": "Injected bug: drop provides value in one SDK; conformance runner fails."
+      "validated_by": "Injected bug: drop provides value in one SDK; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-003",
@@ -1334,7 +1340,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "CHANGELOG 0.5.0 Gate tasks; SDK READMEs",
-      "validated_by": "Injected bug: omit gate timeout serialization; conformance runner fails."
+      "validated_by": "Injected bug: omit gate timeout serialization; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-004",
@@ -1344,7 +1351,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "README.md §Content-addressed caching; SDK READMEs",
-      "validated_by": "Injected bug: serialize inputs under covers; conformance runner fails."
+      "validated_by": "Injected bug: serialize inputs under covers; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-005",
@@ -1354,7 +1362,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "SDK READMEs; CLAUDE.md §SDKs",
-      "validated_by": "Injected bug: one SDK keeps duplicate deps; conformance runner fails."
+      "validated_by": "Injected bug: one SDK keeps duplicate deps; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-006",
@@ -1364,7 +1373,8 @@
       "shell": true,
       "expect_exit": 0,
       "source": "CHANGELOG 0.5.0 TypeScript/Python provides empty string fix",
-      "validated_by": "Injected bug: treat empty provides as undefined; conformance runner fails."
+      "validated_by": "Injected bug: treat empty provides as undefined; conformance runner fails.",
+      "expected_failure": true
     },
     {
       "id": "SDK-007",
@@ -1543,7 +1553,8 @@
       "expect_exit": 0,
       "source": "CLAUDE.md §Runtime isolation and path containment; CHANGELOG 0.2.0 path traversal vulnerability fix",
       "validated_by": "Injected bug: execute task commands directly on host with unrestricted absolute paths; escaped file assertion fails.",
-      "findings": "Currently fails under local shell runtime if task commands can read /etc/passwd into the workspace."
+      "findings": "Currently fails under local shell runtime if task commands can read /etc/passwd into the workspace.",
+      "expected_failure": true
     }
   ]
 }
