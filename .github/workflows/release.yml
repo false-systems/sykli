@@ -22,7 +22,7 @@ jobs:
             os: ubuntu-latest
             burrito_target: linux_aarch64
           - target: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             burrito_target: macos_x86_64
           - target: macos-aarch64
             os: macos-14
