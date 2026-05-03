@@ -1,0 +1,51 @@
+defmodule Sykli.GitHub.WorkspaceJanitor do
+  @moduledoc "Cleans GitHub source workspaces when their owner process exits."
+
+  require Logger
+
+  @cleanup_timeout_ms 5_000
+
+  @spec start(pid(), String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def start(owner, path, opts \\ []) when is_pid(owner) and is_binary(path) do
+    Task.start(fn ->
+      ref = Process.monitor(owner)
+      loop(owner, ref, path, opts)
+    end)
+  end
+
+  @spec cleanup(pid()) :: :ok
+  def cleanup(pid) when is_pid(pid) do
+    ref = make_ref()
+    send(pid, {:cleanup, self(), ref})
+
+    receive do
+      {^ref, :ok} -> :ok
+    after
+      @cleanup_timeout_ms -> :ok
+    end
+  end
+
+  def cleanup(_pid), do: :ok
+
+  defp loop(owner, monitor_ref, path, opts) do
+    receive do
+      {:cleanup, caller, reply_ref} ->
+        Process.demonitor(monitor_ref, [:flush])
+        do_cleanup(path, opts)
+        send(caller, {reply_ref, :ok})
+
+      {:DOWN, ^monitor_ref, :process, ^owner, _reason} ->
+        do_cleanup(path, opts)
+    end
+  end
+
+  defp do_cleanup(path, opts) do
+    source_client(opts).cleanup(path, opts)
+  rescue
+    error ->
+      Logger.warning("[GitHub WorkspaceJanitor] cleanup failed", error: inspect(error))
+      :ok
+  end
+
+  defp source_client(opts), do: Keyword.get(opts, :source_client, Sykli.GitHub.Source)
+end

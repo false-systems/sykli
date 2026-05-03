@@ -107,4 +107,51 @@ defmodule Sykli.GitHub.DispatcherTest do
 
     assert {:error, :duplicate_delivery} = Deliveries.accept(event.delivery_id, 2)
   end
+
+  test "dispatch cleans up the source workspace when the dispatcher process is killed", %{
+    event: event
+  } do
+    parent = self()
+    event = %{event | delivery_id: "dispatcher-crash-cleanup"}
+
+    dispatcher =
+      spawn(fn ->
+        Dispatcher.dispatch(event,
+          app_client: Sykli.GitHub.App.Fake,
+          checks_client: Sykli.GitHub.Checks.Fake,
+          source_client: Sykli.GitHub.Source.Fake,
+          source_fixture: @fixture,
+          after_source_acquired: fn source_path ->
+            send(parent, {:source_acquired, self(), source_path})
+
+            receive do
+              :continue -> :ok
+            end
+          end
+        )
+      end)
+
+    assert_receive {:source_acquired, ^dispatcher, source_path}
+    assert File.exists?(source_path)
+
+    Process.exit(dispatcher, :kill)
+
+    assert_eventually(fn ->
+      refute File.exists?(source_path)
+    end)
+  end
+
+  defp assert_eventually(fun, attempts_left \\ 50)
+
+  defp assert_eventually(fun, attempts_left) when attempts_left > 0 do
+    try do
+      fun.()
+    rescue
+      ExUnit.AssertionError ->
+        Process.sleep(20)
+        assert_eventually(fun, attempts_left - 1)
+    end
+  end
+
+  defp assert_eventually(fun, 0), do: fun.()
 end

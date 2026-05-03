@@ -93,15 +93,43 @@ defmodule Sykli.GitHub.Dispatcher do
   end
 
   defp dispatch_from_source(event, token, source_path, opts) do
-    with {:ok, graph, tasks} <- load_graph(source_path),
-         {:ok, check_runs} <- create_task_runs(event, token, tasks, opts),
-         :ok <- mark_in_progress(event, token, check_runs, opts),
-         {:ok, results} <- run_executor(tasks, graph, source_path, event.run_id, opts),
-         :ok <- conclude_task_runs(event, token, check_runs, results, opts) do
-      {:ok, results}
+    with_workspace_janitor(source_path, opts, fn ->
+      maybe_after_source_acquired(source_path, opts)
+
+      with {:ok, graph, tasks} <- load_graph(source_path),
+           {:ok, check_runs} <- create_task_runs(event, token, tasks, opts),
+           :ok <- mark_in_progress(event, token, check_runs, opts),
+           {:ok, results} <- run_executor(tasks, graph, source_path, event.run_id, opts),
+           :ok <- conclude_task_runs(event, token, check_runs, results, opts) do
+        {:ok, results}
+      end
+    end)
+  end
+
+  defp with_workspace_janitor(source_path, opts, fun) do
+    case workspace_janitor(opts).start(self(), source_path, opts) do
+      {:ok, janitor} ->
+        try do
+          fun.()
+        after
+          workspace_janitor(opts).cleanup(janitor)
+        end
+
+      {:error, reason} ->
+        {:error,
+         dispatch_error(
+           "github.dispatch.workspace_janitor_failed",
+           "failed to monitor source workspace cleanup",
+           reason
+         )}
     end
-  after
-    source_client(opts).cleanup(source_path, opts)
+  end
+
+  defp maybe_after_source_acquired(source_path, opts) do
+    case Keyword.get(opts, :after_source_acquired) do
+      callback when is_function(callback, 1) -> callback.(source_path)
+      _ -> :ok
+    end
   end
 
   defp create_suite(event, token, opts) do
@@ -375,6 +403,9 @@ defmodule Sykli.GitHub.Dispatcher do
 
   defp checks_client(opts), do: Keyword.get(opts, :checks_client, Sykli.GitHub.Checks)
   defp source_client(opts), do: Keyword.get(opts, :source_client, Sykli.GitHub.Source)
+
+  defp workspace_janitor(opts),
+    do: Keyword.get(opts, :workspace_janitor, Sykli.GitHub.WorkspaceJanitor)
 
   defp retryable_dispatch_error?(%Sykli.Error{code: code}) do
     code not in [
