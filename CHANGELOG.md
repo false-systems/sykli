@@ -9,10 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CLI explain glyphs** now use the ADR-020 status glyphs for run summaries (`●` for passed, `✕` for failed) instead of the older checkmark/cross rendering.
+- **CLI explain glyphs** now use the v0.6 status glyphs for run summaries (`●` for passed, `✕` for failed) instead of the older checkmark/cross rendering.
 - **`sykli validate <path>`** now accepts an explicit `sykli.*` file path, matching the run command's path shape.
 - **Global `--json` placement** now works for `sykli --json validate`, matching `sykli validate --json` for agent-safe invocation.
-- **GitHub webhook receiver — three Phase 1 (ADR-021) correctness gaps.**
+- **GitHub webhook receiver — three Phase 1 correctness gaps.**
   - `POST /webhook` is now gated by `Sykli.Mesh.Roles.held_by_local?(:webhook_receiver)`. Previously only `GET /healthz` was gated; on a multi-node deployment every node would ingest deliveries, burn `delivery_id`s in their local replay caches, and create duplicate check suites/runs.
   - The replay cache no longer permanently loses deliveries when a downstream call fails. Previously, `accept_delivery` inserted the `delivery_id` *before* `installation_token` / `create_suite` / `create_run`, so a transient GitHub 5xx left the entry in cache and GitHub's automatic retry hit `:duplicate_delivery` / 409. The receiver now evicts the `delivery_id` on any post-accept failure; concurrent dedup is preserved by the atomic `:ets.insert_new` in `Deliveries.accept/3`.
   - Request body is bounded to 10 MB (with a 15s read timeout) instead of Plug's default unbounded read. Distinct error codes for `body_too_large` (413) and `body_read_failed` (408).
@@ -27,12 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled runtime layer with deterministic-test defaults, SLSA v1.0 supply-chain attestations, an oracle-based AI agent evaluation harness, the FALSE-Protocol-first-class internal model, and the foundation for v0.7's GitHub-native CI integration. v0.5.1, v0.5.2, and v0.5.3 were development tags without CHANGELOG entries; their changes are folded in here.
 
-**Positioning lock-in.** ADR-020 names the project: *local-first CI for the next generation of software developers*. Every architectural decision in this release flows from that thesis. ADR-021 supersedes ADR-004 and frames the next line of work — sykli replaces GitHub Actions instead of running inside it, with a webhook receiver running on the user's own mesh.
+**Positioning lock-in.** *Local-first CI for the next generation of software developers.* Every architectural decision in this release flows from that thesis. The next line of work — sykli replaces GitHub Actions instead of running inside it, with a webhook receiver running on the user's own mesh — supersedes the older "run inside GitHub Actions + Commit Status API" integration.
 
 ### Added
 
 #### CLI & user-facing
-- **v0.6 visual reset** — Nordic-minimal CLI per ADR-020. New modules `Sykli.CLI.Renderer`, `Theme`, `Live`, `FixRenderer`. One accent color (cold cyan-teal), glyph-driven status (`● ○ ✕ ─ ⠋`), right-aligned timing column, single redraw region for animations, hidden task stdout by default, single summary per run.
+- **v0.6 visual reset** — Nordic-minimal CLI. New modules `Sykli.CLI.Renderer`, `Theme`, `Live`, `FixRenderer`. One accent color (cold cyan-teal), glyph-driven status (`● ○ ✕ ─ ⠋`), right-aligned timing column, single redraw region for animations, hidden task stdout by default, single summary per run.
 - **`sykli mcp`** — MCP server for AI assistant integration (Claude Code, Cursor, Copilot). 5 tools, stdio transport.
 - **`sykli fix`** — AI-readable failure analysis with source context and git diff. Renders inline causality, "where it changed", and proposed remediation.
 - **`sykli query`** — structured queries against pipeline / history / health data without an LLM.
@@ -56,7 +56,7 @@ This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled
 - **`SYKLI_SIGNING_KEY` / `SYKLI_ATTESTATION_KEY_FILE`** for HMAC and file-based signing keys.
 - **`Sykli.HTTP.ssl_opts/1`** — shared TLS verification options for all `:httpc` callers (OIDC, S3, SCM, webhooks).
 
-#### GitHub-native foundation (ADR-021 Phase 1)
+#### GitHub-native foundation
 - **`Sykli.GitHub.App`** — JWT-signed App authentication, installation token acquisition, behaviour split (Real + Fake) with token caching (`Sykli.GitHub.App.Cache`).
 - **`Sykli.GitHub.Webhook.Receiver`** — Plug pipeline on Bandit; `/healthz` and `/webhook` endpoints; HMAC-SHA256 signature verification (`Sykli.GitHub.Webhook.Signature`); replay protection via `X-GitHub-Delivery` LRU (`Sykli.GitHub.Webhook.Deliveries`).
 - **`Sykli.GitHub.Checks`** — Checks API client (`create_suite/3`, `create_run/4`, `update_run/4`).
@@ -82,10 +82,6 @@ This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled
 - **`.sykli/context.json`** — added project + health sections; documented optional schema.
 - **Per-task log paths** in occurrence task entries.
 - **ULID run IDs** — monotonic, sortable, replace older random IDs.
-
-#### ADRs
-- **ADR-020** — Positioning, Audience, and Visual Direction (the local-first thesis).
-- **ADR-021** — GitHub-Native Integration via Webhook + Mesh Receiver (supersedes ADR-004).
 
 ### Changed
 
@@ -130,8 +126,6 @@ This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled
 
 ### Documentation
 
-- `docs/adr/020-positioning-and-visual-direction.md`
-- `docs/adr/021-github-native-via-webhook-mesh-receiver.md`
 - `docs/deep-dive-findings.md` — 37 tracked issues across security/reliability/architecture/test coverage; the SEC and REL series above are the closure.
 - `docs/runtimes.md` — runtime selection priority chain.
 - `docs/cache-key-investigation.md` — determinism investigation behind the cache fingerprint change.
@@ -149,7 +143,7 @@ This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled
 ### Migration notes
 
 - **Old `.sykli/occurrence.json` payloads** are not backward-compatible with the new cache-key format. The first run after upgrading rebuilds cache state automatically; no user action required beyond expecting one cold run.
-- **GitHub integration**: ADR-004's "run inside GitHub Actions + Commit Status API" path remains supported as a documented fallback. The new GitHub-native path (ADR-021 Phase 1+) is opt-in via App registration.
+- **GitHub integration**: the legacy "run inside GitHub Actions + Commit Status API" path remains supported as a documented fallback. The new GitHub-native path (App + webhook receiver) is opt-in via App registration.
 - **Tests requiring Docker** are now excluded by default. Run with `mix test.docker` (or `--include docker`) to execute them.
 - **`SYKLI_RUNTIME`** env var is the new way to force a specific runtime. CLI `--runtime` takes precedence.
 

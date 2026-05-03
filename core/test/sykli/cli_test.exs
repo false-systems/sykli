@@ -145,12 +145,12 @@ defmodule Sykli.CLITest do
   end
 
   describe "explain glyphs" do
-    test "uses ADR-020 pass glyph for successful runs" do
+    test "uses the pass glyph for successful runs" do
       assert Sykli.CLI.explain_outcome_marker("success") ==
                Sykli.CLI.Theme.accent() <> Sykli.CLI.Theme.glyph(:pass)
     end
 
-    test "uses ADR-020 fail glyph for failed runs" do
+    test "uses the fail glyph for failed runs" do
       assert Sykli.CLI.explain_outcome_marker("failure") ==
                Sykli.CLI.Theme.error() <> Sykli.CLI.Theme.glyph(:fail)
     end
