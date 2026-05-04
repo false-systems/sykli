@@ -58,6 +58,12 @@ else
   fi
 fi
 
+if [[ "$SKIP_PYTHON" -eq 1 ]]; then
+  echo "⚠ Python SDK cases will be skipped (local Python: $PYTHON_VERSION; SDK requires >=3.12)"
+  echo "  CI must run Python conformance; local devs need Python 3.12+ to exercise it."
+  echo ""
+fi
+
 # Normalize JSON for comparison: sort keys, compact, normalize provides without value
 normalize_json() {
   python3 -c "
@@ -268,4 +274,9 @@ echo -e "${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP
 
 if [[ $FAIL -gt 0 ]]; then
   exit 1
+fi
+
+if [[ "$SKIP_PYTHON" -eq 1 && "${CI:-}" == "true" ]]; then
+  echo -e "${RED}Python SDK conformance was skipped in CI; install Python 3.12+${NC}"
+  exit 2
 fi
