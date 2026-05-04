@@ -54,11 +54,61 @@ defmodule Sykli.GitHub.DispatcherTest do
                      %{status: "in_progress"}}
 
     assert_receive %Sykli.Occurrence{type: "ci.github.run.dispatched"}
-    assert_receive %Sykli.Occurrence{type: "ci.github.run.source_acquired"}
+
+    assert_receive %Sykli.Occurrence{
+      type: "ci.github.run.source_acquired",
+      data: %{bytes: bytes}
+    }
+
+    assert is_integer(bytes)
     assert_receive %Sykli.Occurrence{type: "ci.github.check_run.created"}
     assert_receive %Sykli.Occurrence{type: "ci.github.check_suite.concluded"}
     assert_receive {:github_source_cleanup, source_path}
     refute File.exists?(source_path)
+  end
+
+  test "source_acquired bytes uses du instead of walking the tree", %{event: event} do
+    parent = self()
+
+    du_runner = fn "du", ["-sk", path], opts ->
+      send(parent, {:du_runner_called, path, opts})
+      {"7\t#{path}\n", 0}
+    end
+
+    assert :ok =
+             Dispatcher.dispatch(event,
+               app_client: Sykli.GitHub.App.Fake,
+               checks_client: Sykli.GitHub.Checks.Fake,
+               source_impl: Sykli.GitHub.Source.Fake,
+               source_fixture: @fixture,
+               test_pid: self(),
+               fake_recorder: self(),
+               du_runner: du_runner
+             )
+
+    assert_receive {:du_runner_called, path, [stderr_to_stdout: true]}
+    assert String.ends_with?(path, "/repo")
+
+    assert_receive %Sykli.Occurrence{
+      type: "ci.github.run.source_acquired",
+      data: %{bytes: 7168}
+    }
+  end
+
+  test "source_acquired bytes parses du summary after warnings", %{event: event} do
+    assert_source_bytes(event, {"du: cannot read foo: Permission denied\n42\t/path\n", 0}, 43_008)
+  end
+
+  test "source_acquired bytes is nil when du exits non-zero", %{event: event} do
+    assert_source_bytes(event, {"du: failed\n", 1}, nil)
+  end
+
+  test "source_acquired bytes is nil when du output is unparseable", %{event: event} do
+    assert_source_bytes(event, {"garbage\n", 0}, nil)
+  end
+
+  test "source_acquired bytes is nil when du output is empty", %{event: event} do
+    assert_source_bytes(event, {"", 0}, nil)
   end
 
   test "dispatch failure evicts the delivery for GitHub retry", %{event: event} do
@@ -238,6 +288,26 @@ defmodule Sykli.GitHub.DispatcherTest do
 
   defp task_result(name, status) do
     %TaskResult{name: name, status: status, duration_ms: 1}
+  end
+
+  defp assert_source_bytes(event, du_response, expected_bytes) do
+    du_runner = fn "du", ["-sk", _path], [stderr_to_stdout: true] -> du_response end
+
+    assert :ok =
+             Dispatcher.dispatch(event,
+               app_client: Sykli.GitHub.App.Fake,
+               checks_client: Sykli.GitHub.Checks.Fake,
+               source_impl: Sykli.GitHub.Source.Fake,
+               source_fixture: @fixture,
+               test_pid: self(),
+               fake_recorder: self(),
+               du_runner: du_runner
+             )
+
+    assert_receive %Sykli.Occurrence{
+      type: "ci.github.run.source_acquired",
+      data: %{bytes: ^expected_bytes}
+    }
   end
 
   defmodule FailingJanitor do
