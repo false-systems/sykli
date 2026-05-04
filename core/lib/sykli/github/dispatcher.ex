@@ -19,9 +19,13 @@ defmodule Sykli.GitHub.Dispatcher do
       {:error, %Sykli.Error{} = error} = result ->
         if retryable_dispatch_error?(error) do
           Deliveries.evict(delivery_id)
+          Logger.warning("[GitHub Dispatcher] dispatch failed", code: error.code)
+        else
+          Logger.warning("[GitHub Dispatcher] App auth failed; delivery will not be retried",
+            code: error.code
+          )
         end
 
-        Logger.warning("[GitHub Dispatcher] dispatch failed", code: error.code)
         result
     end
   end
@@ -52,13 +56,13 @@ defmodule Sykli.GitHub.Dispatcher do
   defp dispatch_after_suite(event, token, suite, opts) do
     run_id = event.run_id
 
-    with {:ok, source_path} <- acquire_source(event, token, opts),
-         {:ok, results} <- dispatch_from_source(event, token, source_path, opts) do
+    with {:ok, source_path, janitor} <- acquire_source(event, token, opts),
+         {:ok, results} <- dispatch_from_source(event, token, source_path, janitor, opts) do
       OccPubSub.github_check_suite_concluded(run_id, %{
         repo: event.repo,
         head_sha: event.head_sha,
         check_suite_id: suite["id"],
-        conclusion: conclusion(results)
+        conclusion: suite_conclusion(results)
       })
 
       :ok
@@ -92,15 +96,32 @@ defmodule Sykli.GitHub.Dispatcher do
     end
   end
 
-  defp dispatch_from_source(event, token, source_path, opts) do
-    with {:ok, graph, tasks} <- load_graph(source_path),
-         {:ok, check_runs} <- create_task_runs(event, token, tasks, opts),
-         {:ok, results} <- run_executor(tasks, graph, source_path, event.run_id, opts),
-         :ok <- conclude_task_runs(event, token, check_runs, results, opts) do
-      {:ok, results}
+  defp dispatch_from_source(event, token, source_path, janitor, opts) do
+    try do
+      maybe_after_source_acquired(source_path, opts)
+
+      with {:ok, graph, tasks} <- load_graph(source_path),
+           {:ok, check_runs} <- create_task_runs(event, token, tasks, opts),
+           {:ok, results} <- run_executor(tasks, graph, source_path, event.run_id, opts),
+           :ok <- conclude_task_runs(event, token, check_runs, results, opts) do
+        {:ok, results}
+      end
+    after
+      case workspace_janitor(opts).cleanup(janitor) do
+        :ok ->
+          :ok
+
+        {:error, :timeout} ->
+          Logger.warning("[GitHub Dispatcher] source workspace cleanup timed out")
+      end
     end
-  after
-    source_client(opts).cleanup(source_path, opts)
+  end
+
+  defp maybe_after_source_acquired(source_path, opts) do
+    case Keyword.get(opts, :after_source_acquired) do
+      callback when is_function(callback, 1) -> callback.(source_path)
+      _ -> :ok
+    end
   end
 
   defp create_suite(event, token, opts) do
@@ -124,16 +145,29 @@ defmodule Sykli.GitHub.Dispatcher do
   end
 
   defp acquire_source(event, token, opts) do
-    case source_client(opts).acquire(event, token, opts) do
+    case Sykli.GitHub.Source.acquire(event, token, opts) do
       {:ok, path} ->
-        OccPubSub.github_run_source_acquired(event.run_id, %{
-          repo: event.repo,
-          sha: event.head_sha,
-          path: path,
-          bytes: directory_bytes(path)
-        })
+        case workspace_janitor(opts).start(self(), path, opts) do
+          {:ok, janitor} ->
+            OccPubSub.github_run_source_acquired(event.run_id, %{
+              repo: event.repo,
+              sha: event.head_sha,
+              path: path,
+              bytes: directory_bytes(path)
+            })
 
-        {:ok, path}
+            {:ok, path, janitor}
+
+          {:error, reason} ->
+            Sykli.GitHub.Source.cleanup(path, opts)
+
+            {:error,
+             dispatch_error(
+               "github.dispatch.workspace_janitor_failed",
+               "failed to monitor source workspace cleanup",
+               reason
+             )}
+        end
 
       error ->
         error
@@ -311,11 +345,18 @@ defmodule Sykli.GitHub.Dispatcher do
     end
   end
 
-  defp conclusion(results) do
-    if Enum.any?(results, &(&1.status in [:failed, :errored, :blocked])) do
-      "failure"
-    else
-      "success"
+  @doc false
+  @spec suite_conclusion([Sykli.Executor.TaskResult.t()]) :: String.t()
+  def suite_conclusion([]), do: "success"
+
+  def suite_conclusion(results) do
+    conclusions = Enum.map(results, &CheckRunFormatter.conclusion/1)
+
+    cond do
+      Enum.any?(conclusions, &(&1 == "failure")) -> "failure"
+      Enum.any?(conclusions, &(&1 == "cancelled")) -> "cancelled"
+      Enum.all?(conclusions, &(&1 == "skipped")) -> "skipped"
+      true -> "success"
     end
   end
 
@@ -355,15 +396,20 @@ defmodule Sykli.GitHub.Dispatcher do
       )
 
   defp checks_client(opts), do: Keyword.get(opts, :checks_client, Sykli.GitHub.Checks)
-  defp source_client(opts), do: Keyword.get(opts, :source_client, Sykli.GitHub.Source)
 
-  defp retryable_dispatch_error?(%Sykli.Error{code: code}) do
-    code not in [
-      "github.app.missing_config",
-      "github.app.private_key_not_found",
-      "github.app.jwt_failed"
-    ]
-  end
+  defp workspace_janitor(opts),
+    do: Keyword.get(opts, :workspace_janitor, Sykli.GitHub.WorkspaceJanitor)
+
+  defp retryable_dispatch_error?(%Sykli.Error{code: code})
+       when code in [
+              "github.app.missing_config",
+              "github.app.private_key_not_found",
+              "github.app.jwt_failed",
+              "github.app.unauthorized"
+            ],
+       do: false
+
+  defp retryable_dispatch_error?(%Sykli.Error{}), do: true
 
   defp dispatch_error(code, message, cause \\ nil) do
     %Sykli.Error{
