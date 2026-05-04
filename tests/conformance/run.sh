@@ -38,6 +38,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Detect whether the local Python (with sdk venv preference) satisfies the
+# Python SDK's >=3.12 requirement. If not, the Python conformance cases get
+# skipped instead of failing — env-only gaps shouldn't break the runner.
+SKIP_PYTHON=0
+PYTHON_VERSION="$(
+  cd "$ROOT/sdk/python" 2>/dev/null || exit
+  source .venv/bin/activate 2>/dev/null || true
+  python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null
+)"
+if [[ -z "$PYTHON_VERSION" ]]; then
+  SKIP_PYTHON=1
+  PYTHON_VERSION="not found"
+else
+  py_major="${PYTHON_VERSION%%.*}"
+  py_minor="${PYTHON_VERSION##*.}"
+  if (( py_major < 3 )) || (( py_major == 3 && py_minor < 12 )); then
+    SKIP_PYTHON=1
+  fi
+fi
+
 # Normalize JSON for comparison: sort keys, compact, normalize provides without value
 normalize_json() {
   python3 -c "
@@ -124,6 +144,12 @@ run_case() {
       continue
     fi
 
+    if [[ "$sdk" == "python" && "$SKIP_PYTHON" -eq 1 ]]; then
+      echo -e "  ${YELLOW}○${NC} $case_name/$sdk — skipped (Python 3.12+ required, found $PYTHON_VERSION)"
+      SKIP=$((SKIP + 1))
+      continue
+    fi
+
     local ext
     case "$sdk" in
       go)         ext="go" ;;
@@ -175,6 +201,12 @@ run_negative_case() {
 
   for sdk in "${sdks[@]}"; do
     if [[ -n "$FILTER_SDK" && "$sdk" != "$FILTER_SDK" ]]; then
+      continue
+    fi
+
+    if [[ "$sdk" == "python" && "$SKIP_PYTHON" -eq 1 ]]; then
+      echo -e "  ${YELLOW}○${NC} $case_name/$sdk — skipped (Python 3.12+ required, found $PYTHON_VERSION)"
+      SKIP=$((SKIP + 1))
       continue
     fi
 
