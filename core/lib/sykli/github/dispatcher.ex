@@ -58,7 +58,7 @@ defmodule Sykli.GitHub.Dispatcher do
         repo: event.repo,
         head_sha: event.head_sha,
         check_suite_id: suite["id"],
-        conclusion: conclusion(results)
+        conclusion: suite_conclusion(results)
       })
 
       :ok
@@ -101,7 +101,7 @@ defmodule Sykli.GitHub.Dispatcher do
       {:ok, results}
     end
   after
-    source_client(opts).cleanup(source_path, opts)
+    Sykli.GitHub.Source.cleanup(source_path, opts)
   end
 
   defp create_suite(event, token, opts) do
@@ -125,7 +125,7 @@ defmodule Sykli.GitHub.Dispatcher do
   end
 
   defp acquire_source(event, token, opts) do
-    case source_client(opts).acquire(event, token, opts) do
+    case Sykli.GitHub.Source.acquire(event, token, opts) do
       {:ok, path} ->
         OccPubSub.github_run_source_acquired(event.run_id, %{
           repo: event.repo,
@@ -330,11 +330,18 @@ defmodule Sykli.GitHub.Dispatcher do
     end
   end
 
-  defp conclusion(results) do
-    if Enum.any?(results, &(&1.status in [:failed, :errored, :blocked])) do
-      "failure"
-    else
-      "success"
+  @doc false
+  @spec suite_conclusion([Sykli.Executor.TaskResult.t()]) :: String.t()
+  def suite_conclusion([]), do: "success"
+
+  def suite_conclusion(results) do
+    conclusions = Enum.map(results, &CheckRunFormatter.conclusion/1)
+
+    cond do
+      Enum.any?(conclusions, &(&1 == "failure")) -> "failure"
+      Enum.any?(conclusions, &(&1 == "cancelled")) -> "cancelled"
+      Enum.all?(conclusions, &(&1 == "skipped")) -> "skipped"
+      true -> "success"
     end
   end
 
@@ -374,7 +381,6 @@ defmodule Sykli.GitHub.Dispatcher do
       )
 
   defp checks_client(opts), do: Keyword.get(opts, :checks_client, Sykli.GitHub.Checks)
-  defp source_client(opts), do: Keyword.get(opts, :source_client, Sykli.GitHub.Source)
 
   defp retryable_dispatch_error?(%Sykli.Error{code: code}) do
     code not in [
