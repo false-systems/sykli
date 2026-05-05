@@ -62,6 +62,7 @@ docs/*
 !docs/adr/
 !docs/releases/
 !docs/runtimes.md
+!docs/sdk-schema.md
 
 # Sykli runtime data (AI context, run history, logs)
 .codex/
