@@ -286,20 +286,8 @@ draft.
 Current behavior is advisory and permissive: SDKs emit `version`, the canonical
 schema requires `"1"` or `"2"`, and the engine ignores the value. This means
 `version` is useful today as SDK/schema contract metadata, but it is not yet an
-engine-enforced compatibility boundary.
-
-`version: "1"` means the baseline task graph format: top-level `tasks` and
-regular task fields such as `name`, `command`, `depends_on`, `env`, `inputs`,
-`outputs`, `when`, `secrets`, `retry`, and `timeout`. It does not require
-top-level resource declarations. SDKs currently emit `"1"` when no
-resource-aware features are used.
-
-`version: "2"` means the resource-aware pipeline format. It covers the baseline
-task graph plus resource and execution-environment metadata such as top-level
-`resources`, directory and cache resources, task `mounts`, task `container`, and
-related cache/resource execution metadata already present in the canonical
-schema. SDKs currently emit `"2"` when containers, mounts, directory resources,
-or cache resources are used.
+engine-enforced compatibility boundary. See the [`version` field](#version)
+above for the per-value definitions of `"1"` and `"2"`.
 
 Future engine behavior should become version-aware in a later implementation
 phase:
@@ -349,9 +337,11 @@ contract because it had no execution semantics and could mislead users or agents
 into assuming behavior that did not exist.
 
 Canonical SDK output must not emit `target`, and the JSON Schema rejects it as
-an unknown task field. Existing engines may still ignore incoming `target`
-fields for compatibility because the engine parser is permissive, but that
-permissive behavior is not part of the canonical contract.
+an unknown task field. Engines may still accept payloads that contain `target`
+because the engine parser is permissive about unknown keys — not because of any
+compatibility shim. The engine never read `target` in the first place, so this
+removal is contract cleanup, not a behavior change. That permissive parsing is
+not part of the canonical contract.
 
 Use concrete execution requirement fields instead: `container`, `resources`,
 `mounts`, `k8s`, `services`, `workdir`, and `env`. This removal does not

@@ -1269,9 +1269,6 @@ func (t *Task) WhenCond(c Condition) *Task {
 // execution requirements such as Container, MountDir, MountCache, K8s, Service,
 // Workdir, and Env instead.
 func (t *Task) Target(name string) *Task {
-	if name == "" {
-		log.Panic().Str("task", t.name).Msg("target name cannot be empty")
-	}
 	return t
 }
 

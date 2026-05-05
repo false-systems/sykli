@@ -1398,15 +1398,11 @@ impl<'a> Task<'a> {
     ///
     /// Use concrete execution requirements such as `container`, `mount_dir`,
     /// `mount_cache`, `k8s`, `service`, `workdir`, and `env` instead.
-    ///
-    /// # Panics
-    /// Panics if `name` is empty.
     #[deprecated(
         note = "target no longer affects emitted pipeline JSON; use concrete execution requirement fields instead"
     )]
     #[must_use]
-    pub fn target(self, name: &str) -> Self {
-        assert!(!name.is_empty(), "target name cannot be empty");
+    pub fn target(self, _name: &str) -> Self {
         self
     }
 

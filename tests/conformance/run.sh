@@ -38,52 +38,62 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "Schema Validation"
-"$ROOT/scripts/validate-conformance-schema.py"
-echo ""
-
 # Detect a Python interpreter that satisfies the Python SDK's >=3.12
 # requirement. If not, the Python conformance cases get skipped instead of
 # failing — env-only gaps shouldn't break the runner. An explicit
-# SYKLI_CONFORMANCE_PYTHON value takes precedence.
+# SYKLI_CONFORMANCE_PYTHON value takes precedence and must satisfy the version
+# check; if it doesn't, the runner errors out rather than silently substituting
+# a different interpreter (surprising for local devs debugging selection).
 SKIP_PYTHON=0
 PYTHON_VERSION="not found"
-PYTHON_CANDIDATES=()
-if [[ -n "${SYKLI_CONFORMANCE_PYTHON:-}" ]]; then
-  PYTHON_CANDIDATES+=("$SYKLI_CONFORMANCE_PYTHON")
-fi
-PYTHON_CANDIDATES+=(
-  "$ROOT/sdk/python/.venv/bin/python"
-  "python3.14"
-  "python3.13"
-  "python3.12"
-  "python3"
-)
+EXPLICIT_PYTHON="${SYKLI_CONFORMANCE_PYTHON:-}"
 
-for candidate in "${PYTHON_CANDIDATES[@]}"; do
-  [[ -n "$candidate" ]] || continue
+check_python_version() {
+  local candidate="$1"
+  local version
   version="$("$candidate" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || true)"
-  [[ -n "$version" ]] || continue
-
-  py_major="${version%%.*}"
-  py_minor="${version##*.}"
+  [[ -n "$version" ]] || return 1
+  local py_major="${version%%.*}"
+  local py_minor="${version##*.}"
   if (( py_major > 3 )) || (( py_major == 3 && py_minor >= 12 )); then
-    SYKLI_CONFORMANCE_PYTHON="$candidate"
-    PYTHON_VERSION="$version"
-    break
+    echo "$version"
+    return 0
   fi
+  echo "$version"
+  return 2
+}
 
-  if [[ "$PYTHON_VERSION" == "not found" ]]; then
+if [[ -n "$EXPLICIT_PYTHON" ]]; then
+  if version=$(check_python_version "$EXPLICIT_PYTHON"); then
+    SYKLI_CONFORMANCE_PYTHON="$EXPLICIT_PYTHON"
     PYTHON_VERSION="$version"
+  else
+    rc=$?
+    if (( rc == 2 )); then
+      echo "ERROR: SYKLI_CONFORMANCE_PYTHON=$EXPLICIT_PYTHON reports Python $version; SDK requires >=3.12." >&2
+    else
+      echo "ERROR: SYKLI_CONFORMANCE_PYTHON=$EXPLICIT_PYTHON could not be invoked or did not report a version." >&2
+    fi
+    echo "  Unset SYKLI_CONFORMANCE_PYTHON to enable auto-detection, or point it at Python >=3.12." >&2
+    exit 1
   fi
-done
-
-if [[ -z "${SYKLI_CONFORMANCE_PYTHON:-}" || "$PYTHON_VERSION" == "not found" ]]; then
-  SKIP_PYTHON=1
 else
-  py_major="${PYTHON_VERSION%%.*}"
-  py_minor="${PYTHON_VERSION##*.}"
-  if (( py_major < 3 )) || (( py_major == 3 && py_minor < 12 )); then
+  for candidate in \
+    "$ROOT/sdk/python/.venv/bin/python" \
+    "python3.14" \
+    "python3.13" \
+    "python3.12" \
+    "python3"; do
+    if version=$(check_python_version "$candidate"); then
+      SYKLI_CONFORMANCE_PYTHON="$candidate"
+      PYTHON_VERSION="$version"
+      break
+    elif [[ "$PYTHON_VERSION" == "not found" && -n "${version:-}" ]]; then
+      PYTHON_VERSION="$version"
+    fi
+  done
+
+  if [[ -z "${SYKLI_CONFORMANCE_PYTHON:-}" ]]; then
     SKIP_PYTHON=1
   fi
 fi
@@ -93,6 +103,20 @@ if [[ "$SKIP_PYTHON" -eq 1 ]]; then
   echo "  CI must run Python conformance; local devs need Python 3.12+ to exercise it."
   echo ""
 fi
+
+# Schema validation runs only when we have a usable Python with the jsonschema
+# package available. Missing-package failures shouldn't break the runner for
+# devs without jsonschema installed; CI installs it explicitly.
+echo "Schema Validation"
+if [[ "$SKIP_PYTHON" -eq 1 ]]; then
+  echo "⚠ skipped — no Python >=3.12 available"
+elif ! "$SYKLI_CONFORMANCE_PYTHON" -c "import jsonschema" >/dev/null 2>&1; then
+  echo "⚠ skipped — 'jsonschema' package not installed for $SYKLI_CONFORMANCE_PYTHON"
+  echo "  Install with: $SYKLI_CONFORMANCE_PYTHON -m pip install jsonschema"
+else
+  "$SYKLI_CONFORMANCE_PYTHON" "$ROOT/scripts/validate-conformance-schema.py"
+fi
+echo ""
 
 # Normalize JSON for comparison: sort keys, compact, normalize provides without value
 normalize_json() {

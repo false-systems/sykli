@@ -39,7 +39,7 @@ def format_error(error: jsonschema.ValidationError) -> str:
 def main() -> int:
     try:
         schema = load_json(SCHEMA_PATH)
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         print(f"FAIL {SCHEMA_PATH.relative_to(ROOT)}")
         print(f"  could not load schema: {exc}")
         print("Summary: 0 passed, 1 failed")
@@ -61,7 +61,7 @@ def main() -> int:
         rel_path = path.relative_to(ROOT)
         try:
             data = load_json(path)
-        except Exception as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             print(f"FAIL {rel_path}")
             print(f"  could not load JSON: {exc}")
             failed += 1

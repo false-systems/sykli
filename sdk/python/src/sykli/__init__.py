@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from dataclasses import dataclass, field
 from typing import (
     IO,
@@ -582,6 +583,12 @@ class Task:
         Use concrete execution requirements such as container, resources,
         mounts, k8s, services, workdir, and env instead.
         """
+        warnings.warn(
+            "Task.target() is deprecated and no longer affects emitted pipeline JSON; "
+            "use container/resources/mounts/k8s/services/workdir/env instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self
 
     def k8s(self, opts: K8sOptions) -> Self:
