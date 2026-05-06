@@ -5,6 +5,7 @@ defmodule Sykli.Task do
 
   defstruct name: nil,
             kind: :task,
+            task_type: nil,
             command: nil,
             primitive: nil,
             agent: nil,
@@ -60,6 +61,19 @@ defmodule Sykli.Task do
   @type criticality :: :high | :medium | :low
   @type on_fail_action :: :analyze | :retry | :skip
   @type select_mode :: :smart | :always | :manual
+  @type task_type ::
+          :build
+          | :test
+          | :lint
+          | :format
+          | :scan
+          | :package
+          | :publish
+          | :deploy
+          | :migrate
+          | :generate
+          | :verify
+          | :cleanup
 
   @type semantic :: %{
           covers: [String.t()],
@@ -75,6 +89,7 @@ defmodule Sykli.Task do
   @type t :: %__MODULE__{
           name: String.t(),
           kind: :task | :review,
+          task_type: task_type() | nil,
           command: String.t() | nil,
           primitive: String.t() | nil,
           agent: String.t() | nil,

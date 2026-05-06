@@ -75,6 +75,39 @@ type Pipeline struct {
 	k8sDefaults *K8sOptions // Pipeline-level K8s defaults
 }
 
+// TaskType is the semantic class of an executable task.
+type TaskType string
+
+const (
+	TaskTypeBuild    TaskType = "build"
+	TaskTypeTest     TaskType = "test"
+	TaskTypeLint     TaskType = "lint"
+	TaskTypeFormat   TaskType = "format"
+	TaskTypeScan     TaskType = "scan"
+	TaskTypePackage  TaskType = "package"
+	TaskTypePublish  TaskType = "publish"
+	TaskTypeDeploy   TaskType = "deploy"
+	TaskTypeMigrate  TaskType = "migrate"
+	TaskTypeGenerate TaskType = "generate"
+	TaskTypeVerify   TaskType = "verify"
+	TaskTypeCleanup  TaskType = "cleanup"
+)
+
+var validTaskTypes = map[TaskType]bool{
+	TaskTypeBuild:    true,
+	TaskTypeTest:     true,
+	TaskTypeLint:     true,
+	TaskTypeFormat:   true,
+	TaskTypeScan:     true,
+	TaskTypePackage:  true,
+	TaskTypePublish:  true,
+	TaskTypeDeploy:   true,
+	TaskTypeMigrate:  true,
+	TaskTypeGenerate: true,
+	TaskTypeVerify:   true,
+	TaskTypeCleanup:  true,
+}
+
 // PipelineOption configures a Pipeline.
 type PipelineOption func(*Pipeline)
 
@@ -523,6 +556,7 @@ type gateConfig struct {
 type Task struct {
 	pipeline   *Pipeline
 	name       string
+	taskType   TaskType
 	command    string
 	container  string
 	workdir    string
@@ -744,6 +778,15 @@ func (t *Task) Run(cmd string) *Task {
 		log.Panic().Str("task", t.name).Msg("command cannot be empty")
 	}
 	t.command = cmd
+	return t
+}
+
+// TaskType sets the semantic class of this executable task.
+func (t *Task) TaskType(taskType TaskType) *Task {
+	if !validTaskTypes[taskType] {
+		log.Panic().Str("task", t.name).Str("task_type", string(taskType)).Msg("invalid task_type")
+	}
+	t.taskType = taskType
 	return t
 }
 
@@ -1916,13 +1959,18 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 	// Detect version based on usage
 	version := "1"
 	hasV2Features := len(p.dirs) > 0 || len(p.caches) > 0
+	hasV3Features := false
 	for _, t := range p.tasks {
+		if t.taskType != "" {
+			hasV3Features = true
+		}
 		if t.container != "" || len(t.mounts) > 0 {
 			hasV2Features = true
-			break
 		}
 	}
-	if hasV2Features {
+	if hasV3Features {
+		version = "3"
+	} else if hasV2Features {
 		version = "2"
 	}
 
@@ -1988,6 +2036,7 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 	type jsonTask struct {
 		Name          string              `json:"name"`
 		Kind          string              `json:"kind,omitempty"`
+		TaskType      string              `json:"task_type,omitempty"`
 		Command       string              `json:"command,omitempty"`
 		Container     string              `json:"container,omitempty"`
 		Workdir       string              `json:"workdir,omitempty"`
@@ -2139,6 +2188,7 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 
 		jt := jsonTask{
 			Name:       t.name,
+			TaskType:   string(t.taskType),
 			Command:    t.command,
 			Container:  t.container,
 			Workdir:    t.workdir,

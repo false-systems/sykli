@@ -121,6 +121,32 @@ defmodule Sykli.DSL do
     end)
   end
 
+  @doc "Sets the semantic class of this executable task."
+  def task_type(type)
+      when type in [
+             :build,
+             :test,
+             :lint,
+             :format,
+             :scan,
+             :package,
+             :publish,
+             :deploy,
+             :migrate,
+             :generate,
+             :verify,
+             :cleanup
+           ] do
+    update_current_task(fn t ->
+      reject_review_option!(t, "task_type")
+      %{t | task_type: type}
+    end)
+  end
+
+  def task_type(type) do
+    raise ArgumentError, "invalid task_type #{inspect(type)}"
+  end
+
   @doc "Sets task dependencies."
   def after_(deps) when is_list(deps) do
     update_current_task(fn t -> %{t | depends_on: t.depends_on ++ deps} end)
