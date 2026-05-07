@@ -77,9 +77,14 @@ __all__ = [
     "from_env",
     "from_file",
     "from_vault",
+    # Success criteria
+    "exit_code",
+    "file_exists",
+    "file_non_empty",
     # Types
     "K8sOptions",
     "TaskType",
+    "SuccessCriterion",
     "ValidationError",
     "ExplainContext",
     # Presets
@@ -128,6 +133,57 @@ TaskType = Literal[
 ]
 
 TASK_TYPES: tuple[str, ...] = get_args(TaskType)
+
+SuccessCriterion = dict[str, Any]
+
+
+def exit_code(equals: int) -> SuccessCriterion:
+    """Create an exit_code success criterion."""
+    if not isinstance(equals, int):
+        raise ValueError("exit_code.equals must be an integer")
+    if equals < 0 or equals > 255:
+        raise ValueError("exit_code.equals must be between 0 and 255")
+    return {"type": "exit_code", "equals": equals}
+
+
+def file_exists(path: str) -> SuccessCriterion:
+    """Create a file_exists success criterion."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("file_exists.path cannot be empty")
+    return {"type": "file_exists", "path": path}
+
+
+def file_non_empty(path: str) -> SuccessCriterion:
+    """Create a file_non_empty success criterion."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("file_non_empty.path cannot be empty")
+    return {"type": "file_non_empty", "path": path}
+
+
+def _validate_success_criteria(task_name: str, criteria: Sequence[SuccessCriterion]) -> None:
+    exit_code_count = 0
+    for criterion in criteria:
+        type_ = criterion.get("type")
+        if type_ == "exit_code":
+            exit_code_count += 1
+            if not isinstance(criterion.get("equals"), int):
+                raise ValueError(f"task {task_name!r}: exit_code.equals must be an integer")
+            if criterion["equals"] < 0 or criterion["equals"] > 255:
+                raise ValueError(f"task {task_name!r}: exit_code.equals must be between 0 and 255")
+            unknown = set(criterion) - {"type", "equals"}
+            if unknown:
+                raise ValueError(f"task {task_name!r}: exit_code has unknown keys: {sorted(unknown)}")
+        elif type_ in ("file_exists", "file_non_empty"):
+            path = criterion.get("path")
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"task {task_name!r}: {type_}.path cannot be empty")
+            unknown = set(criterion) - {"type", "path"}
+            if unknown:
+                raise ValueError(f"task {task_name!r}: {type_} has unknown keys: {sorted(unknown)}")
+        else:
+            raise ValueError(f"task {task_name!r}: invalid success_criteria type {type_!r}")
+    if exit_code_count > 1:
+        raise ValueError(f"task {task_name!r}: multiple exit_code success criteria are not allowed")
 
 
 @dataclass(frozen=True)
@@ -409,6 +465,7 @@ class Task:
         self._name = name
         self._is_gate = is_gate
         self._task_type: TaskType | None = None
+        self._success_criteria: list[SuccessCriterion] = []
         self._command: str = ""
         self._container: str = ""
         self._workdir: str = ""
@@ -465,6 +522,12 @@ class Task:
         """Set the semantic class of this executable task."""
         _validate_enum(task_type, TASK_TYPES, "task_type", self._name)
         self._task_type = task_type
+        return self
+
+    def success_criteria(self, criteria: Sequence[SuccessCriterion]) -> Self:
+        """Declare verification metadata for this executable task."""
+        _validate_success_criteria(self._name, criteria)
+        self._success_criteria.extend(dict(criterion) for criterion in criteria)
         return self
 
     def after(self, *tasks: str) -> Self:
@@ -738,6 +801,8 @@ class Task:
             d["command"] = self._command
         if self._task_type is not None:
             d["task_type"] = self._task_type
+        if self._success_criteria:
+            d["success_criteria"] = [dict(criterion) for criterion in self._success_criteria]
         if self._container:
             d["container"] = self._container
         if self._workdir:
@@ -1257,7 +1322,10 @@ class Pipeline:
         return False
 
     def _has_v3_features(self) -> bool:
-        return any(isinstance(t, Task) and t._task_type is not None for t in self._tasks)
+        return any(
+            isinstance(t, Task) and (t._task_type is not None or bool(t._success_criteria))
+            for t in self._tasks
+        )
 
     def _build_output(self) -> dict[str, Any]:
         has_v2_features = self._has_v2_features()

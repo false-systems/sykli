@@ -97,6 +97,7 @@ defmodule Sykli.Validate do
       |> check_missing_deps(tasks, task_names)
       |> check_missing_commands(tasks)
       |> check_task_types(tasks, version)
+      |> check_success_criteria(tasks, version)
       |> check_cycles(tasks)
 
     warnings =
@@ -298,10 +299,51 @@ defmodule Sykli.Validate do
     end)
   end
 
+  defp check_success_criteria(errors, tasks, version) do
+    tasks
+    |> Enum.filter(fn t -> valid_name?(t["name"]) and Map.has_key?(t, "success_criteria") end)
+    |> Enum.reduce(errors, fn t, acc ->
+      name = t["name"]
+      kind = if t["kind"] == "review", do: :review, else: :task
+
+      case Sykli.SuccessCriteria.validate(t["success_criteria"], kind, version, name) do
+        :ok ->
+          acc
+
+        {:error, reason} ->
+          [success_criteria_error_to_map(reason) | acc]
+      end
+    end)
+  end
+
+  defp success_criteria_error_to_map(reason) do
+    %{
+      type: success_criteria_error_type(reason),
+      task: success_criteria_error_task(reason),
+      message: Sykli.SuccessCriteria.message(reason)
+    }
+  end
+
+  defp success_criteria_error_type({type, _task_name}) when is_atom(type), do: type
+  defp success_criteria_error_type({type, _task_name, _detail}) when is_atom(type), do: type
+  defp success_criteria_error_task({_type, task_name}), do: task_name
+  defp success_criteria_error_task({_type, task_name, _detail}), do: task_name
+
   defp format_error(%{type: :missing_command, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :task_type_on_review, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :task_type_requires_version_3, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :unknown_task_type, message: msg}), do: "Error: #{msg}"
+  defp format_error(%{type: :success_criteria_on_review, message: msg}), do: "Error: #{msg}"
+
+  defp format_error(%{type: :success_criteria_requires_version_3, message: msg}),
+    do: "Error: #{msg}"
+
+  defp format_error(%{type: :invalid_success_criteria, message: msg}), do: "Error: #{msg}"
+
+  defp format_error(%{type: :unknown_success_criterion_type, message: msg}),
+    do: "Error: #{msg}"
+
+  defp format_error(%{type: :duplicate_exit_code_criteria, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :cycle, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :missing_dependency, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :duplicate_task, message: msg}), do: "Error: #{msg}"

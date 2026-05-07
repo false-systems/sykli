@@ -2,22 +2,46 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sykli.dev/schemas/sykli-pipeline.schema.json",
   "title": "Sykli Pipeline",
-  "description": "Canonical schema for Sykli pipeline JSON as emitted by the five SDKs (Go, Rust, TypeScript, Elixir, Python) and consumed by the engine. This schema describes the SDK-emitted shape and is intentionally strict (additionalProperties: false). The engine is currently more permissive — it ignores unknown fields and accepts a `condition` alias for `when` and a legacy list form for `outputs`. SDKs should not rely on those permissive paths. See docs/sdk-schema.md for the human-readable specification, contract gaps, and stability labels.",
+  "description": "Canonical schema for Sykli pipeline JSON as emitted by the five SDKs (Go, Rust, TypeScript, Elixir, Python) and consumed by the engine. This schema describes the SDK-emitted shape and is intentionally strict (additionalProperties: false). The engine is currently more permissive \u2014 it ignores unknown fields and accepts a `condition` alias for `when` and a legacy list form for `outputs`. SDKs should not rely on those permissive paths. See docs/sdk-schema.md for the human-readable specification, contract gaps, and stability labels.",
   "type": "object",
-  "required": ["version", "tasks"],
+  "required": [
+    "version",
+    "tasks"
+  ],
   "additionalProperties": false,
   "allOf": [
     {
-      "description": "`task_type` is the first agent-native semantic field and requires pipeline version 3.",
+      "description": "Agent-native semantic fields require pipeline version 3.",
       "if": {
-        "properties": { "version": { "not": { "const": "3" } } },
-        "required": ["version"]
+        "properties": {
+          "version": {
+            "not": {
+              "const": "3"
+            }
+          }
+        },
+        "required": [
+          "version"
+        ]
       },
       "then": {
         "properties": {
           "tasks": {
             "items": {
-              "not": { "required": ["task_type"] }
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "task_type"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "success_criteria"
+                    ]
+                  }
+                ]
+              }
             }
           }
         }
@@ -26,28 +50,43 @@
   ],
   "properties": {
     "version": {
-      "description": "Pipeline wire-format/schema version. SDKs auto-detect: '3' if any executable task uses task_type; otherwise '2' if any container, mount, dir, or cache resource is used; '1' otherwise.",
-      "enum": ["1", "2", "3"]
+      "description": "Pipeline wire-format/schema version. SDKs auto-detect: '3' if any executable task uses semantic fields such as task_type or success_criteria; otherwise '2' if any container, mount, dir, or cache resource is used; '1' otherwise.",
+      "enum": [
+        "1",
+        "2",
+        "3"
+      ]
     },
     "tasks": {
       "description": "List of task objects. May be empty.",
       "type": "array",
-      "items": { "$ref": "#/$defs/task" }
+      "items": {
+        "$ref": "#/$defs/task"
+      }
     },
     "resources": {
       "description": "Map of resource id to resource definition. Only emitted by SDKs when v2 features are present (containers, mounts, dirs, caches).",
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/resource" }
+      "additionalProperties": {
+        "$ref": "#/$defs/resource"
+      }
     }
   },
   "$defs": {
     "resource": {
       "description": "A directory or cache resource referenced by id from `task.mounts[].resource`.",
       "type": "object",
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "enum": ["directory", "cache"] },
+        "type": {
+          "enum": [
+            "directory",
+            "cache"
+          ]
+        },
         "path": {
           "description": "Host path. Required for type=directory.",
           "type": "string"
@@ -55,7 +94,9 @@
         "globs": {
           "description": "Optional glob patterns scoping a directory resource.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "name": {
           "description": "Cache name. Required for type=cache.",
@@ -63,31 +104,126 @@
         }
       }
     },
+    "successCriterion": {
+      "description": "One declared success criterion. Criteria are conjunctive: all criteria in success_criteria must pass when engine checking is implemented.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/exitCodeCriterion"
+        },
+        {
+          "$ref": "#/$defs/fileExistsCriterion"
+        },
+        {
+          "$ref": "#/$defs/fileNonEmptyCriterion"
+        }
+      ]
+    },
+    "exitCodeCriterion": {
+      "type": "object",
+      "required": [
+        "type",
+        "equals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "exit_code"
+        },
+        "equals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      }
+    },
+    "fileExistsCriterion": {
+      "type": "object",
+      "required": [
+        "type",
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "file_exists"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "fileNonEmptyCriterion": {
+      "type": "object",
+      "required": [
+        "type",
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "file_non_empty"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "task": {
       "description": "A pipeline task (or review node when `kind == \"review\"`). The engine validates that non-gate, non-review tasks have a non-empty `command`; that rule is encoded in description rather than schema-level conditionals because gates and reviews compose with several other fields. SDKs validate cycles, duplicate names, and unknown dependencies; the schema does not.",
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "additionalProperties": false,
       "allOf": [
         {
           "description": "`when` and `condition` are aliased by the engine (`when` wins). SDKs emit `when`. The schema rejects payloads that set both.",
-          "not": { "required": ["when", "condition"] }
+          "not": {
+            "required": [
+              "when",
+              "condition"
+            ]
+          }
         },
         {
           "description": "Review-only fields (primitive, agent, context, deterministic) are meaningful only when kind == \"review\". The schema rejects them on regular tasks (where kind is absent or not \"review\").",
           "if": {
             "not": {
-              "properties": { "kind": { "const": "review" } },
-              "required": ["kind"]
+              "properties": {
+                "kind": {
+                  "const": "review"
+                }
+              },
+              "required": [
+                "kind"
+              ]
             }
           },
           "then": {
             "not": {
               "anyOf": [
-                { "required": ["primitive"] },
-                { "required": ["agent"] },
-                { "required": ["context"] },
-                { "required": ["deterministic"] }
+                {
+                  "required": [
+                    "primitive"
+                  ]
+                },
+                {
+                  "required": [
+                    "agent"
+                  ]
+                },
+                {
+                  "required": [
+                    "context"
+                  ]
+                },
+                {
+                  "required": [
+                    "deterministic"
+                  ]
+                }
               ]
             }
           }
@@ -95,22 +231,73 @@
         {
           "description": "Review nodes are graph metadata nodes, not shell-command tasks. The canonical review-node contract rejects task execution fields.",
           "if": {
-            "properties": { "kind": { "const": "review" } },
-            "required": ["kind"]
+            "properties": {
+              "kind": {
+                "const": "review"
+              }
+            },
+            "required": [
+              "kind"
+            ]
           },
           "then": {
             "not": {
               "anyOf": [
-                { "required": ["command"] },
-                { "required": ["outputs"] },
-                { "required": ["gate"] },
-                { "required": ["container"] },
-                { "required": ["services"] },
-                { "required": ["k8s"] },
-                { "required": ["mounts"] },
-                { "required": ["retry"] },
-                { "required": ["timeout"] },
-                { "required": ["task_type"] }
+                {
+                  "required": [
+                    "command"
+                  ]
+                },
+                {
+                  "required": [
+                    "outputs"
+                  ]
+                },
+                {
+                  "required": [
+                    "gate"
+                  ]
+                },
+                {
+                  "required": [
+                    "container"
+                  ]
+                },
+                {
+                  "required": [
+                    "services"
+                  ]
+                },
+                {
+                  "required": [
+                    "k8s"
+                  ]
+                },
+                {
+                  "required": [
+                    "mounts"
+                  ]
+                },
+                {
+                  "required": [
+                    "retry"
+                  ]
+                },
+                {
+                  "required": [
+                    "timeout"
+                  ]
+                },
+                {
+                  "required": [
+                    "task_type"
+                  ]
+                },
+                {
+                  "required": [
+                    "success_criteria"
+                  ]
+                }
               ]
             }
           }
@@ -124,7 +311,10 @@
         },
         "kind": {
           "description": "Task kind. Default is task. The review kind is experimental.",
-          "enum": ["task", "review"]
+          "enum": [
+            "task",
+            "review"
+          ]
         },
         "command": {
           "description": "Shell command to execute. Required for regular (non-gate, non-review) tasks; the engine raises `missing_command` otherwise (validate.ex:230-253). Gates and review tasks have no command.",
@@ -147,6 +337,31 @@
             "cleanup"
           ]
         },
+        "success_criteria": {
+          "description": "Declared verification metadata for executable task success beyond command completion. Requires top-level version == \"3\". Rejected on review nodes. Metadata only in Phase 3C-1; the engine does not evaluate these criteria yet.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/successCriterion"
+          },
+          "allOf": [
+            {
+              "description": "At most one exit_code criterion is allowed per task.",
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "exit_code"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        },
         "container": {
           "description": "Container image (e.g., `golang:1.21`). Triggers v2 emission.",
           "type": "string"
@@ -158,34 +373,52 @@
         "env": {
           "description": "Environment variables. Keys must be non-empty (validated SDK-side; engine accepts any).",
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "inputs": {
           "description": "File patterns used for input-based caching. Glob syntax.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "outputs": {
-          "description": "Named output artifacts (output name → path). Engine also accepts a legacy list form which it normalizes into `output_0`, `output_1`, etc., but SDKs emit the map form canonically.",
+          "description": "Named output artifacts (output name \u2192 path). Engine also accepts a legacy list form which it normalizes into `output_0`, `output_1`, etc., but SDKs emit the map form canonically.",
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "depends_on": {
           "description": "Names of tasks this task depends on. Engine deduplicates (graph.ex:381) and validates references (validate.ex:159-185).",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "task_inputs": {
           "description": "Cross-task artifact dependencies. Engine validates that `from_task` exists, `output` is declared on it, and the source task is a transitive dependency (graph.ex:766-801).",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["from_task", "output", "dest"],
+            "required": [
+              "from_task",
+              "output",
+              "dest"
+            ],
             "additionalProperties": false,
             "properties": {
-              "from_task": { "type": "string" },
-              "output": { "type": "string" },
-              "dest": { "type": "string" }
+              "from_task": {
+                "type": "string"
+              },
+              "output": {
+                "type": "string"
+              },
+              "dest": {
+                "type": "string"
+              }
             }
           }
         },
@@ -201,19 +434,35 @@
         "secrets": {
           "description": "Names of required secrets (v1-style; resolved from environment).",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "secret_refs": {
           "description": "Typed secret references (v2). For source=vault, key must contain `#` separating path from field (e.g., `secret/data/db#password`). The `#` rule is enforced only by the Elixir SDK; engine and other SDKs accept any string.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "source", "key"],
+            "required": [
+              "name",
+              "source",
+              "key"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string" },
-              "source": { "enum": ["env", "file", "vault"] },
-              "key": { "type": "string" }
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "env",
+                  "file",
+                  "vault"
+                ]
+              },
+              "key": {
+                "type": "string"
+              }
             }
           }
         },
@@ -222,7 +471,9 @@
           "type": "object",
           "additionalProperties": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           }
         },
         "services": {
@@ -230,11 +481,20 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["image", "name"],
+            "required": [
+              "image",
+              "name"
+            ],
             "additionalProperties": false,
             "properties": {
-              "image": { "type": "string", "minLength": 1 },
-              "name": { "type": "string", "minLength": 1 }
+              "image": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
@@ -243,12 +503,27 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["resource", "path", "type"],
+            "required": [
+              "resource",
+              "path",
+              "type"
+            ],
             "additionalProperties": false,
             "properties": {
-              "resource": { "type": "string", "minLength": 1 },
-              "path": { "type": "string", "minLength": 1 },
-              "type": { "enum": ["directory", "cache"] }
+              "resource": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "enum": [
+                  "directory",
+                  "cache"
+                ]
+              }
             }
           }
         },
@@ -289,25 +564,39 @@
         "requires": {
           "description": "Required mesh node labels for placement (e.g., `[\"docker\", \"gpu\"]`).",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "provides": {
           "description": "Capabilities this task provides. Each entry is a name with an optional value (which may be referenced by `needs` of downstream tasks).",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "value": { "type": ["string", "null"] }
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
             }
           }
         },
         "needs": {
           "description": "Names of capabilities this task requires. Engine auto-injects dependencies on whichever task provides each capability.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "semantic": {
           "description": "Semantic metadata used by the engine for smart task selection and AI context. Optional.",
@@ -317,7 +606,9 @@
             "covers": {
               "description": "Glob patterns of files this task validates. Used by smart selection.",
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "intent": {
               "description": "Free-form human description of the task's purpose.",
@@ -325,7 +616,11 @@
             },
             "criticality": {
               "description": "Task importance.",
-              "enum": ["high", "medium", "low"]
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
             }
           }
         },
@@ -336,23 +631,38 @@
           "properties": {
             "on_fail": {
               "description": "Action when this task fails.",
-              "enum": ["analyze", "retry", "skip"]
+              "enum": [
+                "analyze",
+                "retry",
+                "skip"
+              ]
             },
             "select": {
               "description": "Selection mode for smart task filtering.",
-              "enum": ["smart", "always", "manual"]
+              "enum": [
+                "smart",
+                "always",
+                "manual"
+              ]
             }
           }
         },
         "gate": {
           "description": "Approval gate. A task with a gate has no command; execution waits for approval according to the strategy.",
           "type": "object",
-          "required": ["strategy"],
+          "required": [
+            "strategy"
+          ],
           "additionalProperties": false,
           "properties": {
             "strategy": {
               "description": "Approval mechanism. `prompt` blocks on interactive input, `env` checks an environment variable, `file` polls a path, `webhook` waits for an HTTP callback.",
-              "enum": ["prompt", "env", "file", "webhook"]
+              "enum": [
+                "prompt",
+                "env",
+                "file",
+                "webhook"
+              ]
             },
             "timeout": {
               "description": "Maximum seconds to wait for approval. Engine default 3600.",
@@ -386,19 +696,39 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "provider": { "enum": ["aws", "gcp", "azure"] },
-            "role_arn": { "type": "string" },
-            "project_number": { "type": "string" },
-            "pool_id": { "type": "string" },
-            "provider_id": { "type": "string" },
-            "tenant_id": { "type": "string" },
-            "client_id": { "type": "string" },
+            "provider": {
+              "enum": [
+                "aws",
+                "gcp",
+                "azure"
+              ]
+            },
+            "role_arn": {
+              "type": "string"
+            },
+            "project_number": {
+              "type": "string"
+            },
+            "pool_id": {
+              "type": "string"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "tenant_id": {
+              "type": "string"
+            },
+            "client_id": {
+              "type": "string"
+            },
             "duration": {
               "description": "Token duration in seconds. Engine default 3600.",
               "type": "integer",
               "minimum": 1
             },
-            "audience": { "type": "string" }
+            "audience": {
+              "type": "string"
+            }
           }
         },
         "history_hint": {
@@ -417,7 +747,9 @@
         "context": {
           "description": "Review-only. Files or context references provided to the review. Meaningful only when `kind == \"review\"`. Experimental.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "deterministic": {
           "description": "Review-only. Whether this review is deterministic. Engine defaults to false. Meaningful only when `kind == \"review\"`. Experimental.",

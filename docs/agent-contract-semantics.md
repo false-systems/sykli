@@ -197,8 +197,8 @@ Rules:
 - Default success remains exit code 0.
 - Criteria array is conjunctive: all criteria must pass.
 - Do not introduce OR semantics initially.
-- `success_criteria` is descriptive at first.
-- Some criteria may become engine-checkable later.
+- `success_criteria` is intended to be engine-checkable.
+- Implemented criteria may affect the task result after command execution.
 - Do not make outputs automatically imply success.
 
 Declared `outputs` are artifact expectations, not success criteria by
@@ -222,6 +222,8 @@ Future possibilities, not part of the first implementation:
 - `regex_match`
 - `coverage_threshold`
 - `junit_report_valid`
+- `artifact_declared`
+- `outputs_exist`
 
 ### Layer 3 - Boundaries: `capabilities` and `effects`
 
@@ -516,6 +518,256 @@ emission parity.
 Phase 3B enforces `task_type` version gating, enum validation, and review-node
 rejection through JSON Schema and through minimal engine/parser validation.
 
+## Phase 3C Decision: `success_criteria`
+
+Phase 3C defines typed verification semantics for executable tasks.
+`success_criteria` describes how success is known beyond merely running a
+command.
+
+### Applicability decision
+
+`success_criteria` applies only to executable tasks: nodes with omitted `kind`
+or `kind: "task"`.
+
+Rules:
+
+- `success_criteria` must not appear on `kind: "review"` nodes.
+- Review nodes may later get their own review-result semantics, but not
+  `success_criteria`.
+- `success_criteria` is optional.
+- `success_criteria` does not replace `task_type`.
+
+Meaning is separated as follows:
+
+- `kind` = graph node kind.
+- `task_type` = executable task semantic class.
+- `primitive` = review-node semantic class.
+- `success_criteria` = executable task success contract.
+
+### Version decision
+
+`success_criteria` requires pipeline `version: "3"`.
+
+It is part of the semantic contract format introduced by version 3. It must not
+be accepted under `version: "1"` or `version: "2"`. Phase 3C must not introduce
+a second version field.
+
+### Combination semantics
+
+`success_criteria` is an array. The array is conjunctive: all criteria must
+pass.
+
+Example:
+
+```json
+[
+  { "type": "exit_code", "equals": 0 },
+  { "type": "file_exists", "path": "coverage.out" }
+]
+```
+
+This means `exit_code == 0` AND `coverage.out` exists.
+
+The first implementation must not add OR semantics or a nested boolean
+expression language.
+
+### Default success
+
+When `success_criteria` is absent, current behavior remains unchanged. A task
+without `success_criteria` succeeds if its process exits successfully according
+to current engine behavior.
+
+Conceptually, the implicit default is `exit_code == 0`, but SDKs must not emit
+an explicit `exit_code` criterion by default. Presets must not emit
+`success_criteria` in the first implementation.
+
+### Engine-checkable semantics
+
+`success_criteria` is intended to become engine-checkable.
+
+Unlike `capabilities` and `effects`, `success_criteria` may affect the task
+result after execution. If criteria are implemented, a task should fail when
+the command succeeds but a declared success criterion fails.
+
+This does not make Sykli a runtime policy engine. Criteria are post-task
+verification checks against declared status or artifacts. They do not sandbox
+syscalls, network use, filesystem writes, external API calls, or database
+writes.
+
+Phase 3C-1 stores, validates, and emits `success_criteria` only. It does not
+wire criteria into executor result, retry, cache, target, or runtime paths. The
+engine must not silently pretend to enforce criteria before target-level
+checking exists.
+
+The semantic direction remains engine-checkable verification for Phase 3C-2.
+
+### Outputs relationship
+
+Declared `outputs` are artifact expectations. They do not automatically imply
+success criteria.
+
+This avoids hidden semantics. `outputs` alone does not mean "file must exist on
+success."
+
+Example:
+
+```json
+{
+  "outputs": { "binary": "dist/app" }
+}
+```
+
+This does not automatically check that `dist/app` exists.
+
+To require that check, the author must declare:
+
+```json
+{
+  "success_criteria": [
+    { "type": "file_exists", "path": "dist/app" }
+  ]
+}
+```
+
+### Initial criterion types
+
+The first implementation includes only these criterion types.
+
+#### `exit_code`
+
+Shape:
+
+```json
+{ "type": "exit_code", "equals": 0 }
+```
+
+Rules:
+
+- `equals` is required.
+- `equals` must be an integer from 0 through 255.
+- `0` is the normal success value.
+- Non-zero success values may be documented explicitly when needed.
+- Only one `exit_code` criterion may appear on a task.
+
+Schema or engine/SDK validation should reject duplicate `exit_code` criteria.
+If this is awkward in JSON Schema, engine and SDK validation must reject it.
+
+#### `file_exists`
+
+Shape:
+
+```json
+{ "type": "file_exists", "path": "coverage.out" }
+```
+
+Rules:
+
+- `path` is required.
+- `path` must be a string.
+- `path` is relative to the task `workdir` unless it is absolute.
+- The criterion checks existence only.
+
+#### `file_non_empty`
+
+Shape:
+
+```json
+{ "type": "file_non_empty", "path": "coverage.out" }
+```
+
+Rules:
+
+- `path` is required.
+- `path` must be a string.
+- The criterion implies file existence during evaluation.
+- It is distinct from `file_exists` because it also checks size/content length.
+
+Future candidates, not part of Phase 3C:
+
+- `json_path`
+- `regex_match`
+- `coverage_threshold`
+- `junit_report_valid`
+- `artifact_declared`
+- `outputs_exist`
+
+### Failure semantics
+
+If the command fails, the task fails as today.
+
+If the command succeeds but a criterion fails, the task fails with a
+`success_criteria` failure. The failure should identify which criterion failed
+and should not be reported as command failure.
+
+This should become visible to agents and tools as structured failure
+information in the future. Phase 3C does not design the full failure taxonomy.
+
+### SDK API decision
+
+SDKs should expose explicit APIs and validate allowed criterion types. They
+must not infer criteria from `outputs`, and presets must not emit
+`success_criteria` in the first implementation.
+
+Likely SDK shapes:
+
+- Go: `.SuccessCriteria(sykli.ExitCode(0), sykli.FileExists("coverage.out"))`.
+- Rust: `.success_criteria([SuccessCriterion::ExitCode(0), SuccessCriterion::FileExists("coverage.out")])`.
+- TypeScript: `.successCriteria([{ type: "exit_code", equals: 0 }, { type: "file_exists", path: "coverage.out" }])`.
+- Python: `.success_criteria([{"type": "exit_code", "equals": 0}, {"type": "file_exists", "path": "coverage.out"}])`.
+- Elixir: `success_criteria [exit_code(0), file_exists("coverage.out")]`.
+
+Task success criteria must not be available on review builders or review
+blocks.
+
+### Conformance decision
+
+Future positive conformance should include:
+
+- `version: "3"`.
+- An executable task with `task_type` and `success_criteria`.
+- `exit_code` plus `file_exists` or `file_non_empty`.
+- No review node.
+
+Future negative coverage should include:
+
+- `success_criteria` under `version: "2"` fails.
+- `success_criteria` on a review node fails.
+- Unknown criterion type fails.
+- `file_exists` without `path` fails.
+- `exit_code` without `equals` fails.
+- Duplicate `exit_code` criteria fail.
+
+Negative cases should be covered by schema validation and SDK or engine tests.
+Conformance negative cases may be added if the harness has a clear expected
+failure model.
+
+### Linting direction
+
+Semantic linting remains advisory:
+
+- `task_type: "test"` without `success_criteria` may warn, but must not fail.
+- A `success_criteria` file path not declared in `outputs` may warn, but must
+  not fail.
+- A `file_non_empty` path also declared as an output is good, but not required.
+- A `deploy` task with only `exit_code` may warn later, but not in the first
+  implementation.
+
+### Non-goals for Phase 3C
+
+- OR semantics.
+- Nested boolean criteria.
+- `json_path`.
+- `regex_match`.
+- Coverage thresholds.
+- JUnit parsing.
+- Automatic output existence checks.
+- Preset auto-emission.
+- `success_criteria` on review nodes.
+- Runtime sandboxing.
+- `capabilities` / `effects`.
+- Failure taxonomy.
+- Compact agent projection.
+
 ## Phase 3 implementation sequence
 
 ### Phase 3A - this document
@@ -544,6 +796,9 @@ Must include:
 - AND semantics.
 - No implicit output success.
 - First criterion types only.
+- Rejection on review nodes.
+- Version 3 gating.
+- Post-task failure when an implemented criterion fails.
 
 ### Phase 3D - `capabilities` / `effects`
 
