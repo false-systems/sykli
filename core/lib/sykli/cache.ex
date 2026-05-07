@@ -35,18 +35,37 @@ defmodule Sykli.Cache do
   alias Sykli.Cache.FileRepository, as: Repo
 
   @version "0.1.0"
+  @s3_required_env ~w(SYKLI_CACHE_S3_BUCKET SYKLI_CACHE_S3_ACCESS_KEY SYKLI_CACHE_S3_SECRET_KEY)
 
   defp repo do
-    bucket = System.get_env("SYKLI_CACHE_S3_BUCKET")
-    access = System.get_env("SYKLI_CACHE_S3_ACCESS_KEY")
-    secret = System.get_env("SYKLI_CACHE_S3_SECRET_KEY")
+    configured =
+      @s3_required_env
+      |> Enum.map(fn name -> {name, System.get_env(name)} end)
+      |> Enum.reject(fn {_name, value} -> blank?(value) end)
 
-    if bucket != nil and access != nil and secret != nil do
-      Sykli.Cache.TieredRepository
-    else
-      Sykli.Cache.FileRepository
+    cond do
+      configured == [] ->
+        Sykli.Cache.FileRepository
+
+      length(configured) == length(@s3_required_env) ->
+        Sykli.Cache.TieredRepository
+
+      true ->
+        configured_names = MapSet.new(configured, fn {name, _value} -> name end)
+
+        missing =
+          @s3_required_env
+          |> Enum.reject(&MapSet.member?(configured_names, &1))
+          |> Enum.join(", ")
+
+        raise ArgumentError,
+              "invalid S3 cache configuration: missing #{missing}; " <>
+                "set all S3 cache variables or unset SYKLI_CACHE_S3_BUCKET to use local cache"
     end
   end
+
+  defp blank?(nil), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
 
   # Env vars that affect builds (PATH excluded - too volatile)
   @relevant_env_vars ["GOPATH", "GOROOT", "CARGO_HOME", "NODE_ENV", "GOOS", "GOARCH"]
@@ -485,7 +504,10 @@ defmodule Sykli.Cache do
   end
 
   defp hash_file(path) do
-    case File.stat(path, time: :posix) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %{type: :symlink}} ->
+        hash_file_metadata(path)
+
       {:ok, %{size: size}} when size > @max_hash_file_size ->
         # Oversized file: use metadata hash to avoid excessive I/O
         hash_file_metadata(path)
@@ -515,7 +537,7 @@ defmodule Sykli.Cache do
   end
 
   defp hash_file_metadata(path) do
-    case File.stat(path, time: :posix) do
+    case File.lstat(path, time: :posix) do
       {:ok, %{size: size, mtime: mtime}} ->
         :crypto.hash(:sha256, "#{path}:#{mtime}:#{size}")
         |> Base.encode16(case: :lower)
@@ -557,29 +579,28 @@ defmodule Sykli.Cache do
   end
 
   defp store_blob(abs_path, workdir) do
-    case File.read(abs_path) do
-      {:ok, content} ->
-        {:ok, blob_hash} = repo().store_blob(content)
+    with {:ok, %{type: type}} when type != :symlink <- File.lstat(abs_path),
+         {:ok, content} <- File.read(abs_path) do
+      {:ok, blob_hash} = repo().store_blob(content)
 
-        # Get file mode
-        mode =
-          case File.stat(abs_path) do
-            {:ok, %{mode: m}} -> m
-            _ -> 0o644
-          end
+      # Get file mode without following symlinks between read and metadata capture.
+      mode =
+        case File.lstat(abs_path) do
+          {:ok, %{mode: m}} -> m
+          _ -> 0o644
+        end
 
-        size = byte_size(content)
-        rel_path = Path.relative_to(abs_path, workdir)
+      size = byte_size(content)
+      rel_path = Path.relative_to(abs_path, workdir)
 
-        %{
-          "path" => rel_path,
-          "blob" => blob_hash,
-          "mode" => mode,
-          "size" => size
-        }
-
-      {:error, _} ->
-        nil
+      %{
+        "path" => rel_path,
+        "blob" => blob_hash,
+        "mode" => mode,
+        "size" => size
+      }
+    else
+      _ -> nil
     end
   end
 

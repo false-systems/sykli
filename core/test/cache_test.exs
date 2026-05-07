@@ -3,6 +3,7 @@ defmodule Sykli.CacheTest do
 
   @test_cache_dir Path.expand("~/.sykli/cache_test")
   @test_workdir Path.expand("/tmp/sykli_cache_test_workdir")
+  @s3_env ~w(SYKLI_CACHE_S3_BUCKET SYKLI_CACHE_S3_ACCESS_KEY SYKLI_CACHE_S3_SECRET_KEY)
 
   # Helper to create task struct
   defp make_task(name, command, opts \\ []) do
@@ -20,6 +21,10 @@ defmodule Sykli.CacheTest do
   end
 
   setup do
+    original_s3_env = Map.new(@s3_env, fn name -> {name, System.get_env(name)} end)
+
+    Enum.each(@s3_env, &System.delete_env/1)
+
     # Clean up test directories
     File.rm_rf!(@test_cache_dir)
     File.rm_rf!(@test_workdir)
@@ -29,6 +34,11 @@ defmodule Sykli.CacheTest do
     on_exit(fn ->
       File.rm_rf!(@test_cache_dir)
       File.rm_rf!(@test_workdir)
+
+      Enum.each(original_s3_env, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
     end)
 
     :ok
@@ -156,6 +166,14 @@ defmodule Sykli.CacheTest do
       task = make_task("test", "go test")
       assert {:miss, _key} = Sykli.Cache.check(task, @test_workdir)
     end
+
+    test "partial S3 cache config fails clearly instead of silently using local cache" do
+      System.put_env("SYKLI_CACHE_S3_BUCKET", "ci-cache")
+
+      assert_raise ArgumentError, ~r/invalid S3 cache configuration: missing/, fn ->
+        Sykli.Cache.init()
+      end
+    end
   end
 
   describe "store and restore" do
@@ -236,6 +254,20 @@ defmodule Sykli.CacheTest do
 
       # Should not crash, but won't store any outputs
       assert :ok = Sykli.Cache.store(key, task, ["nonexistent.txt"], 100, @test_workdir)
+    end
+
+    test "does not store symlink outputs" do
+      Sykli.Cache.init()
+
+      File.write!(Path.join(@test_workdir, "real.txt"), "secret")
+      File.ln_s!("real.txt", Path.join(@test_workdir, "link.txt"))
+
+      task = make_task("build", "echo build", outputs: ["link.txt"])
+      key = Sykli.Cache.cache_key(task, @test_workdir)
+
+      assert :ok = Sykli.Cache.store(key, task, ["link.txt"], 100, @test_workdir)
+      assert {:ok, entry} = Sykli.Cache.get_entry(key)
+      assert entry.outputs == []
     end
 
     test "handles directory outputs" do
