@@ -120,6 +120,13 @@ describe('Pipeline', () => {
       ).toThrow('multiple exit_code success criteria are not allowed');
     });
 
+    it('rejects exit_code success criteria outside process exit range', () => {
+      const p = new Pipeline();
+      expect(() =>
+        p.task('test').run('go test ./...').successCriteria([{ type: 'exit_code', equals: 256 }])
+      ).toThrow('exit_code.equals must be between 0 and 255');
+    });
+
     it('does not expose successCriteria on review nodes', () => {
       const p = new Pipeline();
       expect((p.review('review-code') as any).successCriteria).toBeUndefined();

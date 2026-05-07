@@ -126,6 +126,9 @@ function validateSuccessCriteria(taskName: string, criteria: SuccessCriterion[])
         if (!Number.isInteger(criterion.equals)) {
           throw new Error(`task '${taskName}': exit_code.equals must be an integer`);
         }
+        if (criterion.equals < 0 || criterion.equals > 255) {
+          throw new Error(`task '${taskName}': exit_code.equals must be between 0 and 255`);
+        }
         break;
       case 'file_exists':
       case 'file_non_empty':

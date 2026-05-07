@@ -644,7 +644,7 @@ Shape:
 Rules:
 
 - `equals` is required.
-- `equals` must be an integer.
+- `equals` must be an integer from 0 through 255.
 - `0` is the normal success value.
 - Non-zero success values may be documented explicitly when needed.
 - Only one `exit_code` criterion may appear on a task.

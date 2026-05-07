@@ -2,7 +2,7 @@
 
 import pytest
 
-from sykli import K8sOptions, Pipeline, ValidationError
+from sykli import K8sOptions, Pipeline, ValidationError, exit_code, file_exists, file_non_empty
 from sykli import _jaro_similarity, _jaro_winkler, _best_match
 
 
@@ -85,13 +85,32 @@ class TestFailFastValidation:
         with pytest.raises(ValueError, match="invalid success_criteria type"):
             p.task("test").success_criteria([{"type": "custom", "path": "x"}])
 
+    def test_success_criteria_helpers_validate_inputs(self):
+        assert exit_code(0) == {"type": "exit_code", "equals": 0}
+        assert file_exists("coverage.out") == {"type": "file_exists", "path": "coverage.out"}
+        assert file_non_empty("dist/app") == {"type": "file_non_empty", "path": "dist/app"}
+
+        with pytest.raises(ValueError, match="exit_code.equals"):
+            exit_code("0")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="file_exists.path"):
+            file_exists("")
+
+        with pytest.raises(ValueError, match="file_non_empty.path"):
+            file_non_empty("")
+
     def test_duplicate_exit_code_success_criteria(self):
         p = Pipeline()
         with pytest.raises(ValueError, match="multiple exit_code"):
             p.task("test").success_criteria([
-                {"type": "exit_code", "equals": 0},
-                {"type": "exit_code", "equals": 1},
+                exit_code(0),
+                exit_code(1),
             ])
+
+    def test_exit_code_success_criteria_range(self):
+        p = Pipeline()
+        with pytest.raises(ValueError, match="between 0 and 255"):
+            p.task("test").success_criteria([{"type": "exit_code", "equals": 256}])
 
     def test_review_nodes_do_not_expose_success_criteria(self):
         p = Pipeline()

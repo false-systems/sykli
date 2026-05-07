@@ -171,6 +171,17 @@ func TestDuplicateExitCodeCriteriaPanics(t *testing.T) {
 	p.Task("test").Run("go test ./...").SuccessCriteria(ExitCode(0), ExitCode(1))
 }
 
+func TestExitCodeCriteriaRangePanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for out-of-range exit_code criteria")
+		}
+	}()
+
+	p := New()
+	p.Task("test").Run("go test ./...").SuccessCriteria(ExitCode(256))
+}
+
 func TestInvalidTaskTypePanics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

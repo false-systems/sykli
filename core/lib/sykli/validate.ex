@@ -316,45 +316,18 @@ defmodule Sykli.Validate do
     end)
   end
 
-  defp success_criteria_error_to_map({:success_criteria_on_review, task_name}) do
+  defp success_criteria_error_to_map(reason) do
     %{
-      type: :success_criteria_on_review,
-      task: task_name,
-      message: "Review node '#{task_name}' cannot declare success_criteria"
+      type: success_criteria_error_type(reason),
+      task: success_criteria_error_task(reason),
+      message: Sykli.SuccessCriteria.message(reason)
     }
   end
 
-  defp success_criteria_error_to_map({:success_criteria_requires_version_3, task_name, _version}) do
-    %{
-      type: :success_criteria_requires_version_3,
-      task: task_name,
-      message: "Task '#{task_name}' declares success_criteria but pipeline version is not 3"
-    }
-  end
-
-  defp success_criteria_error_to_map({:invalid_success_criteria, task_name, reason}) do
-    %{
-      type: :invalid_success_criteria,
-      task: task_name,
-      message: "Task '#{task_name}' declares invalid success_criteria: #{reason}"
-    }
-  end
-
-  defp success_criteria_error_to_map({:unknown_success_criterion_type, task_name, type}) do
-    %{
-      type: :unknown_success_criterion_type,
-      task: task_name,
-      message: "Task '#{task_name}' declares unknown success_criteria type '#{type}'"
-    }
-  end
-
-  defp success_criteria_error_to_map({:duplicate_exit_code_criteria, task_name}) do
-    %{
-      type: :duplicate_exit_code_criteria,
-      task: task_name,
-      message: "Task '#{task_name}' declares multiple exit_code success criteria"
-    }
-  end
+  defp success_criteria_error_type({type, _task_name}) when is_atom(type), do: type
+  defp success_criteria_error_type({type, _task_name, _detail}) when is_atom(type), do: type
+  defp success_criteria_error_task({_type, task_name}), do: task_name
+  defp success_criteria_error_task({_type, task_name, _detail}), do: task_name
 
   defp format_error(%{type: :missing_command, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :task_type_on_review, message: msg}), do: "Error: #{msg}"

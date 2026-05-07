@@ -309,6 +309,19 @@ defmodule SykliTest do
       end
     end
 
+    test "rejects exit_code success_criteria outside process exit range" do
+      use Sykli
+
+      assert_raise ArgumentError, ~r/between 0 and 255/, fn ->
+        pipeline do
+          task "test" do
+            success_criteria([%{type: "exit_code", equals: 256}])
+            run("go test ./...")
+          end
+        end
+      end
+    end
+
     test "rejects success_criteria inside review" do
       use Sykli
 
@@ -316,7 +329,7 @@ defmodule SykliTest do
         pipeline do
           review "review-code" do
             primitive("lint")
-            success_criteria([exit_code(0)])
+            success_criteria([%{type: "custom", path: "x"}])
           end
         end
       end

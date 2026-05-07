@@ -176,7 +176,7 @@ Initial criterion types:
 - `{ "type": "file_non_empty", "path": "coverage.out" }`
 
 Only one `exit_code` criterion may appear on a task. `equals` must be an
-integer. File criteria require a non-empty string `path`.
+integer from 0 through 255. File criteria require a non-empty string `path`.
 
 Declared `outputs` are artifact expectations and do not imply success checks.
 To require an output path to exist or be non-empty, declare an explicit

@@ -290,6 +290,16 @@ defmodule Sykli.ValidateTest do
       assert Enum.any?(result.errors, &(&1.type == :success_criteria_requires_version_3))
     end
 
+    test "rejects empty success_criteria before version 3" do
+      json =
+        ~s({"version":"2","tasks":[{"name":"test","command":"go test ./...","success_criteria":[]}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == false
+      assert Enum.any?(result.errors, &(&1.type == :success_criteria_requires_version_3))
+    end
+
     test "rejects success_criteria on review nodes" do
       json =
         ~s({"version":"3","tasks":[{"name":"review-code","kind":"review","primitive":"lint","success_criteria":[{"type":"exit_code","equals":0}]}]})
@@ -328,6 +338,16 @@ defmodule Sykli.ValidateTest do
 
       assert result.valid == false
       assert Enum.any?(result.errors, &(&1.type == :duplicate_exit_code_criteria))
+    end
+
+    test "rejects exit_code outside process exit range" do
+      json =
+        ~s({"version":"3","tasks":[{"name":"test","command":"go test ./...","success_criteria":[{"type":"exit_code","equals":256}]}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == false
+      assert Enum.any?(result.errors, &(&1.type == :invalid_success_criteria))
     end
   end
 

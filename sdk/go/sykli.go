@@ -125,6 +125,9 @@ func validateSuccessCriteria(taskName string, criteria []SuccessCriterion) {
 			if criterion.equals == nil {
 				log.Panic().Str("task", taskName).Msg("exit_code success criterion requires equals")
 			}
+			if *criterion.equals < 0 || *criterion.equals > 255 {
+				log.Panic().Str("task", taskName).Int("equals", *criterion.equals).Msg("exit_code success criterion must be between 0 and 255")
+			}
 		case "file_exists", "file_non_empty":
 			if criterion.path == "" {
 				log.Panic().Str("task", taskName).Str("type", criterion.criterionType).Msg("file success criterion requires path")

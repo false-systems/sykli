@@ -492,11 +492,17 @@ pub enum SuccessCriterion {
 impl SuccessCriterion {
     fn to_json(&self) -> JsonSuccessCriterion {
         match self {
-            SuccessCriterion::ExitCode(code) => JsonSuccessCriterion {
-                type_: "exit_code".to_string(),
-                equals: Some(*code),
-                path: None,
-            },
+            SuccessCriterion::ExitCode(code) => {
+                assert!(
+                    (0..=255).contains(code),
+                    "exit_code success criterion must be between 0 and 255"
+                );
+                JsonSuccessCriterion {
+                    type_: "exit_code".to_string(),
+                    equals: Some(*code),
+                    path: None,
+                }
+            }
             SuccessCriterion::FileExists(path) => {
                 assert!(
                     !path.is_empty(),
@@ -945,7 +951,12 @@ impl<'a> Task<'a> {
                         "file success criterion path cannot be empty"
                     );
                 }
-                SuccessCriterion::ExitCode(_) => {}
+                SuccessCriterion::ExitCode(code) => {
+                    assert!(
+                        (0..=255).contains(code),
+                        "exit_code success criterion must be between 0 and 255"
+                    );
+                }
             }
         }
         self.pipeline.tasks[self.index]
@@ -3070,6 +3081,16 @@ mod tests {
             .task("test")
             .run("go test ./...")
             .success_criteria(&[SuccessCriterion::ExitCode(0), SuccessCriterion::ExitCode(1)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "exit_code success criterion must be between 0 and 255")]
+    fn test_exit_code_success_criteria_range_panics() {
+        let mut p = Pipeline::new();
+        let _ = p
+            .task("test")
+            .run("go test ./...")
+            .success_criteria(&[SuccessCriterion::ExitCode(256)]);
     }
 
     #[test]

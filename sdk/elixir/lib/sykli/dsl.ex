@@ -135,16 +135,18 @@ defmodule Sykli.DSL do
 
   @doc "Declares verification metadata for executable task success."
   def success_criteria(criteria) when is_list(criteria) do
-    validate_success_criteria!(criteria)
-
     update_current_task(fn t ->
       reject_review_option!(t, "success_criteria")
+      validate_success_criteria!(criteria)
       %{t | success_criteria: t.success_criteria ++ criteria}
     end)
   end
 
   @doc "Builds an exit_code success criterion."
-  def exit_code(code) when is_integer(code), do: %{type: "exit_code", equals: code}
+  def exit_code(code) when is_integer(code) and code in 0..255,
+    do: %{type: "exit_code", equals: code}
+
+  def exit_code(_), do: raise(ArgumentError, "exit_code must be between 0 and 255")
 
   @doc "Builds a file_exists success criterion."
   def file_exists(path) when is_binary(path) and path != "",
@@ -1154,8 +1156,14 @@ defmodule Sykli.DSL do
     Enum.each(criteria, &validate_success_criterion!/1)
   end
 
-  defp validate_success_criterion!(%{type: "exit_code", equals: equals}) when is_integer(equals),
-    do: :ok
+  defp validate_success_criterion!(%{type: "exit_code", equals: equals})
+       when is_integer(equals) and equals in 0..255,
+       do: :ok
+
+  defp validate_success_criterion!(%{type: "exit_code", equals: equals})
+       when is_integer(equals) do
+    raise ArgumentError, "exit_code success criterion must be between 0 and 255"
+  end
 
   defp validate_success_criterion!(%{type: "file_exists", path: path})
        when is_binary(path) and path != "",
@@ -1166,8 +1174,13 @@ defmodule Sykli.DSL do
        do: :ok
 
   defp validate_success_criterion!(%{"type" => "exit_code", "equals" => equals})
-       when is_integer(equals),
+       when is_integer(equals) and equals in 0..255,
        do: :ok
+
+  defp validate_success_criterion!(%{"type" => "exit_code", "equals" => equals})
+       when is_integer(equals) do
+    raise ArgumentError, "exit_code success criterion must be between 0 and 255"
+  end
 
   defp validate_success_criterion!(%{"type" => "file_exists", "path" => path})
        when is_binary(path) and path != "",

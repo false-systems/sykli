@@ -7,6 +7,7 @@ defmodule Sykli.SuccessCriteria do
   """
 
   @types ~w(exit_code file_exists file_non_empty)
+  @exit_code_range 0..255
 
   @spec types() :: [String.t()]
   def types, do: @types
@@ -46,24 +47,27 @@ defmodule Sykli.SuccessCriteria do
   end
 
   @spec format_error(term()) :: String.t()
-  def format_error({:success_criteria_on_review, task_name}) do
-    "Error: Review node '#{task_name}' cannot declare success_criteria"
+  def format_error(reason), do: "Error: #{message(reason)}"
+
+  @spec message(term()) :: String.t()
+  def message({:success_criteria_on_review, task_name}) do
+    "Review node '#{task_name}' cannot declare success_criteria"
   end
 
-  def format_error({:success_criteria_requires_version_3, task_name, version}) do
-    "Error: Task '#{task_name}' declares success_criteria but pipeline version is #{inspect(version)}, not \"3\""
+  def message({:success_criteria_requires_version_3, task_name, version}) do
+    "Task '#{task_name}' declares success_criteria but pipeline version is #{inspect(version)}, not \"3\""
   end
 
-  def format_error({:invalid_success_criteria, task_name, reason}) do
-    "Error: Task '#{task_name}' declares invalid success_criteria: #{reason}"
+  def message({:invalid_success_criteria, task_name, reason}) do
+    "Task '#{task_name}' declares invalid success_criteria: #{reason}"
   end
 
-  def format_error({:unknown_success_criterion_type, task_name, type}) do
-    "Error: Task '#{task_name}' declares unknown success_criteria type #{inspect(type)}"
+  def message({:unknown_success_criterion_type, task_name, type}) do
+    "Task '#{task_name}' declares unknown success_criteria type #{inspect(type)}"
   end
 
-  def format_error({:duplicate_exit_code_criteria, task_name}) do
-    "Error: Task '#{task_name}' declares multiple exit_code success criteria"
+  def message({:duplicate_exit_code_criteria, task_name}) do
+    "Task '#{task_name}' declares multiple exit_code success criteria"
   end
 
   defp validate_items(criteria, task_name) do
@@ -77,8 +81,12 @@ defmodule Sykli.SuccessCriteria do
 
   defp validate_item(%{"type" => "exit_code"} = criterion, task_name) do
     case Map.fetch(criterion, "equals") do
-      {:ok, value} when is_integer(value) ->
+      {:ok, value} when is_integer(value) and value in @exit_code_range ->
         validate_no_extra_keys(criterion, ["type", "equals"], task_name, "exit_code")
+
+      {:ok, value} when is_integer(value) ->
+        {:error,
+         {:invalid_success_criteria, task_name, "exit_code.equals must be between 0 and 255"}}
 
       {:ok, _value} ->
         {:error, {:invalid_success_criteria, task_name, "exit_code.equals must be an integer"}}
@@ -137,6 +145,8 @@ defmodule Sykli.SuccessCriteria do
     end
   end
 
+  # Canonicalize validated criteria to the wire key set. This keeps parse output
+  # stable if a future caller bypasses schema validation.
   defp normalize(criteria) do
     Enum.map(criteria, fn
       %{"type" => "exit_code", "equals" => equals} ->

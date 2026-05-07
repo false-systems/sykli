@@ -77,6 +77,10 @@ __all__ = [
     "from_env",
     "from_file",
     "from_vault",
+    # Success criteria
+    "exit_code",
+    "file_exists",
+    "file_non_empty",
     # Types
     "K8sOptions",
     "TaskType",
@@ -133,6 +137,29 @@ TASK_TYPES: tuple[str, ...] = get_args(TaskType)
 SuccessCriterion = dict[str, Any]
 
 
+def exit_code(equals: int) -> SuccessCriterion:
+    """Create an exit_code success criterion."""
+    if not isinstance(equals, int):
+        raise ValueError("exit_code.equals must be an integer")
+    if equals < 0 or equals > 255:
+        raise ValueError("exit_code.equals must be between 0 and 255")
+    return {"type": "exit_code", "equals": equals}
+
+
+def file_exists(path: str) -> SuccessCriterion:
+    """Create a file_exists success criterion."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("file_exists.path cannot be empty")
+    return {"type": "file_exists", "path": path}
+
+
+def file_non_empty(path: str) -> SuccessCriterion:
+    """Create a file_non_empty success criterion."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("file_non_empty.path cannot be empty")
+    return {"type": "file_non_empty", "path": path}
+
+
 def _validate_success_criteria(task_name: str, criteria: Sequence[SuccessCriterion]) -> None:
     exit_code_count = 0
     for criterion in criteria:
@@ -141,6 +168,8 @@ def _validate_success_criteria(task_name: str, criteria: Sequence[SuccessCriteri
             exit_code_count += 1
             if not isinstance(criterion.get("equals"), int):
                 raise ValueError(f"task {task_name!r}: exit_code.equals must be an integer")
+            if criterion["equals"] < 0 or criterion["equals"] > 255:
+                raise ValueError(f"task {task_name!r}: exit_code.equals must be between 0 and 255")
             unknown = set(criterion) - {"type", "equals"}
             if unknown:
                 raise ValueError(f"task {task_name!r}: exit_code has unknown keys: {sorted(unknown)}")

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from sykli import K8sOptions, Pipeline, from_env, branch
+from sykli import K8sOptions, Pipeline, branch, exit_code, file_exists, from_env
 
 
 class TestJsonWireFormat:
@@ -35,8 +35,8 @@ class TestJsonWireFormat:
     def test_success_criteria_serialization(self):
         p = Pipeline()
         p.task("test").run("go test ./...").success_criteria([
-            {"type": "exit_code", "equals": 0},
-            {"type": "file_exists", "path": "coverage.out"},
+            exit_code(0),
+            file_exists("coverage.out"),
         ])
 
         d = p.to_dict()
