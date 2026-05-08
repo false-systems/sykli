@@ -1,0 +1,10 @@
+{
+  "version": "3",
+  "tasks": [
+    {
+      "name": "lint",
+      "command": "golangci-lint run",
+      "primitive": "lint"
+    }
+  ]
+}
