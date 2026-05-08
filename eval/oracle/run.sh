@@ -1167,6 +1167,55 @@ if begin_case "057" "Concurrent: env vars set in task config"; then
 fi
 
 # ============================================================================
+# WORK ITEMS (058-059)
+# ============================================================================
+
+printf "\n${BOLD}Work Items${RESET}\n"
+
+# --- case_058: work create/list/show/claim/note JSON workflow ---
+if begin_case "058" "Work: local work item JSON workflow"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(run_sykli "$dir" work create "Review PR #176" --intent "Check timeout behavior" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    id=$(echo "$LAST_OUTPUT" | jq -r '.data.item.id' 2>/dev/null)
+
+    if [[ -z "$id" || "$id" == "null" ]]; then
+      fail "work create --json did not return data.item.id"
+    elif assert_file_exists "$dir/.sykli/work/items/$id.json"; then
+      list_output=$(run_sykli "$dir" work list --json 2>&1)
+      show_output=$(run_sykli "$dir" work show "$id" --json 2>&1)
+      claim_output=$(run_sykli "$dir" work claim "$id" --json 2>&1)
+      note_output=$(run_sykli "$dir" work note "$id" "Found likely API breakage" --json 2>&1)
+
+      if assert_json_field "$list_output" '.ok' "true" "list"; then
+        if assert_json_field "$show_output" '.data.item.id' "$id" "show"; then
+          if assert_json_field "$claim_output" '.data.item.status' "claimed" "claim"; then
+            if assert_json_field "$note_output" '.data.note.body' "Found likely API breakage" "note"; then
+              pass 0
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_059: invalid work item id returns a stable JSON error ---
+if begin_case "059" "Work: invalid work item id returns JSON error"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(run_sykli "$dir" work show "../escape" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.ok' "false"; then
+      if assert_json_field "$LAST_OUTPUT" '.error.code' "invalid_work_item_id"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 
