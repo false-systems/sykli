@@ -1,5 +1,5 @@
 defmodule Sykli.NodeProfileTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Sykli.NodeProfile
 

@@ -1,8 +1,7 @@
 defmodule Sykli.MeshLabelsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Sykli.Mesh
-  alias Sykli.NodeProfile
 
   describe "local_capabilities/0 integration" do
     test "includes labels from NodeProfile" do
