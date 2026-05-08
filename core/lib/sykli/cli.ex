@@ -9,7 +9,7 @@ defmodule Sykli.CLI do
   alias Sykli.Error.Formatter
 
   @version Mix.Project.config()[:version]
-  @subcommands ~w(cache graph delta watch report history daemon init validate verify plan explain context fix query mcp run)
+  @subcommands ~w(cache graph delta watch report history daemon work init validate verify plan explain context fix query mcp run)
 
   def main(args \\ []) do
     args = normalize_global_json(args)
@@ -44,6 +44,11 @@ defmodule Sykli.CLI do
 
       ["daemon" | daemon_args] ->
         handle_daemon(daemon_args)
+
+      ["work" | work_args] ->
+        work_args
+        |> Sykli.CLI.Work.run()
+        |> halt()
 
       ["init" | init_args] ->
         handle_init(init_args)
@@ -128,6 +133,7 @@ defmodule Sykli.CLI do
       sykli report     Show last run summary with task results
       sykli history    List recent runs
       sykli daemon     Manage daemon (see: sykli daemon --help)
+      sykli work       Manage local work items (see: sykli work --help)
       sykli cache      Manage cache (see: sykli cache --help)
       sykli mcp        Start MCP server (for AI assistants)
 
