@@ -371,6 +371,8 @@ sykli verify              # cross-platform verification via mesh
 sykli history             # recent runs
 sykli report              # show last run summary with task results
 sykli work list           # local Team Mode work items
+sykli run --work <id>     # associate a run with a local work item
+sykli work runs <id>      # list runs associated with a work item
 sykli cache stats         # cache hit rates
 sykli daemon start        # start a mesh node on this host
 sykli mcp                 # MCP server (Claude Code, Cursor, Copilot)
