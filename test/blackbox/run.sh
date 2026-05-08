@@ -429,7 +429,7 @@ echo -e "${DIM}Dataset: $(jq '.cases | length' "$DATASET") test cases${RESET}"
 echo ""
 
 # Run categories in order
-for category in POS NEG SYS INT PERF LOAD ABN CACHE JSON DET SDK UI GH; do
+for category in POS NEG SYS INT PERF LOAD ABN CACHE JSON DET SDK UI GH WORK; do
   cases=$(jq -c ".cases[] | select(.id | startswith(\"$category\"))" "$DATASET")
   if [ -z "$cases" ]; then continue; fi
 

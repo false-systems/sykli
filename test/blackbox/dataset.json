@@ -15,7 +15,8 @@
     "DET": "Determinism - replay and wall-clock contract",
     "SDK": "SDK - cross-language parity contract",
     "UI": "UI - visual reset contract",
-    "GH": "GitHub - native receiver security contract"
+    "GH": "GitHub - native receiver security contract",
+    "WORK": "Work items - local Team Mode workflow"
   },
   "cases": [
     {
@@ -1538,6 +1539,36 @@
       "expect_exit": 0,
       "source": "CLAUDE.md §Definition of done; agent surface supports --json in any flag position",
       "validated_by": "Injected bug: leading --json is parsed as a run flag and validate becomes a path."
+    },
+    {
+      "id": "WORK-001",
+      "name": "local work item CLI workflow persists state",
+      "fixture": "empty_dir",
+      "command": "id=$(sykli work create \"Investigate failing checkout deploy\" --intent \"Find failing step\" --json | jq -r '.data.item.id') && sykli work list --json | jq -e --arg id \"$id\" '.ok == true and (.data.items | length) == 1 and .data.items[0].id == $id' >/dev/null && sykli work show \"$id\" --json | jq -e --arg id \"$id\" '.data.item.id == $id and .data.item.status == \"open\"' >/dev/null && sykli work claim \"$id\" --json | jq -e '.data.item.status == \"claimed\" and .data.item.assigned_to_type == \"member\"' >/dev/null && sykli work note \"$id\" \"Found likely API breakage\" --json | tee work-note.json >/dev/null && test -f \".sykli/work/items/$id.json\" && cat work-note.json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.source == \"local\"",
+        ".data.note.body == \"Found likely API breakage\"",
+        ".data.item.status == \"claimed\"",
+        "(.data.item.notes | length) == 1"
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 1; docs/local-state-plane.md local work item state",
+      "validated_by": "Injected bug: omit work CLI persistence or JSON envelope; workflow jq/file assertions fail."
+    },
+    {
+      "id": "WORK-002",
+      "name": "work show rejects path traversal ids with JSON error",
+      "fixture": "empty_dir",
+      "command": "sykli work show ../escape --json",
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"invalid_work_item_id\""
+      ],
+      "source": "docs/local-state-plane.md; local work items must not escape .sykli/work/items",
+      "validated_by": "Injected bug: pass raw ids into file path construction; traversal id is not rejected."
     },
     {
       "id": "GH-001",
