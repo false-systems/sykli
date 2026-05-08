@@ -55,8 +55,7 @@ Documented in detail in `docs/false-protocol-schema.md`. Summary:
   `sykli context`.
 - `.sykli/test-map.json` — file → tasks mapping.
 - `.sykli/runs/` — per-run manifests for history.
-- (Phase 1 of the roadmap) `.sykli/work/items/<id>.json` — local work
-  item state.
+- `.sykli/work/items/<id>.json` — local work item state.
 - (Phase 3 of the roadmap) `.sykli/gates/<gate-id>.json` — local gate
   decision state.
 
@@ -217,6 +216,35 @@ payload must carry a clear marker for which plane the answer came from
 (e.g. `"source": "local"` vs `"source": "coordinator"`).
 
 ## What the local plane gains in Phase 1+
+
+Phase 1 adds local work item files before any coordinator or network
+behavior. The persisted file is versioned and intentionally small:
+
+```json
+{
+  "id": "01KQPF7Q4W6J2M7V6YF2N0H6A2",
+  "version": "1",
+  "title": "Review PR #176",
+  "intent": "Check timeout and success criteria behavior",
+  "status": "open",
+  "created_by": "member:yair",
+  "assigned_to_type": null,
+  "assigned_to_id": null,
+  "created_at": "2026-05-08T10:00:00Z",
+  "updated_at": "2026-05-08T10:00:00Z",
+  "notes": []
+}
+```
+
+Allowed `status` values are `open`, `claimed`, `running`, `blocked`,
+`done`, `failed`, and `cancelled`.
+
+Allowed `assigned_to_type` values are `member`, `agent`, `daemon`, or
+`null` when unassigned.
+
+The local work item file must not contain logs, artifacts, secrets, source
+code, environment dumps, or full stdout/stderr. It is coordination state,
+not execution evidence.
 
 The roadmap adds local-only state for work items and gates **before**
 networking turns on. That is intentional: a user should be able to:
