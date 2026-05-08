@@ -252,7 +252,12 @@ p.task('ml-train')
     cpu: '4',
     gpu: 1,
   })
-  .k8sRaw('{"nodeSelector":{"gpu-type":"nvidia-a100"},"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}],"serviceAccount":"ml-runner","securityContext":{"runAsNonRoot":true,"readOnlyRootFilesystem":true}}');
+  .k8sRaw({
+    nodeSelector: { 'gpu-type': 'nvidia-a100' },
+    tolerations: [{ key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' }],
+    serviceAccount: 'ml-runner',
+    securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true },
+  });
 ```
 
 ### K8s Types

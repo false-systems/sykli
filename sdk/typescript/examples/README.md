@@ -55,7 +55,7 @@ task.whenCond(branch('main').or(hasTag()));
 task.k8s({
   memory: '4Gi',
   cpu: '2',
-}).k8sRaw('{"nodeSelector":{"gpu-type":"nvidia"}}');
+}).k8sRaw({ nodeSelector: { 'gpu-type': 'nvidia' } });
 
 // Autocomplete for all methods
 p.task('build')

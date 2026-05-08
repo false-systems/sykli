@@ -63,7 +63,10 @@ p.task('gpu-inference')
     gpu: 1,
     memory: '16Gi',
   })
-  .k8sRaw('{"nodeSelector":{"gpu-type":"nvidia-a100"},"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]}')
+  .k8sRaw({
+    nodeSelector: { 'gpu-type': 'nvidia-a100' },
+    tolerations: [{ key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' }],
+  })
   .afterGroup(nodeTests);
 
 // === SECRETS ===

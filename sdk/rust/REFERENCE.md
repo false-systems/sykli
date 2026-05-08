@@ -299,6 +299,9 @@ fn k8s(self, opts: K8sOptions) -> Self
 
 Adds Kubernetes-specific options.
 
+Use `try_k8s(opts)` when constructing options from dynamic input and you want
+immediate validation without waiting for `emit_to`.
+
 ### k8s_raw
 
 ```rust

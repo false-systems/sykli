@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TypeScript `k8sRaw` object overload.** Advanced Kubernetes fields can now
+  be passed as a structured object instead of an escaped JSON string, e.g.
+  `.k8sRaw({ nodeSelector: { gpu: "true" } })`.
 - **SDK contract cleanup release note.** `docs/releases/0.6.2-contract-cleanup.md` summarizes the Phase 1 through Phase 2C contract cleanup: canonical schema, schema-validated conformance fixtures, `version` semantics, `target` removal, TypeScript K8sOptions narrowing, Python conformance interpreter detection, and experimental review-node support across SDKs.
 
 ### Removed

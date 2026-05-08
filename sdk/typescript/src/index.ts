@@ -263,6 +263,8 @@ export interface K8sOptions {
   gpu?: number;
 }
 
+export type K8sRawOptions = string | Record<string, unknown>;
+
 // =============================================================================
 // RESOURCES
 // =============================================================================
@@ -411,7 +413,7 @@ export class Task {
   private _retry?: number;
   private _timeout?: number;
   private _k8s?: K8sOptions;
-  private _k8sRaw?: string;
+  private _k8sRaw?: K8sRawOptions;
   private _requires: string[] = [];
   private _provides: Array<{name: string, value?: string}> = [];
   private _needs: string[] = [];
@@ -656,10 +658,10 @@ export class Task {
    * // GPU node with toleration
    * p.task('train')
    *   .k8s({ memory: '32Gi', gpu: 1 })
-   *   .k8sRaw('{"nodeSelector": {"gpu": "true"}, "tolerations": [{"key": "gpu", "effect": "NoSchedule"}]}');
+   *   .k8sRaw({ nodeSelector: { gpu: 'true' }, tolerations: [{ key: 'gpu', effect: 'NoSchedule' }] });
    * ```
    */
-  k8sRaw(jsonConfig: string): this {
+  k8sRaw(jsonConfig: K8sRawOptions): this {
     this._k8sRaw = jsonConfig;
     return this;
   }
@@ -1000,7 +1002,7 @@ export class Task {
     return json;
   }
 
-  private _k8sToJSON(opts?: K8sOptions, raw?: string): Record<string, unknown> | null {
+  private _k8sToJSON(opts?: K8sOptions, raw?: K8sRawOptions): Record<string, unknown> | null {
     if (!opts && !raw) return null;
 
     const json: Record<string, unknown> = {};
@@ -1008,7 +1010,7 @@ export class Task {
     if (opts?.memory) json.memory = opts.memory;
     if (opts?.cpu) json.cpu = opts.cpu;
     if (opts?.gpu) json.gpu = opts.gpu;
-    if (raw) json.raw = raw;
+    if (raw) json.raw = typeof raw === 'string' ? raw : JSON.stringify(raw);
 
     // Return null if empty
     if (Object.keys(json).length === 0) return null;

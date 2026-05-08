@@ -562,6 +562,25 @@ describe('K8s Options (Minimal API)', () => {
     expect(task.k8s.raw).toContain('serviceAccount');
   });
 
+  it('k8sRaw accepts structured objects and stringifies them', () => {
+    const p = new Pipeline();
+    p.task('custom')
+      .run('echo test')
+      .k8sRaw({
+        serviceAccount: 'my-sa',
+        nodeSelector: { gpu: 'true' },
+        tolerations: [{ key: 'gpu', effect: 'NoSchedule' }],
+      });
+
+    const json = p.toJSON();
+    const task = json.tasks[0];
+    expect(JSON.parse(task.k8s.raw)).toEqual({
+      serviceAccount: 'my-sa',
+      nodeSelector: { gpu: 'true' },
+      tolerations: [{ key: 'gpu', effect: 'NoSchedule' }],
+    });
+  });
+
   it('omits k8s field when no options set', () => {
     const p = new Pipeline();
     p.task('test').run('npm test');

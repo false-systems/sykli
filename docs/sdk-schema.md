@@ -260,7 +260,7 @@ Minimal Kubernetes options:
 - `gpu` (integer, count of GPUs)
 - `raw` (string of raw Kubernetes JSON for advanced fields)
 
-Memory and CPU are validated by Go, Rust, Elixir, and Python SDKs against Kubernetes quantity regex; TypeScript and the engine accept any string. The TypeScript `K8sOptions` interface declares 11 additional fields (`namespace`, `nodeSelector`, `tolerations`, etc.) but `_k8sToJSON` does not serialize them; that is a TS-side type drift, not part of the contract.
+Memory and CPU are validated by Go, Rust, Elixir, and Python SDKs against Kubernetes quantity regex; TypeScript and the engine accept any string. The TypeScript `K8sOptions` interface is intentionally narrowed to the canonical `{memory, cpu, gpu}` shape. Advanced Kubernetes fields should be passed through `k8sRaw(...)`, which emits the canonical `raw` string field.
 
 ### `requires`
 
@@ -425,7 +425,7 @@ These are **descriptive, not prescriptive**. The schema documents current behavi
 2. **Review nodes are experimental.** Engine supports `kind: "review"` and the four review-only fields, and SDKs expose minimal review builders. Review outputs are not canonical.
 3. **`verify` and `oidc` are reserved with no SDK emit.** Engine reads them; SDKs have no API. Either implement SDK support or drop from the schema once a decision lands.
 4. **`history_hint` is engine-internal.** SDKs MUST NOT emit. Schema marks `readOnly` for clarity.
-5. **TypeScript K8s interface drift.** `K8sOptions` interface declares 15 fields; only 4 are serialized. The other 11 silently disappear at emit. The schema reflects the wire contract (4 fields); the TypeScript drift is a TS-side issue, not a schema issue.
+5. **TypeScript K8s advanced fields use `k8sRaw`.** `K8sOptions` is narrowed to the canonical 3 structured fields; advanced Kubernetes fields are serialized through `k8s.raw`.
 6. **SDK validation rigor varies.** K8s memory/CPU regex: Go/Rust/Elixir/Python yes, TypeScript no. Vault `#` separator: Elixir only. Structured `ValidationError` with codes: TypeScript and Python only. The schema documents what the engine accepts (the union); each SDK's README describes its own stricter checks.
 7. **Unknown fields are ignored by engine.** The canonical schema rejects them. SDKs are expected to align with the schema, not the engine's permissiveness.
 

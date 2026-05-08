@@ -339,7 +339,7 @@ p.task("gpu-train")
 
 ```
 
-`K8sOptions` validates `memory` (e.g., `512Mi`, `4Gi`) and `cpu` (e.g., `500m`, `2`) at emit time and reports a `K8sValidationError` for malformed values.
+`K8sOptions` validates `memory` (e.g., `512Mi`, `4Gi`) and `cpu` (e.g., `500m`, `2`) at emit time and reports a `K8sValidationError` for malformed values. Use `try_k8s(...)` or `Pipeline::try_with_k8s_defaults(...)` when you want immediate validation while building the pipeline.
 
 ## Language Presets
 
