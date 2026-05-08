@@ -32,9 +32,15 @@ defmodule Sykli.Error do
   | image_not_found | runtime | Docker image not found |
   | cluster_unreachable | runtime | K8s connection failed |
   | resource_failed | runtime | K8s resource creation failed |
-  | not_a_git_repo | runtime | Not a git repository |
-  | uncommitted_changes | runtime | Uncommitted changes |
-  | internal_error | internal | Unexpected error (with report link) |
+   | not_a_git_repo | runtime | Not a git repository |
+   | uncommitted_changes | runtime | Uncommitted changes |
+   | invalid_work_item | work | Invalid local work item data |
+   | invalid_work_item_id | work | Invalid local work item id |
+   | malformed_work_item_json | work | Local work item file is not valid JSON |
+   | work_item_already_claimed | work | Local work item is already claimed |
+   | work_item_missing_title | work | Work item create command is missing a title |
+   | work_item_not_found | work | Local work item was not found |
+   | internal_error | internal | Unexpected error (with report link) |
 
   ## Usage
 
@@ -590,6 +596,72 @@ defmodule Sykli.Error do
   end
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # WORK ITEM ERRORS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  def work_item_missing_title do
+    %__MODULE__{
+      code: "work_item_missing_title",
+      type: :validation,
+      message: "work item title is required",
+      step: :validate,
+      hints: ["use: sykli work create \"Title\""]
+    }
+  end
+
+  def work_item_not_found(id) do
+    %__MODULE__{
+      code: "work_item_not_found",
+      type: :validation,
+      message: "work item '#{id}' was not found",
+      step: :validate,
+      hints: ["run `sykli work list` to see local work items"]
+    }
+  end
+
+  def invalid_work_item_id(id) do
+    %__MODULE__{
+      code: "invalid_work_item_id",
+      type: :validation,
+      message: "invalid work item id: #{inspect(id)}",
+      step: :validate,
+      hints: ["work item ids may contain letters, numbers, underscores, dashes, and dots"]
+    }
+  end
+
+  def work_item_already_claimed(id, assignment) do
+    %__MODULE__{
+      code: "work_item_already_claimed",
+      type: :validation,
+      message: "work item '#{id}' is already claimed",
+      step: :validate,
+      hints: ["choose another work item or inspect it with `sykli work show #{id}`"],
+      notes: [format_assignment_note(assignment)]
+    }
+  end
+
+  def malformed_work_item_json(path) do
+    %__MODULE__{
+      code: "malformed_work_item_json",
+      type: :validation,
+      message: "local work item file is not valid JSON",
+      step: :parse,
+      hints: ["inspect or remove the malformed file before retrying"],
+      notes: ["path: #{path}"]
+    }
+  end
+
+  def invalid_work_item(reason) do
+    %__MODULE__{
+      code: "invalid_work_item",
+      type: :validation,
+      message: "invalid local work item: #{format_work_item_reason(reason)}",
+      step: :validate,
+      hints: ["inspect the work item file under .sykli/work/items"]
+    }
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # INTERNAL ERRORS
   # ─────────────────────────────────────────────────────────────────────────────
 
@@ -661,6 +733,36 @@ defmodule Sykli.Error do
   def wrap({:python_failed, output}), do: sdk_failed(:python, output)
   def wrap({:python_timeout, msg}), do: sdk_timeout(:python, 120_000) |> add_note(msg)
   def wrap({:missing_tool, tool, hint}), do: missing_tool(tool, hint)
+
+  # Work item errors
+  def wrap(:work_item_missing_title), do: work_item_missing_title()
+  def wrap({:work_item_not_found, id}), do: work_item_not_found(id)
+  def wrap({:invalid_work_item_id, id}), do: invalid_work_item_id(id)
+
+  def wrap({:work_item_already_claimed, id, assignment}),
+    do: work_item_already_claimed(id, assignment)
+
+  def wrap({:malformed_work_item_json, path, _error}), do: malformed_work_item_json(path)
+  def wrap({:unknown_work_flag, flag}), do: invalid_work_item({:unknown_flag, flag})
+  def wrap({:invalid_work_command, command}), do: invalid_work_item({:invalid_command, command})
+  def wrap({:invalid_work_actor, actor}), do: invalid_work_item({:invalid_actor, actor})
+  def wrap({:missing_work_item_version, _}), do: invalid_work_item(:missing_version)
+
+  def wrap({:unsupported_work_item_version, version}),
+    do: invalid_work_item({:unsupported_version, version})
+
+  def wrap({:invalid_work_item_status, status}), do: invalid_work_item({:invalid_status, status})
+
+  def wrap({:invalid_assignment_type, type}),
+    do: invalid_work_item({:invalid_assignment_type, type})
+
+  def wrap({:invalid_assignment_id, id}), do: invalid_work_item({:invalid_assignment_id, id})
+  def wrap({:invalid_actor_type, type}), do: invalid_work_item({:invalid_actor_type, type})
+  def wrap({:invalid_actor_id, field, id}), do: invalid_work_item({:invalid_actor_id, field, id})
+  def wrap({:invalid_created_by, reason}), do: invalid_work_item({:invalid_created_by, reason})
+  def wrap({:invalid_notes, notes}), do: invalid_work_item({:invalid_notes, notes})
+  def wrap({:invalid_note, reason}), do: invalid_work_item({:invalid_note, reason})
+  def wrap({:invalid_note_author, reason}), do: invalid_work_item({:invalid_note_author, reason})
 
   # Validation errors
   def wrap({:cycle_detected, path}), do: cycle_detected(path)
@@ -859,6 +961,62 @@ defmodule Sykli.Error do
   defp build_duration_note(ms) do
     ["task ran for #{format_duration(ms)} before failing"]
   end
+
+  defp format_assignment_note(%{} = assignment) do
+    type = Map.get(assignment, "assigned_to_type") || "unknown"
+    id = Map.get(assignment, "assigned_to_id") || "unknown"
+    status = Map.get(assignment, "status") || "unknown"
+    "current assignment: #{type}:#{id} (status: #{status})"
+  end
+
+  defp format_assignment_note(_assignment), do: "current assignment is unavailable"
+
+  defp format_work_item_reason(:missing_version), do: "missing version"
+
+  defp format_work_item_reason({:unsupported_version, version}),
+    do: "unsupported version #{inspect(version)}"
+
+  defp format_work_item_reason({:unknown_flag, flag}), do: "unknown flag #{flag}"
+  defp format_work_item_reason({:invalid_command, ""}), do: "missing work command"
+
+  defp format_work_item_reason({:invalid_command, command}),
+    do: "invalid work command #{inspect(command)}"
+
+  defp format_work_item_reason({:invalid_actor, actor}), do: "invalid actor #{inspect(actor)}"
+
+  defp format_work_item_reason({:invalid_status, status}),
+    do: "invalid status #{inspect(status)}"
+
+  defp format_work_item_reason({:invalid_assignment_type, type}),
+    do: "invalid assignment type #{inspect(type)}"
+
+  defp format_work_item_reason({:invalid_assignment_id, id}),
+    do: "invalid assignment id #{inspect(id)}"
+
+  defp format_work_item_reason({:invalid_actor_type, type}),
+    do: "invalid actor type #{inspect(type)}"
+
+  defp format_work_item_reason({:invalid_actor_id, field, id}),
+    do: "invalid #{field} actor id #{inspect(id)}"
+
+  defp format_work_item_reason({:invalid_created_by, reason}),
+    do: "invalid created_by fields: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason({:invalid_notes, notes}),
+    do: "invalid notes #{inspect(notes)}"
+
+  defp format_work_item_reason({:invalid_note, reason}),
+    do: "invalid note: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason({:invalid_note_author, reason}),
+    do: "invalid note author: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason(:empty_id), do: "empty actor id"
+  defp format_work_item_reason(:empty_body), do: "empty note body"
+  defp format_work_item_reason(:not_string), do: "expected string"
+  defp format_work_item_reason(:missing_type), do: "missing actor type"
+
+  defp format_work_item_reason(reason), do: inspect(reason)
 
   defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
   defp format_duration(ms) when ms < 60_000, do: "#{Float.round(ms / 1000, 1)}s"

@@ -48,10 +48,16 @@ The roadmap below holds that sentence true at every step.
 Exit criteria: docs land. Definition of done: `docs/done.md` aligned for
 future phases; `git diff --check` passes; PR description complete.
 
-## Phase 1 — Local work item model
+## Phase 1 — Local work item model and CLI
 
 Add local work item state **before** any networking. A team-less user
 must benefit from work items the day they ship.
+
+Status:
+
+- PR #187 added `Sykli.WorkItem`, `Sykli.Work.Store`, and
+  `.sykli/work/items/<id>.json` persistence.
+- PR #188 adds the local `sykli work ...` CLI commands and JSON output.
 
 Suggested modules:
 

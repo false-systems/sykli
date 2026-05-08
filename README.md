@@ -370,6 +370,7 @@ sykli graph               # mermaid / DOT diagram of the DAG
 sykli verify              # cross-platform verification via mesh
 sykli history             # recent runs
 sykli report              # show last run summary with task results
+sykli work list           # local Team Mode work items
 sykli cache stats         # cache hit rates
 sykli daemon start        # start a mesh node on this host
 sykli mcp                 # MCP server (Claude Code, Cursor, Copilot)
@@ -399,6 +400,7 @@ Selection priority and how to add a new runtime: [docs/runtimes.md](docs/runtime
 ├── attestations/         # per-task DSSE envelopes (for artifact registries)
 ├── occurrences_json/     # per-run JSON archive (last 20)
 ├── context.json          # pipeline structure + health (via `sykli context`)
+├── work/items/           # local Team Mode work item state
 └── runs/                 # run history manifests
 ```
 

@@ -247,6 +247,18 @@ The local work item file must not contain logs, artifacts, secrets, source
 code, environment dumps, or full stdout/stderr. It is coordination state,
 not execution evidence.
 
+Local work items are exposed through:
+
+```bash
+sykli work create "Review PR #176"
+sykli work list
+sykli work show <work-id>
+sykli work claim <work-id>
+sykli work note <work-id> "Found likely API breakage"
+```
+
+Each command supports `--json` and returns the shared CLI JSON envelope.
+
 The roadmap adds local-only state for work items and gates **before**
 networking turns on. That is intentional: a user should be able to:
 
