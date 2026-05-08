@@ -132,6 +132,20 @@ defmodule Sykli.CLITest do
       assert opts[:timeout] == 900_000
       assert opts[:target] == :k8s
     end
+
+    test "parses --work=ID" do
+      {path, opts} = Sykli.CLI.parse_run_args(["--work=work_001", "./my-project"])
+
+      assert path == "./my-project"
+      assert opts[:work_item_id] == "work_001"
+    end
+
+    test "parses --work ID" do
+      {path, opts} = Sykli.CLI.parse_run_args(["--work", "work_001", "./my-project"])
+
+      assert path == "./my-project"
+      assert opts[:work_item_id] == "work_001"
+    end
   end
 
   describe "global option normalization" do

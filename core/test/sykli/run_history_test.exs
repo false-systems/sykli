@@ -12,6 +12,8 @@ defmodule Sykli.RunHistoryTest do
         timestamp: ~U[2024-01-15 10:30:00Z],
         git_ref: "abc1234",
         git_branch: "main",
+        work_item_id: "work_001",
+        contract_hash: "sha256:abc",
         tasks: [
           %RunHistory.TaskResult{name: "test", status: :passed, duration_ms: 1234}
         ],
@@ -26,6 +28,10 @@ defmodule Sykli.RunHistoryTest do
 
       files = File.ls!(runs_dir)
       assert Enum.any?(files, &String.ends_with?(&1, ".json"))
+
+      assert {:ok, loaded} = RunHistory.load_latest(path: tmp_dir)
+      assert loaded.work_item_id == "work_001"
+      assert loaded.contract_hash == "sha256:abc"
     end
 
     test "creates latest.json symlink", %{tmp_dir: tmp_dir} do
@@ -257,6 +263,37 @@ defmodule Sykli.RunHistoryTest do
 
       assert {:ok, runs} = RunHistory.list(path: tmp_dir, limit: 2)
       assert length(runs) == 2
+    end
+  end
+
+  describe "list_by_work_item/2" do
+    test "returns associated runs in deterministic recent-first order", %{tmp_dir: tmp_dir} do
+      for {id, work_item_id, hour} <- [
+            {"run-1", "work_001", 1},
+            {"run-2", "work_002", 2},
+            {"run-3", "work_001", 3}
+          ] do
+        run = %RunHistory.Run{
+          id: id,
+          timestamp: DateTime.add(~U[2024-01-15 10:00:00Z], hour * 3600),
+          git_ref: "ref#{hour}",
+          git_branch: "main",
+          work_item_id: work_item_id,
+          contract_hash: "sha256:#{hour}",
+          tasks: [],
+          overall: :passed
+        }
+
+        :ok = RunHistory.save(run, path: tmp_dir)
+      end
+
+      assert {:ok, runs} = RunHistory.list_by_work_item("work_001", path: tmp_dir)
+      assert Enum.map(runs, & &1.id) == ["run-3", "run-1"]
+    end
+
+    test "rejects invalid work item id before listing", %{tmp_dir: tmp_dir} do
+      assert {:error, {:invalid_work_item_id, "../escape"}} =
+               RunHistory.list_by_work_item("../escape", path: tmp_dir)
     end
   end
 

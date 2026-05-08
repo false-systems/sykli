@@ -4,6 +4,7 @@ defmodule Sykli.CLI.WorkTest do
   import ExUnit.CaptureIO
 
   alias Sykli.CLI.Work
+  alias Sykli.RunHistory
 
   @moduletag :tmp_dir
 
@@ -133,6 +134,31 @@ defmodule Sykli.CLI.WorkTest do
       assert output =~ "Usage: sykli work <command>"
       assert output =~ "Unknown flags are rejected"
     end
+
+    test "runs --json lists associated runs", %{tmp_dir: tmp_dir} do
+      assert run_silent(["create", "Review PR"], path: tmp_dir, id: "work_001", now: @now) == 0
+
+      save_run(tmp_dir, %{
+        id: "run-1",
+        timestamp: ~U[2026-05-08 10:00:00Z],
+        work_item_id: "work_001",
+        contract_hash: "sha256:one"
+      })
+
+      save_run(tmp_dir, %{
+        id: "run-2",
+        timestamp: ~U[2026-05-08 11:00:00Z],
+        work_item_id: "work_001",
+        contract_hash: "sha256:two"
+      })
+
+      result = run_json(["runs", "work_001", "--json"], path: tmp_dir)
+
+      assert result["data"]["source"] == "local"
+      assert result["data"]["work_item_id"] == "work_001"
+      assert Enum.map(result["data"]["runs"], & &1["id"]) == ["run-2", "run-1"]
+      assert hd(result["data"]["runs"])["contract_hash"] == "sha256:two"
+    end
   end
 
   describe "errors" do
@@ -197,6 +223,11 @@ defmodule Sykli.CLI.WorkTest do
       result = run_json(["show", "work_001", "--json"], path: tmp_dir, expect: 1)
       assert result["error"]["code"] == "malformed_work_item_json"
     end
+
+    test "runs for missing work item returns structured JSON error", %{tmp_dir: tmp_dir} do
+      result = run_json(["runs", "missing", "--json"], path: tmp_dir, expect: 1)
+      assert result["error"]["code"] == "work_item_not_found"
+    end
   end
 
   defp run_json(args, opts) do
@@ -219,5 +250,20 @@ defmodule Sykli.CLI.WorkTest do
     end)
 
     0
+  end
+
+  defp save_run(tmp_dir, attrs) do
+    run = %RunHistory.Run{
+      id: attrs.id,
+      timestamp: attrs.timestamp,
+      git_ref: "abc123",
+      git_branch: "main",
+      work_item_id: attrs.work_item_id,
+      contract_hash: attrs.contract_hash,
+      tasks: [%RunHistory.TaskResult{name: "test", status: :passed, duration_ms: 10}],
+      overall: :passed
+    }
+
+    :ok = RunHistory.save(run, path: tmp_dir)
   end
 end
