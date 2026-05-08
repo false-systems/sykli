@@ -97,8 +97,8 @@ defmodule Sykli.Services.Docker do
 
   def start_services(_task_name, [], _state), do: {:ok, nil}
 
-  def start_services(task_name, services, _state) do
-    network_name = "sykli-#{sanitize_name(task_name)}-#{:rand.uniform(100_000)}"
+  def start_services(task_name, services, state) do
+    network_name = Sykli.Target.NetworkName.deterministic(task_name, services, state)
 
     case create_network(network_name) do
       {:ok, _} ->
@@ -182,9 +182,5 @@ defmodule Sykli.Services.Docker do
 
   defp docker_executable do
     System.find_executable("docker") || "/usr/bin/docker"
-  end
-
-  defp sanitize_name(name) do
-    String.replace(name, ~r/[^a-zA-Z0-9_-]/, "_")
   end
 end
