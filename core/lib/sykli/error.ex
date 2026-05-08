@@ -983,6 +983,39 @@ defmodule Sykli.Error do
     do: "invalid work command #{inspect(command)}"
 
   defp format_work_item_reason({:invalid_actor, actor}), do: "invalid actor #{inspect(actor)}"
+
+  defp format_work_item_reason({:invalid_status, status}),
+    do: "invalid status #{inspect(status)}"
+
+  defp format_work_item_reason({:invalid_assignment_type, type}),
+    do: "invalid assignment type #{inspect(type)}"
+
+  defp format_work_item_reason({:invalid_assignment_id, id}),
+    do: "invalid assignment id #{inspect(id)}"
+
+  defp format_work_item_reason({:invalid_actor_type, type}),
+    do: "invalid actor type #{inspect(type)}"
+
+  defp format_work_item_reason({:invalid_actor_id, field, id}),
+    do: "invalid #{field} actor id #{inspect(id)}"
+
+  defp format_work_item_reason({:invalid_created_by, reason}),
+    do: "invalid created_by fields: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason({:invalid_notes, notes}),
+    do: "invalid notes #{inspect(notes)}"
+
+  defp format_work_item_reason({:invalid_note, reason}),
+    do: "invalid note: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason({:invalid_note_author, reason}),
+    do: "invalid note author: #{format_work_item_reason(reason)}"
+
+  defp format_work_item_reason(:empty_id), do: "empty actor id"
+  defp format_work_item_reason(:empty_body), do: "empty note body"
+  defp format_work_item_reason(:not_string), do: "expected string"
+  defp format_work_item_reason(:missing_type), do: "missing actor type"
+
   defp format_work_item_reason(reason), do: inspect(reason)
 
   defp format_duration(ms) when ms < 1000, do: "#{ms}ms"

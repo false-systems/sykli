@@ -13,10 +13,12 @@ defmodule Sykli.CLI.Work do
   alias Sykli.WorkItem
 
   @default_actor_type "member"
-  @default_actor_id "local"
 
   @doc """
   Runs a `sykli work ...` command and returns the intended process exit code.
+
+  `runtime_opts` are internal test hooks for store path, clocks, ids, and
+  default actor attribution. Parsed CLI flags are kept separate in `opts`.
   """
   def run(args, runtime_opts \\ []) do
     case parse(args) do
@@ -29,7 +31,7 @@ defmodule Sykli.CLI.Work do
   end
 
   defp execute({:create, title}, opts, runtime_opts) do
-    {actor_type, actor_id} = actor(opts)
+    {actor_type, actor_id} = actor(opts, runtime_opts)
 
     create_opts =
       runtime_opts
@@ -83,7 +85,7 @@ defmodule Sykli.CLI.Work do
   end
 
   defp execute({:claim, id}, opts, runtime_opts) do
-    {actor_type, actor_id} = actor(opts)
+    {actor_type, actor_id} = actor(opts, runtime_opts)
 
     claim_opts =
       runtime_opts
@@ -102,7 +104,7 @@ defmodule Sykli.CLI.Work do
   end
 
   defp execute({:note, id, body}, opts, runtime_opts) do
-    {actor_type, actor_id} = actor(opts)
+    {actor_type, actor_id} = actor(opts, runtime_opts)
 
     note_opts =
       runtime_opts
@@ -188,6 +190,14 @@ defmodule Sykli.CLI.Work do
     parse_flags(rest, [{:json, true} | opts], positionals)
   end
 
+  defp parse_flags(["--help" | rest], opts, positionals) do
+    parse_flags(rest, opts, ["--help" | positionals])
+  end
+
+  defp parse_flags(["-h" | rest], opts, positionals) do
+    parse_flags(rest, opts, ["-h" | positionals])
+  end
+
   defp parse_flags(["--intent", value | rest], opts, positionals) do
     parse_flags(rest, [{:intent, value} | opts], positionals)
   end
@@ -202,7 +212,7 @@ defmodule Sykli.CLI.Work do
         parse_flags(rest, [{:actor_type, actor_type}, {:actor_id, actor_id} | opts], positionals)
 
       {:error, reason} ->
-        {Enum.reverse(opts), Enum.reverse(positionals), reason}
+        finalize_parse_error(opts, positionals, rest, reason)
     end
   end
 
@@ -212,16 +222,27 @@ defmodule Sykli.CLI.Work do
         parse_flags(rest, [{:actor_type, actor_type}, {:actor_id, actor_id} | opts], positionals)
 
       {:error, reason} ->
-        {Enum.reverse(opts), Enum.reverse(positionals), reason}
+        finalize_parse_error(opts, positionals, rest, reason)
     end
   end
 
-  defp parse_flags([<<"--", _::binary>> = flag | _rest], opts, positionals) do
-    {Enum.reverse(opts), Enum.reverse(positionals), {:unknown_work_flag, flag}}
+  defp parse_flags([<<"--", _::binary>> = flag | rest], opts, positionals) do
+    finalize_parse_error(opts, positionals, rest, {:unknown_work_flag, flag})
   end
 
   defp parse_flags([arg | rest], opts, positionals) do
     parse_flags(rest, opts, [arg | positionals])
+  end
+
+  defp finalize_parse_error(opts, positionals, rest, reason) do
+    opts =
+      if "--json" in rest do
+        [{:json, true} | opts]
+      else
+        opts
+      end
+
+    {Enum.reverse(opts), Enum.reverse(positionals), reason}
   end
 
   defp parse_actor(value) when is_binary(value) do
@@ -243,11 +264,34 @@ defmodule Sykli.CLI.Work do
   defp validate_cli_actor_id(""), do: {:error, {:invalid_work_actor, :empty_id}}
   defp validate_cli_actor_id(_actor_id), do: :ok
 
-  defp actor(opts) do
+  defp actor(opts, runtime_opts) do
+    {default_type, default_id} = default_actor(runtime_opts)
+
     {
-      Keyword.get(opts, :actor_type, @default_actor_type),
-      Keyword.get(opts, :actor_id, @default_actor_id)
+      Keyword.get(opts, :actor_type, default_type),
+      Keyword.get(opts, :actor_id, default_id)
     }
+  end
+
+  defp default_actor(runtime_opts) do
+    {
+      Keyword.get(runtime_opts, :default_actor_type, @default_actor_type),
+      Keyword.get_lazy(runtime_opts, :default_actor_id, &default_actor_id/0)
+    }
+  end
+
+  defp default_actor_id do
+    ["SYKLI_ACTOR_ID", "USER", "USERNAME"]
+    |> Enum.find_value(fn name ->
+      case System.get_env(name) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+    end)
+    |> case do
+      nil -> "local"
+      value -> value
+    end
   end
 
   defp store_opts(runtime_opts), do: Keyword.take(runtime_opts, [:path])
@@ -297,6 +341,8 @@ defmodule Sykli.CLI.Work do
     Usage: sykli work <command>
 
     Local work item commands.
+
+    Unquoted title/body words are joined with spaces. Unknown flags are rejected.
 
     Commands:
       sykli work create "Title" [--intent TEXT] [--actor TYPE:ID]

@@ -105,12 +105,12 @@ No cache-prefixed `Sykli.Error` codes are emitted today. Cache failures currentl
 
 | Code | Description | Tier | Emitted from |
 |------|-------------|------|--------------|
-| `invalid_work_item` | A local work item command encountered structurally invalid work item data or arguments. | public-unstable | `core/lib/sykli/error.ex` |
-| `invalid_work_item_id` | A local work item id failed validation, including path traversal attempts. | public-unstable | `core/lib/sykli/error.ex` |
-| `malformed_work_item_json` | A persisted `.sykli/work/items/<id>.json` file is not valid JSON. | public-unstable | `core/lib/sykli/error.ex` |
-| `work_item_already_claimed` | A local work item claim was rejected because the item is no longer open. | public-unstable | `core/lib/sykli/error.ex` |
-| `work_item_missing_title` | `sykli work create` was called without a title. | public-unstable | `core/lib/sykli/error.ex` |
-| `work_item_not_found` | A requested local work item does not exist. | public-unstable | `core/lib/sykli/error.ex` |
+| `invalid_work_item` | A local work item command encountered structurally invalid work item data or arguments. | public-unstable | `core/lib/sykli/error.ex:654` |
+| `invalid_work_item_id` | A local work item id failed validation, including path traversal attempts. | public-unstable | `core/lib/sykli/error.ex:622` |
+| `malformed_work_item_json` | A persisted `.sykli/work/items/<id>.json` file is not valid JSON. | public-unstable | `core/lib/sykli/error.ex:643` |
+| `work_item_already_claimed` | A local work item claim was rejected because the item is no longer open. | public-unstable | `core/lib/sykli/error.ex:632` |
+| `work_item_missing_title` | `sykli work create` was called without a title. | public-unstable | `core/lib/sykli/error.ex:602` |
+| `work_item_not_found` | A requested local work item does not exist. | public-unstable | `core/lib/sykli/error.ex:612` |
 
 ### sdk
 
