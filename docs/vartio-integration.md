@@ -13,9 +13,11 @@ behavior across runs and systems, learns or applies expected envelopes, and
 judges whether an action is inside, outside, or unknown relative to those
 envelopes.
 
-The intended integration is evidence-based, not a merger. Sykli should be able
-to ask Vartio for judgment at review or gate boundaries, and Vartio should be
-able to consume Sykli run evidence as observations.
+The intended integration is evidence-based, not a merger. Keeping these
+systems separate avoids turning Sykli into a workflow-policy engine or Vartio
+into a task runner. Sykli should be able to ask Vartio for judgment at review
+or gate boundaries, and Vartio should be able to consume Sykli run evidence as
+observations.
 
 ## Why The Systems Are Separate
 
@@ -61,8 +63,10 @@ A Sykli review node can ask Vartio a scoped question:
 > Is this actor action inside the expected envelope for this mission?
 
 The Sykli node remains a review node. Vartio is one provider behind the review
-primitive boundary. The review result should be structured evidence, not only
-free-text commentary.
+primitive boundary. A Vartio-backed review primitive must return the same
+`review_result` shape and field semantics as deterministic Sykli review
+primitives; it must not introduce a bespoke result envelope. The review result
+should be structured evidence, not only free-text commentary.
 
 Example contract role:
 
@@ -110,6 +114,27 @@ Every Sykli run can produce structured evidence for Vartio:
 Vartio can ingest that evidence as observations without Sykli depending on
 Vartio at runtime.
 
+## Disagreement Semantics
+
+Before any wire integration, Sykli must decide how Vartio judgments compose
+with deterministic Sykli review primitives.
+
+The recommended first rule is conservative:
+
+- Deterministic Sykli review primitives remain authoritative for the facts they
+  evaluate.
+- Vartio remains authoritative only for envelope judgment about actor behavior.
+- A Vartio `out_of_envelope` decision must not rewrite a deterministic
+  primitive result from `passed` to `failed`.
+- A gate may still treat `out_of_envelope` as blocking according to its own
+  contract.
+- If deterministic evidence and Vartio judgment appear to conflict, Sykli
+  should preserve both results as separate evidence and let the gate decide.
+
+This keeps review facts and behavioral-envelope decisions separate. A future
+wire-format PR must lock the exact composition rule before adding runtime
+integration.
+
 ## Example Flow
 
 1. An operator requests a patch.
@@ -117,7 +142,8 @@ Vartio at runtime.
 3. An agent generates the patch as an executable task.
 4. Sykli runs deterministic review primitives, such as `api_breakage`.
 5. Sykli asks Vartio whether the proposed patch action is inside the actor's
-   expected envelope.
+   expected envelope. The call mechanism is not settled; it may be a review
+   primitive call, a gate-advisor call, or offline evidence ingestion.
 6. Vartio returns `in_envelope`, `out_of_envelope`, or `unknown` with evidence.
 7. A Sykli gate decides whether to continue, fail, or require approval.
 8. Sykli writes FALSE Protocol occurrences and run evidence.
@@ -125,9 +151,15 @@ Vartio at runtime.
 
 ## Future Wire Format
 
-Any future Sykli/Vartio wire shape should be additive and schema-validated.
-It should not overload existing `task_type`, `primitive`, `success_criteria`,
+Any future Sykli/Vartio wire shape should be additive, schema-validated, and
+version-gated when it changes the canonical contract. Vartio-specific fields
+must follow the same version discipline as `task_type` and `success_criteria`.
+They should not overload existing `task_type`, `primitive`, `success_criteria`,
 or `ai_hooks` fields.
+
+The `review_result` shape uses the review primitive result contract. Severity
+values should use the review primitive vocabulary: `info`, `warning`,
+`breaking`, or `critical`.
 
 An illustrative review result could look like:
 
@@ -172,11 +204,11 @@ judgment enters Sykli as structured evidence attached to review or gate nodes.
    identities, SCM identities, and Vartio actors?
 2. Where is envelope state stored, and how is it versioned?
 3. How are Vartio decisions audited alongside Sykli occurrences?
-4. What happens when Vartio and a Sykli deterministic review primitive
-   disagree?
+4. What transport should the first integration use: synchronous review
+   primitive call, gate-advisor call, webhook, async occurrence ingestion, or a
+   combination?
 5. Should Vartio judgments be represented as review results, gate inputs, FALSE
    Protocol occurrences, or all three?
 6. How does this map to the public FALSE Protocol event vocabulary over time?
 7. Which Vartio decisions are advisory warnings, and which are blocking gate
    decisions?
-
