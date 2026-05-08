@@ -61,14 +61,11 @@ p.task('gpu-inference')
   .run('python inference.py')
   .k8s({
     gpu: 1,
-    resources: {
-      requestMemory: '8Gi',
-      limitMemory: '16Gi',
-    },
+    memory: '16Gi',
+  })
+  .k8sRaw({
     nodeSelector: { 'gpu-type': 'nvidia-a100' },
-    tolerations: [
-      { key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' },
-    ],
+    tolerations: [{ key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' }],
   })
   .afterGroup(nodeTests);
 

@@ -294,7 +294,7 @@ Adds Kubernetes-specific options.
 ### k8sRaw
 
 ```typescript
-k8sRaw(json: string): this
+k8sRaw(json: string | Record<string, unknown>): this
 ```
 
 Adds raw Kubernetes JSON for advanced options not covered by the minimal API.
@@ -496,7 +496,7 @@ task.k8s({ memory: "4Gi", cpu: "2", gpu: 1 })
 For advanced options not covered by the minimal API (tolerations, affinity, security contexts), use raw JSON:
 
 ```typescript
-task.k8sRaw('{"nodeSelector": {"gpu": "true"}, "tolerations": [{"key": "gpu", "effect": "NoSchedule"}]}')
+task.k8sRaw({ nodeSelector: { gpu: "true" }, tolerations: [{ key: "gpu", effect: "NoSchedule" }] })
 ```
 
 ---

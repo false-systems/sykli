@@ -203,6 +203,15 @@ impl K8sOptions {
     }
 }
 
+fn validate_k8s_options(opts: &K8sOptions) -> Result<(), Vec<K8sValidationError>> {
+    let errors = opts.validate();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// Error from K8s options validation.
 #[derive(Debug, Clone)]
 pub struct K8sValidationError {
@@ -1666,17 +1675,14 @@ impl<'a> Task<'a> {
     ///
     /// # Example
     /// ```rust,ignore
-    /// use sykli::{Pipeline, K8sOptions, K8sResources};
+    /// use sykli::{Pipeline, K8sOptions};
     ///
     /// let mut p = Pipeline::new();
     /// p.task("build")
     ///     .run("cargo build")
     ///     .k8s(K8sOptions {
-    ///         resources: K8sResources {
-    ///             memory: Some("4Gi".into()),
-    ///             cpu: Some("2".into()),
-    ///             ..Default::default()
-    ///         },
+    ///         memory: Some("4Gi".into()),
+    ///         cpu: Some("2".into()),
     ///         ..Default::default()
     ///     });
     /// ```
@@ -1685,6 +1691,15 @@ impl<'a> Task<'a> {
         debug!(task = %self.pipeline.tasks[self.index].name, "setting k8s options");
         self.pipeline.tasks[self.index].k8s_options = Some(opts);
         self
+    }
+
+    /// Fallible variant of [`TaskBuilder::k8s`] that validates options immediately.
+    ///
+    /// The regular `k8s` builder remains non-panicking for embedders that build
+    /// pipelines from dynamic input; `emit_to` still validates before writing JSON.
+    pub fn try_k8s(self, opts: K8sOptions) -> Result<Self, Vec<K8sValidationError>> {
+        validate_k8s_options(&opts)?;
+        Ok(self.k8s(opts))
     }
 
     /// Adds raw Kubernetes configuration as JSON.
@@ -1866,20 +1881,17 @@ impl Pipeline {
     ///
     /// # Example
     /// ```rust,ignore
-    /// use sykli::{Pipeline, K8sOptions, K8sResources};
+    /// use sykli::{Pipeline, K8sOptions};
     ///
     /// let mut p = Pipeline::with_k8s_defaults(K8sOptions {
-    ///     namespace: Some("ci-jobs".into()),
-    ///     resources: K8sResources {
-    ///         memory: Some("2Gi".into()),
-    ///         ..Default::default()
-    ///     },
+    ///     memory: Some("2Gi".into()),
+    ///     cpu: Some("1".into()),
     ///     ..Default::default()
     /// });
     ///
     /// p.task("test").run("go test");     // inherits defaults
-    /// p.task("heavy").k8s(K8sOptions {   // overrides memory
-    ///     resources: K8sResources { memory: Some("32Gi".into()), ..Default::default() },
+    /// p.task("heavy").k8s(K8sOptions {
+    ///     memory: Some("32Gi".into()),
     ///     ..Default::default()
     /// }).run("heavy-job");
     /// ```
@@ -1891,6 +1903,14 @@ impl Pipeline {
             caches: Vec::new(),
             k8s_defaults: Some(k8s_defaults),
         }
+    }
+
+    /// Fallible variant of [`Pipeline::with_k8s_defaults`] that validates options immediately.
+    pub fn try_with_k8s_defaults(
+        k8s_defaults: K8sOptions,
+    ) -> Result<Self, Vec<K8sValidationError>> {
+        validate_k8s_options(&k8s_defaults)?;
+        Ok(Self::with_k8s_defaults(k8s_defaults))
     }
 
     /// Creates a directory resource.
@@ -4303,14 +4323,19 @@ mod tests {
         ];
         for (mem, expected_hint) in cases {
             let mut p = Pipeline::new();
-            p.task("test").run("echo test").k8s(K8sOptions {
+            let result = p.task("test").run("echo test").try_k8s(K8sOptions {
                 memory: Some(mem.to_string()),
                 ..Default::default()
             });
-            let mut buf = Vec::new();
-            let result = p.emit_to(&mut buf);
-            assert!(result.is_err(), "expected {} to fail", mem);
-            let err_msg = result.unwrap_err().to_string();
+
+            assert!(result.is_err(), "expected {} to fail at build time", mem);
+            let err_msg = result
+                .err()
+                .unwrap()
+                .into_iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
             assert!(
                 err_msg.contains(expected_hint),
                 "expected error for {} to contain '{}', got: {}",
@@ -4339,14 +4364,26 @@ mod tests {
         let cases = ["100cores", "2 cores", "fast"];
         for cpu in cases {
             let mut p = Pipeline::new();
-            p.task("test").run("echo test").k8s(K8sOptions {
+            let result = p.task("test").run("echo test").try_k8s(K8sOptions {
                 cpu: Some(cpu.to_string()),
                 ..Default::default()
             });
-            let mut buf = Vec::new();
-            let result = p.emit_to(&mut buf);
-            assert!(result.is_err(), "expected {} to fail", cpu);
+            assert!(result.is_err(), "expected {} to fail at build time", cpu);
         }
+    }
+
+    #[test]
+    fn test_k8s_regular_builder_defers_validation_to_emit() {
+        let mut p = Pipeline::new();
+        p.task("test").run("echo test").k8s(K8sOptions {
+            memory: Some("32gb".to_string()),
+            cpu: Some("fast".to_string()),
+            ..Default::default()
+        });
+
+        let mut buf = Vec::new();
+        let err = p.emit_to(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("invalid memory format"));
     }
 
     #[test]
@@ -4413,18 +4450,12 @@ mod tests {
 
     #[test]
     fn test_k8s_validation_with_defaults() {
-        // Validation should happen after merging with defaults
-        let mut p = Pipeline::with_k8s_defaults(K8sOptions {
+        let result = Pipeline::try_with_k8s_defaults(K8sOptions {
             memory: Some("invalid_memory".to_string()),
             ..Default::default()
         });
-        p.task("test").run("echo test");
-
-        let mut buf = Vec::new();
-        let result = p.emit_to(&mut buf);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
+        assert!(result.err().unwrap()[0]
             .to_string()
             .contains("invalid memory format"));
     }

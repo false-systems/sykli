@@ -562,6 +562,25 @@ describe('K8s Options (Minimal API)', () => {
     expect(task.k8s.raw).toContain('serviceAccount');
   });
 
+  it('k8sRaw accepts structured objects and stringifies them', () => {
+    const p = new Pipeline();
+    p.task('custom')
+      .run('echo test')
+      .k8sRaw({
+        serviceAccount: 'my-sa',
+        nodeSelector: { gpu: 'true' },
+        tolerations: [{ key: 'gpu', effect: 'NoSchedule' }],
+      });
+
+    const json = p.toJSON();
+    const task = json.tasks[0];
+    expect(JSON.parse(task.k8s.raw)).toEqual({
+      serviceAccount: 'my-sa',
+      nodeSelector: { gpu: 'true' },
+      tolerations: [{ key: 'gpu', effect: 'NoSchedule' }],
+    });
+  });
+
   it('omits k8s field when no options set', () => {
     const p = new Pipeline();
     p.task('test').run('npm test');
@@ -569,6 +588,17 @@ describe('K8s Options (Minimal API)', () => {
     const json = p.toJSON();
     const task = (json.tasks as any[])[0];
     expect(task.k8s).toBeUndefined();
+  });
+
+  it('merges only canonical k8s defaults into emitted JSON', () => {
+    const p = new Pipeline({ k8sDefaults: { memory: '2Gi', cpu: '1', gpu: 1 } });
+    p.task('build')
+      .run('npm run build')
+      .k8s({ memory: '4Gi' });
+
+    const json = p.toJSON();
+    const task = (json.tasks as any[])[0];
+    expect(task.k8s).toEqual({ memory: '4Gi', cpu: '1', gpu: 1 });
   });
 });
 
