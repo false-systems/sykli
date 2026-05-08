@@ -70,6 +70,58 @@ defmodule Sykli.Executor do
           }
   end
 
+  defmodule TaskRunResult do
+    @moduledoc """
+    Internal normalized result from one task execution attempt.
+    """
+
+    @enforce_keys [:status]
+    defstruct [
+      :status,
+      :error,
+      :output,
+      success_criteria_results: []
+    ]
+
+    @type status :: :ok | :error | :errored
+    @type t :: %__MODULE__{
+            status: status(),
+            error: term() | nil,
+            output: String.t() | nil,
+            success_criteria_results: [Sykli.SuccessCriteria.Result.t()]
+          }
+
+    def ok(output, success_criteria_results) do
+      %__MODULE__{
+        status: :ok,
+        output: output,
+        success_criteria_results: success_criteria_results
+      }
+    end
+
+    def error(reason, success_criteria_results \\ []) do
+      %__MODULE__{
+        status: :error,
+        error: reason,
+        output: error_output(reason),
+        success_criteria_results: success_criteria_results
+      }
+    end
+
+    def errored(reason, success_criteria_results \\ []) do
+      %__MODULE__{
+        status: :errored,
+        error: reason,
+        output: error_output(reason),
+        success_criteria_results: success_criteria_results
+      }
+    end
+
+    # Extension point for error shapes that carry user-visible process output.
+    defp error_output(%Sykli.Error{output: output}) when is_binary(output), do: output
+    defp error_output(_reason), do: nil
+  end
+
   defmodule Config do
     @moduledoc "Executor configuration to avoid parameter explosion."
 
@@ -769,33 +821,36 @@ defmodule Sykli.Executor do
          run_id,
          chain_id
        ) do
-    case Sykli.Telemetry.span_task(task.name, %{}, fn ->
-           run_and_cache(task, state, cache_key, progress, target)
-         end) do
-      result when result == :ok or (is_tuple(result) and elem(result, 0) == :ok) ->
-        duration = System.monotonic_time(:millisecond) - start_time
+    run_result =
+      Sykli.Telemetry.span_task(task.name, %{}, fn ->
+        run_and_cache(task, state, cache_key, progress, target)
+      end)
 
-        {output, success_criteria_results} =
-          case result do
-            {:ok, out, criteria_results} -> {out, criteria_results}
-            {:ok, out} -> {out, []}
-            :ok -> {nil, []}
-          end
+    case run_result do
+      %TaskRunResult{status: :ok} ->
+        duration = System.monotonic_time(:millisecond) - start_time
 
         %TaskResult{
           name: task.name,
           status: :passed,
           duration_ms: duration,
           error: nil,
-          output: output,
+          output: run_result.output,
           command: task.command,
-          success_criteria_results: success_criteria_results
+          success_criteria_results: run_result.success_criteria_results
         }
 
-      {:error, reason, _success_criteria_results} when attempt < max_attempts ->
+      %TaskRunResult{status: :error} when attempt < max_attempts ->
         Output.task_retrying(task.name, attempt, max_attempts)
 
-        maybe_emit_task_retrying(task.name, attempt, max_attempts, reason, run_id, chain_id)
+        maybe_emit_task_retrying(
+          task.name,
+          attempt,
+          max_attempts,
+          run_result.error,
+          run_id,
+          chain_id
+        )
 
         do_run_with_retry(
           task,
@@ -810,61 +865,30 @@ defmodule Sykli.Executor do
           chain_id
         )
 
-      {:error, reason} when attempt < max_attempts ->
-        Output.task_retrying(task.name, attempt, max_attempts)
-
-        maybe_emit_task_retrying(task.name, attempt, max_attempts, reason, run_id, chain_id)
-
-        do_run_with_retry(
-          task,
-          state,
-          cache_key,
-          attempt + 1,
-          max_attempts,
-          progress,
-          target,
-          start_time,
-          run_id,
-          chain_id
-        )
-
-      {:error, reason, success_criteria_results} ->
+      %TaskRunResult{status: :error} ->
         duration = System.monotonic_time(:millisecond) - start_time
-
-        output =
-          case reason do
-            %Sykli.Error{output: out} when is_binary(out) -> out
-            _ -> nil
-          end
 
         %TaskResult{
           name: task.name,
           status: :failed,
           duration_ms: duration,
-          error: reason,
-          output: output,
+          error: run_result.error,
+          output: run_result.output,
           command: task.command,
-          success_criteria_results: success_criteria_results
+          success_criteria_results: run_result.success_criteria_results
         }
 
-      {:error, reason} ->
+      %TaskRunResult{status: :errored} ->
         duration = System.monotonic_time(:millisecond) - start_time
-
-        # Extract output from Sykli.Error if available
-        output =
-          case reason do
-            %Sykli.Error{output: out} when is_binary(out) -> out
-            _ -> nil
-          end
 
         %TaskResult{
           name: task.name,
-          status: :failed,
+          status: :errored,
           duration_ms: duration,
-          error: reason,
-          output: output,
+          error: run_result.error,
+          output: run_result.output,
           command: task.command,
-          success_criteria_results: []
+          success_criteria_results: run_result.success_criteria_results
         }
     end
   end
@@ -922,11 +946,11 @@ defmodule Sykli.Executor do
                   end
 
                   maybe_github_status(name, "success")
-                  {:ok, output, success_criteria_results}
+                  TaskRunResult.ok(output, success_criteria_results)
 
                 {:error, reason, success_criteria_results} ->
                   maybe_github_status(name, "failure")
-                  {:error, reason, success_criteria_results}
+                  TaskRunResult.error(reason, success_criteria_results)
               end
 
             :ok ->
@@ -937,16 +961,16 @@ defmodule Sykli.Executor do
                   end
 
                   maybe_github_status(name, "success")
-                  {:ok, nil, success_criteria_results}
+                  TaskRunResult.ok(nil, success_criteria_results)
 
                 {:error, reason, success_criteria_results} ->
                   maybe_github_status(name, "failure")
-                  {:error, reason, success_criteria_results}
+                  TaskRunResult.error(reason, success_criteria_results)
               end
 
             {:error, reason} ->
               maybe_github_status(name, "failure")
-              {:error, reason}
+              TaskRunResult.error(reason)
           end
         after
           # Always stop services, even on failure
@@ -955,7 +979,7 @@ defmodule Sykli.Executor do
 
       {:error, reason} ->
         Output.service_start_failed(name, reason)
-        {:error, {:service_start_failed, reason}}
+        TaskRunResult.error({:service_start_failed, reason})
     end
   end
 
