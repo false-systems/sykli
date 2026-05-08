@@ -86,6 +86,7 @@ No cache-prefixed `Sykli.Error` codes are emitted today. Cache failures currentl
 | Code | Description | Tier | Emitted from |
 |------|-------------|------|--------------|
 | `internal_error` | Catch-all wrapper for unexpected Sykli failures. | public-stable | `core/lib/sykli/error.ex:540` |
+| `source_not_found` / `source_not_regular` / `symlink_not_allowed` | Internal artifact-copy reasons returned by local target storage; callers should format or wrap them before exposing a public boundary. | internal | `core/lib/sykli/target/local.ex`, `core/lib/sykli/target/storage.ex` |
 | `unknown` | JSON envelope fallback when an error-like value is not a `Sykli.Error`. | internal | `core/lib/sykli/cli/json_response.ex:51`, `core/lib/sykli/cli.ex:317` |
 
 ### runtime

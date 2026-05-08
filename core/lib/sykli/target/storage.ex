@@ -146,6 +146,7 @@ defmodule Sykli.Storage.Local do
         {:error, {:path_traversal, dest_path}}
 
       true ->
+        # Internal structured reasons; executor/target callers format them at the boundary.
         case File.lstat(abs_source) do
           {:ok, %{type: :regular}} -> copy_file(abs_source, abs_dest)
           {:ok, %{type: :directory}} -> copy_directory(abs_source, abs_dest)

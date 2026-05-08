@@ -197,6 +197,7 @@ defmodule Sykli.Target.Local do
         {:error, {:path_traversal, dest_path}}
 
       true ->
+        # Internal structured reasons; executor/target callers format them at the boundary.
         case File.lstat(abs_source) do
           {:ok, %{type: :regular}} -> copy_file(abs_source, abs_dest)
           {:ok, %{type: :directory}} -> copy_directory(abs_source, abs_dest)
@@ -221,7 +222,7 @@ defmodule Sykli.Target.Local do
     unless function_exported?(runtime, :create_network, 1) do
       {:error, {:runtime_no_services, runtime.name()}}
     else
-      network_name = deterministic_network_name(task_name, services, state.workdir)
+      network_name = Sykli.Target.NetworkName.deterministic(task_name, services, state.workdir)
 
       case runtime.create_network(network_name) do
         {:ok, _} ->
@@ -655,29 +656,6 @@ defmodule Sykli.Target.Local do
   # ─────────────────────────────────────────────────────────────────────────────
   # HELPERS
   # ─────────────────────────────────────────────────────────────────────────────
-
-  defp sanitize_name(name) do
-    String.replace(name, ~r/[^a-zA-Z0-9_-]/, "_")
-  end
-
-  defp deterministic_network_name(task_name, services, workdir) do
-    suffix =
-      :crypto.hash(:sha256, :erlang.term_to_binary({task_name, service_seed(services), workdir}))
-      |> Base.encode16(case: :lower)
-      |> binary_part(0, 12)
-
-    "sykli-#{sanitize_name(task_name)}-#{suffix}"
-  end
-
-  defp service_seed(services) do
-    Enum.map(services, fn
-      %Sykli.Graph.Service{name: name, image: image} ->
-        {name, image}
-
-      service when is_map(service) ->
-        {service[:name] || service["name"], service[:image] || service["image"]}
-    end)
-  end
 
   # Securely check if path is within base directory (prevents path traversal)
   defp path_within?(path, base) do

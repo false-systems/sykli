@@ -66,6 +66,7 @@ defmodule Sykli.Cache do
 
   defp blank?(nil), do: true
   defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: false
 
   # Env vars that affect builds (PATH excluded - too volatile)
   @relevant_env_vars ["GOPATH", "GOROOT", "CARGO_HOME", "NODE_ENV", "GOOS", "GOARCH"]
@@ -225,10 +226,22 @@ defmodule Sykli.Cache do
       |> Enum.flat_map(fn pattern ->
         expand_output_pattern(pattern, abs_workdir)
       end)
-      |> Enum.map(fn path ->
-        store_blob(path, abs_workdir)
+      |> Enum.flat_map(fn path ->
+        case store_blob(path, abs_workdir) do
+          {:ok, entry} ->
+            [entry]
+
+          {:skip, {:symlink_output_skipped, rel_path}} ->
+            IO.puts(
+              "#{IO.ANSI.yellow()}⚠ Warning: Skipping symlink output #{rel_path} for task #{task.name}#{IO.ANSI.reset()}"
+            )
+
+            []
+
+          {:skip, _reason} ->
+            []
+        end
       end)
-      |> Enum.reject(&is_nil/1)
 
     # Check if any outputs were expected but missing
     if outputs != [] && output_entries == [] do
@@ -593,14 +606,19 @@ defmodule Sykli.Cache do
       size = byte_size(content)
       rel_path = Path.relative_to(abs_path, workdir)
 
-      %{
-        "path" => rel_path,
-        "blob" => blob_hash,
-        "mode" => mode,
-        "size" => size
-      }
+      {:ok,
+       %{
+         "path" => rel_path,
+         "blob" => blob_hash,
+         "mode" => mode,
+         "size" => size
+       }}
     else
-      _ -> nil
+      {:ok, %{type: :symlink}} ->
+        {:skip, {:symlink_output_skipped, Path.relative_to(abs_path, workdir)}}
+
+      _ ->
+        {:skip, :not_stored}
     end
   end
 
