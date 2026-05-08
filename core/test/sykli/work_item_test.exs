@@ -11,7 +11,8 @@ defmodule Sykli.WorkItemTest do
                WorkItem.new("Investigate failing checkout deploy",
                  id: "work_001",
                  intent: "Find the failing deploy step",
-                 created_by: "member:yair",
+                 created_by_type: "member",
+                 created_by_id: "yair",
                  now: @now
                )
 
@@ -27,7 +28,8 @@ defmodule Sykli.WorkItemTest do
                "title" => "Investigate failing checkout deploy",
                "intent" => "Find the failing deploy step",
                "status" => "open",
-               "created_by" => "member:yair",
+               "created_by_type" => "member",
+               "created_by_id" => "yair",
                "assigned_to_type" => nil,
                "assigned_to_id" => nil,
                "created_at" => @now,
@@ -70,6 +72,19 @@ defmodule Sykli.WorkItemTest do
       assert {:error, {:invalid_assignment_type, "robot"}} =
                WorkItem.claim(item, "robot", "claude")
     end
+
+    test "does not silently overwrite an existing claim" do
+      assert {:ok, item} = WorkItem.new("Review PR", id: "work_001", now: @now)
+      assert {:ok, claimed} = WorkItem.claim(item, "agent", "claude", now: @now)
+
+      assert {:error,
+              {:work_item_already_claimed, "work_001",
+               %{
+                 "status" => "claimed",
+                 "assigned_to_type" => "agent",
+                 "assigned_to_id" => "claude"
+               }}} = WorkItem.claim(claimed, "daemon", "yair-mbp", now: @now)
+    end
   end
 
   describe "append_note/3" do
@@ -109,20 +124,73 @@ defmodule Sykli.WorkItemTest do
                  "version" => "1",
                  "title" => "Review PR",
                  "status" => "open",
+                 "created_by_type" => "member",
+                 "created_by_id" => "yair",
                  "created_at" => @now,
                  "updated_at" => @now,
                  "notes" => []
                })
 
       assert item.id == "work_001"
+      assert item.created_by_type == "member"
+      assert item.created_by_id == "yair"
     end
 
-    test "rejects invalid IDs and unsupported versions" do
+    test "rejects invalid IDs and missing or unsupported versions" do
       assert {:error, {:invalid_work_item_id, "../escape"}} =
                WorkItem.from_map(%{"id" => "../escape", "title" => "Bad"})
 
+      assert {:error, {:missing_work_item_version, nil}} =
+               WorkItem.from_map(%{"id" => "work_001", "title" => "Bad"})
+
       assert {:error, {:unsupported_work_item_version, "2"}} =
                WorkItem.from_map(%{"id" => "work_001", "title" => "Bad", "version" => "2"})
+    end
+
+    test "rejects malformed created_by actor refs" do
+      assert {:error, {:invalid_created_by, :missing_type}} =
+               WorkItem.from_map(%{
+                 "id" => "work_001",
+                 "version" => "1",
+                 "title" => "Bad",
+                 "created_by_id" => "yair"
+               })
+
+      assert {:error, {:invalid_actor_type, "robot"}} =
+               WorkItem.from_map(%{
+                 "id" => "work_001",
+                 "version" => "1",
+                 "title" => "Bad",
+                 "created_by_type" => "robot",
+                 "created_by_id" => "yair"
+               })
+    end
+
+    test "rejects malformed persisted notes" do
+      base = %{
+        "id" => "work_001",
+        "version" => "1",
+        "title" => "Review PR",
+        "status" => "open"
+      }
+
+      assert {:error, {:invalid_note, 1}} =
+               WorkItem.from_map(Map.put(base, "notes", [1]))
+
+      assert {:error, {:invalid_note, {:id, nil}}} =
+               WorkItem.from_map(Map.put(base, "notes", [%{"body" => "Missing id"}]))
+
+      assert {:error, {:invalid_note_author, :missing_type}} =
+               WorkItem.from_map(
+                 Map.put(base, "notes", [
+                   %{
+                     "id" => "note_001",
+                     "body" => "Bad author",
+                     "author_id" => "yair",
+                     "created_at" => @now
+                   }
+                 ])
+               )
     end
   end
 end

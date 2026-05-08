@@ -227,7 +227,8 @@ behavior. The persisted file is versioned and intentionally small:
   "title": "Review PR #176",
   "intent": "Check timeout and success criteria behavior",
   "status": "open",
-  "created_by": "member:yair",
+  "created_by_type": "member",
+  "created_by_id": "yair",
   "assigned_to_type": null,
   "assigned_to_id": null,
   "created_at": "2026-05-08T10:00:00Z",
@@ -239,8 +240,8 @@ behavior. The persisted file is versioned and intentionally small:
 Allowed `status` values are `open`, `claimed`, `running`, `blocked`,
 `done`, `failed`, and `cancelled`.
 
-Allowed `assigned_to_type` values are `member`, `agent`, `daemon`, or
-`null` when unassigned.
+Allowed actor type values for `created_by_type` and `assigned_to_type` are
+`member`, `agent`, `daemon`, or `null` when the actor is not known.
 
 The local work item file must not contain logs, artifacts, secrets, source
 code, environment dumps, or full stdout/stderr. It is coordination state,

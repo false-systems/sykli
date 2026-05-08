@@ -5,6 +5,11 @@ defmodule Sykli.Work.Store do
   The store persists work items under `.sykli/work/items/<id>.json` in the
   requested project path. It is intentionally local-only; coordinator sync is a
   later Team Mode phase.
+
+  Writes are atomic per file, but this store does not provide cross-process
+  locking. Read-modify-write operations, including claims, enforce model rules
+  for the loaded item and remain last-writer-wins under concurrent writers until
+  the coordinator store adds transactional claims.
   """
 
   alias Sykli.WorkItem
@@ -120,9 +125,10 @@ defmodule Sykli.Work.Store do
   end
 
   defp encode(%WorkItem{} = item) do
-    {:ok, Jason.encode!(WorkItem.to_map(item), pretty: true)}
-  rescue
-    error -> {:error, {:work_item_encode_failed, error}}
+    case Jason.encode(WorkItem.to_map(item), pretty: true) do
+      {:ok, json} -> {:ok, json}
+      {:error, error} -> {:error, {:work_item_encode_failed, error}}
+    end
   end
 
   defp decode(json, path) do

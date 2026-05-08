@@ -10,7 +10,8 @@ defmodule Sykli.WorkItem do
 
   @version "1"
   @statuses ~w(open claimed running blocked done failed cancelled)
-  @assignment_types ~w(member agent daemon)
+  @actor_types ~w(member agent daemon)
+  @assignment_types @actor_types
 
   @enforce_keys [:id, :title, :status, :created_at, :updated_at]
   defstruct [
@@ -19,7 +20,8 @@ defmodule Sykli.WorkItem do
     title: nil,
     intent: nil,
     status: "open",
-    created_by: nil,
+    created_by_type: nil,
+    created_by_id: nil,
     assigned_to_type: nil,
     assigned_to_id: nil,
     created_at: nil,
@@ -40,7 +42,8 @@ defmodule Sykli.WorkItem do
           title: String.t(),
           intent: String.t() | nil,
           status: status(),
-          created_by: String.t() | nil,
+          created_by_type: assignment_type(),
+          created_by_id: String.t() | nil,
           assigned_to_type: assignment_type(),
           assigned_to_id: String.t() | nil,
           created_at: String.t(),
@@ -57,6 +60,9 @@ defmodule Sykli.WorkItem do
   @doc "Returns valid assignment type strings."
   def assignment_types, do: @assignment_types
 
+  @doc "Returns valid work item actor type strings."
+  def actor_types, do: @actor_types
+
   @doc "Builds a new work item."
   def new(title, opts \\ [])
 
@@ -65,10 +71,12 @@ defmodule Sykli.WorkItem do
 
     attrs = %{
       id: Keyword.get_lazy(opts, :id, &Sykli.ULID.generate/0),
+      version: @version,
       title: String.trim(title),
       intent: blank_to_nil(Keyword.get(opts, :intent)),
       status: Keyword.get(opts, :status, "open"),
-      created_by: blank_to_nil(Keyword.get(opts, :created_by)),
+      created_by_type: Keyword.get(opts, :created_by_type),
+      created_by_id: blank_to_nil(Keyword.get(opts, :created_by_id)),
       assigned_to_type: Keyword.get(opts, :assigned_to_type),
       assigned_to_id: blank_to_nil(Keyword.get(opts, :assigned_to_id)),
       created_at: now,
@@ -95,7 +103,8 @@ defmodule Sykli.WorkItem do
 
   @doc "Claims a work item for a member, agent, or daemon."
   def claim(%__MODULE__{} = item, assignment_type, assignment_id, opts \\ []) do
-    with :ok <- validate_assignment_type(assignment_type),
+    with :ok <- ensure_claimable(item),
+         :ok <- validate_assignment_type(assignment_type),
          :ok <- validate_assignment_id(assignment_id) do
       now = Keyword.get_lazy(opts, :now, &now_iso8601/0)
 
@@ -143,7 +152,8 @@ defmodule Sykli.WorkItem do
       "title" => item.title,
       "intent" => item.intent,
       "status" => item.status,
-      "created_by" => item.created_by,
+      "created_by_type" => item.created_by_type,
+      "created_by_id" => item.created_by_id,
       "assigned_to_type" => item.assigned_to_type,
       "assigned_to_id" => item.assigned_to_id,
       "created_at" => item.created_at,
@@ -160,21 +170,27 @@ defmodule Sykli.WorkItem do
          :ok <- validate_title(attrs["title"]),
          :ok <- validate_version(attrs["version"]),
          :ok <- validate_status(attrs["status"] || "open"),
+         :ok <- validate_created_by(attrs["created_by_type"], attrs["created_by_id"]),
          :ok <- validate_assignment_type(attrs["assigned_to_type"]),
+         :ok <-
+           validate_optional_assignment_id(attrs["assigned_to_type"], attrs["assigned_to_id"]),
          :ok <- validate_notes(attrs["notes"] || []) do
+      notes = Enum.map(attrs["notes"] || [], &normalize_keys/1)
+
       {:ok,
        %__MODULE__{
          id: attrs["id"],
-         version: attrs["version"] || @version,
+         version: attrs["version"],
          title: String.trim(attrs["title"]),
          intent: blank_to_nil(attrs["intent"]),
          status: attrs["status"] || "open",
-         created_by: blank_to_nil(attrs["created_by"]),
+         created_by_type: attrs["created_by_type"],
+         created_by_id: blank_to_nil(attrs["created_by_id"]),
          assigned_to_type: attrs["assigned_to_type"],
          assigned_to_id: blank_to_nil(attrs["assigned_to_id"]),
          created_at: attrs["created_at"] || now_iso8601(),
          updated_at: attrs["updated_at"] || attrs["created_at"] || now_iso8601(),
-         notes: attrs["notes"] || []
+         notes: notes
        }}
     end
   end
@@ -198,15 +214,55 @@ defmodule Sykli.WorkItem do
   def validate_assignment_type(type) when type in @assignment_types, do: :ok
   def validate_assignment_type(type), do: {:error, {:invalid_assignment_type, type}}
 
+  def validate_actor_type(nil), do: :ok
+  def validate_actor_type(type) when type in @actor_types, do: :ok
+  def validate_actor_type(type), do: {:error, {:invalid_actor_type, type}}
+
   defp validate_title(title) when is_binary(title) do
     if String.trim(title) == "", do: {:error, {:invalid_title, :empty}}, else: :ok
   end
 
   defp validate_title(title), do: {:error, {:invalid_title, title}}
 
-  defp validate_version(nil), do: :ok
+  defp validate_version(nil), do: {:error, {:missing_work_item_version, nil}}
   defp validate_version(@version), do: :ok
   defp validate_version(version), do: {:error, {:unsupported_work_item_version, version}}
+
+  defp ensure_claimable(%__MODULE__{status: "open"}), do: :ok
+
+  defp ensure_claimable(%__MODULE__{} = item) do
+    {:error,
+     {:work_item_already_claimed, item.id,
+      %{
+        "status" => item.status,
+        "assigned_to_type" => item.assigned_to_type,
+        "assigned_to_id" => item.assigned_to_id
+      }}}
+  end
+
+  defp validate_created_by(nil, nil), do: :ok
+  defp validate_created_by(nil, actor_id) when actor_id in [nil, ""], do: :ok
+  defp validate_created_by(nil, _actor_id), do: {:error, {:invalid_created_by, :missing_type}}
+
+  defp validate_created_by(actor_type, actor_id) do
+    with :ok <- validate_actor_type(actor_type),
+         :ok <- validate_actor_id(actor_id, :created_by) do
+      :ok
+    end
+  end
+
+  defp validate_optional_assignment_id(nil, nil), do: :ok
+
+  defp validate_optional_assignment_id(nil, assignment_id) when assignment_id in [nil, ""],
+    do: :ok
+
+  defp validate_optional_assignment_id(nil, _assignment_id) do
+    {:error, {:invalid_assignment_id, :missing_type}}
+  end
+
+  defp validate_optional_assignment_id(_assignment_type, assignment_id) do
+    validate_assignment_id(assignment_id)
+  end
 
   defp validate_assignment_id(nil), do: {:error, {:invalid_assignment_id, :empty}}
 
@@ -216,8 +272,54 @@ defmodule Sykli.WorkItem do
 
   defp validate_assignment_id(id), do: {:error, {:invalid_assignment_id, id}}
 
-  defp validate_notes(notes) when is_list(notes), do: :ok
+  defp validate_actor_id(nil, field), do: {:error, {:invalid_actor_id, field, :empty}}
+
+  defp validate_actor_id(id, field) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, {:invalid_actor_id, field, :empty}}, else: :ok
+  end
+
+  defp validate_actor_id(id, field), do: {:error, {:invalid_actor_id, field, id}}
+
+  defp validate_notes(notes) when is_list(notes) do
+    Enum.reduce_while(notes, :ok, fn note, :ok ->
+      case validate_note(note) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   defp validate_notes(notes), do: {:error, {:invalid_notes, notes}}
+
+  defp validate_note(note) when is_map(note) do
+    attrs = normalize_keys(note)
+
+    with :ok <- validate_note_string(attrs["id"], :id),
+         :ok <- validate_note_string(attrs["body"], :body),
+         :ok <- validate_note_string(attrs["created_at"], :created_at),
+         :ok <- validate_note_author(attrs["author_type"], attrs["author_id"]) do
+      :ok
+    end
+  end
+
+  defp validate_note(note), do: {:error, {:invalid_note, note}}
+
+  defp validate_note_string(value, field) when is_binary(value) do
+    if String.trim(value) == "", do: {:error, {:invalid_note, {field, :empty}}}, else: :ok
+  end
+
+  defp validate_note_string(value, field), do: {:error, {:invalid_note, {field, value}}}
+
+  defp validate_note_author(nil, nil), do: :ok
+  defp validate_note_author(nil, author_id) when author_id in [nil, ""], do: :ok
+  defp validate_note_author(nil, _author_id), do: {:error, {:invalid_note_author, :missing_type}}
+
+  defp validate_note_author(author_type, author_id) do
+    with :ok <- validate_actor_type(author_type),
+         :ok <- validate_actor_id(author_id, :note_author) do
+      :ok
+    end
+  end
 
   defp normalize_keys(map) do
     Map.new(map, fn

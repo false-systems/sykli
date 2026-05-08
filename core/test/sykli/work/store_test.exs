@@ -14,7 +14,8 @@ defmodule Sykli.Work.StoreTest do
                Store.create("Investigate failing checkout deploy",
                  id: "work_001",
                  intent: "Find the failing deploy step",
-                 created_by: "member:yair",
+                 created_by_type: "member",
+                 created_by_id: "yair",
                  now: @now,
                  path: tmp_dir
                )
@@ -28,6 +29,8 @@ defmodule Sykli.Work.StoreTest do
       persisted = path |> File.read!() |> Jason.decode!()
       assert persisted["version"] == "1"
       assert persisted["title"] == "Investigate failing checkout deploy"
+      assert persisted["created_by_type"] == "member"
+      assert persisted["created_by_id"] == "yair"
       refute Map.has_key?(persisted, "logs")
       refute Map.has_key?(persisted, "artifacts")
       refute Map.has_key?(persisted, "secrets")
@@ -78,6 +81,19 @@ defmodule Sykli.Work.StoreTest do
       assert claimed.status == "claimed"
       assert claimed.assigned_to_type == "daemon"
       assert claimed.assigned_to_id == "yair-mbp"
+    end
+
+    test "does not overwrite an existing claim", %{tmp_dir: tmp_dir} do
+      assert {:ok, _} = Store.create("Review PR", id: "work_001", now: @now, path: tmp_dir)
+      assert {:ok, _} = Store.claim("work_001", "agent", "claude", now: @now, path: tmp_dir)
+
+      assert {:error,
+              {:work_item_already_claimed, "work_001",
+               %{
+                 "status" => "claimed",
+                 "assigned_to_type" => "agent",
+                 "assigned_to_id" => "claude"
+               }}} = Store.claim("work_001", "daemon", "yair-mbp", now: @now, path: tmp_dir)
     end
 
     test "appends a note", %{tmp_dir: tmp_dir} do
@@ -136,6 +152,25 @@ defmodule Sykli.Work.StoreTest do
       File.write!(Path.join(dir, "work_001.json"), Jason.encode!(%{"id" => "work_001"}))
 
       assert {:error, {:invalid_title, nil}} = Store.get("work_001", path: tmp_dir)
+    end
+
+    test "missing persisted version is explicit", %{tmp_dir: tmp_dir} do
+      dir = Store.items_dir(path: tmp_dir)
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "work_001.json"),
+        Jason.encode!(%{
+          "id" => "work_001",
+          "title" => "Review PR",
+          "status" => "open",
+          "created_at" => @now,
+          "updated_at" => @now,
+          "notes" => []
+        })
+      )
+
+      assert {:error, {:missing_work_item_version, nil}} = Store.get("work_001", path: tmp_dir)
     end
 
     test "save validates work item IDs", %{tmp_dir: tmp_dir} do
