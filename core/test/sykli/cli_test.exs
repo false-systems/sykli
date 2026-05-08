@@ -137,6 +137,7 @@ defmodule Sykli.CLITest do
   describe "global option normalization" do
     test "moves leading --json after JSON-supporting subcommand" do
       assert Sykli.CLI.normalize_global_json(["--json", "validate"]) == ["validate", "--json"]
+      assert Sykli.CLI.normalize_global_json(["--json", "work", "list"]) == ["work", "--json", "list"]
     end
 
     test "leaves default run JSON form unchanged" do
