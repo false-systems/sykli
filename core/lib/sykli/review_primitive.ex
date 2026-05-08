@@ -35,7 +35,7 @@ defmodule Sykli.ReviewPrimitive do
           }
   end
 
-  @api_breakage_primitives ~w(api_breakage api-breakage)
+  @api_breakage_primitive "api_breakage"
 
   @doc """
   Evaluate the review primitive for a review node.
@@ -45,8 +45,9 @@ defmodule Sykli.ReviewPrimitive do
     primitive = Task.primitive(task)
 
     cond do
-      primitive in @api_breakage_primitives ->
-        api_breakage_runner(opts).evaluate(task, state, opts)
+      primitive == @api_breakage_primitive ->
+        runner = api_breakage_runner(opts)
+        classify_result(runner.evaluate(task, state, opts))
 
       is_binary(primitive) ->
         unsupported(task, primitive, "unsupported review primitive: #{primitive}")
@@ -61,6 +62,12 @@ defmodule Sykli.ReviewPrimitive do
   """
   @spec failed?(Result.t()) :: boolean()
   def failed?(%Result{status: status}), do: status in [:failed, :unsupported, :errored]
+
+  defp classify_result({:ok, %Result{} = result}) do
+    if failed?(result), do: {:error, result}, else: {:ok, result}
+  end
+
+  defp classify_result({:error, %Result{} = result}), do: {:error, result}
 
   defp api_breakage_runner(opts) do
     Keyword.get(opts, :review_primitive_runner) ||

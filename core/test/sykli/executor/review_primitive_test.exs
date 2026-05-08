@@ -18,7 +18,7 @@ defmodule Sykli.Executor.ReviewPrimitiveTest do
          message: "no public API breakage detected",
          tool: "fixture",
          findings: [],
-         evidence: %{"task" => task.name}
+         evidence: Sykli.Executor.ReviewPrimitiveTest.evidence(task)
        }}
     end
   end
@@ -33,7 +33,21 @@ defmodule Sykli.Executor.ReviewPrimitiveTest do
          message: "public API breakage detected",
          tool: "fixture",
          findings: [%{"symbol" => "Client.connect", "change" => "removed"}],
-         evidence: %{"task" => task.name}
+         evidence: Sykli.Executor.ReviewPrimitiveTest.evidence(task)
+       }}
+    end
+  end
+
+  defmodule MisclassifiedFailingRunner do
+    def evaluate(task, _state, _opts) do
+      {:ok,
+       %Result{
+         review_type: "api_breakage",
+         status: :failed,
+         severity: "breaking",
+         message: "runner returned ok tuple with failed status",
+         findings: [],
+         evidence: Sykli.Executor.ReviewPrimitiveTest.evidence(task)
        }}
     end
   end
@@ -118,6 +132,40 @@ defmodule Sykli.Executor.ReviewPrimitiveTest do
             ]} = Executor.run([task], graph(task), target: Local)
   end
 
+  test "hyphenated api-breakage spelling is rejected as non-canonical" do
+    task = review_task("review-api", primitive: "api-breakage")
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "review_primitive_failed"},
+                review_result: %Result{
+                  review_type: "api-breakage",
+                  status: :unsupported,
+                  message: "unsupported review primitive: api-breakage"
+                }
+              }
+            ]} = Executor.run([task], graph(task), target: Local)
+  end
+
+  test "failed result status fails even if runner returns ok tuple" do
+    Application.put_env(:sykli, :api_breakage_review_runner, MisclassifiedFailingRunner)
+    task = review_task("review-api")
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                review_result: %Result{
+                  review_type: "api_breakage",
+                  status: :failed,
+                  message: "runner returned ok tuple with failed status"
+                }
+              }
+            ]} = Executor.run([task], graph(task), target: Local)
+  end
+
   defp review_task(name, opts \\ []) do
     primitive = Keyword.get(opts, :primitive, "api_breakage")
 
@@ -140,4 +188,12 @@ defmodule Sykli.Executor.ReviewPrimitiveTest do
   end
 
   defp graph(%Task{} = task), do: %{task.name => task}
+
+  def evidence(%Task{} = task) do
+    %{
+      "task" => task.name,
+      "context" => Task.context(task),
+      "agent" => Task.agent(task)
+    }
+  end
 end
