@@ -661,6 +661,16 @@ defmodule Sykli.Error do
     }
   end
 
+  def contract_hash_failed(path, reason) do
+    %__MODULE__{
+      code: "contract_hash_failed",
+      type: :validation,
+      message: "failed to compute contract hash for #{path}: #{inspect(reason)}",
+      step: :validate,
+      hints: ["check that the detected Sykli SDK file is readable"]
+    }
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # INTERNAL ERRORS
   # ─────────────────────────────────────────────────────────────────────────────
@@ -763,6 +773,7 @@ defmodule Sykli.Error do
   def wrap({:invalid_notes, notes}), do: invalid_work_item({:invalid_notes, notes})
   def wrap({:invalid_note, reason}), do: invalid_work_item({:invalid_note, reason})
   def wrap({:invalid_note_author, reason}), do: invalid_work_item({:invalid_note_author, reason})
+  def wrap({:contract_hash_failed, path, reason}), do: contract_hash_failed(path, reason)
 
   # Validation errors
   def wrap({:cycle_detected, path}), do: cycle_detected(path)

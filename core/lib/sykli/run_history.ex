@@ -58,6 +58,8 @@ defmodule Sykli.RunHistory do
       :git_branch,
       :tasks,
       :overall,
+      :work_item_id,
+      :contract_hash,
       :platform,
       :verification,
       verified: false
@@ -70,6 +72,8 @@ defmodule Sykli.RunHistory do
             git_branch: String.t(),
             tasks: [Sykli.RunHistory.TaskResult.t()],
             overall: :passed | :failed,
+            work_item_id: String.t() | nil,
+            contract_hash: String.t() | nil,
             platform: String.t() | nil,
             verified: boolean(),
             verification: map() | nil
@@ -223,6 +227,17 @@ defmodule Sykli.RunHistory do
     end
   end
 
+  @doc """
+  Lists recent runs associated with a local work item.
+  """
+  @spec list_by_work_item(String.t(), keyword()) :: {:ok, [Run.t()]} | {:error, term()}
+  def list_by_work_item(work_item_id, opts \\ []) do
+    with :ok <- Sykli.WorkItem.validate_id(work_item_id),
+         {:ok, runs} <- list(opts) do
+      {:ok, Enum.filter(runs, &(&1.work_item_id == work_item_id))}
+    end
+  end
+
   # ----- PRIVATE -----
 
   defp timestamp_to_filename(%DateTime{} = dt) do
@@ -263,6 +278,8 @@ defmodule Sykli.RunHistory do
       tasks: Enum.map(run.tasks, &encode_task_result/1),
       overall: Atom.to_string(run.overall)
     }
+    |> maybe_add(:work_item_id, run.work_item_id)
+    |> maybe_add(:contract_hash, run.contract_hash)
     |> maybe_add(:platform, run.platform)
     |> maybe_add(:verified, if(run.verified, do: true, else: nil))
     |> maybe_add(:verification, run.verification)
@@ -296,6 +313,8 @@ defmodule Sykli.RunHistory do
       git_branch: data["git_branch"],
       tasks: Enum.map(data["tasks"] || [], &decode_task_result/1),
       overall: String.to_existing_atom(data["overall"]),
+      work_item_id: data["work_item_id"],
+      contract_hash: data["contract_hash"],
       platform: data["platform"],
       verified: data["verified"] || false,
       verification: data["verification"]

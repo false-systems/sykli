@@ -62,7 +62,7 @@ defmodule Sykli do
 
               # Save run history if enabled
               if save_history do
-                save_run_history(path, result, filtered_graph)
+                save_run_history(path, result, filtered_graph, opts)
               end
 
               result
@@ -186,7 +186,7 @@ defmodule Sykli do
   end
 
   # Save run history and generate AI context after execution
-  defp save_run_history(path, result, graph) do
+  defp save_run_history(path, result, graph, opts) do
     timestamp = DateTime.utc_now()
     run_id = generate_run_id()
 
@@ -206,7 +206,9 @@ defmodule Sykli do
       git_ref: get_git_ref(path),
       git_branch: get_git_branch(path),
       tasks: task_results_with_cause,
-      overall: overall
+      overall: overall,
+      work_item_id: Keyword.get(opts, :work_item_id),
+      contract_hash: Keyword.get(opts, :contract_hash)
     }
 
     # Write per-task logs
