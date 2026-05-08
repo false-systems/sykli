@@ -15,6 +15,7 @@ defmodule Sykli.Error do
   |------|----------|-------------|
   | task_failed | execution | Task command failed |
   | task_timeout | execution | Task timed out |
+  | review_primitive_failed | execution | Review primitive failed or is unsupported |
   | success_criteria_failed | execution | Declared success criteria failed |
   | unsupported_success_criteria_for_target | execution | Target cannot evaluate declared success criteria |
   | missing_secrets | execution | Missing secrets |
@@ -171,6 +172,36 @@ defmodule Sykli.Error do
       ],
       notes: []
     }
+  end
+
+  @doc """
+  review_primitive_failed: Review primitive failed or could not be evaluated.
+  """
+  def review_primitive_failed(task, review_result) do
+    %__MODULE__{
+      code: "review_primitive_failed",
+      type: :execution,
+      message: "review primitive failed for '#{task}'",
+      task: task,
+      step: :run,
+      hints: review_primitive_hints(review_result),
+      notes: [
+        "review_type: #{review_result.review_type}",
+        "status: #{review_result.status}",
+        "message: #{review_result.message}"
+      ]
+    }
+  end
+
+  defp review_primitive_hints(%{status: :unsupported, review_type: "api_breakage"}) do
+    [
+      "configure an api_breakage adapter with Application.put_env(:sykli, :api_breakage_review_runner, MyAdapter)",
+      "see docs/review-primitives.md for the review_result contract"
+    ]
+  end
+
+  defp review_primitive_hints(_review_result) do
+    ["inspect the review_result evidence and fix or configure the review primitive"]
   end
 
   @doc """

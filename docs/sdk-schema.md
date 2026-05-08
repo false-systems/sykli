@@ -329,6 +329,11 @@ left out of the current experimental contract. The schema rejects task execution
 fields on review nodes: `command`, `outputs`, `gate`, `container`, `services`,
 `k8s`, `mounts`, `retry`, `timeout`, `task_type`, and `success_criteria`.
 
+At execution time, review nodes invoke deterministic review primitives rather
+than shell commands. The first primitive boundary is `api_breakage`; it returns
+structured `review_result` data and fails explicitly when no adapter is
+configured. See [review-primitives.md](review-primitives.md).
+
 ## Normalization behavior
 
 Documented engine normalizations the schema does not perform:
