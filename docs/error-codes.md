@@ -126,7 +126,7 @@ responses that surface graph parse failures.
 
 | Type | Description | Tier | Emitted from |
 |------|-------------|------|--------------|
-| `empty_contract_schema_version` | The top-level `version` field is an empty or whitespace-only string. | public-unstable | `core/lib/sykli/contract_schema_version.ex:37` |
-| `invalid_contract_schema_version_type` | The top-level `version` field is present but is not a string. | public-unstable | `core/lib/sykli/contract_schema_version.ex:48` |
-| `missing_contract_schema_version` | The contract has no top-level `version` field. | public-unstable | `core/lib/sykli/contract_schema_version.ex:30` |
-| `unsupported_contract_schema_version` | The top-level `version` string is not one of the supported contract schema versions. | public-unstable | `core/lib/sykli/contract_schema_version.ex:44` |
+| `empty_contract_schema_version` | The top-level `version` field is an empty or whitespace-only string. | public-stable | `core/lib/sykli/contract_schema_version.ex:37` |
+| `invalid_contract_schema_version_type` | The top-level `version` field is present but is not a string. | public-stable | `core/lib/sykli/contract_schema_version.ex:48` |
+| `missing_contract_schema_version` | The contract has no top-level `version` field. | public-stable | `core/lib/sykli/contract_schema_version.ex:30` |
+| `unsupported_contract_schema_version` | The top-level `version` string is not one of the supported contract schema versions. | public-stable | `core/lib/sykli/contract_schema_version.ex:44` |

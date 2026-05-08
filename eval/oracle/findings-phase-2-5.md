@@ -3,11 +3,11 @@
 These are requirement-level gaps found by the new adversarial black-box and
 oracle cases. Fixes are intentionally out of scope for this PR.
 
-## Status note after PR #173-#177
+## Current status notes
 
 This file is historical audit input. The table below is not deleted because it
 records what the oracle observed at the time, but several findings are stale
-after the contract cleanup PRs.
+after the contract cleanup PRs. Status rows are current as of 2026-05-08.
 
 | Case(s) | Status | Evidence / next action |
 | --- | --- | --- |
