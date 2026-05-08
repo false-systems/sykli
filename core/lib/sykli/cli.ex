@@ -317,6 +317,7 @@ defmodule Sykli.CLI do
         cached: r.status == :cached
       }
       |> maybe_add_success_criteria_results(r.success_criteria_results)
+      |> maybe_add_review_result(r.review_result)
 
     case r.error do
       %Sykli.Error{} = err ->
@@ -334,6 +335,24 @@ defmodule Sykli.CLI do
 
   defp maybe_add_success_criteria_results(base, results) do
     Map.put(base, :success_criteria_results, Enum.map(results, &success_criteria_result_to_map/1))
+  end
+
+  defp maybe_add_review_result(base, nil), do: base
+
+  defp maybe_add_review_result(base, result) do
+    Map.put(base, :review_result, review_result_to_map(result))
+  end
+
+  defp review_result_to_map(result) do
+    %{
+      review_type: result.review_type,
+      status: Atom.to_string(result.status),
+      severity: result.severity,
+      message: result.message,
+      tool: result.tool,
+      findings: result.findings,
+      evidence: result.evidence
+    }
   end
 
   defp success_criteria_result_to_map(result) do

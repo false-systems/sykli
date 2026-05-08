@@ -55,6 +55,7 @@ defmodule Sykli.Executor do
       :error,
       :output,
       :command,
+      :review_result,
       success_criteria_results: []
     ]
 
@@ -66,6 +67,7 @@ defmodule Sykli.Executor do
             error: term() | nil,
             output: String.t() | nil,
             command: String.t() | nil,
+            review_result: Sykli.ReviewPrimitive.Result.t() | nil,
             success_criteria_results: [Sykli.SuccessCriteria.Result.t()]
           }
   end
@@ -525,77 +527,107 @@ defmodule Sykli.Executor do
   defp run_single(%Sykli.Graph.Task{} = task, state, progress, target, run_id) do
     start_time = System.monotonic_time(:millisecond)
 
-    # Handle gates (approval points)
-    if Sykli.Graph.Task.gate?(task) do
-      run_gate(task, state, progress, run_id)
-    else
-      # Check condition first
-      if should_run?(task) do
-        # Resolve secret_refs before execution
-        task = resolve_secret_refs(task)
+    cond do
+      Sykli.Graph.Task.review?(task) ->
+        run_review(task, state, progress)
 
-        # OIDC credential exchange (if configured)
-        try do
-          case OIDCService.exchange(task, state) do
-            {:ok, oidc_env} ->
-              # Merge OIDC env vars into task env
-              task =
-                if map_size(oidc_env) > 0 do
-                  %{task | env: Map.merge(task.env || %{}, oidc_env)}
-                else
-                  task
+      Sykli.Graph.Task.gate?(task) ->
+        run_gate(task, state, progress, run_id)
+
+      true ->
+        # Check condition first
+        if should_run?(task) do
+          # Resolve secret_refs before execution
+          task = resolve_secret_refs(task)
+
+          # OIDC credential exchange (if configured)
+          try do
+            case OIDCService.exchange(task, state) do
+              {:ok, oidc_env} ->
+                # Merge OIDC env vars into task env
+                task =
+                  if map_size(oidc_env) > 0 do
+                    %{task | env: Map.merge(task.env || %{}, oidc_env)}
+                  else
+                    task
+                  end
+
+                # Validate required secrets are present (via target)
+                case validate_secrets(task, state, target) do
+                  :ok ->
+                    run_task_with_cache(task, state, progress, target, start_time, run_id)
+
+                  {:error, missing} ->
+                    Output.missing_secrets(task.name, missing)
+
+                    duration = System.monotonic_time(:millisecond) - start_time
+
+                    %TaskResult{
+                      name: task.name,
+                      status: :errored,
+                      duration_ms: duration,
+                      error: Error.missing_secrets(task.name, missing),
+                      command: task.command
+                    }
                 end
 
-              # Validate required secrets are present (via target)
-              case validate_secrets(task, state, target) do
-                :ok ->
-                  run_task_with_cache(task, state, progress, target, start_time, run_id)
+              {:error, reason} ->
+                Output.oidc_failed(task.name, reason)
 
-                {:error, missing} ->
-                  Output.missing_secrets(task.name, missing)
+                duration = System.monotonic_time(:millisecond) - start_time
 
-                  duration = System.monotonic_time(:millisecond) - start_time
-
-                  %TaskResult{
-                    name: task.name,
-                    status: :errored,
-                    duration_ms: duration,
-                    error: Error.missing_secrets(task.name, missing),
-                    command: task.command
-                  }
-              end
-
-            {:error, reason} ->
-              Output.oidc_failed(task.name, reason)
-
-              duration = System.monotonic_time(:millisecond) - start_time
-
-              %TaskResult{
-                name: task.name,
-                status: :errored,
-                duration_ms: duration,
-                error: Error.internal("OIDC credential exchange failed: #{reason}"),
-                command: task.command
-              }
+                %TaskResult{
+                  name: task.name,
+                  status: :errored,
+                  duration_ms: duration,
+                  error: Error.internal("OIDC credential exchange failed: #{reason}"),
+                  command: task.command
+                }
+            end
+          after
+            OIDCService.cleanup_temp_files()
           end
-        after
-          OIDCService.cleanup_temp_files()
+        else
+          Output.task_skipped("", task.name, "condition not met")
+
+          maybe_emit_task_skipped(task.name, :condition_not_met, run_id)
+          duration = System.monotonic_time(:millisecond) - start_time
+
+          %TaskResult{
+            name: task.name,
+            status: :skipped,
+            duration_ms: duration,
+            error: nil,
+            command: task.command
+          }
         end
-      else
-        Output.task_skipped("", task.name, "condition not met")
-
-        maybe_emit_task_skipped(task.name, :condition_not_met, run_id)
-        duration = System.monotonic_time(:millisecond) - start_time
-
-        %TaskResult{
-          name: task.name,
-          status: :skipped,
-          duration_ms: duration,
-          error: nil,
-          command: task.command
-        }
-      end
     end
+  end
+
+  defp run_review(%Sykli.Graph.Task{} = task, state, progress) do
+    prefix = progress_prefix(progress)
+    start_time = System.monotonic_time(:millisecond)
+
+    Output.task_starting(prefix, task.name, "review: #{Sykli.Graph.Task.primitive(task)}")
+
+    {status, error, review_result} =
+      case Sykli.ReviewPrimitive.evaluate(task, state) do
+        {:ok, result} ->
+          {:passed, nil, result}
+
+        {:error, result} ->
+          Output.task_failed(prefix, task.name, result.message)
+          {:failed, Error.review_primitive_failed(task.name, result), result}
+      end
+
+    %TaskResult{
+      name: task.name,
+      status: status,
+      duration_ms: System.monotonic_time(:millisecond) - start_time,
+      error: error,
+      command: nil,
+      review_result: review_result
+    }
   end
 
   defp run_gate(%Sykli.Graph.Task{} = task, _state, progress, run_id) do
