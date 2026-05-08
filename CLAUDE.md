@@ -244,7 +244,7 @@ Key env vars (see `cli.ex` and module docs for full details):
 
 Cases use prefixed IDs. Original 7 categories: `POS` (positive — works as promised), `NEG` (rejects what it should), `SYS` (cross-boundary behavior), `INT` (SDK-to-engine integration), `PERF` (speed/resources), `LOAD` (volume), `ABN` (abnormal inputs). Phase 2.5 added 6 contract-driven prefixes: `CACHE` (cache contract + isolation), `JSON` (envelope contract), `DET` (determinism / NoWallClock replay contract), `SDK` (cross-language parity), `UI` (visual reset contract — banned vocabulary, glyph language), `GH` (GitHub-native receiver security contract).
 
-Some cases carry `expected_failure: true`, which marks them as known-broken contract assertions hiding open bugs (see `eval/oracle/findings-phase-2-5.md`). When fixing the underlying bug, **remove the flag**; the case must pass naturally without it. Adding new `expected_failure: true` cases is an anti-pattern — open a tracking issue instead.
+Some cases carry `expected_failure: true`, which marks them as known-broken contract assertions hiding open bugs. When fixing the underlying bug, **remove the flag**; the case must pass naturally without it. Adding new `expected_failure: true` cases is an anti-pattern — open a tracking issue instead.
 
 ## Patterns & Conventions
 
@@ -311,4 +311,3 @@ These shape how code decisions get made. They are not aspirational — the test 
 
 - `--timeout` flag doesn't enforce timeouts on local target (tasks run to completion)
 - Docker-tagged tests are skipped when no Docker daemon is available; run them explicitly with `mix test.docker`.
-- See `docs/deep-dive-findings.md` for tracked issues — security (SEC-001–007) and reliability (REL-001–008) items are all resolved; test coverage (TEST-001–010) resolved; architecture items (ARCH-001–010) remain as long-term structural improvements

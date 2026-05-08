@@ -144,12 +144,8 @@ This release crystallizes the v0.6 line: a Nordic-minimal CLI, a fully decoupled
 
 ### Documentation
 
-- `docs/deep-dive-findings.md` — 37 tracked issues across security/reliability/architecture/test coverage; the SEC and REL series above are the closure.
 - `docs/runtimes.md` — runtime selection priority chain.
-- `docs/cache-key-investigation.md` — determinism investigation behind the cache fingerprint change.
-- `docs/eventqueue-flake-investigation.md` — property-test triage.
 - `docs/github-native.md` — Phase 1 setup walkthrough.
-- `CODEX_PROMPT_PHASE_1.md` and `CODEX_PROMPT_PHASE_2.md` — kickoff prompts for AI coding agents driving the GitHub-native rollout.
 
 ### SDK & ecosystem
 
