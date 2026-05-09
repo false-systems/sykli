@@ -1402,6 +1402,157 @@ if begin_case "069" "Gates: invalid gate id returns JSON error"; then
   rm -rf "$dir"
 fi
 
+# --- case_070: coordinator health JSON envelope ---
+if begin_case "070" "Coordinator: health JSON envelope"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    LAST_OUTPUT=$(curl -fsS "http://127.0.0.1:$port/health" 2>&1) && exit_code=0 || exit_code=$?
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_exit 0 "$exit_code"; then
+      if assert_json_field "$LAST_OUTPUT" '.ok' "true"; then
+        if assert_json_field "$LAST_OUTPUT" '.data.service' "sykli-coordinator"; then
+          pass 0
+        fi
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
+# --- case_071: coordinator authenticated org team work API ---
+if begin_case "071" "Coordinator: authenticated work API JSON"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    org_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    org_id=$(echo "$org_json" | jq -r '.data.org.id')
+
+    team_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"org_id\":\"$org_id\",\"slug\":\"platform\",\"name\":\"Platform\"}" \
+      "http://127.0.0.1:$port/v1/teams")
+    team_id=$(echo "$team_json" | jq -r '.data.team.id')
+
+    work_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"org_id\":\"$org_id\",\"team_id\":\"$team_id\",\"title\":\"Coordinate team work\"}" \
+      "http://127.0.0.1:$port/v1/work-items")
+    work_id=$(echo "$work_json" | jq -r '.data.work_item.id')
+
+    curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"assigned_to_type":"member","assigned_to_id":"yair"}' \
+      "http://127.0.0.1:$port/v1/work-items/$work_id/claim" >/dev/null
+
+    LAST_OUTPUT=$(curl -fsS -H 'Authorization: Bearer secret' "http://127.0.0.1:$port/v1/work-items" 2>&1) && exit_code=0 || exit_code=$?
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_exit 0 "$exit_code"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.items[0].title' "Coordinate team work"; then
+        if assert_json_field "$LAST_OUTPUT" '.data.items[0].status' "claimed"; then
+          pass 0
+        fi
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
+# --- case_072: coordinator unauthorized JSON error ---
+if begin_case "072" "Coordinator: unauthorized JSON error"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    LAST_OUTPUT=$(curl -s -X POST -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_json_field "$LAST_OUTPUT" '.ok' "false"; then
+      if assert_json_field "$LAST_OUTPUT" '.error.code' "coordinator.unauthorized"; then
+        pass 0
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
+# --- case_073: coordinator duplicate slug JSON error ---
+if begin_case "073" "Coordinator: duplicate org slug JSON error"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs" >/dev/null
+
+    LAST_OUTPUT=$(curl -s -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"Duplicate"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_json_field "$LAST_OUTPUT" '.ok' "false"; then
+      if assert_json_field "$LAST_OUTPUT" '.error.code' "coordinator.duplicate_org_slug"; then
+        pass 0
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================

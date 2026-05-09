@@ -17,7 +17,8 @@
     "UI": "UI - visual reset contract",
     "GH": "GitHub - native receiver security contract",
     "WORK": "Work items - local Team Mode workflow",
-    "GATE": "Gates - local Team Mode decision workflow"
+    "GATE": "Gates - local Team Mode decision workflow",
+    "COORD": "Coordinator - self-hosted Team Mode API"
   },
   "cases": [
     {
@@ -1657,6 +1658,27 @@
       ],
       "source": "docs/team-mode-roadmap.md Phase 3; terminal gate decisions must not be silently overwritten",
       "validated_by": "Injected bug: approve/reject overwrites terminal gate state; invalid transition assertion fails."
+    },
+    {
+      "id": "COORD-001",
+      "name": "self-hosted coordinator skeleton serves authenticated work API",
+      "fixture": "empty_dir",
+      "command": "port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS \"http://127.0.0.1:$port/health\" >health.json; code=$(curl -s -o unauthorized.json -w '%{http_code}' -X POST \"http://127.0.0.1:$port/v1/orgs\" -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}'); test \"$code\" = \"401\"; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >team.json; team=$(jq -r '.data.team.id' team.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"team_id\\\":\\\"$team\\\",\\\"title\\\":\\\"Coordinate team work\\\"}\" \"http://127.0.0.1:$port/v1/work-items\" >work.json; work=$(jq -r '.data.work_item.id' work.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"assigned_to_type\":\"member\",\"assigned_to_id\":\"yair\"}' \"http://127.0.0.1:$port/v1/work-items/$work/claim\" >claim.json; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"body\":\"Evidence reviewed\"}' \"http://127.0.0.1:$port/v1/work-items/$work/notes\" >note.json; curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/work-items\" >list.json; jq -e '.error.code == \"coordinator.unauthorized\"' unauthorized.json >/dev/null; cat list.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.items | length == 1",
+        ".data.items[0].title == \"Coordinate team work\"",
+        ".data.items[0].status == \"claimed\"",
+        ".data.items[0].assigned_to_type == \"member\"",
+        ".data.items[0] | has(\"logs\") | not",
+        ".data.items[0] | has(\"artifacts\") | not",
+        ".data.items[0] | has(\"secrets\") | not"
+      ],
+      "source": "docs/self-hosted-coordinator.md Phase 4; coordinator skeleton must expose authenticated org/team/work APIs",
+      "validated_by": "Injected bug: coordinator write endpoints are unauthenticated or work API does not persist shared state."
     },
     {
       "id": "GH-001",

@@ -20,6 +20,33 @@ To rename or deprecate a public code, add the replacement first, keep the old co
 
 No cache-prefixed `Sykli.Error` codes are emitted today. Cache failures currently surface through execution/runtime errors or internal wrapping.
 
+### coordinator
+
+Coordinator codes are public-unstable while the self-hosted Team Mode API
+surface is still young. They are emitted in the JSON envelope returned by
+`sykli coordinator start` and by the coordinator HTTP API.
+
+| Code | Description | Tier | Emitted from |
+|------|-------------|------|--------------|
+| `coordinator.auth_not_configured` | The coordinator API was started without an auth token configuration for protected endpoints. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:182` |
+| `coordinator.body_read_failed` | Plug failed to read the coordinator request body. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:194` |
+| `coordinator.duplicate_org_slug` | An org create request used an org slug that already exists. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:206` |
+| `coordinator.duplicate_team_slug` | A team create request used a team slug that already exists in the org. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:209` |
+| `coordinator.internal_error` | Fallback coordinator API error for an unexpected structured reason. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:227` |
+| `coordinator.invalid_assignment_type` | A work claim request used an unsupported assignment type. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:221` |
+| `coordinator.invalid_bind` | The coordinator CLI received an invalid `--bind` address. | public-unstable | `core/lib/sykli/cli/coordinator.ex:190` |
+| `coordinator.invalid_command` | The coordinator CLI received an unsupported command or flag. | public-unstable | `core/lib/sykli/cli/coordinator.ex:200`, `core/lib/sykli/cli/coordinator.ex:210` |
+| `coordinator.invalid_json` | The coordinator request body was not valid JSON. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:185` |
+| `coordinator.invalid_payload` | The coordinator request body was not an object or missed required fields. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:188`, `core/lib/sykli/team_coordinator/router.ex:200`, `core/lib/sykli/team_coordinator/router.ex:203` |
+| `coordinator.invalid_port` | The coordinator CLI received an invalid `--port` value. | public-unstable | `core/lib/sykli/cli/coordinator.ex:180` |
+| `coordinator.not_found` | The coordinator API endpoint path is not implemented. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:197` |
+| `coordinator.org_not_found` | A coordinator request referenced an org that does not exist. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:212` |
+| `coordinator.payload_too_large` | The coordinator request body exceeded the configured size limit. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:191` |
+| `coordinator.start_failed` | The coordinator CLI could not start the HTTP service. | public-unstable | `core/lib/sykli/cli/coordinator.ex:220`, `core/lib/sykli/cli/coordinator.ex:231` |
+| `coordinator.team_not_found` | A coordinator request referenced a team that does not exist. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:215` |
+| `coordinator.token_required` | `sykli coordinator start` was called without `--token` or `SYKLI_COORDINATOR_TOKEN`. | public-unstable | `core/lib/sykli/cli/coordinator.ex:170` |
+| `coordinator.unauthorized` | A protected coordinator endpoint was called without a valid bearer token. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:176`, `core/lib/sykli/team_coordinator/router.ex:179` |
+
 ### execution
 
 | Code | Description | Tier | Emitted from |
