@@ -75,6 +75,19 @@ defmodule Sykli.GateDecisionTest do
       assert approved.status == "approved"
     end
 
+    test "supports block and expire transitions for future runtime hooks" do
+      assert {:ok, gate} = GateDecision.new(id: "gate_001", now: @now)
+      assert {:ok, blocked} = GateDecision.block(gate, now: @later)
+      assert blocked.status == "blocked"
+      assert blocked.updated_at == @later
+
+      assert {:ok, expired} = GateDecision.expire(blocked, now: "2026-05-09T10:10:00Z")
+      assert expired.status == "expired"
+
+      assert {:error, {:invalid_gate_transition, "expired", "approved"}} =
+               GateDecision.approve(expired, "Too late")
+    end
+
     test "rejects terminal transitions" do
       assert {:ok, gate} = GateDecision.new(id: "gate_001", now: @now)
       assert {:ok, approved} = GateDecision.approve(gate, "Reviewed", now: @later)

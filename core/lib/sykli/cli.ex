@@ -106,11 +106,17 @@ defmodule Sykli.CLI do
 
   def normalize_global_json(args), do: args
 
-  defp normalize_gates_args([]), do: ["list"]
-  defp normalize_gates_args(["list" | _] = args), do: args
+  @doc false
+  def normalize_gates_args([]), do: ["list"]
 
-  defp normalize_gates_args(args) do
-    if "list" in args, do: args, else: ["list" | args]
+  def normalize_gates_args([first | _] = args)
+      when first in ~w(list show approve reject --help -h),
+      do: args
+
+  def normalize_gates_args([<<"--", _::binary>> | _] = args), do: ["list" | args]
+
+  def normalize_gates_args(args) do
+    args
   end
 
   defp print_help do

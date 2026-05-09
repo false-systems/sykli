@@ -1625,7 +1625,8 @@
         ".ok == true",
         ".data.source == \"local\"",
         ".data.gate.status == \"rejected\"",
-        ".data.gate.reason == \"Not safe\""
+        ".data.gate.reason == \"Not safe\"",
+        ".data.gate.decided_by | contains(\":\")"
       ],
       "source": "docs/team-mode-roadmap.md Phase 3; docs/local-state-plane.md local gate decision state",
       "validated_by": "Injected bug: gate CLI does not persist decisions or returns non-envelope JSON; workflow assertions fail."

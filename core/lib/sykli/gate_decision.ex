@@ -6,6 +6,13 @@ defmodule Sykli.GateDecision do
   `.sykli/gates/<id>.json`. It records a waiting or blocked decision boundary and
   the later approval or rejection. Coordinator sync and runtime gate hookup are
   later Team Mode layers.
+
+  `decided_by` is stored as a compact actor reference string, e.g.
+  `"member:yair"`, `"agent:claude"`, or `"daemon:worker-1"`.
+
+  `evidence_refs` is stored as an opaque list of maps in this local v0 shape.
+  Consumers should treat unknown keys conservatively and validate the inner
+  reference shape they need before rendering or syncing it.
   """
 
   @version "1"
@@ -85,6 +92,16 @@ defmodule Sykli.GateDecision do
   @doc "Rejects a waiting or blocked gate."
   def reject(%__MODULE__{} = gate, reason, opts \\ []) do
     decide(gate, "rejected", reason, opts)
+  end
+
+  @doc "Marks a waiting gate as blocked for future runtime integration."
+  def block(%__MODULE__{} = gate, opts \\ []) do
+    transition(gate, "blocked", opts)
+  end
+
+  @doc "Marks a waiting or blocked gate as expired for future expirer integration."
+  def expire(%__MODULE__{} = gate, opts \\ []) do
+    transition(gate, "expired", opts)
   end
 
   @doc "Converts a gate decision to the persisted JSON map shape."
@@ -173,9 +190,20 @@ defmodule Sykli.GateDecision do
     end
   end
 
+  defp transition(%__MODULE__{} = gate, target_status, opts) do
+    with :ok <- validate_transition(gate.status, target_status) do
+      now = Keyword.get_lazy(opts, :now, &now_iso8601/0)
+
+      {:ok, %__MODULE__{gate | status: target_status, updated_at: now}}
+    end
+  end
+
   defp validate_transition(from, to)
        when from in ["waiting", "blocked"] and to in ["approved", "rejected"],
        do: :ok
+
+  defp validate_transition("waiting", "blocked"), do: :ok
+  defp validate_transition(from, "expired") when from in ["waiting", "blocked"], do: :ok
 
   defp validate_transition(from, to) when from in @terminal_statuses,
     do: {:error, {:invalid_gate_transition, from, to}}

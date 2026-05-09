@@ -51,8 +51,21 @@ defmodule Sykli.CLI.GateTest do
       gate = result["data"]["gate"]
       assert gate["status"] == "approved"
       assert gate["reason"] == "Evidence reviewed"
-      assert gate["decided_by"] == "test-user"
+      assert gate["decided_by"] == "member:test-user"
       assert gate["decided_at"] == @later
+    end
+
+    test "approve preserves explicit actor type in decided_by", %{tmp_dir: tmp_dir} do
+      create_gate(tmp_dir, id: "gate_001", status: "waiting")
+
+      result =
+        run_json(
+          ["approve", "gate_001", "--actor=agent:claude", "--reason", "Agent review", "--json"],
+          path: tmp_dir,
+          now: @later
+        )
+
+      assert result["data"]["gate"]["decided_by"] == "agent:claude"
     end
 
     test "reject --json records decision", %{tmp_dir: tmp_dir} do
@@ -94,6 +107,15 @@ defmodule Sykli.CLI.GateTest do
     test "missing reason returns structured JSON error", %{tmp_dir: tmp_dir} do
       create_gate(tmp_dir, id: "gate_001", status: "waiting")
       result = run_json(["approve", "gate_001", "--json"], path: tmp_dir, expect: 1)
+      assert result["error"]["code"] == "gate_decision_missing_reason"
+    end
+
+    test "blank reason returns structured JSON error", %{tmp_dir: tmp_dir} do
+      create_gate(tmp_dir, id: "gate_001", status: "waiting")
+
+      result =
+        run_json(["approve", "gate_001", "--reason", "   ", "--json"], path: tmp_dir, expect: 1)
+
       assert result["error"]["code"] == "gate_decision_missing_reason"
     end
 

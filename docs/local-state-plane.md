@@ -300,6 +300,10 @@ and `expired`. `waiting` and `blocked` may transition to `approved` or
 `rejected`; `approved`, `rejected`, and `expired` are terminal. Approvals and
 rejections require a reason.
 
+When a decision is recorded, `decided_by` uses the same compact actor reference
+format accepted by the CLI, such as `member:yair`, `agent:claude`, or
+`daemon:worker-1`.
+
 Gate `evidence_refs` are references only. They must not contain raw logs,
 source code, artifacts, environment dumps, secrets, or full stdout/stderr.
 Runtime gate request persistence is a follow-up hookup; this local store and

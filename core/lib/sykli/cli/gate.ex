@@ -86,12 +86,12 @@ defmodule Sykli.CLI.Gate do
 
   defp decide(action, id, opts, runtime_opts) do
     reason = Keyword.get(opts, :reason)
-    {_actor_type, actor_id} = actor(opts, runtime_opts)
+    {actor_type, actor_id} = actor(opts, runtime_opts)
 
     decision_opts =
       runtime_opts
       |> Keyword.take([:path, :now])
-      |> Keyword.put(:decided_by, actor_id)
+      |> Keyword.put(:decided_by, "#{actor_type}:#{actor_id}")
 
     result =
       case action do
