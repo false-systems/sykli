@@ -16,7 +16,8 @@
     "SDK": "SDK - cross-language parity contract",
     "UI": "UI - visual reset contract",
     "GH": "GitHub - native receiver security contract",
-    "WORK": "Work items - local Team Mode workflow"
+    "WORK": "Work items - local Team Mode workflow",
+    "GATE": "Gates - local Team Mode decision workflow"
   },
   "cases": [
     {
@@ -1612,6 +1613,49 @@
       ],
       "source": "docs/local-state-plane.md; work ids must not escape local state paths",
       "validated_by": "Injected bug: pass --work id into local state path without validation."
+    },
+    {
+      "id": "GATE-001",
+      "name": "local gate decision CLI workflow persists state",
+      "fixture": "empty_dir",
+      "command": "mkdir -p .sykli/gates && printf '%s\\n' '{\"id\":\"gate_001\",\"version\":\"1\",\"work_item_id\":\"work_001\",\"run_id\":\"run_001\",\"node_id\":\"approve\",\"status\":\"waiting\",\"reason\":null,\"requested_by_type\":\"system\",\"requested_by_id\":\"executor\",\"decided_by\":null,\"decided_at\":null,\"created_at\":\"2026-05-09T10:00:00Z\",\"updated_at\":\"2026-05-09T10:00:00Z\",\"evidence_refs\":[{\"type\":\"occurrence\",\"uri\":\"local://.sykli/occurrence.json\"}]}' > .sykli/gates/gate_001.json && printf '%s\\n' '{\"id\":\"gate_002\",\"version\":\"1\",\"work_item_id\":\"work_001\",\"run_id\":\"run_001\",\"node_id\":\"reject\",\"status\":\"waiting\",\"reason\":null,\"requested_by_type\":\"system\",\"requested_by_id\":\"executor\",\"decided_by\":null,\"decided_at\":null,\"created_at\":\"2026-05-09T10:00:00Z\",\"updated_at\":\"2026-05-09T10:00:00Z\",\"evidence_refs\":[]}' > .sykli/gates/gate_002.json && sykli gates list --json | jq -e '(.data.gates | length) == 2 and .data.gates[0].id == \"gate_001\"' >/dev/null && sykli gate show gate_001 --json | jq -e '.data.gate.status == \"waiting\"' >/dev/null && sykli gate approve gate_001 --reason \"Evidence reviewed\" --json | jq -e '.data.gate.status == \"approved\" and .data.gate.reason == \"Evidence reviewed\"' >/dev/null && sykli gate reject gate_002 --reason \"Not safe\" --json | tee gate-reject.json >/dev/null && test -f .sykli/gates/gate_001.json && jq -e '.status == \"approved\" and .reason == \"Evidence reviewed\"' .sykli/gates/gate_001.json >/dev/null && ! grep -q \"secret\" .sykli/gates/gate_001.json && cat gate-reject.json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.source == \"local\"",
+        ".data.gate.status == \"rejected\"",
+        ".data.gate.reason == \"Not safe\""
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 3; docs/local-state-plane.md local gate decision state",
+      "validated_by": "Injected bug: gate CLI does not persist decisions or returns non-envelope JSON; workflow assertions fail."
+    },
+    {
+      "id": "GATE-002",
+      "name": "gate show rejects path traversal ids with JSON error",
+      "fixture": "empty_dir",
+      "command": "sykli gate show ../escape --json",
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"invalid_gate_id\""
+      ],
+      "source": "docs/local-state-plane.md; local gate ids must not escape .sykli/gates",
+      "validated_by": "Injected bug: pass raw gate ids into file path construction; traversal id is not rejected."
+    },
+    {
+      "id": "GATE-003",
+      "name": "terminal gate transition fails clearly",
+      "fixture": "empty_dir",
+      "command": "mkdir -p .sykli/gates && printf '%s\\n' '{\"id\":\"gate_001\",\"version\":\"1\",\"work_item_id\":null,\"run_id\":null,\"node_id\":\"approve\",\"status\":\"approved\",\"reason\":\"Reviewed\",\"requested_by_type\":null,\"requested_by_id\":null,\"decided_by\":\"member:yair\",\"decided_at\":\"2026-05-09T10:01:00Z\",\"created_at\":\"2026-05-09T10:00:00Z\",\"updated_at\":\"2026-05-09T10:01:00Z\",\"evidence_refs\":[]}' > .sykli/gates/gate_001.json && sykli gate reject gate_001 --reason \"No\" --json",
+      "shell": true,
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"invalid_gate_transition\""
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 3; terminal gate decisions must not be silently overwritten",
+      "validated_by": "Injected bug: approve/reject overwrites terminal gate state; invalid transition assertion fails."
     },
     {
       "id": "GH-001",

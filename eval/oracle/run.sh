@@ -1285,6 +1285,123 @@ if begin_case "062" "Work: run with missing work item returns JSON error"; then
   rm -rf "$dir"
 fi
 
+# --- case_063: gates list JSON returns local gate decisions ---
+if begin_case "063" "Gates: list JSON returns local gate decisions"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/gates"
+  cat > "$dir/.sykli/gates/gate_001.json" <<'JSON'
+{"id":"gate_001","version":"1","work_item_id":"work_001","run_id":"run_001","node_id":"approve","status":"waiting","reason":null,"requested_by_type":"system","requested_by_id":"executor","decided_by":null,"decided_at":null,"created_at":"2026-05-09T10:00:00Z","updated_at":"2026-05-09T10:00:00Z","evidence_refs":[{"type":"occurrence","uri":"local://.sykli/occurrence.json"}]}
+JSON
+
+  LAST_OUTPUT=$(run_sykli "$dir" gates list --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.ok' "true"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.gates[0].id' "gate_001"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_064: gate show JSON returns one gate ---
+if begin_case "064" "Gates: show JSON returns one gate"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/gates"
+  cat > "$dir/.sykli/gates/gate_001.json" <<'JSON'
+{"id":"gate_001","version":"1","work_item_id":"work_001","run_id":"run_001","node_id":"approve","status":"waiting","reason":null,"requested_by_type":"system","requested_by_id":"executor","decided_by":null,"decided_at":null,"created_at":"2026-05-09T10:00:00Z","updated_at":"2026-05-09T10:00:00Z","evidence_refs":[]}
+JSON
+
+  LAST_OUTPUT=$(run_sykli "$dir" gate show gate_001 --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.gate.id' "gate_001"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.gate.status' "waiting"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_065: gate approve JSON records decision ---
+if begin_case "065" "Gates: approve JSON records decision"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/gates"
+  cat > "$dir/.sykli/gates/gate_001.json" <<'JSON'
+{"id":"gate_001","version":"1","work_item_id":null,"run_id":null,"node_id":"approve","status":"waiting","reason":null,"requested_by_type":null,"requested_by_id":null,"decided_by":null,"decided_at":null,"created_at":"2026-05-09T10:00:00Z","updated_at":"2026-05-09T10:00:00Z","evidence_refs":[]}
+JSON
+
+  LAST_OUTPUT=$(run_sykli "$dir" gate approve gate_001 --reason "Evidence reviewed" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.gate.status' "approved"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.gate.reason' "Evidence reviewed"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_066: gate reject JSON records decision ---
+if begin_case "066" "Gates: reject JSON records decision"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/gates"
+  cat > "$dir/.sykli/gates/gate_001.json" <<'JSON'
+{"id":"gate_001","version":"1","work_item_id":null,"run_id":null,"node_id":"approve","status":"waiting","reason":null,"requested_by_type":null,"requested_by_id":null,"decided_by":null,"decided_at":null,"created_at":"2026-05-09T10:00:00Z","updated_at":"2026-05-09T10:00:00Z","evidence_refs":[]}
+JSON
+
+  LAST_OUTPUT=$(run_sykli "$dir" gate reject gate_001 --reason "Not safe" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.gate.status' "rejected"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.gate.reason' "Not safe"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_067: missing gate returns a stable JSON error ---
+if begin_case "067" "Gates: missing gate returns JSON error"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(run_sykli "$dir" gate show missing --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.error.code' "gate_not_found"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_068: invalid gate transition returns a stable JSON error ---
+if begin_case "068" "Gates: invalid transition returns JSON error"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/gates"
+  cat > "$dir/.sykli/gates/gate_001.json" <<'JSON'
+{"id":"gate_001","version":"1","work_item_id":null,"run_id":null,"node_id":"approve","status":"approved","reason":"Reviewed","requested_by_type":null,"requested_by_id":null,"decided_by":"member:yair","decided_at":"2026-05-09T10:01:00Z","created_at":"2026-05-09T10:00:00Z","updated_at":"2026-05-09T10:01:00Z","evidence_refs":[]}
+JSON
+
+  LAST_OUTPUT=$(run_sykli "$dir" gate reject gate_001 --reason "No" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.error.code' "invalid_gate_transition"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_069: invalid gate id returns a stable JSON error ---
+if begin_case "069" "Gates: invalid gate id returns JSON error"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(run_sykli "$dir" gate show "../escape" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.error.code' "invalid_gate_id"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================
