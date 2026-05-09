@@ -131,27 +131,33 @@ Exit criteria:
 Make approvals and rejections first-class locally. This is the dry run
 of the coordinator's gate flow, but entirely on one machine.
 
-Suggested CLI:
+Local CLI:
 
 ```bash
 sykli gates list
+sykli gate show <gate-id>
 sykli gate approve <gate-id> --reason "Looks safe"
 sykli gate reject <gate-id> --reason "API breakage not acceptable"
 ```
 
-Suggested local path:
+Local path:
 
 ```text
 .sykli/gates/<gate-id>.json
 ```
 
+Status values are `waiting`, `blocked`, `approved`, `rejected`, and `expired`.
+Only `waiting` and `blocked` gates may be approved or rejected. Terminal
+decisions are not silently overwritten.
+
 Exit criteria:
 
-- A blocked run with a gate persists the gate state to disk.
-- A subsequent `sykli gate approve` resumes the run on its next attempt.
-- `sykli explain` shows gate state in human and JSON output.
-- MCP tools `list_gates`, `approve_gate`, `reject_gate` exist
-  (local-only).
+- Local gate decisions persist under `.sykli/gates/<gate-id>.json`.
+- `sykli gates list`, `sykli gate show`, `sykli gate approve`, and
+  `sykli gate reject` support human and `--json` output.
+- Invalid transitions are rejected.
+- Runtime gate request persistence, run resumption, `sykli explain` gate
+  rendering, and MCP gate tools remain follow-up layers.
 
 ## Phase 4 — Coordinator skeleton
 
