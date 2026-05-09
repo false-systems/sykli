@@ -1574,7 +1574,7 @@
       "id": "WORK-003",
       "name": "run with work item records local run association",
       "fixture": "single_task",
-      "command": "id=$(sykli work create \"Run associated with work item\" --json | jq -r '.data.item.id') && sykli run --work \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.work_item_id == $id and (.data.contract_hash | startswith(\"sha256:\")) and .data.status == \"passed\"' >/dev/null && sykli work runs \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.work_item_id == $id and (.data.runs | length) == 1 and .data.runs[0].work_item_id == $id and (.data.runs[0].contract_hash | startswith(\"sha256:\")) and .data.runs[0].status == \"passed\"' >/dev/null && ! grep -q \"hello\" \".sykli/work/items/$id.json\" && sykli work runs \"$id\" --json",
+      "command": "id=$(sykli work create \"Run associated with work item\" --json | jq -r '.data.item.id') && sykli run --work \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.source == \"local\" and .data.work_item_id == $id and (.data.contract_hash | startswith(\"sha256:\")) and .data.status == \"passed\"' >/dev/null && sykli work runs \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.work_item_id == $id and (.data.runs | length) == 1 and .data.runs[0].work_item_id == $id and (.data.runs[0].contract_hash | startswith(\"sha256:\")) and .data.runs[0].status == \"passed\"' >/dev/null && ! grep -q \"hello\" \".sykli/work/items/$id.json\" && sykli work runs \"$id\" --json",
       "shell": true,
       "expect_exit": 0,
       "expect_json_jq": [

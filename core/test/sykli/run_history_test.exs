@@ -291,6 +291,31 @@ defmodule Sykli.RunHistoryTest do
       assert Enum.map(runs, & &1.id) == ["run-3", "run-1"]
     end
 
+    test "filters before applying limit", %{tmp_dir: tmp_dir} do
+      for {id, work_item_id, hour} <- [
+            {"run-1", "work_001", 1},
+            {"run-2", "work_002", 2},
+            {"run-3", "work_002", 3},
+            {"run-4", "work_001", 4}
+          ] do
+        run = %RunHistory.Run{
+          id: id,
+          timestamp: DateTime.add(~U[2024-01-15 10:00:00Z], hour * 3600),
+          git_ref: "ref#{hour}",
+          git_branch: "main",
+          work_item_id: work_item_id,
+          contract_hash: "sha256:#{hour}",
+          tasks: [],
+          overall: :passed
+        }
+
+        :ok = RunHistory.save(run, path: tmp_dir)
+      end
+
+      assert {:ok, runs} = RunHistory.list_by_work_item("work_001", path: tmp_dir, limit: 2)
+      assert Enum.map(runs, & &1.id) == ["run-4", "run-1"]
+    end
+
     test "rejects invalid work item id before listing", %{tmp_dir: tmp_dir} do
       assert {:error, {:invalid_work_item_id, "../escape"}} =
                RunHistory.list_by_work_item("../escape", path: tmp_dir)

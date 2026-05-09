@@ -34,7 +34,7 @@ defmodule Sykli do
     save_history = Keyword.get(opts, :save_history, true)
 
     with {:ok, sdk_file} <- Detector.find(path),
-         {:ok, json} <- Detector.emit(sdk_file),
+         {:ok, json} <- emit_contract_json(sdk_file, opts),
          {:ok, graph} <- Graph.parse(json) do
       # Expand matrix tasks into individual tasks
       expanded_graph = Graph.expand_matrix(graph)
@@ -143,6 +143,13 @@ defmodule Sykli do
       error ->
         IO.puts(:stderr, "\e[31m✗ Error: #{inspect(error)}\e[0m")
         error
+    end
+  end
+
+  defp emit_contract_json(sdk_file, opts) do
+    case Keyword.get(opts, :emitted_json) do
+      json when is_binary(json) -> {:ok, json}
+      _ -> Detector.emit(sdk_file)
     end
   end
 

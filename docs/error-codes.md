@@ -105,7 +105,7 @@ No cache-prefixed `Sykli.Error` codes are emitted today. Cache failures currentl
 
 | Code | Description | Tier | Emitted from |
 |------|-------------|------|--------------|
-| `contract_hash_failed` | Sykli could not read the detected SDK file to compute a local work/run contract hash. | public-unstable | `core/lib/sykli/error.ex:664` |
+| `contract_hash_failed` | Sykli could not canonicalize emitted contract JSON to compute a local work/run contract hash. | public-unstable | `core/lib/sykli/error.ex:664` |
 | `invalid_work_item` | A local work item command encountered structurally invalid work item data or arguments. | public-unstable | `core/lib/sykli/error.ex:654` |
 | `invalid_work_item_id` | A local work item id failed validation, including path traversal attempts. | public-unstable | `core/lib/sykli/error.ex:622` |
 | `malformed_work_item_json` | A persisted `.sykli/work/items/<id>.json` file is not valid JSON. | public-unstable | `core/lib/sykli/error.ex:643` |

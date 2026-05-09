@@ -146,6 +146,14 @@ defmodule Sykli.CLITest do
       assert path == "./my-project"
       assert opts[:work_item_id] == "work_001"
     end
+
+    test "missing --work value is preserved as an invalid id" do
+      {path, opts} = Sykli.CLI.parse_run_args(["--work", "--json", "./my-project"])
+
+      assert path == "./my-project"
+      assert opts[:json] == true
+      assert opts[:work_item_id] == ""
+    end
   end
 
   describe "global option normalization" do

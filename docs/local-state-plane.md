@@ -265,7 +265,7 @@ Each command supports `--json` and returns the shared CLI JSON envelope.
 
 `--work` validates the local work item before execution starts. The run
 manifest records the work item id and a deterministic `sha256:` contract
-hash computed from the detected SDK file bytes. Detailed evidence remains in
+hash computed from canonicalized emitted contract JSON. Detailed evidence remains in
 the normal `.sykli/` run, occurrence, log, and attestation stores; work state
 only points at the run summary.
 

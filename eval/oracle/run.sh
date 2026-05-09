@@ -1227,8 +1227,11 @@ if begin_case "060" "Work: run with work item returns JSON metadata"; then
     if assert_json_field "$LAST_OUTPUT" '.data.work_item_id' "$id" "work id"; then
       hash=$(echo "$LAST_OUTPUT" | jq -r '.data.contract_hash' 2>/dev/null)
       status=$(echo "$LAST_OUTPUT" | jq -r '.data.status' 2>/dev/null)
+      source=$(echo "$LAST_OUTPUT" | jq -r '.data.source' 2>/dev/null)
 
-      if [[ "$status" != "passed" ]]; then
+      if [[ "$source" != "local" ]]; then
+        fail "run source was $source"
+      elif [[ "$status" != "passed" ]]; then
         fail "run status was $status"
       elif [[ ! "$hash" =~ ^sha256:[0-9a-f]{64}$ ]]; then
         fail "contract_hash has invalid format: $hash"

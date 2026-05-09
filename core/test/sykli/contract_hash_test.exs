@@ -18,12 +18,23 @@ defmodule Sykli.ContractHashTest do
     refute hash_a == hash_b
   end
 
-  test "hashes SDK file bytes", %{tmp_dir: tmp_dir} do
-    path = Path.join(tmp_dir, "sykli.exs")
-    json = Jason.encode!(%{"version" => "1", "tasks" => []})
-    File.write!(path, "IO.puts(#{inspect(json)})")
+  test "canonicalizes emitted JSON before hashing" do
+    json_a = ~s({"version":"1","tasks":[{"name":"test","command":"echo ok"}]})
 
-    assert {:ok, hash} = Sykli.ContractHash.from_sdk_file(path)
-    assert hash == Sykli.ContractHash.from_bytes(File.read!(path))
+    json_b = """
+    {
+      "version": "1",
+      "tasks": [
+        {
+          "name": "test",
+          "command": "echo ok"
+        }
+      ]
+    }
+    """
+
+    assert {:ok, hash_a} = Sykli.ContractHash.from_json(json_a)
+    assert {:ok, hash_b} = Sykli.ContractHash.from_json(json_b)
+    assert hash_a == hash_b
   end
 end

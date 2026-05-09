@@ -97,8 +97,8 @@ A run can belong to a work item. The local store gains a join.
 Status:
 
 - PR #189 adds `sykli run --work <work-id>`, stores `work_item_id` and a
-  deterministic `sha256:` `contract_hash` in existing run manifests, and
-  adds `sykli work runs <work-id>`.
+  deterministic `sha256:` `contract_hash` over canonicalized emitted JSON in
+  existing run manifests, and adds `sykli work runs <work-id>`.
 
 Suggested CLI:
 

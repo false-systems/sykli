@@ -319,10 +319,13 @@ defmodule Sykli.CLI do
 
       work_item_id ->
         with {:ok, _item} <- WorkStore.get(work_item_id, path: path),
-             {:ok, {sdk_file, _runner}} <- Sykli.Detector.find(path),
-             {:ok, contract_hash} <- Sykli.ContractHash.from_sdk_file(sdk_file) do
+             {:ok, sdk_file} <- Sykli.Detector.find(path),
+             {:ok, json} <- Sykli.Detector.emit(sdk_file),
+             {:ok, contract_hash} <- Sykli.ContractHash.from_json(json) do
           work_meta = %{work_item_id: work_item_id, contract_hash: contract_hash}
-          {:ok, work_meta, [work_item_id: work_item_id, contract_hash: contract_hash]}
+
+          {:ok, work_meta,
+           [work_item_id: work_item_id, contract_hash: contract_hash, emitted_json: json]}
         end
     end
   end
@@ -340,13 +343,16 @@ defmodule Sykli.CLI do
   defp latest_run_json_meta(_path, work_meta) when map_size(work_meta) == 0, do: %{}
 
   defp latest_run_json_meta(path, work_meta) do
+    # Local CLI compatibility: thread run_id through Sykli.run/2 when the
+    # executor result shape is normalized instead of reading latest.json back.
     case Sykli.RunHistory.load_latest(path: path) do
       {:ok, run} ->
         work_meta
+        |> Map.put(:source, "local")
         |> Map.put(:run_id, run.id)
 
       {:error, _} ->
-        work_meta
+        Map.put(work_meta, :source, "local")
     end
   end
 
@@ -503,6 +509,9 @@ defmodule Sykli.CLI do
   defp do_parse_run_args(["--work", work_item_id | tail], opts, rest)
        when is_binary(work_item_id) and binary_part(work_item_id, 0, 1) != "-",
        do: do_parse_run_args(tail, [{:work_item_id, work_item_id} | opts], rest)
+
+  defp do_parse_run_args(["--work" | tail], opts, rest),
+    do: do_parse_run_args(tail, [{:work_item_id, ""} | opts], rest)
 
   defp do_parse_run_args(["--" <> _ = arg | tail], opts, rest) do
     IO.puts(

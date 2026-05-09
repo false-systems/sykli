@@ -209,7 +209,7 @@ defmodule Sykli.RunHistory do
           # Only .json files, not symlinks
           |> Enum.filter(&String.match?(&1, ~r/^\d{4}-\d{2}-\d{2}.*\.json$/))
           |> Enum.sort(:desc)
-          |> Enum.take(limit)
+          |> maybe_take(limit)
           |> Enum.flat_map(fn file ->
             case File.read(Path.join(runs_dir, file)) do
               {:ok, json} -> [decode_run(json)]
@@ -229,16 +229,31 @@ defmodule Sykli.RunHistory do
 
   @doc """
   Lists recent runs associated with a local work item.
+
+  Filtering happens before applying `:limit`, so unrelated recent runs do not
+  hide older runs for the requested work item. Pagination is not implemented
+  yet; this scans local run manifests.
   """
   @spec list_by_work_item(String.t(), keyword()) :: {:ok, [Run.t()]} | {:error, term()}
   def list_by_work_item(work_item_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 10)
+    list_opts = Keyword.put(opts, :limit, :all)
+
     with :ok <- Sykli.WorkItem.validate_id(work_item_id),
-         {:ok, runs} <- list(opts) do
-      {:ok, Enum.filter(runs, &(&1.work_item_id == work_item_id))}
+         {:ok, runs} <- list(list_opts) do
+      runs =
+        runs
+        |> Enum.filter(&(&1.work_item_id == work_item_id))
+        |> maybe_take(limit)
+
+      {:ok, runs}
     end
   end
 
   # ----- PRIVATE -----
+
+  defp maybe_take(items, :all), do: items
+  defp maybe_take(items, limit), do: Enum.take(items, limit)
 
   defp timestamp_to_filename(%DateTime{} = dt) do
     dt

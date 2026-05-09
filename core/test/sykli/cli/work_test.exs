@@ -158,6 +158,7 @@ defmodule Sykli.CLI.WorkTest do
       assert result["data"]["work_item_id"] == "work_001"
       assert Enum.map(result["data"]["runs"], & &1["id"]) == ["run-2", "run-1"]
       assert hd(result["data"]["runs"])["contract_hash"] == "sha256:two"
+      assert hd(result["data"]["runs"])["timestamp"] == "2026-05-08T11:00:00Z"
     end
   end
 

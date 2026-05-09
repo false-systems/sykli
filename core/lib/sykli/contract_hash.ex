@@ -2,16 +2,17 @@ defmodule Sykli.ContractHash do
   @moduledoc """
   Deterministic hashes for emitted Sykli contracts.
 
-  Phase 1 Team Mode uses the SDK source file bytes as the local contract
-  identity. This keeps the hash stable and avoids including runtime data such
-  as timestamps, durations, or run ids.
+  Team Mode uses canonicalized emitted JSON as the local contract identity.
+  This keeps formatting and comments in SDK source files out of the hash and
+  avoids including runtime data such as timestamps, durations, or run ids.
   """
 
-  @doc "Computes a sha256-prefixed hash for a detected SDK file."
-  def from_sdk_file(path) when is_binary(path) do
-    case File.read(path) do
-      {:ok, bytes} -> {:ok, from_bytes(bytes)}
-      {:error, reason} -> {:error, {:contract_hash_failed, path, reason}}
+  @doc "Computes a sha256-prefixed hash for emitted contract JSON."
+  def from_json(json) when is_binary(json) do
+    with {:ok, decoded} <- Jason.decode(json) do
+      {:ok, from_bytes(Jason.encode!(decoded))}
+    else
+      {:error, reason} -> {:error, {:contract_hash_failed, :emitted_json, reason}}
     end
   end
 
