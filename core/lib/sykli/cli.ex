@@ -2634,6 +2634,12 @@ defmodule Sykli.CLI do
     end
   end
 
+  defp handle_daemon(["join" | args]) do
+    ["join" | args]
+    |> Sykli.Daemon.Join.run()
+    |> halt()
+  end
+
   defp handle_daemon(["stop"]) do
     IO.puts("#{IO.ANSI.cyan()}Stopping SYKLI daemon...#{IO.ANSI.reset()}")
 
@@ -2654,6 +2660,16 @@ defmodule Sykli.CLI do
 
   defp handle_daemon(["status"]) do
     print_daemon_status()
+    halt(0)
+  end
+
+  defp handle_daemon(["status", "--json"]) do
+    print_daemon_status_json()
+    halt(0)
+  end
+
+  defp handle_daemon(["--json", "status"]) do
+    print_daemon_status_json()
     halt(0)
   end
 
@@ -2744,11 +2760,13 @@ defmodule Sykli.CLI do
       start --labels=<l>  Start with node labels
       stop               Stop the daemon
       status             Show daemon status
+      join               Join a self-hosted coordinator
 
     Examples:
       sykli daemon start                  Start full daemon (default)
       sykli daemon start --role worker    Start worker-only daemon
       sykli daemon start --labels=docker,gpu  Start with labels
+      sykli daemon join --coordinator https://sykli.internal --org false-systems --team platform
       sykli daemon start -f               Start in foreground
       sykli daemon status                 Check if daemon is running
       sykli daemon stop                   Stop the daemon
@@ -2803,6 +2821,37 @@ defmodule Sykli.CLI do
             IO.puts("  Run 'sykli daemon start' to start")
         end
     end
+  end
+
+  defp print_daemon_status_json do
+    daemon =
+      case Sykli.Daemon.status() do
+        {:running, info} ->
+          %{
+            status: "running",
+            pid: info.pid,
+            pid_file: info.pid_file,
+            node: if(info.node, do: Atom.to_string(info.node), else: nil),
+            role:
+              if(info.node, do: Sykli.Daemon.node_role(info.node) |> Atom.to_string(), else: nil)
+          }
+
+        {:stopped, info} ->
+          %{
+            status: "stopped",
+            reason: Atom.to_string(info.reason),
+            stale_pid: Map.get(info, :stale_pid),
+            pid_file: Map.get(info, :pid_file)
+          }
+      end
+
+    session =
+      case Sykli.Daemon.SessionStore.read() do
+        {:ok, data} -> Map.drop(data, ["token"])
+        {:error, _reason} -> nil
+      end
+
+    IO.puts(JsonResponse.ok(%{daemon: daemon, coordinator_session: session}))
   end
 
   defp format_role(:full), do: "full (execute + coordinate)"
