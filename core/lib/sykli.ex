@@ -34,7 +34,7 @@ defmodule Sykli do
     save_history = Keyword.get(opts, :save_history, true)
 
     with {:ok, sdk_file} <- Detector.find(path),
-         {:ok, json} <- Detector.emit(sdk_file),
+         {:ok, json} <- emit_contract_json(sdk_file, opts),
          {:ok, graph} <- Graph.parse(json) do
       # Expand matrix tasks into individual tasks
       expanded_graph = Graph.expand_matrix(graph)
@@ -62,7 +62,7 @@ defmodule Sykli do
 
               # Save run history if enabled
               if save_history do
-                save_run_history(path, result, filtered_graph)
+                save_run_history(path, result, filtered_graph, opts)
               end
 
               result
@@ -146,6 +146,13 @@ defmodule Sykli do
     end
   end
 
+  defp emit_contract_json(sdk_file, opts) do
+    case Keyword.get(opts, :emitted_json) do
+      json when is_binary(json) -> {:ok, json}
+      _ -> Detector.emit(sdk_file)
+    end
+  end
+
   # Filter graph (map of name => task) to only include matching tasks + their dependencies
   defp filter_graph(graph, filter_fn) when is_map(graph) do
     # Graph is a map: %{name => task}
@@ -186,7 +193,7 @@ defmodule Sykli do
   end
 
   # Save run history and generate AI context after execution
-  defp save_run_history(path, result, graph) do
+  defp save_run_history(path, result, graph, opts) do
     timestamp = DateTime.utc_now()
     run_id = generate_run_id()
 
@@ -206,7 +213,9 @@ defmodule Sykli do
       git_ref: get_git_ref(path),
       git_branch: get_git_branch(path),
       tasks: task_results_with_cause,
-      overall: overall
+      overall: overall,
+      work_item_id: Keyword.get(opts, :work_item_id),
+      contract_hash: Keyword.get(opts, :contract_hash)
     }
 
     # Write per-task logs

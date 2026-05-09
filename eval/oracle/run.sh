@@ -1215,6 +1215,76 @@ if begin_case "059" "Work: invalid work item id returns JSON error"; then
   rm -rf "$dir"
 fi
 
+# --- case_060: run with --work returns work metadata in JSON ---
+if begin_case "060" "Work: run with work item returns JSON metadata"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pass.exs"
+  create_output=$(run_sykli "$dir" work create "Associated run" --json 2>&1)
+  id=$(echo "$create_output" | jq -r '.data.item.id' 2>/dev/null)
+
+  LAST_OUTPUT=$(run_sykli "$dir" run --work "$id" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.work_item_id' "$id" "work id"; then
+      hash=$(echo "$LAST_OUTPUT" | jq -r '.data.contract_hash' 2>/dev/null)
+      status=$(echo "$LAST_OUTPUT" | jq -r '.data.status' 2>/dev/null)
+      source=$(echo "$LAST_OUTPUT" | jq -r '.data.source' 2>/dev/null)
+
+      if [[ "$source" != "local" ]]; then
+        fail "run source was $source"
+      elif [[ "$status" != "passed" ]]; then
+        fail "run status was $status"
+      elif [[ ! "$hash" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        fail "contract_hash has invalid format: $hash"
+      else
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_061: work runs lists associated runs ---
+if begin_case "061" "Work: work runs JSON lists associated run"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pass.exs"
+  create_output=$(run_sykli "$dir" work create "Associated run" --json 2>&1)
+  id=$(echo "$create_output" | jq -r '.data.item.id' 2>/dev/null)
+  run_sykli "$dir" run --work "$id" --json >/dev/null 2>&1 || true
+
+  LAST_OUTPUT=$(run_sykli "$dir" work runs "$id" --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.work_item_id' "$id" "work id"; then
+      count=$(echo "$LAST_OUTPUT" | jq '.data.runs | length' 2>/dev/null)
+      hash=$(echo "$LAST_OUTPUT" | jq -r '.data.runs[0].contract_hash' 2>/dev/null)
+
+      if [[ "$count" != "1" ]]; then
+        fail "expected one associated run, got $count"
+      elif [[ ! "$hash" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        fail "associated run contract_hash has invalid format: $hash"
+      else
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_062: missing work item fails before execution ---
+if begin_case "062" "Work: run with missing work item returns JSON error"; then
+  dir=$(tmp_workdir)
+  make_pipeline "$dir" "pass.exs"
+
+  LAST_OUTPUT=$(run_sykli "$dir" run --work missing --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.ok' "false"; then
+      if assert_json_field "$LAST_OUTPUT" '.error.code' "work_item_not_found"; then
+        pass 0
+      fi
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================

@@ -56,6 +56,8 @@ Documented in detail in `docs/false-protocol-schema.md`. Summary:
 - `.sykli/test-map.json` — file → tasks mapping.
 - `.sykli/runs/` — per-run manifests for history.
 - `.sykli/work/items/<id>.json` — local work item state.
+- Work/run links are stored on existing `.sykli/runs/*.json` manifests as
+  `work_item_id` and `contract_hash`; work item files do not copy run logs.
 - (Phase 3 of the roadmap) `.sykli/gates/<gate-id>.json` — local gate
   decision state.
 
@@ -255,9 +257,17 @@ sykli work list
 sykli work show <work-id>
 sykli work claim <work-id>
 sykli work note <work-id> "Found likely API breakage"
+sykli run <contract-or-dir> --work <work-id>
+sykli work runs <work-id>
 ```
 
 Each command supports `--json` and returns the shared CLI JSON envelope.
+
+`--work` validates the local work item before execution starts. The run
+manifest records the work item id and a deterministic `sha256:` contract
+hash computed from canonicalized emitted contract JSON. Detailed evidence remains in
+the normal `.sykli/` run, occurrence, log, and attestation stores; work state
+only points at the run summary.
 
 The roadmap adds local-only state for work items and gates **before**
 networking turns on. That is intentional: a user should be able to:

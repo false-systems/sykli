@@ -7,6 +7,7 @@ defmodule Sykli.CLI do
   alias Sykli.Delta
   alias Sykli.Error
   alias Sykli.Error.Formatter
+  alias Sykli.Work.Store, as: WorkStore
 
   @version Mix.Project.config()[:version]
   @subcommands ~w(cache graph delta watch report history daemon work init validate verify plan explain context fix query mcp run)
@@ -111,6 +112,7 @@ defmodule Sykli.CLI do
       --filter=NAME             Only run tasks matching NAME
       --timeout=DURATION        Per-task timeout (default: 5m). Use 10m, 30s, 2h, 1d, or 0 for no timeout
       --target=TARGET           Execution target: local (default), k8s
+      --work=WORK_ID            Associate this run with a local work item
       --allow-dirty             Allow running with uncommitted changes (K8s)
       --git-ssh-secret=NAME     K8s Secret for SSH git auth
       --git-token-secret=NAME   K8s Secret for HTTPS git auth
@@ -237,16 +239,35 @@ defmodule Sykli.CLI do
         run_opts
       end
 
-    result = Sykli.run(path, run_opts)
-    duration = System.monotonic_time(:millisecond) - start_time
+    case prepare_work_run_context(path, opts) do
+      {:ok, work_meta, work_run_opts} ->
+        run_opts = work_run_opts ++ run_opts
+        result = Sykli.run(path, run_opts)
+        duration = System.monotonic_time(:millisecond) - start_time
 
-    # Restore stdout before writing output
-    if original_gl, do: restore_stdout(original_gl)
+        # Restore stdout before writing output
+        if original_gl, do: restore_stdout(original_gl)
 
+        output_run_result(result, duration, path, opts, json_output, work_meta)
+
+      {:error, reason} ->
+        if original_gl, do: restore_stdout(original_gl)
+
+        if json_output do
+          IO.puts(JsonResponse.error(Error.wrap(reason)))
+        else
+          display_error(reason)
+        end
+
+        halt(1)
+    end
+  end
+
+  defp output_run_result(result, duration, path, opts, json_output, work_meta) do
     case result do
       {:ok, results} ->
         if json_output do
-          IO.puts(JsonResponse.ok(run_json_data("passed", results, duration, path)))
+          IO.puts(JsonResponse.ok(run_json_data("passed", results, duration, path, work_meta)))
         else
           IO.puts(
             Renderer.render_run(
@@ -264,7 +285,7 @@ defmodule Sykli.CLI do
 
       {:error, results} when is_list(results) ->
         if json_output do
-          IO.puts(JsonResponse.ok(run_json_data("failed", results, duration, path)))
+          IO.puts(JsonResponse.ok(run_json_data("failed", results, duration, path, work_meta)))
         else
           IO.puts(
             Renderer.render_run(
@@ -291,13 +312,48 @@ defmodule Sykli.CLI do
     end
   end
 
-  defp run_json_data(status, results, duration_ms, path) do
+  defp prepare_work_run_context(path, opts) do
+    case Keyword.get(opts, :work_item_id) do
+      nil ->
+        {:ok, %{}, []}
+
+      work_item_id ->
+        with {:ok, _item} <- WorkStore.get(work_item_id, path: path),
+             {:ok, sdk_file} <- Sykli.Detector.find(path),
+             {:ok, json} <- Sykli.Detector.emit(sdk_file),
+             {:ok, contract_hash} <- Sykli.ContractHash.from_json(json) do
+          work_meta = %{work_item_id: work_item_id, contract_hash: contract_hash}
+
+          {:ok, work_meta,
+           [work_item_id: work_item_id, contract_hash: contract_hash, emitted_json: json]}
+        end
+    end
+  end
+
+  defp run_json_data(status, results, duration_ms, path, work_meta) do
     %{
       status: status,
       duration_ms: duration_ms,
       tasks: Enum.map(results, &task_result_to_map/1),
       occurrence_path: Path.join([path, ".sykli", "occurrence.json"])
     }
+    |> Map.merge(latest_run_json_meta(path, work_meta))
+  end
+
+  defp latest_run_json_meta(_path, work_meta) when map_size(work_meta) == 0, do: %{}
+
+  defp latest_run_json_meta(path, work_meta) do
+    # Local CLI compatibility: thread run_id through Sykli.run/2 when the
+    # executor result shape is normalized instead of reading latest.json back.
+    case Sykli.RunHistory.load_latest(path: path) do
+      {:ok, run} ->
+        work_meta
+        |> Map.put(:source, "local")
+        |> Map.put(:run_id, run.id)
+
+      {:error, _} ->
+        Map.put(work_meta, :source, "local")
+    end
   end
 
   defp pipeline_label(path) do
@@ -446,6 +502,16 @@ defmodule Sykli.CLI do
   defp do_parse_run_args(["--target", value | tail], opts, rest)
        when is_binary(value) and binary_part(value, 0, 1) != "-",
        do: do_parse_run_args(tail, [{:target, parse_target(value)} | opts], rest)
+
+  defp do_parse_run_args(["--work=" <> work_item_id | tail], opts, rest),
+    do: do_parse_run_args(tail, [{:work_item_id, work_item_id} | opts], rest)
+
+  defp do_parse_run_args(["--work", work_item_id | tail], opts, rest)
+       when is_binary(work_item_id) and binary_part(work_item_id, 0, 1) != "-",
+       do: do_parse_run_args(tail, [{:work_item_id, work_item_id} | opts], rest)
+
+  defp do_parse_run_args(["--work" | tail], opts, rest),
+    do: do_parse_run_args(tail, [{:work_item_id, ""} | opts], rest)
 
   defp do_parse_run_args(["--" <> _ = arg | tail], opts, rest) do
     IO.puts(

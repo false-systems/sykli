@@ -123,6 +123,33 @@ defmodule Sykli.CLI.Work do
     end
   end
 
+  defp execute({:runs, id}, opts, runtime_opts) do
+    store_opts = store_opts(runtime_opts)
+    history_opts = Keyword.merge(store_opts, Keyword.take(runtime_opts, [:limit]))
+
+    with {:ok, _item} <- Store.get(id, store_opts),
+         {:ok, runs} <- Sykli.RunHistory.list_by_work_item(id, history_opts) do
+      output_success(
+        %{source: "local", work_item_id: id, runs: Enum.map(runs, &run_map/1)},
+        opts,
+        fn ->
+          if runs == [] do
+            IO.puts("No runs for work item #{id}")
+          else
+            IO.puts("Runs for work item #{id}:")
+
+            Enum.each(runs, fn run ->
+              IO.puts("  #{run.id}  #{run.overall}  #{run.contract_hash}")
+            end)
+          end
+        end
+      )
+    else
+      {:error, reason} ->
+        output_error(reason, Keyword.get(opts, :json, false))
+    end
+  end
+
   defp execute(:help, _opts, _runtime_opts) do
     print_help()
     0
@@ -177,6 +204,13 @@ defmodule Sykli.CLI.Work do
 
       match?(["note"], positionals) or match?(["note", _], positionals) ->
         {:error, {:invalid_work_command, "note requires a work item id and body"}, opts}
+
+      match?(["runs", _], positionals) ->
+        ["runs", id] = positionals
+        {:ok, {:runs, id}, opts}
+
+      positionals == ["runs"] ->
+        {:error, {:invalid_work_command, "runs requires a work item id"}, opts}
 
       true ->
         {:error, {:invalid_work_command, Enum.join(positionals, " ")}, opts}
@@ -350,11 +384,25 @@ defmodule Sykli.CLI.Work do
       sykli work show <work-id>
       sykli work claim <work-id> [--actor TYPE:ID]
       sykli work note <work-id> "Body" [--actor TYPE:ID]
+      sykli work runs <work-id>
 
     Options:
       --json          Output as JSON
       --intent TEXT   Set work item intent when creating
       --actor TYPE:ID Set actor identity, e.g. member:yair, agent:claude, daemon:worker-1
     """)
+  end
+
+  defp run_map(run) do
+    %{
+      id: run.id,
+      work_item_id: run.work_item_id,
+      contract_hash: run.contract_hash,
+      status: Atom.to_string(run.overall),
+      timestamp: DateTime.to_iso8601(run.timestamp),
+      task_count: length(run.tasks),
+      passed_count: Enum.count(run.tasks, &(&1.status == :passed)),
+      failed_count: Enum.count(run.tasks, &(&1.status in [:failed, :errored]))
+    }
   end
 end

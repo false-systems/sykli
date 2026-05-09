@@ -1571,6 +1571,49 @@
       "validated_by": "Injected bug: pass raw ids into file path construction; traversal id is not rejected."
     },
     {
+      "id": "WORK-003",
+      "name": "run with work item records local run association",
+      "fixture": "single_task",
+      "command": "id=$(sykli work create \"Run associated with work item\" --json | jq -r '.data.item.id') && sykli run --work \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.source == \"local\" and .data.work_item_id == $id and (.data.contract_hash | startswith(\"sha256:\")) and .data.status == \"passed\"' >/dev/null && sykli work runs \"$id\" --json | jq -e --arg id \"$id\" '.ok == true and .data.work_item_id == $id and (.data.runs | length) == 1 and .data.runs[0].work_item_id == $id and (.data.runs[0].contract_hash | startswith(\"sha256:\")) and .data.runs[0].status == \"passed\"' >/dev/null && ! grep -q \"hello\" \".sykli/work/items/$id.json\" && sykli work runs \"$id\" --json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.source == \"local\"",
+        "(.data.runs | length) == 1",
+        "(.data.runs[0].contract_hash | startswith(\"sha256:\"))",
+        ".data.runs[0].status == \"passed\""
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 2; docs/local-state-plane.md work/run association",
+      "validated_by": "Injected bug: omit work_item_id or contract_hash from run history; work runs jq assertions fail."
+    },
+    {
+      "id": "WORK-004",
+      "name": "run with missing work item fails before execution",
+      "fixture": "single_task",
+      "command": "sykli run --work missing --json",
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"work_item_not_found\""
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 2; missing work item must fail before execution",
+      "validated_by": "Injected bug: run executes even when --work points at missing local work item."
+    },
+    {
+      "id": "WORK-005",
+      "name": "run with invalid work item id fails before execution",
+      "fixture": "single_task",
+      "command": "sykli run --work ../escape --json",
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"invalid_work_item_id\""
+      ],
+      "source": "docs/local-state-plane.md; work ids must not escape local state paths",
+      "validated_by": "Injected bug: pass --work id into local state path without validation."
+    },
+    {
       "id": "GH-001",
       "name": "Receiver refuses to start without webhook role",
       "fixture": "single_task",

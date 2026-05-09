@@ -94,6 +94,12 @@ Exit criteria:
 
 A run can belong to a work item. The local store gains a join.
 
+Status:
+
+- PR #189 adds `sykli run --work <work-id>`, stores `work_item_id` and a
+  deterministic `sha256:` `contract_hash` over canonicalized emitted JSON in
+  existing run manifests, and adds `sykli work runs <work-id>`.
+
 Suggested CLI:
 
 ```bash
@@ -115,8 +121,9 @@ Exit criteria:
 
 - The summary block in `.sykli/runs/<run_id>.json` carries the new fields
   when a `--work` flag was supplied.
-- `sykli explain` and `sykli fix` surface the work item id when
-  available.
+- `sykli work runs <work-id>` lists associated run summaries.
+- `sykli explain` and `sykli fix` surfacing the work item id remains a
+  follow-up once those renderers consume work metadata.
 - Conformance cases unchanged (no SDK contract change in this phase).
 
 ## Phase 3 — Local gate decision state
