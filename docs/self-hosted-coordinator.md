@@ -146,6 +146,22 @@ the coordinator does not reach daemons.
 Future versions may add object storage for opt-in evidence uploads, but
 that is out of scope here.
 
+### Current skeleton storage
+
+The first implementation slice uses an in-memory coordinator store. This
+is deliberately not production persistence. It stabilizes the HTTP API,
+auth boundary, JSON envelopes, and tests before the Postgres-backed store
+and migrations land.
+
+Current behavior:
+
+- `sykli coordinator start --token <token>` starts the coordinator
+  skeleton.
+- State is lost when the coordinator process exits.
+- State-changing calls append in-memory audit events.
+- Durable Postgres storage, migrations, and deployment assets remain
+  follow-up work.
+
 ## Security defaults
 
 Documented in detail in `docs/team-mode-security.md`. The short version:
@@ -495,7 +511,8 @@ GET   /v1/events/stream              # SSE; not required for v0 correctness
 Health:
 
 ```text
-GET   /healthz                       # unauthenticated; returns coordinator readiness
+GET   /health                        # unauthenticated; returns coordinator readiness
+GET   /healthz                       # compatibility alias
 ```
 
 Every response uses the same envelope shape Sykli already uses for `--json`
@@ -513,6 +530,24 @@ output (`Sykli.CLI.JsonResponse`):
 Errors carry `{ "ok": false, "error": { "code", "message", "hints": [..] } }`
 with codes from `docs/error-codes.md` extended with coordinator-specific
 codes when needed.
+
+The current skeleton implements:
+
+```text
+GET  /health
+GET  /healthz
+POST /v1/orgs
+GET  /v1/orgs
+POST /v1/teams
+GET  /v1/teams
+GET  /v1/work-items
+POST /v1/work-items
+GET  /v1/work-items/:id
+POST /v1/work-items/:id/claim
+POST /v1/work-items/:id/notes
+```
+
+All `/v1/*` endpoints require `Authorization: Bearer <token>`.
 
 ## Where this document does not go
 

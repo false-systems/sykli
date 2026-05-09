@@ -84,6 +84,12 @@ Any violation of the above is a security bug, not a feature request.
 
 The coordinator issues team-scoped tokens through `sykli team token create`.
 
+The coordinator skeleton bootstraps with a single bearer token supplied by
+`--token` or `SYKLI_COORDINATOR_TOKEN`. This is intentionally minimal and
+does not implement RBAC, OIDC, GitHub org mapping, or daemon join tokens
+yet. Every non-health `/v1/*` endpoint rejects missing or incorrect bearer
+tokens.
+
 Properties:
 
 - Bearer tokens, opaque, ≥ 256 bits of entropy.

@@ -163,6 +163,10 @@ Exit criteria:
 
 First server-side phase. Stand up a minimal self-hosted service.
 
+Status: the first skeleton slice is implemented with an in-memory store,
+minimal bearer-token auth, health/org/team/work item endpoints, and JSON
+envelopes. Durable Postgres storage and migrations remain follow-up work.
+
 Suggested modules:
 
 - `Sykli.Coordinator.Application`
@@ -190,8 +194,10 @@ token for a (org, team) pair.
 Exit criteria:
 
 - A coordinator process starts under `sykli coordinator start`.
-- `sykli coordinator migrate` runs schema migrations.
-- `sykli coordinator status` reports liveness.
+- `sykli coordinator migrate` runs schema migrations. Not implemented in
+  the skeleton slice because storage is still in-memory.
+- `sykli coordinator status` reports liveness. Not implemented in the
+  skeleton slice; use `GET /health` or `GET /healthz`.
 - TLS termination is documented (recommended: terminate at Ingress;
   optional in-process TLS for direct deploys).
 - Audit log row written for every state-changing call.
