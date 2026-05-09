@@ -113,6 +113,17 @@ No cache-prefixed `Sykli.Error` codes are emitted today. Cache failures currentl
 | `work_item_missing_title` | `sykli work create` was called without a title. | public-unstable | `core/lib/sykli/error.ex:602` |
 | `work_item_not_found` | A requested local work item does not exist. | public-unstable | `core/lib/sykli/error.ex:612` |
 
+### gates
+
+| Code | Description | Tier | Emitted from |
+|------|-------------|------|--------------|
+| `gate_decision_missing_reason` | `sykli gate approve` or `sykli gate reject` was called without a non-empty reason. | public-unstable | `core/lib/sykli/error.ex:719` |
+| `gate_not_found` | A requested local gate does not exist. | public-unstable | `core/lib/sykli/error.ex:678` |
+| `invalid_gate_decision` | A local gate command encountered structurally invalid gate data or arguments. | public-unstable | `core/lib/sykli/error.ex:729` |
+| `invalid_gate_id` | A local gate id failed validation, including path traversal attempts. | public-unstable | `core/lib/sykli/error.ex:688` |
+| `invalid_gate_transition` | A terminal or otherwise invalid gate status transition was rejected. | public-unstable | `core/lib/sykli/error.ex:709` |
+| `malformed_gate_json` | A persisted `.sykli/gates/<gate-id>.json` file is not valid JSON. | public-unstable | `core/lib/sykli/error.ex:698` |
+
 ### sdk
 
 | Code | Description | Tier | Emitted from |

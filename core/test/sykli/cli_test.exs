@@ -165,6 +165,28 @@ defmodule Sykli.CLITest do
                "--json",
                "list"
              ]
+
+      assert Sykli.CLI.normalize_global_json(["--json", "gates", "list"]) == [
+               "gates",
+               "--json",
+               "list"
+             ]
+
+      assert Sykli.CLI.normalize_global_json(["--json", "gate", "show", "gate_001"]) == [
+               "gate",
+               "--json",
+               "show",
+               "gate_001"
+             ]
+    end
+
+    test "normalizes plural gates command without corrupting explicit subcommands" do
+      assert Sykli.CLI.normalize_gates_args([]) == ["list"]
+      assert Sykli.CLI.normalize_gates_args(["--json"]) == ["list", "--json"]
+      assert Sykli.CLI.normalize_gates_args(["--status=waiting"]) == ["list", "--status=waiting"]
+      assert Sykli.CLI.normalize_gates_args(["show", "gate_001"]) == ["show", "gate_001"]
+      assert Sykli.CLI.normalize_gates_args(["approve", "gate_001"]) == ["approve", "gate_001"]
+      assert Sykli.CLI.normalize_gates_args(["wat", "gate_001"]) == ["wat", "gate_001"]
     end
 
     test "leaves default run JSON form unchanged" do

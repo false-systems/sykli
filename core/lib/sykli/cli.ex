@@ -10,7 +10,7 @@ defmodule Sykli.CLI do
   alias Sykli.Work.Store, as: WorkStore
 
   @version Mix.Project.config()[:version]
-  @subcommands ~w(cache graph delta watch report history daemon work init validate verify plan explain context fix query mcp run)
+  @subcommands ~w(cache graph delta watch report history daemon work gates gate init validate verify plan explain context fix query mcp run)
 
   def main(args \\ []) do
     args = normalize_global_json(args)
@@ -49,6 +49,17 @@ defmodule Sykli.CLI do
       ["work" | work_args] ->
         work_args
         |> Sykli.CLI.Work.run()
+        |> halt()
+
+      ["gates" | gate_args] ->
+        gate_args
+        |> normalize_gates_args()
+        |> Sykli.CLI.Gate.run()
+        |> halt()
+
+      ["gate" | gate_args] ->
+        gate_args
+        |> Sykli.CLI.Gate.run()
         |> halt()
 
       ["init" | init_args] ->
@@ -95,6 +106,19 @@ defmodule Sykli.CLI do
 
   def normalize_global_json(args), do: args
 
+  @doc false
+  def normalize_gates_args([]), do: ["list"]
+
+  def normalize_gates_args([first | _] = args)
+      when first in ~w(list show approve reject --help -h),
+      do: args
+
+  def normalize_gates_args([<<"--", _::binary>> | _] = args), do: ["list" | args]
+
+  def normalize_gates_args(args) do
+    args
+  end
+
   defp print_help do
     IO.puts("""
     sykli - CI pipelines in your language
@@ -136,6 +160,8 @@ defmodule Sykli.CLI do
       sykli history    List recent runs
       sykli daemon     Manage daemon (see: sykli daemon --help)
       sykli work       Manage local work items (see: sykli work --help)
+      sykli gates      List local gate decisions
+      sykli gate       Manage local gate decisions (see: sykli gate --help)
       sykli cache      Manage cache (see: sykli cache --help)
       sykli mcp        Start MCP server (for AI assistants)
 

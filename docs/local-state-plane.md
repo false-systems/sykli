@@ -58,8 +58,7 @@ Documented in detail in `docs/false-protocol-schema.md`. Summary:
 - `.sykli/work/items/<id>.json` — local work item state.
 - Work/run links are stored on existing `.sykli/runs/*.json` manifests as
   `work_item_id` and `contract_hash`; work item files do not copy run logs.
-- (Phase 3 of the roadmap) `.sykli/gates/<gate-id>.json` — local gate
-  decision state.
+- `.sykli/gates/<gate-id>.json` — local gate decision state.
 
 The local store is self-contained. A daemon with no coordinator
 connection writes the same `.sykli/` it always did. The local-only mode
@@ -259,6 +258,10 @@ sykli work claim <work-id>
 sykli work note <work-id> "Found likely API breakage"
 sykli run <contract-or-dir> --work <work-id>
 sykli work runs <work-id>
+sykli gates list
+sykli gate show <gate-id>
+sykli gate approve <gate-id> --reason "Evidence reviewed"
+sykli gate reject <gate-id> --reason "Not safe"
 ```
 
 Each command supports `--json` and returns the shared CLI JSON envelope.
@@ -268,6 +271,43 @@ manifest records the work item id and a deterministic `sha256:` contract
 hash computed from canonicalized emitted contract JSON. Detailed evidence remains in
 the normal `.sykli/` run, occurrence, log, and attestation stores; work state
 only points at the run summary.
+
+Local gate decisions live at `.sykli/gates/<gate-id>.json`:
+
+```jsonc
+{
+  "id": "gate_001",
+  "version": "1",
+  "work_item_id": "work_001",
+  "run_id": "run_123",
+  "node_id": "approve-deploy",
+  "status": "waiting",
+  "reason": null,
+  "requested_by_type": "system",
+  "requested_by_id": "executor",
+  "decided_by": null,
+  "decided_at": null,
+  "created_at": "2026-05-09T10:00:00Z",
+  "updated_at": "2026-05-09T10:00:00Z",
+  "evidence_refs": [
+    {"type": "occurrence", "uri": "local://.sykli/occurrence.json"}
+  ]
+}
+```
+
+Allowed gate `status` values are `waiting`, `blocked`, `approved`, `rejected`,
+and `expired`. `waiting` and `blocked` may transition to `approved` or
+`rejected`; `approved`, `rejected`, and `expired` are terminal. Approvals and
+rejections require a reason.
+
+When a decision is recorded, `decided_by` uses the same compact actor reference
+format accepted by the CLI, such as `member:yair`, `agent:claude`, or
+`daemon:worker-1`.
+
+Gate `evidence_refs` are references only. They must not contain raw logs,
+source code, artifacts, environment dumps, secrets, or full stdout/stderr.
+Runtime gate request persistence is a follow-up hookup; this local store and
+CLI are the decision-state foundation.
 
 The roadmap adds local-only state for work items and gates **before**
 networking turns on. That is intentional: a user should be able to:
