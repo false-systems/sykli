@@ -165,6 +165,19 @@ defmodule Sykli.CLITest do
                "--json",
                "list"
              ]
+
+      assert Sykli.CLI.normalize_global_json(["--json", "gates", "list"]) == [
+               "gates",
+               "--json",
+               "list"
+             ]
+
+      assert Sykli.CLI.normalize_global_json(["--json", "gate", "show", "gate_001"]) == [
+               "gate",
+               "--json",
+               "show",
+               "gate_001"
+             ]
     end
 
     test "leaves default run JSON form unchanged" do
