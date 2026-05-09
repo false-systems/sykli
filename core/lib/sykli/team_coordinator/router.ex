@@ -1,4 +1,4 @@
-defmodule Sykli.Coordinator.Router do
+defmodule Sykli.TeamCoordinator.Router do
   @moduledoc """
   Plug router for the self-hosted Team Mode coordinator skeleton.
 
@@ -10,7 +10,7 @@ defmodule Sykli.Coordinator.Router do
   import Plug.Conn
 
   alias Sykli.CLI.JsonResponse
-  alias Sykli.Coordinator.{Auth, Store}
+  alias Sykli.TeamCoordinator.{Auth, Store}
   alias Sykli.Error
 
   @max_body_bytes 1_000_000

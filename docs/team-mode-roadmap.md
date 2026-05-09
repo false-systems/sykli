@@ -169,9 +169,9 @@ envelopes. Durable Postgres storage and migrations remain follow-up work.
 
 Suggested modules:
 
-- `Sykli.Coordinator.Application`
-- `Sykli.Coordinator.Router`
-- `Sykli.Coordinator.Store`
+- `Sykli.TeamCoordinator.Application`
+- `Sykli.TeamCoordinator.Router`
+- `Sykli.TeamCoordinator.Store`
 
 Suggested storage: Postgres.
 
@@ -194,6 +194,8 @@ token for a (org, team) pair.
 Exit criteria:
 
 - A coordinator process starts under `sykli coordinator start`.
+- The skeleton binds to `127.0.0.1` by default; operators must pass
+  `--bind` intentionally when exposing it beyond localhost.
 - `sykli coordinator migrate` runs schema migrations. Not implemented in
   the skeleton slice because storage is still in-memory.
 - `sykli coordinator status` reports liveness. Not implemented in the

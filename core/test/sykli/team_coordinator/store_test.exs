@@ -1,7 +1,7 @@
-defmodule Sykli.Coordinator.StoreTest do
+defmodule Sykli.TeamCoordinator.StoreTest do
   use ExUnit.Case, async: true
 
-  alias Sykli.Coordinator.Store
+  alias Sykli.TeamCoordinator.Store
 
   @now "2026-05-09T10:00:00Z"
 

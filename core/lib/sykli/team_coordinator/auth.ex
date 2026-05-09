@@ -1,4 +1,4 @@
-defmodule Sykli.Coordinator.Auth do
+defmodule Sykli.TeamCoordinator.Auth do
   @moduledoc """
   Minimal bearer-token auth for the self-hosted Team Mode coordinator.
 

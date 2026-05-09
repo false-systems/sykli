@@ -1,4 +1,4 @@
-defmodule Sykli.Coordinator.Application do
+defmodule Sykli.TeamCoordinator.Application do
   @moduledoc """
   Supervisor for the self-hosted Team Mode coordinator skeleton.
 
@@ -9,6 +9,7 @@ defmodule Sykli.Coordinator.Application do
   use Supervisor
 
   @default_port 8620
+  @default_bind "127.0.0.1"
 
   def start_link(opts \\ []) do
     case Keyword.fetch(opts, :name) do
@@ -21,12 +22,14 @@ defmodule Sykli.Coordinator.Application do
   def init(opts) do
     token = Keyword.fetch!(opts, :token)
     port = Keyword.get(opts, :port, @default_port)
-    store_name = Keyword.get(opts, :store_name, Sykli.Coordinator.Store)
+    bind = Keyword.get(opts, :bind, @default_bind)
+    store_name = Keyword.get(opts, :store_name, Sykli.TeamCoordinator.Store)
 
     children = [
-      {Sykli.Coordinator.Store, store_opts(opts, store_name)},
+      {Sykli.TeamCoordinator.Store, store_opts(opts, store_name)},
       {Bandit,
-       plug: {Sykli.Coordinator.Router, store: store_name, token: token},
+       plug: {Sykli.TeamCoordinator.Router, store: store_name, token: token},
+       ip: bind,
        port: port,
        startup_log: false}
     ]

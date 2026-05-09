@@ -1,9 +1,9 @@
-defmodule Sykli.Coordinator.AuthTest do
+defmodule Sykli.TeamCoordinator.AuthTest do
   use ExUnit.Case, async: true
 
   import Plug.Test
 
-  alias Sykli.Coordinator.Auth
+  alias Sykli.TeamCoordinator.Auth
 
   test "rejects missing malformed and wrong bearer tokens" do
     assert {:error, :coordinator_unauthorized} =

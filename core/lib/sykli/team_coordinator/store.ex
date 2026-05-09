@@ -1,4 +1,4 @@
-defmodule Sykli.Coordinator.Store do
+defmodule Sykli.TeamCoordinator.Store do
   @moduledoc """
   In-memory store for the self-hosted Team Mode coordinator skeleton.
 

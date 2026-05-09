@@ -1,10 +1,10 @@
-defmodule Sykli.Coordinator.RouterTest do
+defmodule Sykli.TeamCoordinator.RouterTest do
   use ExUnit.Case, async: true
 
   import Plug.Conn
   import Plug.Test
 
-  alias Sykli.Coordinator.{Router, Store}
+  alias Sykli.TeamCoordinator.{Router, Store}
 
   @token "test-token"
   @now "2026-05-09T10:00:00Z"

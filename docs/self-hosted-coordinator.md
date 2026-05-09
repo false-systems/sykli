@@ -156,7 +156,11 @@ and migrations land.
 Current behavior:
 
 - `sykli coordinator start --token <token>` starts the coordinator
-  skeleton.
+  skeleton on `127.0.0.1` by default.
+- `--bind <address>` may expose it on another interface, for example
+  `--bind 0.0.0.0` behind a TLS-terminating ingress or proxy.
+- The skeleton speaks plain HTTP; production deployments must terminate
+  TLS at the ingress or proxy until in-process TLS is explicitly added.
 - State is lost when the coordinator process exits.
 - State-changing calls append in-memory audit events.
 - Durable Postgres storage, migrations, and deployment assets remain

@@ -11,6 +11,7 @@ defmodule Sykli.CLI.Coordinator do
   alias Sykli.Error.Formatter
 
   @default_port 8620
+  @default_bind "127.0.0.1"
 
   def run(args) do
     case parse(args) do
@@ -31,19 +32,27 @@ defmodule Sykli.CLI.Coordinator do
 
     with {:ok, token} <- token(opts),
          {:ok, port} <- port(opts),
-         {:ok, _pid} <- Sykli.Coordinator.Application.start_link(token: token, port: port) do
+         {:ok, bind_string, bind_address} <- bind(opts),
+         {:ok, _pid} <-
+           Sykli.TeamCoordinator.Application.start_link(
+             token: token,
+             port: port,
+             bind: bind_address
+           ) do
       if json? do
         IO.puts(
           JsonResponse.ok(%{
             source: "coordinator",
             status: "running",
+            bind: bind_string,
             port: port,
             storage: "in_memory"
           })
         )
       else
-        IO.puts("Sykli coordinator listening on http://127.0.0.1:#{port}")
+        IO.puts("Sykli coordinator listening on http://#{bind_string}:#{port}")
         IO.puts("storage: in_memory")
+        IO.puts("warning: plain HTTP; terminate TLS at an ingress or proxy for production")
       end
 
       Process.sleep(:infinity)
@@ -89,6 +98,12 @@ defmodule Sykli.CLI.Coordinator do
   defp parse_flags([<<"--port=", value::binary>> | rest], opts, positionals),
     do: parse_flags(rest, [{:port, value} | opts], positionals)
 
+  defp parse_flags(["--bind", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:bind, value} | opts], positionals)
+
+  defp parse_flags([<<"--bind=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:bind, value} | opts], positionals)
+
   defp parse_flags(["--token", value | rest], opts, positionals),
     do: parse_flags(rest, [{:token, value} | opts], positionals)
 
@@ -125,6 +140,21 @@ defmodule Sykli.CLI.Coordinator do
     end
   end
 
+  defp bind(opts) do
+    value = Keyword.get(opts, :bind, @default_bind)
+
+    with {:ok, address} <- parse_bind(value) do
+      {:ok, value, address}
+    end
+  end
+
+  defp parse_bind(value) when is_binary(value) do
+    case :inet.parse_address(String.to_charlist(value)) do
+      {:ok, address} -> {:ok, address}
+      {:error, _reason} -> {:error, {:invalid_coordinator_bind, value}}
+    end
+  end
+
   defp output_error(reason, json_output) do
     error = coordinator_error(reason)
 
@@ -154,6 +184,16 @@ defmodule Sykli.CLI.Coordinator do
       message: "invalid coordinator port: #{inspect(value)}",
       step: :setup,
       hints: ["use --port with a TCP port between 1 and 65535"]
+    }
+  end
+
+  defp coordinator_error({:invalid_coordinator_bind, value}) do
+    %Error{
+      code: "coordinator.invalid_bind",
+      type: :validation,
+      message: "invalid coordinator bind address: #{inspect(value)}",
+      step: :setup,
+      hints: ["use --bind with an IPv4 or IPv6 address, for example 127.0.0.1"]
     }
   end
 
@@ -205,12 +245,13 @@ defmodule Sykli.CLI.Coordinator do
     Self-hosted Team Mode coordinator commands.
 
     Commands:
-      sykli coordinator start --token TOKEN [--port PORT]
+      sykli coordinator start --token TOKEN [--port PORT] [--bind ADDRESS]
 
     Options:
       --json          Output startup status as JSON before serving
       --token TOKEN   Bearer token required for non-health API endpoints
       --port PORT     HTTP port (default: #{@default_port})
+      --bind ADDRESS  Listen address (default: #{@default_bind}; use 0.0.0.0 only intentionally)
 
     The coordinator skeleton stores state in memory. It exposes health,
     org/team, and work item endpoints only; it does not execute work.

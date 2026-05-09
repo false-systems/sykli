@@ -90,6 +90,10 @@ does not implement RBAC, OIDC, GitHub org mapping, or daemon join tokens
 yet. Every non-health `/v1/*` endpoint rejects missing or incorrect bearer
 tokens.
 
+The skeleton binds to `127.0.0.1` by default. Exposing it on `0.0.0.0` or
+another non-loopback address requires an explicit `--bind` value and should
+be paired with TLS termination at an ingress or proxy.
+
 Properties:
 
 - Bearer tokens, opaque, ≥ 256 bits of entropy.
