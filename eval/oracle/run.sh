@@ -1553,6 +1553,64 @@ if begin_case "073" "Coordinator: duplicate org slug JSON error"; then
   fi
 fi
 
+# --- case_074: daemon join and heartbeat JSON shapes ---
+if begin_case "074" "Coordinator: daemon join and heartbeat JSON"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    org_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    org_id=$(echo "$org_json" | jq -r '.data.org.id')
+
+    curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"org_id\":\"$org_id\",\"slug\":\"platform\",\"name\":\"Platform\"}" \
+      "http://127.0.0.1:$port/v1/teams" >/dev/null
+
+    LAST_OUTPUT=$(cd "$dir" && "$SYKLI_BIN" daemon join \
+      --coordinator "http://127.0.0.1:$port" \
+      --org false-systems \
+      --team platform \
+      --token secret \
+      --labels macos,docker \
+      --name yair-mbp \
+      --json 2>&1) && exit_code=0 || exit_code=$?
+
+    session_id=$(echo "$LAST_OUTPUT" | jq -r '.data.session.session_id // empty')
+    heartbeat_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"session_id\":\"$session_id\",\"status\":\"busy\",\"labels\":[\"macos\"],\"capabilities\":[\"local\"],\"last_run_id\":\"run_001\"}" \
+      "http://127.0.0.1:$port/v1/daemon-sessions/$session_id/heartbeat")
+    list_json=$(curl -fsS -H 'Authorization: Bearer secret' "http://127.0.0.1:$port/v1/daemon-sessions")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_exit 0 "$exit_code"; then
+      if assert_json_field "$LAST_OUTPUT" '.data.session.accepts_remote_work' "false"; then
+        if assert_json_field "$LAST_OUTPUT" '.data.session.policy.upload_raw_logs_by_default' "false"; then
+          if assert_json_field "$heartbeat_json" '.data.next_heartbeat_seconds' "15"; then
+            if assert_json_field "$list_json" '.data.items[0].status' "busy"; then
+              pass 0
+            fi
+          fi
+        fi
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================

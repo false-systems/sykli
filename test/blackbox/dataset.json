@@ -1681,6 +1681,27 @@
       "validated_by": "Injected bug: coordinator write endpoints are unauthenticated or work API does not persist shared state."
     },
     {
+      "id": "COORD-002",
+      "name": "daemon joins coordinator and heartbeats",
+      "fixture": "empty_dir",
+      "command": "port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >team.json; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --labels macos,docker --name yair-mbp --json >join.json; session=$(jq -r '.data.session.session_id' join.json); ! grep -q secret join.json; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"session_id\\\":\\\"$session\\\",\\\"status\\\":\\\"busy\\\",\\\"labels\\\":[\\\"macos\\\"],\\\"capabilities\\\":[\\\"local\\\"],\\\"last_run_id\\\":\\\"run_001\\\"}\" \"http://127.0.0.1:$port/v1/daemon-sessions/$session/heartbeat\" >heartbeat.json; curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/daemon-sessions\" >sessions.json; cat sessions.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.items | length == 1",
+        ".data.items[0].daemon_id == \"yair-mbp\"",
+        ".data.items[0].status == \"busy\"",
+        ".data.items[0].accepts_remote_work == false",
+        ".data.items[0] | has(\"token\") | not",
+        ".data.items[0] | has(\"logs\") | not",
+        ".data.items[0] | has(\"artifacts\") | not"
+      ],
+      "source": "docs/daemon-join-protocol.md Phase 5; daemon join/heartbeat must be authenticated and presence-only",
+      "validated_by": "Injected bug: daemon join leaks token, defaults accepts_remote_work true, or heartbeat does not update coordinator state."
+    },
+    {
       "id": "GH-001",
       "name": "Receiver refuses to start without webhook role",
       "fixture": "single_task",
