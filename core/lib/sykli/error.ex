@@ -672,6 +672,71 @@ defmodule Sykli.Error do
   end
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # GATE DECISION ERRORS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  def gate_not_found(id) do
+    %__MODULE__{
+      code: "gate_not_found",
+      type: :validation,
+      message: "gate '#{id}' was not found",
+      step: :validate,
+      hints: ["run `sykli gates list` to see local gates"]
+    }
+  end
+
+  def invalid_gate_id(id) do
+    %__MODULE__{
+      code: "invalid_gate_id",
+      type: :validation,
+      message: "invalid gate id: #{inspect(id)}",
+      step: :validate,
+      hints: ["gate ids may contain letters, numbers, underscores, dashes, and dots"]
+    }
+  end
+
+  def malformed_gate_json(path) do
+    %__MODULE__{
+      code: "malformed_gate_json",
+      type: :validation,
+      message: "local gate file is not valid JSON",
+      step: :parse,
+      hints: ["inspect or remove the malformed file before retrying"],
+      notes: ["path: #{path}"]
+    }
+  end
+
+  def invalid_gate_transition(from, to) do
+    %__MODULE__{
+      code: "invalid_gate_transition",
+      type: :validation,
+      message: "invalid gate transition: #{from} -> #{to}",
+      step: :validate,
+      hints: ["only waiting or blocked gates can be approved or rejected"]
+    }
+  end
+
+  def gate_decision_missing_reason do
+    %__MODULE__{
+      code: "gate_decision_missing_reason",
+      type: :validation,
+      message: "gate approval or rejection requires a reason",
+      step: :validate,
+      hints: ["use --reason \"...\""]
+    }
+  end
+
+  def invalid_gate_decision(reason) do
+    %__MODULE__{
+      code: "invalid_gate_decision",
+      type: :validation,
+      message: "invalid local gate decision: #{format_gate_reason(reason)}",
+      step: :validate,
+      hints: ["inspect the gate file under .sykli/gates"]
+    }
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # INTERNAL ERRORS
   # ─────────────────────────────────────────────────────────────────────────────
 
@@ -774,6 +839,44 @@ defmodule Sykli.Error do
   def wrap({:invalid_note, reason}), do: invalid_work_item({:invalid_note, reason})
   def wrap({:invalid_note_author, reason}), do: invalid_work_item({:invalid_note_author, reason})
   def wrap({:contract_hash_failed, path, reason}), do: contract_hash_failed(path, reason)
+
+  # Gate decision errors
+  def wrap({:gate_not_found, id}), do: gate_not_found(id)
+  def wrap({:invalid_gate_id, id}), do: invalid_gate_id(id)
+  def wrap({:malformed_gate_json, path, _error}), do: malformed_gate_json(path)
+  def wrap({:invalid_gate_transition, from, to}), do: invalid_gate_transition(from, to)
+  def wrap(:gate_decision_missing_reason), do: gate_decision_missing_reason()
+  def wrap({:unknown_gate_flag, flag}), do: invalid_gate_decision({:unknown_flag, flag})
+
+  def wrap({:invalid_gate_command, command}),
+    do: invalid_gate_decision({:invalid_command, command})
+
+  def wrap({:invalid_gate_actor, actor}), do: invalid_gate_decision({:invalid_actor, actor})
+  def wrap({:missing_gate_version, _}), do: invalid_gate_decision(:missing_version)
+
+  def wrap({:unsupported_gate_version, version}),
+    do: invalid_gate_decision({:unsupported_version, version})
+
+  def wrap({:invalid_gate_status, status}), do: invalid_gate_decision({:invalid_status, status})
+  def wrap({:invalid_gate_decision, reason}), do: invalid_gate_decision(reason)
+
+  def wrap({:invalid_gate_field, field, value}),
+    do: invalid_gate_decision({:invalid_field, field, value})
+
+  def wrap({:invalid_gate_requester, reason}),
+    do: invalid_gate_decision({:invalid_requester, reason})
+
+  def wrap({:invalid_gate_requester_type, type}),
+    do: invalid_gate_decision({:invalid_requester_type, type})
+
+  def wrap({:invalid_gate_requester_id, id}),
+    do: invalid_gate_decision({:invalid_requester_id, id})
+
+  def wrap({:invalid_gate_evidence_ref, ref}),
+    do: invalid_gate_decision({:invalid_evidence_ref, ref})
+
+  def wrap({:invalid_gate_evidence_refs, refs}),
+    do: invalid_gate_decision({:invalid_evidence_refs, refs})
 
   # Validation errors
   def wrap({:cycle_detected, path}), do: cycle_detected(path)
@@ -1028,6 +1131,47 @@ defmodule Sykli.Error do
   defp format_work_item_reason(:missing_type), do: "missing actor type"
 
   defp format_work_item_reason(reason), do: inspect(reason)
+
+  defp format_gate_reason(:missing_version), do: "missing version"
+
+  defp format_gate_reason({:unsupported_version, version}),
+    do: "unsupported version #{inspect(version)}"
+
+  defp format_gate_reason({:unknown_flag, flag}), do: "unknown flag #{flag}"
+  defp format_gate_reason({:invalid_command, ""}), do: "missing gate command"
+
+  defp format_gate_reason({:invalid_command, command}),
+    do: "invalid gate command #{inspect(command)}"
+
+  defp format_gate_reason({:invalid_actor, actor}), do: "invalid actor #{inspect(actor)}"
+
+  defp format_gate_reason({:invalid_status, status}),
+    do: "invalid status #{inspect(status)}"
+
+  defp format_gate_reason({:invalid_field, field, value}),
+    do: "invalid #{field} #{inspect(value)}"
+
+  defp format_gate_reason({:invalid_requester, reason}),
+    do: "invalid requester: #{format_gate_reason(reason)}"
+
+  defp format_gate_reason({:invalid_requester_type, type}),
+    do: "invalid requester type #{inspect(type)}"
+
+  defp format_gate_reason({:invalid_requester_id, id}),
+    do: "invalid requester id #{inspect(id)}"
+
+  defp format_gate_reason({:invalid_evidence_ref, ref}),
+    do: "invalid evidence ref #{inspect(ref)}"
+
+  defp format_gate_reason({:invalid_evidence_refs, refs}),
+    do: "invalid evidence refs #{inspect(refs)}"
+
+  defp format_gate_reason(:empty_id), do: "empty actor id"
+  defp format_gate_reason(:empty), do: "empty value"
+  defp format_gate_reason(:not_object), do: "expected object"
+  defp format_gate_reason(:missing_type), do: "missing requester type"
+
+  defp format_gate_reason(reason), do: inspect(reason)
 
   defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
   defp format_duration(ms) when ms < 60_000, do: "#{Float.round(ms / 1000, 1)}s"
