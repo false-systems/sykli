@@ -1,0 +1,219 @@
+defmodule Sykli.CLI.Coordinator do
+  @moduledoc """
+  Minimal CLI entry point for the self-hosted Team Mode coordinator skeleton.
+
+  This command only starts the coordinator HTTP API. It does not join daemons,
+  sync runs, sync gates, or execute remote work.
+  """
+
+  alias Sykli.CLI.JsonResponse
+  alias Sykli.Error
+  alias Sykli.Error.Formatter
+
+  @default_port 8620
+
+  def run(args) do
+    case parse(args) do
+      {:ok, :help, _opts} ->
+        print_help()
+        0
+
+      {:ok, :start, opts} ->
+        start(opts)
+
+      {:error, reason, opts} ->
+        output_error(reason, Keyword.get(opts, :json, false))
+    end
+  end
+
+  defp start(opts) do
+    json? = Keyword.get(opts, :json, false)
+
+    with {:ok, token} <- token(opts),
+         {:ok, port} <- port(opts),
+         {:ok, _pid} <- Sykli.Coordinator.Application.start_link(token: token, port: port) do
+      if json? do
+        IO.puts(
+          JsonResponse.ok(%{
+            source: "coordinator",
+            status: "running",
+            port: port,
+            storage: "in_memory"
+          })
+        )
+      else
+        IO.puts("Sykli coordinator listening on http://127.0.0.1:#{port}")
+        IO.puts("storage: in_memory")
+      end
+
+      Process.sleep(:infinity)
+      0
+    else
+      {:error, reason} -> output_error(reason, json?)
+    end
+  end
+
+  defp parse(args) do
+    {opts, positionals, error} = parse_flags(args, [], [])
+
+    cond do
+      error != nil ->
+        {:error, error, opts}
+
+      positionals in [[], ["--help"], ["-h"]] ->
+        {:ok, :help, opts}
+
+      positionals == ["start"] ->
+        {:ok, :start, opts}
+
+      true ->
+        {:error, {:invalid_coordinator_command, Enum.join(positionals, " ")}, opts}
+    end
+  end
+
+  defp parse_flags([], opts, positionals),
+    do: {Enum.reverse(opts), Enum.reverse(positionals), nil}
+
+  defp parse_flags(["--json" | rest], opts, positionals),
+    do: parse_flags(rest, [{:json, true} | opts], positionals)
+
+  defp parse_flags(["--help" | rest], opts, positionals),
+    do: parse_flags(rest, opts, ["--help" | positionals])
+
+  defp parse_flags(["-h" | rest], opts, positionals),
+    do: parse_flags(rest, opts, ["-h" | positionals])
+
+  defp parse_flags(["--port", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:port, value} | opts], positionals)
+
+  defp parse_flags([<<"--port=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:port, value} | opts], positionals)
+
+  defp parse_flags(["--token", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:token, value} | opts], positionals)
+
+  defp parse_flags([<<"--token=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:token, value} | opts], positionals)
+
+  defp parse_flags([<<"--", _::binary>> = flag | rest], opts, positionals) do
+    opts =
+      if "--json" in rest do
+        [{:json, true} | opts]
+      else
+        opts
+      end
+
+    {Enum.reverse(opts), Enum.reverse(positionals), {:unknown_coordinator_flag, flag}}
+  end
+
+  defp parse_flags([arg | rest], opts, positionals),
+    do: parse_flags(rest, opts, [arg | positionals])
+
+  defp token(opts) do
+    case Keyword.get(opts, :token) || System.get_env("SYKLI_COORDINATOR_TOKEN") do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, :coordinator_token_required}
+    end
+  end
+
+  defp port(opts) do
+    value = Keyword.get(opts, :port, Integer.to_string(@default_port))
+
+    case Integer.parse(value) do
+      {port, ""} when port > 0 and port < 65_536 -> {:ok, port}
+      _ -> {:error, {:invalid_coordinator_port, value}}
+    end
+  end
+
+  defp output_error(reason, json_output) do
+    error = coordinator_error(reason)
+
+    if json_output do
+      IO.puts(JsonResponse.error(error))
+    else
+      IO.puts(:stderr, Formatter.format(error))
+    end
+
+    1
+  end
+
+  defp coordinator_error(:coordinator_token_required) do
+    %Error{
+      code: "coordinator.token_required",
+      type: :validation,
+      message: "coordinator start requires a token",
+      step: :setup,
+      hints: ["set SYKLI_COORDINATOR_TOKEN or pass --token <token>"]
+    }
+  end
+
+  defp coordinator_error({:invalid_coordinator_port, value}) do
+    %Error{
+      code: "coordinator.invalid_port",
+      type: :validation,
+      message: "invalid coordinator port: #{inspect(value)}",
+      step: :setup,
+      hints: ["use --port with a TCP port between 1 and 65535"]
+    }
+  end
+
+  defp coordinator_error({:unknown_coordinator_flag, flag}) do
+    %Error{
+      code: "coordinator.invalid_command",
+      type: :validation,
+      message: "unknown coordinator flag: #{flag}",
+      step: :validate,
+      hints: ["use: sykli coordinator start --token <token>"]
+    }
+  end
+
+  defp coordinator_error({:invalid_coordinator_command, command}) do
+    %Error{
+      code: "coordinator.invalid_command",
+      type: :validation,
+      message: "invalid coordinator command: #{command}",
+      step: :validate,
+      hints: ["use: sykli coordinator start --token <token>"]
+    }
+  end
+
+  defp coordinator_error({:shutdown, {:failed_to_start_child, _child, reason}}) do
+    %Error{
+      code: "coordinator.start_failed",
+      type: :runtime,
+      message: "coordinator failed to start",
+      step: :setup,
+      cause: reason,
+      hints: ["check whether the configured port is already in use"]
+    }
+  end
+
+  defp coordinator_error(reason) do
+    %Error{
+      code: "coordinator.start_failed",
+      type: :runtime,
+      message: "coordinator failed to start: #{inspect(reason)}",
+      step: :setup,
+      hints: []
+    }
+  end
+
+  defp print_help do
+    IO.puts("""
+    Usage: sykli coordinator <command>
+
+    Self-hosted Team Mode coordinator commands.
+
+    Commands:
+      sykli coordinator start --token TOKEN [--port PORT]
+
+    Options:
+      --json          Output startup status as JSON before serving
+      --token TOKEN   Bearer token required for non-health API endpoints
+      --port PORT     HTTP port (default: #{@default_port})
+
+    The coordinator skeleton stores state in memory. It exposes health,
+    org/team, and work item endpoints only; it does not execute work.
+    """)
+  end
+end

@@ -10,7 +10,7 @@ defmodule Sykli.CLI do
   alias Sykli.Work.Store, as: WorkStore
 
   @version Mix.Project.config()[:version]
-  @subcommands ~w(cache graph delta watch report history daemon work gates gate init validate verify plan explain context fix query mcp run)
+  @subcommands ~w(cache graph delta watch report history daemon coordinator work gates gate init validate verify plan explain context fix query mcp run)
 
   def main(args \\ []) do
     args = normalize_global_json(args)
@@ -45,6 +45,11 @@ defmodule Sykli.CLI do
 
       ["daemon" | daemon_args] ->
         handle_daemon(daemon_args)
+
+      ["coordinator" | coordinator_args] ->
+        coordinator_args
+        |> Sykli.CLI.Coordinator.run()
+        |> halt()
 
       ["work" | work_args] ->
         work_args
@@ -159,6 +164,7 @@ defmodule Sykli.CLI do
       sykli report     Show last run summary with task results
       sykli history    List recent runs
       sykli daemon     Manage daemon (see: sykli daemon --help)
+      sykli coordinator Start the self-hosted Team Mode coordinator
       sykli work       Manage local work items (see: sykli work --help)
       sykli gates      List local gate decisions
       sykli gate       Manage local gate decisions (see: sykli gate --help)
