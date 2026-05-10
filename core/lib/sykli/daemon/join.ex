@@ -43,12 +43,14 @@ defmodule Sykli.Daemon.Join do
   end
 
   def build_join_payload(opts, runtime_opts \\ []) do
-    with {:ok, _coordinator} <- required_opt(opts, :coordinator, :daemon_join_missing_coordinator),
+    with {:ok, _coordinator} <-
+           required_opt(opts, :coordinator, :daemon_join_missing_coordinator),
          {:ok, org} <- required_opt(opts, :org, :daemon_join_missing_org),
          {:ok, team} <- required_opt(opts, :team, :daemon_join_missing_team),
          {:ok, _token} <- required_opt(opts, :token, :daemon_join_missing_token),
          {:ok, labels} <- parse_list(Keyword.get(opts, :labels, ""), :labels),
-         {:ok, capabilities} <- parse_capabilities(Keyword.get(opts, :capabilities), runtime_opts),
+         {:ok, capabilities} <-
+           parse_capabilities(Keyword.get(opts, :capabilities), runtime_opts),
          {:ok, daemon_id} <- daemon_id(opts) do
       {:ok,
        %{
