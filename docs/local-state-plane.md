@@ -203,8 +203,8 @@ agent surface. With the coordinator, the same command may touch:
 
 - The local plane (`.sykli/`) — for `sykli explain`, `sykli fix`, MCP
   tools, full evidence.
-- The coordinator — for `sykli work list --team`, `sykli gate approve`,
-  team-wide queries.
+- The coordinator — for `sykli work list --team platform` and later
+  team-wide run/gate queries.
 
 A command that operates on both must be explicit about which it is
 reading. The CLI surface in `docs/team-mode-roadmap.md` uses `--team` (or
@@ -214,7 +214,7 @@ operation, exactly as today.
 
 This rule must hold for `--json` output as well: the envelope's `data`
 payload must carry a clear marker for which plane the answer came from
-(e.g. `"source": "local"` vs `"source": "coordinator"`).
+(e.g. `"source": "local"` vs `"source": "team"`).
 
 ## What the local plane gains in Phase 1+
 
@@ -263,6 +263,22 @@ sykli gate show <gate-id>
 sykli gate approve <gate-id> --reason "Evidence reviewed"
 sykli gate reject <gate-id> --reason "Not safe"
 ```
+
+Team work items are exposed through the same work commands with an
+explicit coordinator team:
+
+```bash
+sykli work create "Review PR #176" --team platform
+sykli work list --team platform
+sykli work show <work-id> --team platform
+sykli work claim <work-id> --team platform
+sykli work note <work-id> "Found likely API breakage" --team platform
+```
+
+These commands use the daemon session at `.sykli/daemon/session.json`
+and `SYKLI_TEAM_TOKEN`. They do not store remote work items in the local
+work-item store, and they do not sync runs, gates, logs, artifacts,
+source code, secrets, environment dumps, or full stdout/stderr.
 
 Each command supports `--json` and returns the shared CLI JSON envelope.
 

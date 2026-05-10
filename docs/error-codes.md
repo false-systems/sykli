@@ -162,6 +162,16 @@ daemon status/session JSON surfaces.
 | `invalid_work_item` | A local work item command encountered structurally invalid work item data or arguments. | public-unstable | `core/lib/sykli/error.ex:654` |
 | `invalid_work_item_id` | A local work item id failed validation, including path traversal attempts. | public-unstable | `core/lib/sykli/error.ex:622` |
 | `malformed_work_item_json` | A persisted `.sykli/work/items/<id>.json` file is not valid JSON. | public-unstable | `core/lib/sykli/error.ex:643` |
+| `work.team_coordinator_error` | The coordinator rejected a team work command with a structured non-auth error. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_coordinator_unavailable` | A team work command could not reach the joined coordinator. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_invalid_coordinator_response` | The coordinator returned invalid JSON or an unexpected response shape for a team work command. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_mismatch` | A team work command requested a team other than the joined coordinator team. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_missing_token` | A team work command was run without `SYKLI_TEAM_TOKEN`. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_not_joined` | A team work command was run before `sykli daemon join` created a local coordinator session. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_required` | Team mode was selected without a team name. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_runs_not_supported` | `sykli work runs --team` was requested before run summary sync exists. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_session_invalid` | The local daemon coordinator session file is malformed or invalid. | public-unstable | `core/lib/sykli/cli/work.ex` |
+| `work.team_unauthorized` | The coordinator rejected authorization for a team work command. | public-unstable | `core/lib/sykli/cli/work.ex` |
 | `work_item_already_claimed` | A local work item claim was rejected because the item is no longer open. | public-unstable | `core/lib/sykli/error.ex:632` |
 | `work_item_missing_title` | `sykli work create` was called without a title. | public-unstable | `core/lib/sykli/error.ex:602` |
 | `work_item_not_found` | A requested local work item does not exist. | public-unstable | `core/lib/sykli/error.ex:612` |
