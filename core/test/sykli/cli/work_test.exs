@@ -4,6 +4,7 @@ defmodule Sykli.CLI.WorkTest do
   import ExUnit.CaptureIO
 
   alias Sykli.CLI.Work
+  alias Sykli.Daemon.SessionStore
   alias Sykli.RunHistory
 
   @moduletag :tmp_dir
@@ -162,6 +163,141 @@ defmodule Sykli.CLI.WorkTest do
     end
   end
 
+  describe "team work commands" do
+    setup %{tmp_dir: tmp_dir} do
+      write_session(tmp_dir)
+      :ok
+    end
+
+    test "create --team routes to coordinator and does not create local item", %{tmp_dir: tmp_dir} do
+      result =
+        run_json(["create", "Investigate deploy", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret",
+          now: @now
+        )
+
+      assert result["data"]["source"] == "team"
+      assert result["data"]["team"] == "platform"
+      assert result["data"]["item"]["id"] == "work_team_001"
+      refute File.exists?(Path.join([tmp_dir, ".sykli", "work", "items", "work_team_001.json"]))
+
+      assert_received {:create_team_work, "secret",
+                       %{"title" => "Investigate deploy", "created_by" => "member:test-user"}}
+    end
+
+    test "list show claim and note --team return team JSON", %{tmp_dir: tmp_dir} do
+      assert run_json(["list", "--team", "platform", "--json"],
+               path: tmp_dir,
+               work_client: __MODULE__.FakeTeamClient,
+               team_token: "secret"
+             )["data"]["items"] == [%{"id" => "work_team_001", "status" => "open"}]
+
+      assert run_json(["show", "work_team_001", "--team", "platform", "--json"],
+               path: tmp_dir,
+               work_client: __MODULE__.FakeTeamClient,
+               team_token: "secret"
+             )["data"]["item"]["id"] == "work_team_001"
+
+      claim =
+        run_json(["claim", "work_team_001", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret"
+        )
+
+      assert claim["data"]["item"]["status"] == "claimed"
+      assert claim["data"]["item"]["assigned_to_id"] == "test-user"
+
+      note =
+        run_json(["note", "work_team_001", "Found issue", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret"
+        )
+
+      assert note["data"]["note"]["body"] == "Found issue"
+      assert note["data"]["source"] == "team"
+    end
+
+    test "team mode without joined session fails and does not fall back locally", %{
+      tmp_dir: tmp_dir
+    } do
+      File.rm!(SessionStore.path(path: tmp_dir))
+
+      result =
+        run_json(["create", "Investigate deploy", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret",
+          expect: 1
+        )
+
+      assert result["error"]["code"] == "work.team_not_joined"
+      assert {:ok, []} = Sykli.Work.Store.list(path: tmp_dir)
+    end
+
+    test "team mismatch and missing token fail clearly", %{tmp_dir: tmp_dir} do
+      mismatch =
+        run_json(["list", "--team", "other", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret",
+          expect: 1
+        )
+
+      assert mismatch["error"]["code"] == "work.team_mismatch"
+
+      missing_token =
+        run_json(["list", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          expect: 1
+        )
+
+      assert missing_token["error"]["code"] == "work.team_missing_token"
+    end
+
+    test "coordinator unavailable and unauthorized are structured without token leakage", %{
+      tmp_dir: tmp_dir
+    } do
+      unavailable =
+        run_json(["list", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.UnavailableTeamClient,
+          team_token: "super-secret",
+          expect: 1
+        )
+
+      assert unavailable["error"]["code"] == "work.team_coordinator_unavailable"
+      refute Jason.encode!(unavailable) =~ "super-secret"
+
+      unauthorized =
+        run_json(["list", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.UnauthorizedTeamClient,
+          team_token: "super-secret",
+          expect: 1
+        )
+
+      assert unauthorized["error"]["code"] == "work.team_unauthorized"
+      refute Jason.encode!(unauthorized) =~ "super-secret"
+    end
+
+    test "team runs command is explicitly unsupported before run sync", %{tmp_dir: tmp_dir} do
+      result =
+        run_json(["runs", "work_team_001", "--team", "platform", "--json"],
+          path: tmp_dir,
+          work_client: __MODULE__.FakeTeamClient,
+          team_token: "secret",
+          expect: 1
+        )
+
+      assert result["error"]["code"] == "work.team_runs_not_supported"
+    end
+  end
+
   describe "errors" do
     test "create without title returns structured JSON error", %{tmp_dir: tmp_dir} do
       result = run_json(["create", "--json"], path: tmp_dir, expect: 1)
@@ -266,5 +402,71 @@ defmodule Sykli.CLI.WorkTest do
     }
 
     :ok = RunHistory.save(run, path: tmp_dir)
+  end
+
+  defp write_session(tmp_dir) do
+    {:ok, _session} =
+      SessionStore.write(
+        %{
+          "coordinator" => "https://sykli.internal",
+          "org" => "false-systems",
+          "team" => "platform",
+          "daemon_id" => "test-daemon",
+          "session_id" => "sess_001",
+          "team_id" => "team_001",
+          "heartbeat_interval_seconds" => 15,
+          "policy" => %{"upload_raw_logs_by_default" => false},
+          "labels" => [],
+          "capabilities" => ["local"],
+          "accepts_remote_work" => false,
+          "joined_at" => @now
+        },
+        path: tmp_dir
+      )
+  end
+
+  defmodule FakeTeamClient do
+    def create(session, token, attrs, _opts) do
+      send(self(), {:create_team_work, token, attrs})
+
+      {:ok,
+       %{
+         "id" => "work_team_001",
+         "team_id" => session["team_id"],
+         "title" => attrs["title"],
+         "status" => "open"
+       }}
+    end
+
+    def list(_session, _token, _opts) do
+      {:ok, [%{"id" => "work_team_001", "status" => "open"}]}
+    end
+
+    def show(_session, _token, "work_team_001", _opts) do
+      {:ok, %{"id" => "work_team_001", "status" => "open", "title" => "Investigate deploy"}}
+    end
+
+    def claim(_session, _token, "work_team_001", attrs, _opts) do
+      {:ok,
+       %{
+         "id" => "work_team_001",
+         "status" => "claimed",
+         "assigned_to_type" => attrs["assigned_to_type"],
+         "assigned_to_id" => attrs["assigned_to_id"]
+       }}
+    end
+
+    def note(_session, _token, "work_team_001", attrs, _opts) do
+      {:ok, %{"id" => "note_001", "work_item_id" => "work_team_001", "body" => attrs["body"]}}
+    end
+  end
+
+  defmodule UnavailableTeamClient do
+    def list(_session, _token, _opts),
+      do: {:error, {:team_coordinator_unavailable, :econnrefused}}
+  end
+
+  defmodule UnauthorizedTeamClient do
+    def list(_session, _token, _opts), do: {:error, :team_unauthorized}
   end
 end

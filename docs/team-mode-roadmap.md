@@ -250,29 +250,43 @@ Exit criteria:
 
 ## Phase 6 — Work sync
 
-The local work store gains a `--team` mode.
+The local work CLI gains a `--team <team>` mode.
 
-Suggested CLI:
+Implemented in PR #193:
 
 ```bash
-sykli work create --team "Investigate failing checkout deploy"
-sykli work list --team
-sykli work claim <work-id> --team
-sykli work assign <work-id> --to agent:claude --team
-sykli work note <work-id> --team "Investigated, see local evidence"
+sykli work create "Investigate failing checkout deploy" --team platform
+sykli work list --team platform
+sykli work show <work-id> --team platform
+sykli work claim <work-id> --team platform
+sykli work note <work-id> "Investigated, see local evidence" --team platform
 ```
 
 Without `--team`, every command is local exactly as in Phase 1. With
-`--team`, operations write to (or read from) the coordinator and the
-audit log records each one.
+`--team <team>`, operations read from or write to the coordinator using
+the daemon session created by `sykli daemon join`. Team mode requires
+`SYKLI_TEAM_TOKEN` because the session file intentionally does not store
+the bearer token.
+
+If team mode cannot reach or authenticate to the coordinator, the command
+fails. It does not silently fall back to local `.sykli/` state.
+
+Still out of scope:
+
+- `sykli work assign`
+- `sykli work runs --team`
+- local caching of coordinator work items
+- run summary sync
+- gate approval sync
 
 Exit criteria:
 
-- `sykli work list --team` returns the coordinator's view, paginated.
+- `sykli work list --team platform` returns the coordinator's view for
+  the joined team.
 - `sykli work claim <id> --team` is atomic at the coordinator: only one
   successful claim per work item.
-- `--json` envelope distinguishes `"source": "coordinator"` from
-  `"source": "local"`.
+- `--json` envelope distinguishes `"source": "team"` from `"source":
+  "local"`.
 
 ## Phase 7 — Run summary sync
 
@@ -442,11 +456,16 @@ Work:
 
 ```bash
 sykli work create "Investigate failing checkout deploy"
+sykli work create "Investigate failing checkout deploy" --team platform
 sykli work list
+sykli work list --team platform
 sykli work show <work-id>
+sykli work show <work-id> --team platform
 sykli work claim <work-id>
+sykli work claim <work-id> --team platform
 sykli work assign <work-id> --to agent:claude
 sykli work note <work-id> "Found likely API breakage"
+sykli work note <work-id> "Found likely API breakage" --team platform
 ```
 
 Run:
@@ -485,7 +504,7 @@ Concrete scenario the design optimizes for, achievable after Phases 6–8:
 
    ```bash
    sykli work list --team platform
-   sykli work claim <work-id>
+   sykli work claim <work-id> --team platform
    ```
 
 3. Dima's daemon runs a Sykli contract:

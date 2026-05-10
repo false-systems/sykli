@@ -105,11 +105,20 @@ Properties:
   `--token` flag. The current daemon session file stores coordinator
   URL, org/team, `session_id`, policy, labels, and capabilities, but does
   not persist the bearer token.
+- Reused by team work CLI calls through `SYKLI_TEAM_TOKEN` after
+  `sykli daemon join`. The token is not printed in normal or JSON
+  command output.
 
 Tokens are not user identities. They authenticate a daemon's right to
 participate in a team. Member identities (who claimed a work item, who
 approved a gate) are separately recorded based on the originating CLI
 or MCP call.
+
+Team work commands are explicit. Local work commands remain the default,
+and `sykli work ... --team <team>` fails rather than falling back to
+local state when no coordinator session exists, the requested team does
+not match the joined session, the token is missing, or authorization
+fails.
 
 ### Future — OIDC and GitHub org mapping
 

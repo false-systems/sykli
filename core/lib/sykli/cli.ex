@@ -165,7 +165,7 @@ defmodule Sykli.CLI do
       sykli history    List recent runs
       sykli daemon     Manage daemon (see: sykli daemon --help)
       sykli coordinator Start the self-hosted Team Mode coordinator
-      sykli work       Manage local work items (see: sykli work --help)
+      sykli work       Manage local or coordinator work items (see: sykli work --help)
       sykli gates      List local gate decisions
       sykli gate       Manage local gate decisions (see: sykli gate --help)
       sykli cache      Manage cache (see: sykli cache --help)

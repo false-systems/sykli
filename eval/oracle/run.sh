@@ -1611,6 +1611,126 @@ if begin_case "074" "Coordinator: daemon join and heartbeat JSON"; then
   fi
 fi
 
+# --- case_075: team work CLI syncs through coordinator ---
+if begin_case "075" "Team Work: coordinator work CLI JSON"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    org_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    org_id=$(echo "$org_json" | jq -r '.data.org.id')
+
+    curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"org_id\":\"$org_id\",\"slug\":\"platform\",\"name\":\"Platform\"}" \
+      "http://127.0.0.1:$port/v1/teams" >/dev/null
+
+    (cd "$dir" && "$SYKLI_BIN" daemon join \
+      --coordinator "http://127.0.0.1:$port" \
+      --org false-systems \
+      --team platform \
+      --token secret \
+      --name oracle-daemon \
+      --json >/dev/null)
+
+    create_json=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work create "Team work item" --team platform --json)
+    work_id=$(echo "$create_json" | jq -r '.data.item.id')
+    list_json=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work list --team platform --json)
+    show_json=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work show "$work_id" --team platform --json)
+    claim_json=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work claim "$work_id" --team platform --json)
+    LAST_OUTPUT=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work note "$work_id" "Found issue" --team platform --json 2>&1) && exit_code=0 || exit_code=$?
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_exit 0 "$exit_code"; then
+      if assert_json_field "$create_json" '.data.source' "team"; then
+        if assert_json_field "$list_json" '.data.items[0].title' "Team work item"; then
+          if assert_json_field "$show_json" '.data.item.id' "$work_id"; then
+            if assert_json_field "$claim_json" '.data.item.status' "claimed"; then
+              if assert_json_field "$LAST_OUTPUT" '.data.note.body' "Found issue"; then
+                pass 0
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
+# --- case_076: team work without joined session returns JSON error ---
+if begin_case "076" "Team Work: not joined JSON error"; then
+  dir=$(tmp_workdir)
+  LAST_OUTPUT=$(cd "$dir" && SYKLI_TEAM_TOKEN=secret "$SYKLI_BIN" work list --team platform --json 2>&1) && exit_code=0 || exit_code=$?
+  if assert_exit 1 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.error.code' "work.team_not_joined"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
+# --- case_077: team work unauthorized returns JSON error ---
+if begin_case "077" "Team Work: unauthorized JSON error"; then
+  if ! command -v curl &>/dev/null; then
+    skip "curl not available"
+  else
+    dir=$(tmp_workdir)
+    port=$((24000 + RANDOM % 10000))
+    (cd "$dir" && SYKLI_COORDINATOR_TOKEN=secret "$SYKLI_BIN" coordinator start --port "$port" >coordinator.log 2>&1) &
+    pid=$!
+
+    for _ in {1..80}; do
+      if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    org_json=$(curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d '{"slug":"false-systems","name":"False Systems"}' \
+      "http://127.0.0.1:$port/v1/orgs")
+    org_id=$(echo "$org_json" | jq -r '.data.org.id')
+
+    curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' \
+      -d "{\"org_id\":\"$org_id\",\"slug\":\"platform\",\"name\":\"Platform\"}" \
+      "http://127.0.0.1:$port/v1/teams" >/dev/null
+
+    (cd "$dir" && "$SYKLI_BIN" daemon join \
+      --coordinator "http://127.0.0.1:$port" \
+      --org false-systems \
+      --team platform \
+      --token secret \
+      --name oracle-daemon \
+      --json >/dev/null)
+
+    LAST_OUTPUT=$(cd "$dir" && SYKLI_TEAM_TOKEN=wrong "$SYKLI_BIN" work list --team platform --json 2>&1) && exit_code=0 || exit_code=$?
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    if assert_exit 1 "$exit_code"; then
+      if assert_json_field "$LAST_OUTPUT" '.error.code' "work.team_unauthorized"; then
+        pass 0
+      fi
+    fi
+    rm -rf "$dir"
+  fi
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================

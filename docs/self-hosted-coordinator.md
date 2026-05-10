@@ -164,6 +164,13 @@ Current behavior:
 - State-changing calls append in-memory audit events.
 - Daemon join and heartbeat sessions are stored in memory and are lost
   when the coordinator exits.
+- `sykli work create/list/show/claim/note --team <team>` can operate
+  against the coordinator after `sykli daemon join` writes a local
+  session file.
+- Team work commands require `SYKLI_TEAM_TOKEN`; the daemon session file
+  stores coordinator metadata but not the bearer token.
+- Team work commands fail rather than falling back to local `.sykli/`
+  state when the coordinator is unavailable or authorization fails.
 - Durable Postgres storage, migrations, and deployment assets remain
   follow-up work.
 
