@@ -1702,6 +1702,40 @@
       "validated_by": "Injected bug: daemon join leaks token, defaults accepts_remote_work true, or heartbeat does not update coordinator state."
     },
     {
+      "id": "COORD-003",
+      "name": "team work CLI syncs through coordinator",
+      "fixture": "empty_dir",
+      "command": "port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >team.json; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --name team-work-daemon --json >/dev/null; work=$(SYKLI_TEAM_TOKEN=secret sykli work create \"Team work item\" --team platform --json | jq -r '.data.item.id'); SYKLI_TEAM_TOKEN=secret sykli work list --team platform --json | jq -e --arg work \"$work\" '.data.source == \"team\" and .data.items[0].id == $work' >/dev/null; SYKLI_TEAM_TOKEN=secret sykli work show \"$work\" --team platform --json | jq -e --arg work \"$work\" '.data.item.id == $work' >/dev/null; SYKLI_TEAM_TOKEN=secret sykli work claim \"$work\" --team platform --json | jq -e '.data.item.status == \"claimed\" and .data.item.assigned_to_type == \"member\"' >/dev/null; SYKLI_TEAM_TOKEN=secret sykli work note \"$work\" \"Found likely API breakage\" --team platform --json >note.json; test ! -f \".sykli/work/items/$work.json\"; local=$(sykli work create \"Local still default\" --json | jq -r '.data.item.id'); test -f \".sykli/work/items/$local.json\"; cat note.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.source == \"team\"",
+        ".data.team == \"platform\"",
+        ".data.note.body == \"Found likely API breakage\"",
+        ".data.note | has(\"logs\") | not",
+        ".data.note | has(\"artifacts\") | not",
+        ".data.note | has(\"secrets\") | not"
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 6; team work commands use coordinator only when --team is explicit",
+      "validated_by": "Injected bug: team work commands fall back to local, omit auth/session, or leak raw logs/artifacts/secrets."
+    },
+    {
+      "id": "COORD-004",
+      "name": "team work without join fails without local fallback",
+      "fixture": "empty_dir",
+      "command": "SYKLI_TEAM_TOKEN=secret sykli work create \"Should not be local\" --team platform --json >out.json; code=$?; test \"$code\" = 1; test ! -d .sykli/work/items; cat out.json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == false",
+        ".error.code == \"work.team_not_joined\""
+      ],
+      "source": "docs/team-mode-security.md; team mode must not silently fall back to local mode",
+      "validated_by": "Injected bug: missing coordinator session still creates a local .sykli work item."
+    },
+    {
       "id": "GH-001",
       "name": "Receiver refuses to start without webhook role",
       "fixture": "single_task",
