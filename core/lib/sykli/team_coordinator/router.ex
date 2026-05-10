@@ -3,8 +3,8 @@ defmodule Sykli.TeamCoordinator.Router do
   Plug router for the self-hosted Team Mode coordinator skeleton.
 
   This HTTP surface coordinates org/team/work metadata only. It deliberately
-  exposes no execution, shell, log upload, artifact upload, daemon session, run,
-  gate, or evidence endpoints in this PR.
+  exposes no execution, shell, log upload, artifact upload, run, gate, or
+  evidence endpoints.
   """
 
   import Plug.Conn
@@ -118,6 +118,50 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "daemon-sessions"]} = conn, opts) do
+    with {:ok, body, conn} <- read_json(conn),
+         {:ok, response, _session} <- Store.create_daemon_session(store(opts), body) do
+      send_json(conn, 201, response)
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions"]} = conn, opts) do
+    conn = fetch_query_params(conn)
+
+    filters =
+      conn.query_params
+      |> Map.take(["org_id", "team_id"])
+      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+      |> Map.new()
+
+    with {:ok, sessions} <- Store.list_daemon_sessions(store(opts), filters) do
+      send_json(conn, 200, %{items: sessions})
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions", id]} = conn, opts) do
+    with {:ok, session} <- Store.get_daemon_session(store(opts), id) do
+      send_json(conn, 200, %{daemon_session: session})
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(
+         %Plug.Conn{method: "POST", path_info: ["v1", "daemon-sessions", id, "heartbeat"]} =
+           conn,
+         opts
+       ) do
+    with {:ok, body, conn} <- read_json(conn),
+         {:ok, heartbeat, _session} <- Store.heartbeat_daemon_session(store(opts), id, body) do
+      send_json(conn, 200, heartbeat)
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
   defp route_v1(conn, _opts), do: send_error(conn, :coordinator_route_not_found)
 
   defp read_json(conn) do
@@ -171,6 +215,11 @@ defmodule Sykli.TeamCoordinator.Router do
   defp status_for({:invalid_assignment_type, _type}), do: 400
   defp status_for({:invalid_work_item_id, _id}), do: 400
   defp status_for({:work_item_already_claimed, _id, _assignment}), do: 409
+  defp status_for({:invalid_daemon_id, _id}), do: 400
+  defp status_for({:invalid_daemon_list_field, _field}), do: 400
+  defp status_for({:invalid_daemon_status, _status}), do: 400
+  defp status_for({:invalid_daemon_session_id, _id}), do: 400
+  defp status_for({:daemon_session_not_found, _id}), do: 404
   defp status_for(_reason), do: 500
 
   defp coordinator_error(:coordinator_unauthorized),
@@ -223,6 +272,26 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error({:work_item_already_claimed, id, assignment}),
     do: Error.work_item_already_claimed(id, assignment)
+
+  defp coordinator_error({:invalid_daemon_id, id}),
+    do: error("coordinator.invalid_daemon_id", "invalid daemon id: #{inspect(id)}")
+
+  defp coordinator_error({:invalid_daemon_list_field, field}),
+    do:
+      error(
+        "coordinator.invalid_daemon_payload",
+        "daemon field must be a list of non-empty strings: #{field}"
+      )
+
+  defp coordinator_error({:invalid_daemon_status, status}),
+    do: error("coordinator.invalid_daemon_status", "invalid daemon status: #{inspect(status)}")
+
+  defp coordinator_error({:invalid_daemon_session_id, id}),
+    do:
+      error("coordinator.invalid_daemon_session_id", "invalid daemon session id: #{inspect(id)}")
+
+  defp coordinator_error({:daemon_session_not_found, id}),
+    do: error("coordinator.daemon_session_not_found", "daemon session was not found: #{id}")
 
   defp coordinator_error(reason),
     do: error("coordinator.internal_error", "coordinator failed: #{inspect(reason)}")

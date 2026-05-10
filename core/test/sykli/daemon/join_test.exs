@@ -1,0 +1,142 @@
+defmodule Sykli.Daemon.JoinTest do
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureIO
+
+  alias Sykli.Daemon.Join
+
+  @now "2026-05-09T10:00:00Z"
+
+  test "builds join payload with labels capabilities and remote work disabled by default" do
+    assert {:ok, payload} =
+             Join.build_join_payload(
+               [
+                 coordinator: "https://sykli.internal",
+                 org: "false-systems",
+                 team: "platform",
+                 token: "secret",
+                 labels: "macos,docker",
+                 name: "yair-mbp"
+               ],
+               version: "0.6.1"
+             )
+
+    assert payload["daemon_id"] == "yair-mbp"
+    assert payload["labels"] == ["macos", "docker"]
+    assert payload["capabilities"] == ["local"]
+    assert payload["version"] == "0.6.1"
+    assert payload["accepts_remote_work"] == false
+    refute Map.has_key?(payload, "token")
+  end
+
+  test "heartbeat payload is shaped for coordinator" do
+    session = %{"session_id" => "sess_001", "labels" => ["macos"], "capabilities" => ["local"]}
+
+    assert Join.heartbeat_payload(session, %{"last_run_id" => "run_001"}) == %{
+             "session_id" => "sess_001",
+             "status" => "available",
+             "current_work_item_id" => nil,
+             "labels" => ["macos"],
+             "capabilities" => ["local"],
+             "last_run_id" => "run_001"
+           }
+  end
+
+  test "successful join persists session and does not print token" do
+    tmp = Path.join(System.tmp_dir!(), "sykli-join-test-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    output =
+      capture_io(fn ->
+        assert Join.join(
+                 [
+                   coordinator: "https://sykli.internal",
+                   org: "false-systems",
+                   team: "platform",
+                   token: "super-secret",
+                   labels: "macos,docker",
+                   name: "yair-mbp",
+                   json: true,
+                   path: tmp
+                 ],
+                 client: __MODULE__.FakeClient,
+                 now: @now,
+                 version: "0.6.1"
+               ) == 0
+      end)
+
+    decoded = Jason.decode!(output)
+    assert decoded["data"]["session"]["session_id"] == "sess_001"
+    refute output =~ "super-secret"
+
+    {:ok, file} = File.read(Sykli.Daemon.SessionStore.path(path: tmp))
+    refute file =~ "super-secret"
+  end
+
+  test "join accepts token from environment without persisting it" do
+    tmp =
+      Path.join(System.tmp_dir!(), "sykli-join-env-test-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    System.put_env("SYKLI_TEAM_TOKEN", "super-secret")
+    on_exit(fn -> System.delete_env("SYKLI_TEAM_TOKEN") end)
+
+    capture_io(fn ->
+      assert Join.join(
+               [
+                 coordinator: "https://sykli.internal",
+                 org: "false-systems",
+                 team: "platform",
+                 name: "yair-mbp",
+                 json: true,
+                 path: tmp
+               ],
+               client: __MODULE__.FakeClient,
+               now: @now,
+               version: "0.6.1"
+             ) == 0
+    end)
+
+    {:ok, file} = File.read(Sykli.Daemon.SessionStore.path(path: tmp))
+    refute file =~ "super-secret"
+  end
+
+  test "join help works after subcommand name" do
+    output =
+      capture_io(fn ->
+        assert Join.run(["join", "--help"]) == 0
+      end)
+
+    assert output =~ "Usage: sykli daemon join"
+  end
+
+  test "missing required args return structured json error" do
+    output =
+      capture_io(fn ->
+        assert Join.run(["join", "--org", "false-systems", "--json"]) == 1
+      end)
+
+    assert Jason.decode!(output)["error"]["code"] == "daemon.join_missing_coordinator"
+  end
+
+  defmodule FakeClient do
+    def post_json(_url, "/v1/daemon-sessions", "super-secret", payload) do
+      if Map.has_key?(payload, "token") do
+        raise "join payload leaked token"
+      end
+
+      {:ok,
+       %{
+         "session_id" => "sess_001",
+         "heartbeat_interval_seconds" => 15,
+         "team_id" => "team_001",
+         "policy" => %{
+           "sync_run_summaries" => true,
+           "sync_evidence_refs" => true,
+           "upload_raw_logs_by_default" => false
+         }
+       }}
+    end
+  end
+end

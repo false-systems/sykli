@@ -32,10 +32,15 @@ surface is still young. They are emitted in the JSON envelope returned by
 | `coordinator.body_read_failed` | Plug failed to read the coordinator request body. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:194` |
 | `coordinator.duplicate_org_slug` | An org create request used an org slug that already exists. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:206` |
 | `coordinator.duplicate_team_slug` | A team create request used a team slug that already exists in the org. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:209` |
+| `coordinator.daemon_session_not_found` | A daemon session lookup or heartbeat referenced a session that does not exist. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
 | `coordinator.internal_error` | Fallback coordinator API error for an unexpected structured reason. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:227` |
 | `coordinator.invalid_assignment_type` | A work claim request used an unsupported assignment type. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:221` |
 | `coordinator.invalid_bind` | The coordinator CLI received an invalid `--bind` address. | public-unstable | `core/lib/sykli/cli/coordinator.ex:190` |
 | `coordinator.invalid_command` | The coordinator CLI received an unsupported command or flag. | public-unstable | `core/lib/sykli/cli/coordinator.ex:200`, `core/lib/sykli/cli/coordinator.ex:210` |
+| `coordinator.invalid_daemon_id` | A daemon join request used an invalid daemon id. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
+| `coordinator.invalid_daemon_payload` | A daemon join or heartbeat request used malformed labels, capabilities, or list fields. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
+| `coordinator.invalid_daemon_session_id` | A heartbeat or daemon-session lookup used an invalid session id. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
+| `coordinator.invalid_daemon_status` | A heartbeat request used an unsupported daemon status. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
 | `coordinator.invalid_json` | The coordinator request body was not valid JSON. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:185` |
 | `coordinator.invalid_payload` | The coordinator request body was not an object or missed required fields. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:188`, `core/lib/sykli/team_coordinator/router.ex:200`, `core/lib/sykli/team_coordinator/router.ex:203` |
 | `coordinator.invalid_port` | The coordinator CLI received an invalid `--port` value. | public-unstable | `core/lib/sykli/cli/coordinator.ex:180` |
@@ -46,6 +51,27 @@ surface is still young. They are emitted in the JSON envelope returned by
 | `coordinator.team_not_found` | A coordinator request referenced a team that does not exist. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:215` |
 | `coordinator.token_required` | `sykli coordinator start` was called without `--token` or `SYKLI_COORDINATOR_TOKEN`. | public-unstable | `core/lib/sykli/cli/coordinator.ex:170` |
 | `coordinator.unauthorized` | A protected coordinator endpoint was called without a valid bearer token. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:176`, `core/lib/sykli/team_coordinator/router.ex:179` |
+
+### daemon
+
+Daemon Team Mode codes are public-unstable while daemon join/session
+behavior is new. They are emitted by `sykli daemon join --json` and
+daemon status/session JSON surfaces.
+
+| Code | Description | Tier | Emitted from |
+|------|-------------|------|--------------|
+| `daemon.coordinator_error` | The coordinator rejected daemon join with a structured non-auth error. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.coordinator_unauthorized` | The coordinator rejected daemon join authorization. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.coordinator_unavailable` | The daemon join client could not reach the coordinator. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.invalid_coordinator_response` | The coordinator returned invalid JSON or an unexpected response shape. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.invalid_id` | `sykli daemon join` received or inferred an invalid daemon id. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.invalid_join_command` | `sykli daemon join` received an unsupported command form or flag. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.invalid_join_payload` | `sykli daemon join` received malformed label or capability arguments. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.join_failed` | Fallback daemon join failure for unexpected structured reasons. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.join_missing_coordinator` | `sykli daemon join` was called without `--coordinator`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.join_missing_org` | `sykli daemon join` was called without `--org`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.join_missing_team` | `sykli daemon join` was called without `--team`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
+| `daemon.join_missing_token` | `sykli daemon join` was called without `--token` or `SYKLI_TEAM_TOKEN`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
 
 ### execution
 

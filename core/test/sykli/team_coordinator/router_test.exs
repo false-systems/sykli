@@ -15,7 +15,7 @@ defmodule Sykli.TeamCoordinator.RouterTest do
         now: fn -> @now end,
         id:
           id_sequence(
-            ~w(org_001 audit_001 team_001 audit_002 work_001 audit_003 audit_004 note_001 audit_005)
+            ~w(org_001 audit_001 team_001 audit_002 work_001 audit_003 audit_004 note_001 audit_005 sess_001 audit_006 audit_007)
           )
       )
 
@@ -157,6 +157,85 @@ defmodule Sykli.TeamCoordinator.RouterTest do
 
     assert conn.status == 404
     assert json(conn)["error"]["code"] == "coordinator.not_found"
+  end
+
+  test "creates lists shows and heartbeats daemon sessions", %{opts: opts} do
+    assert 201 =
+             :post
+             |> authed_json_conn("/v1/orgs", %{
+               "slug" => "false-systems",
+               "name" => "False Systems"
+             })
+             |> call(opts)
+             |> Map.fetch!(:status)
+
+    assert 201 =
+             :post
+             |> authed_json_conn("/v1/teams", %{
+               "org_id" => "org_001",
+               "slug" => "platform",
+               "name" => "Platform"
+             })
+             |> call(opts)
+             |> Map.fetch!(:status)
+
+    join =
+      :post
+      |> authed_json_conn("/v1/daemon-sessions", %{
+        "daemon_id" => "yair-mbp",
+        "org" => "false-systems",
+        "team" => "platform",
+        "labels" => ["macos", "docker"],
+        "capabilities" => ["local", "shell"],
+        "version" => "0.6.1"
+      })
+      |> call(opts)
+
+    assert join.status == 201
+    session_id = json(join)["data"]["session_id"]
+    assert is_binary(session_id)
+    assert json(join)["data"]["team_id"] == "team_001"
+    assert json(join)["data"]["heartbeat_interval_seconds"] == 15
+    assert json(join)["data"]["policy"]["upload_raw_logs_by_default"] == false
+
+    list =
+      :get
+      |> authed_conn("/v1/daemon-sessions")
+      |> call(opts)
+
+    assert list.status == 200
+    assert [%{"id" => ^session_id, "accepts_remote_work" => false}] = json(list)["data"]["items"]
+
+    show =
+      :get
+      |> authed_conn("/v1/daemon-sessions/#{session_id}")
+      |> call(opts)
+
+    assert show.status == 200
+    assert json(show)["data"]["daemon_session"]["status"] == "available"
+
+    heartbeat =
+      :post
+      |> authed_json_conn("/v1/daemon-sessions/#{session_id}/heartbeat", %{
+        "session_id" => session_id,
+        "status" => "busy",
+        "labels" => ["macos"],
+        "capabilities" => ["local"],
+        "last_run_id" => "run_001"
+      })
+      |> call(opts)
+
+    assert heartbeat.status == 200
+    assert json(heartbeat)["data"]["next_heartbeat_seconds"] == 15
+    assert json(heartbeat)["data"]["assignments"] == []
+
+    invalid =
+      :post
+      |> authed_json_conn("/v1/daemon-sessions/#{session_id}/heartbeat", %{"status" => "wat"})
+      |> call(opts)
+
+    assert invalid.status == 400
+    assert json(invalid)["error"]["code"] == "coordinator.invalid_daemon_status"
   end
 
   defp call(conn, opts) do

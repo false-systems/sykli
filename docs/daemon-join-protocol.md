@@ -2,12 +2,15 @@
 
 ## Status
 
-Design document. Specifies how a Sykli daemon establishes and maintains
-a session with a self-hosted coordinator. Phase 0 of
-`docs/team-mode-roadmap.md`.
+Implemented incrementally. PR #192 adds the first daemon join and
+heartbeat slice: coordinator daemon-session endpoints, the
+`sykli daemon join` client command, local session persistence, and
+`sykli daemon status --json` session visibility.
 
-No implementation in this PR. Wire shapes below are normative;
-exact field types and error codes are firmed up by the implementing PR.
+Later phases still add work sync, run summary sync, gate decision sync,
+and event-stream delivery. Wire shapes below are the current contract for
+the implemented join/heartbeat slice unless a later section explicitly
+marks behavior as future work.
 
 ## Architecture sentence
 
@@ -37,20 +40,19 @@ The daemon must:
 - Verify the coordinator's TLS certificate against the system trust
   store, with the same hostname-checking rules as the rest of Sykli's
   HTTP layer (see `Sykli.HTTP.ssl_opts/1`).
-- Refuse to connect to plaintext HTTP except when `--insecure` is set
-  for local development. `--insecure` must log a clear warning per
-  connect.
+- Prefer HTTPS for non-local coordinator URLs. The current implementation
+  also supports plain HTTP for the local coordinator skeleton and tests;
+  production deployments should terminate TLS at an ingress or proxy.
 - Carry an `Authorization: Bearer <token>` header on every request that
   needs authentication.
 
 The coordinator must:
 
-- Reject any request without TLS unless explicitly configured for
-  development.
 - Reject any request whose token is missing, malformed, expired, revoked,
   or scoped to a different org/team.
-- Rate-limit join attempts per source IP and per token to resist token
-  exfiltration brute force.
+- Rate-limit join attempts per source IP and per token in the durable
+  production coordinator. The current in-memory skeleton does not include
+  rate limiting yet.
 
 ## Daemon identity
 
@@ -153,14 +155,14 @@ Field rules:
     default and only secure value for v0 is `false`.
 
 If the coordinator rejects the join, the response uses the standard error
-envelope with a code from `docs/error-codes.md` (with new
-coordinator-specific codes added in Phase 4). Examples:
+envelope with a code from `docs/error-codes.md`. Implemented examples
+include:
 
-- `team.token.invalid`
-- `team.token.expired`
-- `team.token.scope_mismatch`
-- `team.daemon.label_unknown`
-- `team.policy.refused_remote_work`
+- `coordinator.unauthorized`
+- `coordinator.org_not_found`
+- `coordinator.team_not_found`
+- `coordinator.invalid_daemon_id`
+- `coordinator.invalid_daemon_payload`
 
 ## Heartbeat
 
@@ -185,9 +187,10 @@ Content-Type: application/json
 
 Field rules:
 
-- `status` — one of `available`, `busy`, `draining`. `draining` means the
-  daemon is finishing in-flight work but will not accept new work; it is
-  the equivalent of the SIGTERM drain behavior in `Sykli.Application`.
+- `status` — one of `available`, `busy`, `offline`, `degraded`, or
+  `draining`. `draining` means the daemon is finishing in-flight work but
+  will not accept new work; it is the equivalent of the SIGTERM drain
+  behavior in `Sykli.Application`.
 - `current_work_item_id` — if the daemon is currently running a work item.
 - `labels` and `capabilities` — re-sent on every heartbeat. The
   coordinator treats the latest heartbeat as authoritative. A daemon may
@@ -195,7 +198,7 @@ Field rules:
 - `last_run_id` — the most recent run the daemon has reported. The
   coordinator uses this to detect dropped run summaries.
 
-The heartbeat response is the daemon's pickup channel for shared
+The heartbeat response is the daemon's future pickup channel for shared
 decisions:
 
 ```json
@@ -224,9 +227,11 @@ decisions:
 }
 ```
 
-The decisions and assignments arrays may be empty. The daemon must
-process every entry it receives idempotently; the coordinator may
-re-send a decision if the previous heartbeat's response was dropped.
+The current implementation returns empty `decisions` and `assignments`
+arrays because work sync and gate sync are later phases. Once those
+phases land, the daemon must process every entry it receives
+idempotently; the coordinator may re-send a decision if the previous
+heartbeat's response was dropped.
 
 If the coordinator returns 401/403, the daemon must stop sending and
 surface the failure to the operator. It must not retry blindly with

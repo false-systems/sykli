@@ -12,6 +12,8 @@ defmodule Sykli.TeamCoordinator.Store do
   alias Sykli.WorkItem
 
   @assignment_types WorkItem.assignment_types()
+  @heartbeat_statuses ~w(available busy offline degraded draining)
+  @heartbeat_interval_seconds 15
 
   def start_link(opts \\ []) do
     {server_opts, init_opts} = Keyword.split(opts, [:name])
@@ -33,6 +35,18 @@ defmodule Sykli.TeamCoordinator.Store do
     do: GenServer.call(server, {:claim_work_item, id, attrs})
 
   def add_note(server, id, attrs), do: GenServer.call(server, {:add_note, id, attrs})
+
+  def create_daemon_session(server, attrs),
+    do: GenServer.call(server, {:create_daemon_session, attrs})
+
+  def list_daemon_sessions(server, filters \\ %{}),
+    do: GenServer.call(server, {:list_daemon_sessions, filters})
+
+  def get_daemon_session(server, id), do: GenServer.call(server, {:get_daemon_session, id})
+
+  def heartbeat_daemon_session(server, id, attrs),
+    do: GenServer.call(server, {:heartbeat_daemon_session, id, attrs})
+
   def audit_log(server), do: GenServer.call(server, :audit_log)
 
   @impl true
@@ -47,6 +61,8 @@ defmodule Sykli.TeamCoordinator.Store do
        teams_by_org_slug: %{},
        work_items: %{},
        notes_by_work_item: %{},
+       daemon_sessions: %{},
+       daemon_sessions_by_identity: %{},
        audit_log: []
      }}
   end
@@ -209,8 +225,113 @@ defmodule Sykli.TeamCoordinator.Store do
     end
   end
 
+  def handle_call({:create_daemon_session, attrs}, _from, state) do
+    with {:ok, org_id} <- org_id_from_join(state, attrs),
+         {:ok, team_id} <- team_id_from_join(state, attrs, org_id),
+         {:ok, daemon_id} <- required_daemon_id(attrs),
+         {:ok, labels} <- optional_string_list(attrs, "labels"),
+         {:ok, capabilities} <- optional_string_list(attrs, "capabilities"),
+         {:ok, version} <- required_string(attrs, "version"),
+         {:ok, accepts_remote_work} <- optional_boolean(attrs, "accepts_remote_work", false) do
+      now = now(state)
+      session_id = id(state)
+      identity = {org_id, team_id, daemon_id}
+
+      session = %{
+        "id" => session_id,
+        "session_id" => session_id,
+        "org_id" => org_id,
+        "team_id" => team_id,
+        "daemon_id" => daemon_id,
+        "display_name" => blank_to_nil(Map.get(attrs, "display_name")) || daemon_id,
+        "status" => "available",
+        "labels" => labels,
+        "capabilities" => capabilities,
+        "version" => version,
+        "accepts_remote_work" => accepts_remote_work,
+        "current_work_item_id" => nil,
+        "last_run_id" => nil,
+        "last_seen_at" => now,
+        "created_at" => now,
+        "updated_at" => now,
+        "superseded_by" => nil
+      }
+
+      state =
+        state
+        |> supersede_existing_daemon(identity, session_id, now)
+        |> put_in([:daemon_sessions, session_id], session)
+        |> put_in([:daemon_sessions_by_identity, identity], session_id)
+        |> audit("daemon.joined", "daemon_session", session_id, org_id, team_id)
+
+      {:reply, {:ok, session_response(session), session}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:list_daemon_sessions, filters}, _from, state) do
+    sessions =
+      state.daemon_sessions
+      |> sorted_values()
+      |> Enum.filter(fn session ->
+        filter_match?(session, "org_id", Map.get(filters, "org_id")) and
+          filter_match?(session, "team_id", Map.get(filters, "team_id"))
+      end)
+
+    {:reply, {:ok, sessions}, state}
+  end
+
+  def handle_call({:get_daemon_session, id}, _from, state) do
+    {:reply, fetch_daemon_session(state, id), state}
+  end
+
+  def handle_call({:heartbeat_daemon_session, id, attrs}, _from, state) do
+    with {:ok, session} <- fetch_daemon_session(state, id),
+         :ok <- validate_session_id_match(id, Map.get(attrs, "session_id")),
+         {:ok, status} <- required_heartbeat_status(attrs),
+         {:ok, labels} <- optional_string_list(attrs, "labels", session["labels"]),
+         {:ok, capabilities} <-
+           optional_string_list(attrs, "capabilities", session["capabilities"]) do
+      now = now(state)
+
+      updated =
+        session
+        |> Map.put("status", status)
+        |> Map.put("labels", labels)
+        |> Map.put("capabilities", capabilities)
+        |> Map.put("current_work_item_id", blank_to_nil(Map.get(attrs, "current_work_item_id")))
+        |> Map.put("last_run_id", blank_to_nil(Map.get(attrs, "last_run_id")))
+        |> Map.put("last_seen_at", now)
+        |> Map.put("updated_at", now)
+
+      state =
+        state
+        |> put_in([:daemon_sessions, id], updated)
+        |> audit("daemon.heartbeat", "daemon_session", id, session["org_id"], session["team_id"])
+
+      heartbeat = %{
+        "next_heartbeat_seconds" => @heartbeat_interval_seconds,
+        "decisions" => [],
+        "assignments" => []
+      }
+
+      {:reply, {:ok, heartbeat, updated}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call(:audit_log, _from, state) do
     {:reply, {:ok, Enum.reverse(state.audit_log)}, state}
+  end
+
+  defp org_id_from_join(state, attrs) do
+    org_id(state, Map.put_new(attrs, "org_slug", Map.get(attrs, "org")))
+  end
+
+  defp team_id_from_join(state, attrs, org_id) do
+    team_id(state, Map.put_new(attrs, "team_slug", Map.get(attrs, "team")), org_id)
   end
 
   defp required_slug(attrs, field) do
@@ -231,6 +352,50 @@ defmodule Sykli.TeamCoordinator.Store do
 
       _ ->
         {:error, {:missing_field, field}}
+    end
+  end
+
+  defp required_daemon_id(attrs) do
+    with {:ok, daemon_id} <- required_string(attrs, "daemon_id") do
+      if Regex.match?(~r/^[a-z0-9._-]{1,128}$/, daemon_id) do
+        {:ok, daemon_id}
+      else
+        {:error, {:invalid_daemon_id, daemon_id}}
+      end
+    end
+  end
+
+  defp optional_string_list(attrs, field, default \\ []) do
+    case Map.get(attrs, field, default) do
+      values when is_list(values) ->
+        values
+        |> Enum.reduce_while({:ok, []}, fn
+          value, {:ok, acc} when is_binary(value) ->
+            value = String.trim(value)
+
+            cond do
+              value == "" -> {:halt, {:error, {:invalid_daemon_list_field, field}}}
+              String.length(value) > 128 -> {:halt, {:error, {:invalid_daemon_list_field, field}}}
+              true -> {:cont, {:ok, [value | acc]}}
+            end
+
+          _value, _acc ->
+            {:halt, {:error, {:invalid_daemon_list_field, field}}}
+        end)
+        |> case do
+          {:ok, values} -> {:ok, Enum.reverse(values)}
+          error -> error
+        end
+
+      _other ->
+        {:error, {:invalid_daemon_list_field, field}}
+    end
+  end
+
+  defp optional_boolean(attrs, field, default) do
+    case Map.get(attrs, field, default) do
+      value when is_boolean(value) -> {:ok, value}
+      _ -> {:error, {:invalid_field, field}}
     end
   end
 
@@ -274,6 +439,17 @@ defmodule Sykli.TeamCoordinator.Store do
     end
   end
 
+  defp required_heartbeat_status(attrs) do
+    case Map.get(attrs, "status") do
+      status when status in @heartbeat_statuses -> {:ok, status}
+      status -> {:error, {:invalid_daemon_status, status}}
+    end
+  end
+
+  defp validate_session_id_match(_id, nil), do: :ok
+  defp validate_session_id_match(id, id), do: :ok
+  defp validate_session_id_match(_id, value), do: {:error, {:invalid_daemon_session_id, value}}
+
   defp fetch_work_item(state, id) do
     with :ok <- WorkItem.validate_id(id) do
       case Map.fetch(state.work_items, id) do
@@ -281,6 +457,51 @@ defmodule Sykli.TeamCoordinator.Store do
         :error -> {:error, {:work_item_not_found, id}}
       end
     end
+  end
+
+  defp fetch_daemon_session(state, id) when is_binary(id) and id not in ["", ".", ".."] do
+    if String.contains?(id, ["/", "\\", <<0>>]) do
+      {:error, {:invalid_daemon_session_id, id}}
+    else
+      case Map.fetch(state.daemon_sessions, id) do
+        {:ok, session} -> {:ok, session}
+        :error -> {:error, {:daemon_session_not_found, id}}
+      end
+    end
+  end
+
+  defp fetch_daemon_session(_state, id), do: {:error, {:invalid_daemon_session_id, id}}
+
+  defp supersede_existing_daemon(state, identity, new_session_id, now) do
+    case Map.fetch(state.daemon_sessions_by_identity, identity) do
+      {:ok, old_session_id} ->
+        update_in(state, [:daemon_sessions, old_session_id], fn
+          nil ->
+            nil
+
+          session ->
+            session
+            |> Map.put("status", "offline")
+            |> Map.put("superseded_by", new_session_id)
+            |> Map.put("updated_at", now)
+        end)
+
+      :error ->
+        state
+    end
+  end
+
+  defp session_response(session) do
+    %{
+      "session_id" => session["session_id"],
+      "heartbeat_interval_seconds" => @heartbeat_interval_seconds,
+      "team_id" => session["team_id"],
+      "policy" => %{
+        "sync_run_summaries" => true,
+        "sync_evidence_refs" => true,
+        "upload_raw_logs_by_default" => false
+      }
+    }
   end
 
   defp ensure_claimable(%{"status" => "open"}), do: :ok

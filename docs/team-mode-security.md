@@ -86,9 +86,9 @@ The coordinator issues team-scoped tokens through `sykli team token create`.
 
 The coordinator skeleton bootstraps with a single bearer token supplied by
 `--token` or `SYKLI_COORDINATOR_TOKEN`. This is intentionally minimal and
-does not implement RBAC, OIDC, GitHub org mapping, or daemon join tokens
-yet. Every non-health `/v1/*` endpoint rejects missing or incorrect bearer
-tokens.
+does not implement RBAC, OIDC, or GitHub org mapping yet. Daemon join and
+heartbeat requests use the same bearer-token boundary. Every non-health
+`/v1/*` endpoint rejects missing or incorrect bearer tokens.
 
 The skeleton binds to `127.0.0.1` by default. Exposing it on `0.0.0.0` or
 another non-loopback address requires an explicit `--bind` value and should
@@ -101,9 +101,10 @@ Properties:
 - Carry no execution authority over individual daemons.
 - Revocable at any time. Revocation invalidates all sessions on the
   next heartbeat.
-- Stored on daemons in `SYKLI_TEAM_TOKEN` (env var) or a config file
-  with strict file permissions (`0600`). Never written to a CLI argument
-  in production.
+- Supplied to daemons via `SYKLI_TEAM_TOKEN` (env var) or a one-shot
+  `--token` flag. The current daemon session file stores coordinator
+  URL, org/team, `session_id`, policy, labels, and capabilities, but does
+  not persist the bearer token.
 
 Tokens are not user identities. They authenticate a daemon's right to
 participate in a team. Member identities (who claimed a work item, who

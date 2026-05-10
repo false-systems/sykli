@@ -208,6 +208,12 @@ Exit criteria:
 
 Daemons connect outbound and announce themselves.
 
+Status: PR #192 adds coordinator daemon-session endpoints, authenticated
+join/heartbeat handling, `sykli daemon join`, local coordinator session
+persistence without storing the token, and `sykli daemon status --json`
+session visibility. Work sync, run sync, gate sync, offline liveness
+expiry, and reconnect outbox behavior remain later slices.
+
 Suggested CLI:
 
 ```bash
@@ -233,9 +239,11 @@ Coordinator tracks:
 Exit criteria:
 
 - `daemon join` succeeds against the coordinator from Phase 4.
-- Heartbeats keep `daemon_sessions.status` in `online`.
+- Heartbeats keep `daemon_sessions.status` current with `available`,
+  `busy`, `offline`, `degraded`, or `draining`.
 - A killed daemon transitions to `offline` after the documented
-  liveness cutoff.
+  liveness cutoff. This expiry loop remains follow-up after the first
+  join/heartbeat slice.
 - `sykli daemon status` reflects coordinator-side state when joined,
   local-only state when not.
 - Black-box cases cover token rejection, TLS failure, and reconnect.

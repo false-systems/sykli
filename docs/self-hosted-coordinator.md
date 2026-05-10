@@ -2,12 +2,11 @@
 
 ## Status
 
-Design document for the Sykli Coordinator service. Phase 0 of
-`docs/team-mode-roadmap.md`. No implementation in this PR.
-
-The schema, API, and deployment shape below are normative for future
-implementation PRs but illustrative in detail (table column names, exact
-HTTP paths, Helm value names) until the first slice lands.
+Design and implementation reference for the Sykli Coordinator service.
+The initial skeleton is implemented with an in-memory store,
+bearer-token auth, org/team/work item endpoints, and daemon
+join/heartbeat endpoints. Durable Postgres storage, run sync, gate sync,
+and deployment manifests remain future implementation slices.
 
 ## Product sentence
 
@@ -163,6 +162,8 @@ Current behavior:
   TLS at the ingress or proxy until in-process TLS is explicitly added.
 - State is lost when the coordinator process exits.
 - State-changing calls append in-memory audit events.
+- Daemon join and heartbeat sessions are stored in memory and are lost
+  when the coordinator exits.
 - Durable Postgres storage, migrations, and deployment assets remain
   follow-up work.
 
