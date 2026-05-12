@@ -312,7 +312,7 @@ defmodule Sykli.RunHistory do
       streak: tr.streak
     }
     |> maybe_add(:error, tr.error)
-    |> maybe_add(:failure_semantics, failure_semantics_to_map(tr.failure_semantics))
+    |> maybe_add(:failure_semantics, Sykli.FailureSemantics.to_map(tr.failure_semantics))
     |> maybe_add(:inputs, tr.inputs)
     |> maybe_add(:likely_cause, tr.likely_cause)
     |> maybe_add(:verified_on, tr.verified_on)
@@ -353,13 +353,6 @@ defmodule Sykli.RunHistory do
       verified_on: data["verified_on"]
     }
   end
-
-  defp failure_semantics_to_map(nil), do: nil
-
-  defp failure_semantics_to_map(%Sykli.FailureSemantics{} = semantics),
-    do: Sykli.FailureSemantics.to_map(semantics)
-
-  defp failure_semantics_to_map(map) when is_map(map), do: map
 
   defp parse_timestamp(str) do
     case DateTime.from_iso8601(str) do

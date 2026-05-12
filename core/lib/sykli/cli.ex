@@ -2423,20 +2423,13 @@ defmodule Sykli.CLI do
             streak: t.streak
           }
           |> maybe_put(:error, t.error)
-          |> maybe_put(:failure_semantics, history_failure_semantics(t.failure_semantics))
+          |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
           |> maybe_put(:likely_cause, t.likely_cause)
         end)
     }
 
     IO.puts(JsonResponse.ok(output))
   end
-
-  defp history_failure_semantics(nil), do: nil
-
-  defp history_failure_semantics(%Sykli.FailureSemantics{} = semantics),
-    do: Sykli.FailureSemantics.to_map(semantics)
-
-  defp history_failure_semantics(map) when is_map(map), do: map
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

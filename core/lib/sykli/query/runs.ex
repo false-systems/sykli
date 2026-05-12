@@ -80,19 +80,12 @@ defmodule Sykli.Query.Runs do
               duration_ms: t.duration_ms,
               cached: t.cached == true
             }
-            |> maybe_put(:failure_semantics, failure_semantics_to_map(t.failure_semantics))
+            |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
 
           maybe_put(result, :error, t.error)
         end)
     }
   end
-
-  defp failure_semantics_to_map(nil), do: nil
-
-  defp failure_semantics_to_map(%Sykli.FailureSemantics{} = semantics),
-    do: Sykli.FailureSemantics.to_map(semantics)
-
-  defp failure_semantics_to_map(map) when is_map(map), do: map
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

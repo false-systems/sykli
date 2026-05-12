@@ -185,6 +185,14 @@ defmodule Sykli.FailureSemantics do
     )
   end
 
+  @doc """
+  Serializes failure semantics to a string-keyed map suitable for JSON output.
+
+  Accepts `nil` (passthrough), a `%FailureSemantics{}` struct (canonical
+  serialization), or an already-serialized map (passthrough — useful when a
+  value has been round-tripped through `from_map/1` and back, or when a caller
+  is unsure of the input shape).
+  """
   def to_map(nil), do: nil
 
   def to_map(%__MODULE__{} = semantics) do
@@ -197,6 +205,8 @@ defmodule Sykli.FailureSemantics do
     }
     |> maybe_put("details", non_empty_map(semantics.details))
   end
+
+  def to_map(map) when is_map(map), do: map
 
   def from_map(nil), do: nil
 
