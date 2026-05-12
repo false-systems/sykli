@@ -34,6 +34,40 @@ defmodule Sykli.RunHistoryTest do
       assert loaded.contract_hash == "sha256:abc"
     end
 
+    test "round-trips task failure semantics", %{tmp_dir: tmp_dir} do
+      run = %RunHistory.Run{
+        id: "failure-semantics-run",
+        timestamp: ~U[2024-01-15 10:30:00Z],
+        git_ref: "abc1234",
+        git_branch: "main",
+        tasks: [
+          %RunHistory.TaskResult{
+            name: "test",
+            status: :failed,
+            duration_ms: 100,
+            error: "success_criteria_failed: task failed success_criteria",
+            failure_semantics:
+              Sykli.FailureSemantics.criteria_failure(
+                "success_criteria_failed",
+                "task failed success_criteria"
+              )
+          }
+        ],
+        overall: :failed
+      }
+
+      assert :ok = RunHistory.save(run, path: tmp_dir)
+      assert {:ok, loaded} = RunHistory.load_latest(path: tmp_dir)
+      [task] = loaded.tasks
+
+      assert %Sykli.FailureSemantics{
+               class: :criteria_failure,
+               source: :criteria,
+               retryable: false,
+               reason: "success_criteria_failed"
+             } = task.failure_semantics
+    end
+
     test "creates latest.json symlink", %{tmp_dir: tmp_dir} do
       run = %RunHistory.Run{
         id: "test-run-2",

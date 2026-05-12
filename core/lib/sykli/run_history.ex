@@ -27,6 +27,7 @@ defmodule Sykli.RunHistory do
       :status,
       :duration_ms,
       :error,
+      :failure_semantics,
       :inputs,
       :likely_cause,
       :verified_on,
@@ -40,6 +41,7 @@ defmodule Sykli.RunHistory do
             duration_ms: non_neg_integer(),
             cached: boolean(),
             error: String.t() | nil,
+            failure_semantics: map() | nil,
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
             verified_on: String.t() | nil,
@@ -310,6 +312,7 @@ defmodule Sykli.RunHistory do
       streak: tr.streak
     }
     |> maybe_add(:error, tr.error)
+    |> maybe_add(:failure_semantics, failure_semantics_to_map(tr.failure_semantics))
     |> maybe_add(:inputs, tr.inputs)
     |> maybe_add(:likely_cause, tr.likely_cause)
     |> maybe_add(:verified_on, tr.verified_on)
@@ -344,11 +347,19 @@ defmodule Sykli.RunHistory do
       cached: data["cached"] || false,
       streak: data["streak"] || 0,
       error: data["error"],
+      failure_semantics: Sykli.FailureSemantics.from_map(data["failure_semantics"]),
       inputs: data["inputs"],
       likely_cause: data["likely_cause"],
       verified_on: data["verified_on"]
     }
   end
+
+  defp failure_semantics_to_map(nil), do: nil
+
+  defp failure_semantics_to_map(%Sykli.FailureSemantics{} = semantics),
+    do: Sykli.FailureSemantics.to_map(semantics)
+
+  defp failure_semantics_to_map(map) when is_map(map), do: map
 
   defp parse_timestamp(str) do
     case DateTime.from_iso8601(str) do

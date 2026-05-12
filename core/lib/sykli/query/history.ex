@@ -61,6 +61,7 @@ defmodule Sykli.Query.History do
              task: task_name,
              status: :failed,
              error: task.error,
+             failure_semantics: failure_semantics_to_map(task.failure_semantics),
              duration_ms: task.duration_ms,
              run_id: run.id,
              timestamp: DateTime.to_iso8601(run.timestamp),
@@ -92,6 +93,13 @@ defmodule Sykli.Query.History do
       DateTime.to_date(run.timestamp) == today
     end)
   end
+
+  defp failure_semantics_to_map(nil), do: nil
+
+  defp failure_semantics_to_map(%Sykli.FailureSemantics{} = semantics),
+    do: Sykli.FailureSemantics.to_map(semantics)
+
+  defp failure_semantics_to_map(map) when is_map(map), do: map
 
   defp metadata(query) do
     %{query: query, timestamp: DateTime.utc_now() |> DateTime.to_iso8601()}

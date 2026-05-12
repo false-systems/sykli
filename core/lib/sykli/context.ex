@@ -233,11 +233,19 @@ defmodule Sykli.Context do
       "status" => to_string(result[:status] || :unknown),
       "duration_ms" => result[:duration_ms],
       "cached" => result[:cached] == true,
-      "error" => result[:error]
+      "error" => result[:error],
+      "failure_semantics" => failure_semantics_to_map(result[:failure_semantics])
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
+
+  defp failure_semantics_to_map(nil), do: nil
+
+  defp failure_semantics_to_map(%Sykli.FailureSemantics{} = semantics),
+    do: Sykli.FailureSemantics.to_map(semantics)
+
+  defp failure_semantics_to_map(map) when is_map(map), do: map
 
   defp maybe_add_semantic(map, task) do
     if Task.has_semantic?(task) do

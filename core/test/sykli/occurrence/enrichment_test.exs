@@ -358,6 +358,14 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
       outcomes = Enum.map(steps, & &1["outcome"])
       assert outcomes == ["success", "failure", "error", "success", "skipped", "failure"]
+
+      tasks_by_name = Map.new(enriched.data["tasks"], &{&1["name"], &1})
+      assert get_in(tasks_by_name, ["fail", "failure_semantics", "class"]) == "runtime_failure"
+      assert get_in(tasks_by_name, ["err", "failure_semantics", "class"]) == "timeout"
+      assert get_in(tasks_by_name, ["skip", "failure_semantics", "class"]) == "skipped"
+
+      assert get_in(tasks_by_name, ["block", "failure_semantics", "class"]) ==
+               "dependency_failure"
     end
 
     test "failed task step includes error info", %{workdir: workdir} do
@@ -381,6 +389,7 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
       assert step["error"]["code"] == "task_failed"
       assert step["error"]["what_failed"] =~ "test"
+      assert step["error"]["failure_semantics"]["class"] == "runtime_failure"
     end
 
     test "step timestamps are offset from base timestamp", %{workdir: workdir} do

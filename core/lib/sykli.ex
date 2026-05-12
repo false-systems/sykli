@@ -276,7 +276,8 @@ defmodule Sykli do
             status: t.status,
             duration_ms: t.duration_ms,
             cached: t.cached,
-            error: t.error
+            error: t.error,
+            failure_semantics: t.failure_semantics
           }
         end)
     }
@@ -449,6 +450,9 @@ defmodule Sykli do
         duration_ms: result.duration_ms,
         cached: result.status == :cached,
         error: format_error_for_history(result.error),
+        failure_semantics:
+          result.failure_semantics ||
+            Sykli.FailureSemantics.for_result(result.status, result.error),
         inputs: inputs,
         streak: streak
       }
