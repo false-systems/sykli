@@ -100,6 +100,12 @@ defmodule Sykli.TeamCoordinator.RunSummary do
     error |> String.split(":", parts: 2) |> List.first()
   end
 
+  defp task_error_code(%RunHistory.TaskResult{error: %Sykli.Error{code: code}})
+       when is_binary(code),
+       do: code
+
+  defp task_error_code(%RunHistory.TaskResult{}), do: nil
+
   defp criteria_results(%RunHistory.TaskResult{} = task) do
     task.success_criteria_results
     |> List.wrap()

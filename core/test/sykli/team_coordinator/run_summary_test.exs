@@ -85,6 +85,46 @@ defmodule Sykli.TeamCoordinator.RunSummaryTest do
     assert DateTime.diff(@ts, started, :millisecond) == 2_000
   end
 
+  test "extracts error code from Sykli.Error struct without crashing", %{tmp_dir: tmp_dir} do
+    run = %Run{
+      id: "run_struct_err",
+      timestamp: @ts,
+      git_ref: "abc1234",
+      git_branch: "main",
+      overall: :failed,
+      tasks: [
+        %TaskResult{
+          name: "t",
+          kind: "task",
+          status: :failed,
+          duration_ms: 5,
+          error: %Sykli.Error{code: "task_failed", message: "boom"}
+        }
+      ]
+    }
+
+    encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
+    assert encoded["run"]["error_code"] == "task_failed"
+    assert [%{"error_code" => "task_failed"}] = encoded["nodes"]
+  end
+
+  test "non-binary non-struct error falls through to nil error_code", %{tmp_dir: tmp_dir} do
+    run = %Run{
+      id: "run_atom_err",
+      timestamp: @ts,
+      git_ref: "abc1234",
+      git_branch: "main",
+      overall: :failed,
+      tasks: [
+        %TaskResult{name: "t", kind: "task", status: :errored, duration_ms: 5, error: :boom}
+      ]
+    }
+
+    encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
+    assert encoded["run"]["error_code"] == nil
+    assert [%{"error_code" => nil}] = encoded["nodes"]
+  end
+
   test "zero-duration run still produces equal started_at and finished_at without crashing",
        %{tmp_dir: tmp_dir} do
     run = %Run{
