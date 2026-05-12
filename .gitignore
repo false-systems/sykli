@@ -57,12 +57,28 @@ temp/
 *.tmp
 *.pid
 
-# Documentation (research notes - not for commit, but allow ADRs and committed guides)
+# Documentation — research notes default to ignored; canonical guides are explicitly allowlisted.
+# When adding a new doc you want tracked, add a corresponding `!docs/<name>.md` line below
+# (or use `git add -f` for one-offs). Keep this list sorted alphabetically.
 docs/*
 !docs/adr/
 !docs/releases/
+!docs/agent-contract-semantics.md
+!docs/coordination-modes.md
+!docs/daemon-join-protocol.md
+!docs/done.md
+!docs/error-codes.md
+!docs/false-protocol-schema.md
+!docs/github-native.md
+!docs/local-state-plane.md
+!docs/mcp-tools.md
+!docs/review-primitives.md
 !docs/runtimes.md
 !docs/sdk-schema.md
+!docs/self-hosted-coordinator.md
+!docs/team-mode-roadmap.md
+!docs/team-mode-security.md
+!docs/vartio-integration.md
 
 # Sykli runtime data (AI context, run history, logs)
 .codex/
@@ -72,3 +88,6 @@ examples/**/.sykli/
 # Build artifacts from example projects
 examples/go-project/app
 docs/landing-page.md
+
+# Working drafts (Codex handoff prompts for upcoming roadmap phases)
+CODEX_PROMPT_*.md
