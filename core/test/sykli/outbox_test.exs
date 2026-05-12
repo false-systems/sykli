@@ -14,7 +14,9 @@ defmodule Sykli.OutboxTest do
                fn payload ->
                  send(self(), {:sent, payload})
                  :ok
-               end, path: tmp_dir)
+               end,
+               path: tmp_dir
+             )
 
     assert_received {:sent, @payload}
     assert {:ok, 0} = Sykli.Outbox.pending_count("runs", path: tmp_dir)
