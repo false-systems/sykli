@@ -4,6 +4,20 @@ defmodule Sykli.TeamCoordinator.RunSummary do
 
   The summary is intentionally metadata-only: no logs, source, artifacts, or
   contract bytes are included.
+
+  Timing fields:
+
+    * `finished_at` — `run.timestamp`, set when the run finishes and history
+      is saved.
+    * `started_at` — currently equal to `finished_at`. The engine measures
+      true wall-clock start time at the executor (`Sykli.Executor.do_run/6`)
+      but does not yet propagate it onto `RunHistory.Run`. A later PR will
+      thread it through and replace this with the real value.
+    * `total_task_duration_ms` — sum of per-task `duration_ms` across the
+      whole run. This is *total work*, not wall-clock: tasks at the same
+      dependency level run in parallel, so this number counts parallel
+      branches separately. Use it as a "how much CPU did this run consume"
+      metric, not as elapsed time.
   """
 
   alias Sykli.RunHistory
@@ -22,13 +36,7 @@ defmodule Sykli.TeamCoordinator.RunSummary do
   def from_run(%RunHistory.Run{} = run, opts) do
     session = Keyword.get(opts, :session, opts)
     path = Keyword.get(opts, :path, ".")
-    total_duration_ms = total_duration_ms(run)
     finished_at = run.timestamp
-
-    started_at =
-      if total_duration_ms > 0,
-        do: DateTime.add(finished_at, -total_duration_ms, :millisecond),
-        else: finished_at
 
     %__MODULE__{
       run: %{
@@ -41,9 +49,9 @@ defmodule Sykli.TeamCoordinator.RunSummary do
         "status" => Atom.to_string(run.overall),
         "error_code" => error_code(run),
         "target" => run.platform || "local",
-        "started_at" => DateTime.to_iso8601(started_at),
+        "started_at" => DateTime.to_iso8601(finished_at),
         "finished_at" => DateTime.to_iso8601(finished_at),
-        "total_duration_ms" => total_duration_ms,
+        "total_task_duration_ms" => total_task_duration_ms(run),
         "git_ref" => run.git_ref,
         "git_branch" => run.git_branch
       },
@@ -80,7 +88,7 @@ defmodule Sykli.TeamCoordinator.RunSummary do
   defp node_status(%RunHistory.TaskResult{cached: true}), do: "cached"
   defp node_status(%RunHistory.TaskResult{status: status}), do: Atom.to_string(status)
 
-  defp total_duration_ms(%RunHistory.Run{tasks: tasks}) do
+  defp total_task_duration_ms(%RunHistory.Run{tasks: tasks}) do
     tasks
     |> Enum.map(&(&1.duration_ms || 0))
     |> Enum.sum()

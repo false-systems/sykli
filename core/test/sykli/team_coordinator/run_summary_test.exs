@@ -61,8 +61,12 @@ defmodule Sykli.TeamCoordinator.RunSummaryTest do
     assert [%{"visibility" => "local_only", "uri" => "file://" <> _}] = encoded["evidence_refs"]
   end
 
-  test "projects total_duration_ms and derives started_at from finished_at minus duration",
+  test "projects total_task_duration_ms as sum across all tasks (not wall-clock)",
        %{tmp_dir: tmp_dir} do
+    # Tasks at the same dependency level run in parallel, so the sum-of-durations
+    # is total work consumed, not elapsed wall-clock time. The projection
+    # documents this name explicitly; started_at is the finish timestamp until
+    # the engine threads real wall-clock through RunHistory.Run.
     run = %Run{
       id: "run_dur",
       timestamp: @ts,
@@ -78,11 +82,9 @@ defmodule Sykli.TeamCoordinator.RunSummaryTest do
 
     encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
 
-    assert encoded["run"]["total_duration_ms"] == 2_000
+    assert encoded["run"]["total_task_duration_ms"] == 2_000
     assert encoded["run"]["finished_at"] == DateTime.to_iso8601(@ts)
-
-    {:ok, started, _} = DateTime.from_iso8601(encoded["run"]["started_at"])
-    assert DateTime.diff(@ts, started, :millisecond) == 2_000
+    assert encoded["run"]["started_at"] == encoded["run"]["finished_at"]
   end
 
   test "extracts error code from Sykli.Error struct without crashing", %{tmp_dir: tmp_dir} do
@@ -138,7 +140,7 @@ defmodule Sykli.TeamCoordinator.RunSummaryTest do
 
     encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
 
-    assert encoded["run"]["total_duration_ms"] == 0
+    assert encoded["run"]["total_task_duration_ms"] == 0
     assert encoded["run"]["started_at"] == encoded["run"]["finished_at"]
   end
 end
