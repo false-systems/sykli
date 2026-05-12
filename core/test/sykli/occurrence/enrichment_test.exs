@@ -392,6 +392,23 @@ defmodule Sykli.Occurrence.EnrichmentTest do
       assert step["error"]["failure_semantics"]["class"] == "runtime_failure"
     end
 
+    test "unknown-shape error (string/atom/tuple) still produces error + failure_semantics block",
+         %{workdir: workdir} do
+      occ = make_occurrence("run-step-other-err", "ci.run.failed", "failure")
+      graph = %{"test" => %{command: "mix test"}}
+
+      results =
+        {:error,
+         [%TaskResult{name: "test", status: :failed, duration_ms: 50, error: "raw string boom"}]}
+
+      enriched = Enrichment.enrich(occ, graph, results, workdir)
+      step = hd(enriched.history["steps"])
+
+      assert step["error"]["code"] == "unknown"
+      assert step["error"]["what_failed"] =~ "raw string boom"
+      assert step["error"]["failure_semantics"]["class"] == "unknown"
+    end
+
     test "step timestamps are offset from base timestamp", %{workdir: workdir} do
       occ = make_occurrence("run-ts", "ci.run.passed", "success")
       graph = %{}

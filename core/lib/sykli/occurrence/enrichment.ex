@@ -350,6 +350,9 @@ defmodule Sykli.Occurrence.Enrichment do
 
         step =
           case r.error do
+            nil ->
+              step
+
             %Sykli.Error{} = err ->
               Map.put(step, "error", %{
                 "code" => err.code,
@@ -364,8 +367,12 @@ defmodule Sykli.Occurrence.Enrichment do
                 "failure_semantics" => failure_semantics_map(r)
               })
 
-            _ ->
-              step
+            other ->
+              Map.put(step, "error", %{
+                "code" => "unknown",
+                "what_failed" => "task #{r.name} failed: #{inspect(other)}",
+                "failure_semantics" => failure_semantics_map(r)
+              })
           end
 
         # Remove nil description
