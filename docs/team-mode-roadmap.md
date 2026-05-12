@@ -252,7 +252,7 @@ Exit criteria:
 
 The local work CLI gains a `--team <team>` mode.
 
-Implemented in PR #193:
+Merged in PR #193:
 
 ```bash
 sykli work create "Investigate failing checkout deploy" --team platform
