@@ -60,4 +60,45 @@ defmodule Sykli.TeamCoordinator.RunSummaryTest do
 
     assert [%{"visibility" => "local_only", "uri" => "file://" <> _}] = encoded["evidence_refs"]
   end
+
+  test "projects total_duration_ms and derives started_at from finished_at minus duration",
+       %{tmp_dir: tmp_dir} do
+    run = %Run{
+      id: "run_dur",
+      timestamp: @ts,
+      git_ref: "abc1234",
+      git_branch: "main",
+      overall: :passed,
+      tasks: [
+        %TaskResult{name: "a", kind: "task", status: :passed, duration_ms: 1_200},
+        %TaskResult{name: "b", kind: "task", status: :passed, duration_ms: 800},
+        %TaskResult{name: "c", kind: "task", status: :cached, duration_ms: 0}
+      ]
+    }
+
+    encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
+
+    assert encoded["run"]["total_duration_ms"] == 2_000
+    assert encoded["run"]["finished_at"] == DateTime.to_iso8601(@ts)
+
+    {:ok, started, _} = DateTime.from_iso8601(encoded["run"]["started_at"])
+    assert DateTime.diff(@ts, started, :millisecond) == 2_000
+  end
+
+  test "zero-duration run still produces equal started_at and finished_at without crashing",
+       %{tmp_dir: tmp_dir} do
+    run = %Run{
+      id: "run_zero",
+      timestamp: @ts,
+      git_ref: "abc1234",
+      git_branch: "main",
+      overall: :passed,
+      tasks: [%TaskResult{name: "a", kind: "task", status: :cached, duration_ms: nil}]
+    }
+
+    encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
+
+    assert encoded["run"]["total_duration_ms"] == 0
+    assert encoded["run"]["started_at"] == encoded["run"]["finished_at"]
+  end
 end

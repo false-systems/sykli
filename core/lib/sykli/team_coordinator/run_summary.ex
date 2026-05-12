@@ -22,6 +22,13 @@ defmodule Sykli.TeamCoordinator.RunSummary do
   def from_run(%RunHistory.Run{} = run, opts) do
     session = Keyword.get(opts, :session, opts)
     path = Keyword.get(opts, :path, ".")
+    total_duration_ms = total_duration_ms(run)
+    finished_at = run.timestamp
+
+    started_at =
+      if total_duration_ms > 0,
+        do: DateTime.add(finished_at, -total_duration_ms, :millisecond),
+        else: finished_at
 
     %__MODULE__{
       run: %{
@@ -34,8 +41,9 @@ defmodule Sykli.TeamCoordinator.RunSummary do
         "status" => Atom.to_string(run.overall),
         "error_code" => error_code(run),
         "target" => run.platform || "local",
-        "started_at" => DateTime.to_iso8601(run.timestamp),
-        "finished_at" => DateTime.to_iso8601(run.timestamp),
+        "started_at" => DateTime.to_iso8601(started_at),
+        "finished_at" => DateTime.to_iso8601(finished_at),
+        "total_duration_ms" => total_duration_ms,
         "git_ref" => run.git_ref,
         "git_branch" => run.git_branch
       },
@@ -71,6 +79,13 @@ defmodule Sykli.TeamCoordinator.RunSummary do
 
   defp node_status(%RunHistory.TaskResult{cached: true}), do: "cached"
   defp node_status(%RunHistory.TaskResult{status: status}), do: Atom.to_string(status)
+
+  defp total_duration_ms(%RunHistory.Run{tasks: tasks}) do
+    tasks
+    |> Enum.map(&(&1.duration_ms || 0))
+    |> Enum.sum()
+    |> max(0)
+  end
 
   defp error_code(%RunHistory.Run{overall: :passed}), do: nil
 
