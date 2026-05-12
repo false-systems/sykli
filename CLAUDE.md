@@ -4,12 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Recent changes
 
+Most recent first. Older shipped features (Phase 3B `task_type`, Phase 3C `success_criteria`, schema-as-canonical-contract, `target` removed, review nodes) are now load-bearing architecture — see §"SDKs", §"Patterns & Conventions" ("Engine vocabulary modules"), and the `ReviewPrimitive` row in §"Key Modules".
+
+- **Team Mode foundation** shipped — local work-item and gate-decision stores, `sykli run --work` association with deterministic `contract_hash`, daemon join + heartbeat protocol, self-hosted coordinator skeleton (in-memory store, bearer-token auth), work-item sync via `sykli work ... --team <team>`, deterministic review primitive dispatch (`api_breakage`), and canonical contract hashing. CLI surface: `sykli work`, `sykli gate`, `sykli coordinator`, `sykli daemon join`. The four coordination modes (Local-only / Trusted LAN mesh / Self-hosted coordinator / Hybrid) are normative — see `docs/coordination-modes.md` and the design index under §"Other docs". Phases 0–6 of `docs/team-mode-roadmap.md` are merged on `main`; Phase 7 (run summary sync) and Phase 8 (gate approval sync) are next, after which the roadmap's "first useful demo" — cross-machine work claim → run → remote gate approval — becomes possible.
 - **Engine now enforces `version` strictly.** `Sykli.ContractSchemaVersion` (`core/lib/sykli/contract_schema_version.ex`) is the central policy module — it pins supported versions (`"1"`, `"2"`, `"3"`), the current version (`"3"`), and rejects missing/empty/wrong-type/unsupported versions. `Sykli.Graph.parse/1` and `Sykli.Validate.validate_data/1` both call `ContractSchemaVersion.fetch/1`. The previous silent default-to-`"1"` behavior is gone — payloads without a valid version are rejected. Negative coverage lives in `tests/conformance/schema-invalid/` (11 fixtures: missing, empty string, arbitrary string, integer, float, array, boolean, null, object, unsupported-future, unsupported-major).
-- **Phase 3C `success_criteria`.** Three criterion types (`exit_code`, `file_exists`, `file_non_empty`), conjunctive AND, at-most-one `exit_code` per task. Engine vocabulary lives in `Sykli.SuccessCriteria`. The executor now orchestrates target-level evaluation after command success; the local target enforces all three criteria, unsupported targets fail explicitly, and tasks with criteria bypass cache. All five SDKs ship explicit APIs. Conformance case `24-success-criteria.json`.
-- **Pipeline contract is canonical.** `schemas/sykli-pipeline.schema.json` (JSON Schema 2020-12) is the source of truth for SDK-emitted JSON. `scripts/validate-conformance-schema.py` validates positive fixtures in `tests/conformance/cases/` AND verifies negative fixtures in `tests/conformance/schema-invalid/` are rejected. SDKs must emit only the canonical shape.
-- **Phase 3B `task_type` (version `"3"`).** Closed 12-value enum (`build`, `test`, `lint`, `format`, `scan`, `package`, `publish`, `deploy`, `migrate`, `generate`, `verify`, `cleanup`) classifying executable tasks. Engine vocabulary lives in `Sykli.TaskType`. Triple-layered enforcement: schema `if/then`, `Sykli.Graph.parse_task_type/4`, `Sykli.Validate.check_task_types/3`. Rejected on review nodes. Design rationale: `docs/agent-contract-semantics.md`.
-- **`target` field removed from canonical SDK output.** All five SDK builder methods are deprecated no-ops (Python raises `DeprecationWarning`). The engine never read `target`; this was contract cleanup.
-- **Review nodes (`kind: "review"`) experimental** across all five SDKs. Schema rejects task-execution fields on reviews (`command`, `outputs`, `services`, `mounts`, `k8s`, `retry`, `timeout`, `task_type`, `success_criteria`).
 - **GitHub-native foundation** shipped — GitHub App auth, webhook receiver (Plug + Bandit), Checks API client, `Sykli.Mesh.Roles`. See `docs/github-native.md`.
 - **CLI visual reset** shipped — Nordic-minimal renderer (`Sykli.CLI.Renderer/Theme/Live/FixRenderer`). The output rules are testable; banned vocabulary in §"CLI output rules" below.
 
@@ -77,12 +75,22 @@ eval/harness/run.sh --case 001 --dry-run    # preview without running
 - `README.md` — user-facing pitch + quickstart.
 - `GETTING_STARTED.md` — installation and first-pipeline walkthrough.
 - `RELEASE.md` — release process (Burrito builds, signing, tagging).
-- `CHANGELOG.md` — Keep-a-Changelog format; current line is 0.6.x.
+- `CHANGELOG.md` — Keep-a-Changelog format.
+- `VERSION` (repo root) — canonical version string; `mix.exs` and SDK package manifests mirror it via `scripts/bump-version.sh`. Read this, don't hardcode versions.
 - `docs/sdk-schema.md` — current canonical wire contract, field-by-field.
 - `docs/agent-contract-semantics.md` — Phase 3 design doc (normative for future Phase 3 PRs).
+- `docs/coordination-modes.md` — the four Team Mode shapes (Local / Mesh / Coordinator / Hybrid). Normative.
+- `docs/local-state-plane.md` — the `.sykli/` ↔ coordinator split: detailed local truth vs. shared projection.
+- `docs/self-hosted-coordinator.md` — coordinator responsibilities, data model (`orgs/teams/members/daemon_sessions/work_items/work_notes/contracts`), and storage.
+- `docs/daemon-join-protocol.md` — outbound daemon join + heartbeat + reconnect semantics.
+- `docs/team-mode-roadmap.md` / `docs/team-mode-security.md` — phasing and security posture.
+- `docs/review-primitives.md` — review-node dispatch contract and the `review_result` shape.
+- `docs/runtimes.md` — runtime selection priority chain.
 - `examples/` and `test_projects/` — runnable sample pipelines for manual testing.
 
 Before every commit: `mix format && mix test && mix escript.build`
+
+The repo ships a pre-commit hook at `.githooks/pre-commit` that runs `sykli delta` (the binary's affected-tasks-only path) against the staged change. It auto-discovers the binary in this order: `./core/sykli` → `./core/burrito_out/sykli_macos_aarch64` → `$PATH`; if none are present it exits 0 (skips). The hook is **not** wired up automatically — enable it with `git config core.hooksPath .githooks`. This is real dogfooding: a regression in `sykli delta` breaks every dev's commit flow, so treat that command as user-visible critical-path behavior.
 
 ## Definition of done
 
@@ -118,6 +126,19 @@ The application also installs a SIGTERM handler that drains in-flight `TaskSuper
 4. **Target** executes commands — Local (Docker/Shell) or Kubernetes (Jobs)
 5. **Occurrence** pipeline emits FALSE Protocol events, enriches terminal events with error/reasoning/history blocks, persists to `.sykli/`
 
+### Coordination modes (Team Mode)
+
+> The daemon executes and records; the mesh dispatches inside trusted networks; the coordinator synchronizes team state across locations; `.sykli/` remains the local source of detailed evidence.
+
+That sentence is normative. It appears verbatim in `docs/coordination-modes.md`, `docs/local-state-plane.md`, and `docs/daemon-join-protocol.md`, and it constrains every Team Mode change. The four shapes:
+
+1. **Local-only.** No network. One machine. The default.
+2. **Trusted LAN mesh.** BEAM/libcluster mesh inside a trust domain (existing `Sykli.Mesh`).
+3. **Self-hosted coordinator.** Team-state plane. Daemons connect outbound via `Sykli.Daemon.Join` and `Sykli.Coordinator.Client`; the coordinator never executes work.
+4. **Hybrid.** Mesh inside trust domains, coordinator across them.
+
+Local-first is binding: anything new must work in mode 1 with no network. The coordinator is a downstream projection of part of `.sykli/` — it never owns detailed evidence (see `docs/local-state-plane.md`).
+
 ### Key Modules
 
 | Module | File | Role |
@@ -144,6 +165,14 @@ The application also installs a SIGTERM handler that drains in-flight `TaskSuper
 | `GitHub.Webhook.{Receiver,Server,Signature,Deliveries}` | `github/webhook/*.ex` | Plug pipeline on Bandit; HMAC-SHA256 signature verification; `X-GitHub-Delivery` replay LRU |
 | `GitHub.Checks` | `github/checks.ex` | Checks API client (`create_suite/3`, `create_run/4`, `update_run/4`) |
 | `GitHub.Clock` / `GitHub.HttpClient` | `github/{clock,http_client}*.ex` | Behaviour-split time + HTTP layers for deterministic testing |
+| `WorkItem` / `Work.Store` | `work_item.ex`, `work/store.ex` | Local work-item model + JSON store at `.sykli/work/items/<id>.json`. Statuses: `open/claimed/running/blocked/done/failed/cancelled`. Run association via `attach_run/3`. |
+| `GateDecision` / `Gate.Store` | `gate_decision.ex`, `gate/store.ex` | Local gate-decision model + JSON store at `.sykli/gates/<id>.json`. Statuses: `waiting/approved/rejected/blocked/expired`. `decided_by` is a compact actor ref string (e.g. `"member:yair"`). |
+| `Coordinator` / `Coordinator.Client` | `coordinator.ex`, `coordinator/client.ex` | GenServer that ingests occurrences from connected daemons (in-process, in-memory) + `:httpc`-backed JSON transport used by daemons to talk to a self-hosted coordinator (TLS via `Sykli.HTTP.ssl_opts/1`). Per-resource API surfaces (e.g. `WorkClient`) layer on top of this. |
+| `TeamCoordinator.WorkClient` | `team_coordinator/work_client.ex` | Thin work-item adapter over `Coordinator.Client`. Powers `sykli work create/list/show/claim/note --team <team>`. Does not cache locally; does not execute or assign work. Future Phase 7/8 sync work will likely add `RunClient`/`GateClient` siblings under `team_coordinator/`. |
+| `Daemon.Join` / `Daemon.SessionStore` | `daemon/join.ex`, `daemon/session_store.ex` | Outbound daemon join + heartbeat protocol (see `docs/daemon-join-protocol.md`). Session token persisted under `.sykli/`. |
+| `ReviewPrimitive` | `review_primitive.ex` | Deterministic dispatch for `kind: "review"` nodes. Canonical names only (e.g. `api_breakage`); hyphenated aliases are rejected. Returns `Result{review_type, status, severity, message, tool, findings, evidence}`. Unsupported primitives fail explicitly — never silently skipped. |
+| `ContractHash` | `contract_hash.ex` | `sha256:` hashes for emitted SDK JSON. Canonicalizes by re-encoding parsed JSON so formatting and SDK-side comments don't perturb the hash. Used as Team Mode contract identity. |
+| `CLI.{Coordinator,Gate,Work}` | `cli/{coordinator,gate,work}.ex` | Subcommand modules for the Team Mode CLI surface. All `--json` output flows through `CLI.JsonResponse`. |
 
 Other modules in `lib/sykli/`: Context, Explain, Fix, Plan, Query, Delta, MCP.Server, SCM, Services, Telemetry, HTTP, Attestation, Target.K8s.
 
@@ -192,7 +221,9 @@ Occurrence context carries `trace_id`, `span_id`, and `chain_id` (for correlatin
 ├── occurrences/             # ETF archive (last 50, fast BEAM reload)
 ├── context.json             # pipeline structure + health (via `sykli context`)
 ├── test-map.json            # file → tasks mapping (via `sykli context`)
-└── runs/                    # run history manifests
+├── runs/                    # run history manifests
+├── work/items/              # local work items (Team Mode, one JSON per item)
+└── gates/                   # local gate decisions (Team Mode, one JSON per decision)
 ```
 
 See `docs/false-protocol-schema.md` for the on-disk schema, sample documents, stability tiers, and producer modules for these artifacts.
@@ -213,7 +244,7 @@ The project dogfoods itself via `sykli.exs` (root-level pipeline) and `.github/w
 
 ## CLI Commands
 
-`run`, `validate`, `init`, `explain`, `fix`, `plan`, `context`, `query`, `graph`, `report`, `history`, `verify`, `delta`, `watch`, `daemon`, `mcp`, `cache`
+`run`, `validate`, `init`, `explain`, `fix`, `plan`, `context`, `query`, `graph`, `report`, `history`, `verify`, `delta`, `watch`, `daemon`, `mcp`, `cache`, `work`, `gate`, `coordinator`
 
 ## Environment Variables
 
