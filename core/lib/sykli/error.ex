@@ -737,6 +737,72 @@ defmodule Sykli.Error do
   end
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # TEAM RUN SYNC ERRORS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  def team_run_publish_unauthorized do
+    %__MODULE__{
+      code: "team.run.publish_unauthorized",
+      type: :runtime,
+      message: "coordinator rejected run summary authorization",
+      step: :setup,
+      hints: ["check SYKLI_TEAM_TOKEN and daemon join state"]
+    }
+  end
+
+  def team_run_publish_unavailable(reason) do
+    %__MODULE__{
+      code: "team.run.publish_unavailable",
+      type: :runtime,
+      message: "coordinator unavailable while publishing run summary",
+      step: :setup,
+      hints: ["the run remains local and will be retried from the outbox"],
+      notes: ["reason: #{inspect(reason)}"]
+    }
+  end
+
+  def team_run_invalid_payload do
+    %__MODULE__{
+      code: "team.run.invalid_payload",
+      type: :validation,
+      message: "run summary payload is invalid",
+      step: :validate,
+      hints: []
+    }
+  end
+
+  def team_run_body_too_large do
+    %__MODULE__{
+      code: "team.run.body_too_large",
+      type: :validation,
+      message: "run summary payload exceeds coordinator limit",
+      step: :validate,
+      hints: ["run summaries must contain references, not logs or artifacts"]
+    }
+  end
+
+  def team_outbox_write_failed(reason) do
+    %__MODULE__{
+      code: "team.outbox.write_failed",
+      type: :runtime,
+      message: "failed to write team outbox entry",
+      step: :setup,
+      hints: ["check permissions under .sykli/outbox"],
+      notes: ["reason: #{inspect(reason)}"]
+    }
+  end
+
+  def team_outbox_invalid_kind do
+    %__MODULE__{
+      code: "team.outbox.invalid_kind",
+      type: :internal,
+      message: "invalid team outbox kind",
+      step: :setup,
+      hints: []
+    }
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # INTERNAL ERRORS
   # ─────────────────────────────────────────────────────────────────────────────
 

@@ -27,9 +27,12 @@ defmodule Sykli.RunHistory do
       :status,
       :duration_ms,
       :error,
+      :kind,
+      :review_result,
       :inputs,
       :likely_cause,
       :verified_on,
+      success_criteria_results: [],
       cached: false,
       streak: 0
     ]
@@ -40,6 +43,9 @@ defmodule Sykli.RunHistory do
             duration_ms: non_neg_integer(),
             cached: boolean(),
             error: String.t() | nil,
+            kind: String.t() | nil,
+            review_result: map() | nil,
+            success_criteria_results: [map()] | nil,
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
             verified_on: String.t() | nil,
@@ -310,6 +316,9 @@ defmodule Sykli.RunHistory do
       streak: tr.streak
     }
     |> maybe_add(:error, tr.error)
+    |> maybe_add(:kind, tr.kind)
+    |> maybe_add(:review_result, tr.review_result)
+    |> maybe_add(:success_criteria_results, tr.success_criteria_results)
     |> maybe_add(:inputs, tr.inputs)
     |> maybe_add(:likely_cause, tr.likely_cause)
     |> maybe_add(:verified_on, tr.verified_on)
@@ -344,6 +353,9 @@ defmodule Sykli.RunHistory do
       cached: data["cached"] || false,
       streak: data["streak"] || 0,
       error: data["error"],
+      kind: data["kind"],
+      review_result: data["review_result"],
+      success_criteria_results: data["success_criteria_results"],
       inputs: data["inputs"],
       likely_cause: data["likely_cause"],
       verified_on: data["verified_on"]

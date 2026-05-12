@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Most recent first. Older shipped features (Phase 3B `task_type`, Phase 3C `success_criteria`, schema-as-canonical-contract, `target` removed, review nodes) are now load-bearing architecture — see §"SDKs", §"Patterns & Conventions" ("Engine vocabulary modules"), and the `ReviewPrimitive` row in §"Key Modules".
 
+- **Team Mode run summary sync** added Phase 7 coordinator projection: joined daemons publish metadata-only run summaries to `POST /v1/runs`, the coordinator stores idempotent run records plus node/criteria/review/gate/evidence refs, and `.sykli/outbox/runs/` replays deferred publishes. No logs, source, artifacts, contract bytes, or tokens cross this boundary.
 - **Team Mode foundation** shipped — local work-item and gate-decision stores, `sykli run --work` association with deterministic `contract_hash`, daemon join + heartbeat protocol, self-hosted coordinator skeleton (in-memory store, bearer-token auth), work-item sync via `sykli work ... --team <team>`, deterministic review primitive dispatch (`api_breakage`), and canonical contract hashing. CLI surface: `sykli work`, `sykli gate`, `sykli coordinator`, `sykli daemon join`. The four coordination modes (Local-only / Trusted LAN mesh / Self-hosted coordinator / Hybrid) are normative — see `docs/coordination-modes.md` and the design index under §"Other docs". Phases 0–6 of `docs/team-mode-roadmap.md` are merged on `main`; Phase 7 (run summary sync) and Phase 8 (gate approval sync) are next, after which the roadmap's "first useful demo" — cross-machine work claim → run → remote gate approval — becomes possible.
 - **Engine now enforces `version` strictly.** `Sykli.ContractSchemaVersion` (`core/lib/sykli/contract_schema_version.ex`) is the central policy module — it pins supported versions (`"1"`, `"2"`, `"3"`), the current version (`"3"`), and rejects missing/empty/wrong-type/unsupported versions. `Sykli.Graph.parse/1` and `Sykli.Validate.validate_data/1` both call `ContractSchemaVersion.fetch/1`. The previous silent default-to-`"1"` behavior is gone — payloads without a valid version are rejected. Negative coverage lives in `tests/conformance/schema-invalid/` (11 fixtures: missing, empty string, arbitrary string, integer, float, array, boolean, null, object, unsupported-future, unsupported-major).
 - **GitHub-native foundation** shipped — GitHub App auth, webhook receiver (Plug + Bandit), Checks API client, `Sykli.Mesh.Roles`. See `docs/github-native.md`.
@@ -169,6 +170,8 @@ Local-first is binding: anything new must work in mode 1 with no network. The co
 | `GateDecision` / `Gate.Store` | `gate_decision.ex`, `gate/store.ex` | Local gate-decision model + JSON store at `.sykli/gates/<id>.json`. Statuses: `waiting/approved/rejected/blocked/expired`. `decided_by` is a compact actor ref string (e.g. `"member:yair"`). |
 | `Coordinator` / `Coordinator.Client` | `coordinator.ex`, `coordinator/client.ex` | GenServer that ingests occurrences from connected daemons (in-process, in-memory) + `:httpc`-backed JSON transport used by daemons to talk to a self-hosted coordinator (TLS via `Sykli.HTTP.ssl_opts/1`). Per-resource API surfaces (e.g. `WorkClient`) layer on top of this. |
 | `TeamCoordinator.WorkClient` | `team_coordinator/work_client.ex` | Thin work-item adapter over `Coordinator.Client`. Powers `sykli work create/list/show/claim/note --team <team>`. Does not cache locally; does not execute or assign work. Future Phase 7/8 sync work will likely add `RunClient`/`GateClient` siblings under `team_coordinator/`. |
+| `TeamCoordinator.RunSummary` / `RunClient` | `team_coordinator/run_summary.ex`, `team_coordinator/run_client.ex` | Metadata-only run sync projection and coordinator adapter. Publishes run status, nodes, criteria/review summaries, gates, and evidence refs; never logs, source, artifacts, contract bytes, or tokens. |
+| `Outbox` | `outbox.ex` | Atomic `.sykli/outbox/<kind>/<id>.json` queue for deferred Team Mode sync. Phase 7 uses `outbox/runs/`. |
 | `Daemon.Join` / `Daemon.SessionStore` | `daemon/join.ex`, `daemon/session_store.ex` | Outbound daemon join + heartbeat protocol (see `docs/daemon-join-protocol.md`). Session token persisted under `.sykli/`. |
 | `ReviewPrimitive` | `review_primitive.ex` | Deterministic dispatch for `kind: "review"` nodes. Canonical names only (e.g. `api_breakage`); hyphenated aliases are rejected. Returns `Result{review_type, status, severity, message, tool, findings, evidence}`. Unsupported primitives fail explicitly — never silently skipped. |
 | `ContractHash` | `contract_hash.ex` | `sha256:` hashes for emitted SDK JSON. Canonicalizes by re-encoding parsed JSON so formatting and SDK-side comments don't perturb the hash. Used as Team Mode contract identity. |
@@ -205,6 +208,7 @@ Run lifecycle: `ci.run.started`, `ci.run.passed`, `ci.run.failed`
 Task lifecycle: `ci.task.started`, `ci.task.completed`, `ci.task.cached`, `ci.task.skipped`, `ci.task.retrying`, `ci.task.output`
 Cache / gates: `ci.cache.miss`, `ci.gate.waiting`, `ci.gate.resolved`
 GitHub-native: `ci.github.webhook.received`, `ci.github.check_suite.opened`
+Team Mode: `ci.team.run.synced`, `ci.team.run.sync_deferred`, `ci.team.outbox.drained` (public-unstable)
 
 Terminal events get enriched with `error`, `reasoning`, `history` blocks by `Occurrence.Enrichment`.
 
@@ -223,7 +227,8 @@ Occurrence context carries `trace_id`, `span_id`, and `chain_id` (for correlatin
 ├── test-map.json            # file → tasks mapping (via `sykli context`)
 ├── runs/                    # run history manifests
 ├── work/items/              # local work items (Team Mode, one JSON per item)
-└── gates/                   # local gate decisions (Team Mode, one JSON per decision)
+├── gates/                   # local gate decisions (Team Mode, one JSON per decision)
+└── outbox/runs/             # deferred Team Mode run-summary sync payloads
 ```
 
 See `docs/false-protocol-schema.md` for the on-disk schema, sample documents, stability tiers, and producer modules for these artifacts.

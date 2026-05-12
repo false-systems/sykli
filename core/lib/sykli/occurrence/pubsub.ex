@@ -139,6 +139,31 @@ defmodule Sykli.Occurrence.PubSub do
     occ
   end
 
+  def team_run_synced(run_id, data) do
+    occ = Occurrence.team_run_synced(run_id, data)
+    broadcast(occ)
+    occ
+  end
+
+  def team_run_sync_deferred(run_id, data) do
+    secrets = System.get_env("SYKLI_TEAM_TOKEN") |> List.wrap() |> Enum.reject(&is_nil/1)
+
+    occ =
+      Occurrence.team_run_sync_deferred(
+        run_id,
+        Sykli.Services.SecretMasker.mask_deep(data, secrets)
+      )
+
+    broadcast(occ)
+    occ
+  end
+
+  def team_outbox_drained(run_id, data) do
+    occ = Occurrence.team_outbox_drained(run_id, data)
+    broadcast(occ)
+    occ
+  end
+
   @doc "Broadcast a ci.github.webhook.received occurrence. Returns the Occurrence."
   def github_webhook_received(run_id, data) do
     occ = Occurrence.github_webhook_received(run_id, data)

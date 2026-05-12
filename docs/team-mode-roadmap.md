@@ -293,6 +293,10 @@ Exit criteria:
 After a local or K8s run, a joined daemon publishes a summary to the
 coordinator.
 
+Status:
+
+- Implemented in PR #194; update to `Merged in PR #194` after merge.
+
 Sync set:
 
 - run status

@@ -77,6 +77,38 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "runs"]} = conn, opts) do
+    with {:ok, body, conn} <- read_run_json(conn),
+         {:ok, run, mode} <- Store.record_run(store(opts), body) do
+      status = if mode == :inserted, do: 201, else: 200
+      send_json(conn, status, %{run: run})
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs"]} = conn, opts) do
+    conn = fetch_query_params(conn)
+
+    filters =
+      conn.query_params
+      |> Map.take(["team_id", "work_item_id", "status"])
+      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+      |> Map.new()
+
+    with {:ok, runs} <- Store.list_runs(store(opts), filters) do
+      send_json(conn, 200, %{items: runs})
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs", id]} = conn, opts) do
+    with {:ok, run} <- Store.get_run(store(opts), id) do
+      send_json(conn, 200, run)
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
   defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "work-items"]} = conn, opts) do
     with {:ok, body, conn} <- read_json(conn),
          {:ok, item} <- Store.create_work_item(store(opts), body) do
@@ -181,6 +213,14 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
+  defp read_run_json(conn) do
+    case read_json(conn) do
+      {:error, :coordinator_invalid_payload} -> {:error, :team_run_invalid_payload}
+      {:error, :coordinator_payload_too_large} -> {:error, :team_run_body_too_large}
+      other -> other
+    end
+  end
+
   defp send_json(conn, status, data) do
     conn
     |> put_resp_content_type("application/json")
@@ -203,8 +243,10 @@ defmodule Sykli.TeamCoordinator.Router do
   defp status_for(:coordinator_invalid_json), do: 400
   defp status_for(:coordinator_invalid_payload), do: 400
   defp status_for(:coordinator_payload_too_large), do: 413
+  defp status_for(:team_run_body_too_large), do: 413
   defp status_for(:coordinator_body_read_failed), do: 408
   defp status_for(:coordinator_route_not_found), do: 404
+  defp status_for(:team_run_invalid_payload), do: 400
   defp status_for({:missing_field, _field}), do: 400
   defp status_for({:invalid_field, _field}), do: 400
   defp status_for({:duplicate_org_slug, _slug}), do: 409
@@ -220,6 +262,8 @@ defmodule Sykli.TeamCoordinator.Router do
   defp status_for({:invalid_daemon_status, _status}), do: 400
   defp status_for({:invalid_daemon_session_id, _id}), do: 400
   defp status_for({:daemon_session_not_found, _id}), do: 404
+  defp status_for(:run_not_found), do: 404
+  defp status_for({:invalid_run_id, _id}), do: 400
   defp status_for(_reason), do: 500
 
   defp coordinator_error(:coordinator_unauthorized),
@@ -239,6 +283,9 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error(:coordinator_payload_too_large),
     do: error("coordinator.payload_too_large", "request body exceeds coordinator limit")
+
+  defp coordinator_error(:team_run_body_too_large),
+    do: error("team.run.body_too_large", "run summary body exceeds coordinator limit")
 
   defp coordinator_error(:coordinator_body_read_failed),
     do: error("coordinator.body_read_failed", "failed to read request body")
@@ -292,6 +339,14 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error({:daemon_session_not_found, id}),
     do: error("coordinator.daemon_session_not_found", "daemon session was not found: #{id}")
+
+  defp coordinator_error(:team_run_invalid_payload),
+    do: error("team.run.invalid_payload", "run summary payload is invalid")
+
+  defp coordinator_error(:run_not_found), do: error("team.run.not_found", "run was not found")
+
+  defp coordinator_error({:invalid_run_id, id}),
+    do: error("team.run.invalid_payload", "invalid run id: #{inspect(id)}")
 
   defp coordinator_error(reason),
     do: error("coordinator.internal_error", "coordinator failed: #{inspect(reason)}")

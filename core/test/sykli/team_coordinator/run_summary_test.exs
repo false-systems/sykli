@@ -1,0 +1,63 @@
+defmodule Sykli.TeamCoordinator.RunSummaryTest do
+  use ExUnit.Case, async: true
+  @moduletag :tmp_dir
+
+  alias Sykli.RunHistory.{Run, TaskResult}
+  alias Sykli.TeamCoordinator.RunSummary
+
+  @session %{"org" => "false-systems", "team" => "platform", "session_id" => "sess_001"}
+  @ts ~U[2026-05-11 10:00:00Z]
+
+  test "projects run metadata nodes criteria reviews and evidence refs", %{tmp_dir: tmp_dir} do
+    File.mkdir_p!(Path.join(tmp_dir, ".sykli"))
+    File.write!(Path.join([tmp_dir, ".sykli", "occurrence.json"]), ~s({"ok":true}))
+
+    run = %Run{
+      id: "run_001",
+      timestamp: @ts,
+      git_ref: "abc1234",
+      git_branch: "main",
+      work_item_id: "work_001",
+      contract_hash: "sha256:abc",
+      overall: :failed,
+      tasks: [
+        %TaskResult{
+          name: "test",
+          kind: "task",
+          status: :failed,
+          duration_ms: 12,
+          error: "task_failed: task failed",
+          success_criteria_results: [
+            %{"type" => "exit_code", "status" => "failed", "message" => "exit code 1"}
+          ]
+        },
+        %TaskResult{
+          name: "review-api",
+          kind: "review",
+          status: :passed,
+          duration_ms: 4,
+          review_result: %{
+            "review_type" => "api_breakage",
+            "status" => "passed",
+            "severity" => nil,
+            "message" => "no breaking changes detected",
+            "tool" => "api-diff"
+          }
+        }
+      ]
+    }
+
+    encoded = run |> RunSummary.from_run(session: @session, path: tmp_dir) |> RunSummary.encode()
+
+    assert encoded["version"] == "1"
+    assert encoded["run"]["status"] == "failed"
+    assert encoded["run"]["error_code"] == "task_failed"
+    assert [%{"name" => "test", "status" => "failed"}, %{"kind" => "review"}] = encoded["nodes"]
+    assert [%{"task" => "test", "type" => "exit_code"}] = encoded["criteria_results"]
+
+    assert [%{"task" => "review-api", "review_type" => "api_breakage"}] =
+             encoded["review_results"]
+
+    assert [%{"visibility" => "local_only", "uri" => "file://" <> _}] = encoded["evidence_refs"]
+  end
+end

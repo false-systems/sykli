@@ -169,6 +169,75 @@ defmodule Sykli.TeamCoordinator.StoreTest do
     assert List.last(events)["subject_id"] == item["id"]
   end
 
+  test "records runs idempotently and filters run list", %{store: store} do
+    {:ok, org} = Store.create_org(store, %{"slug" => "false-systems", "name" => "False Systems"})
+
+    {:ok, team} =
+      Store.create_team(store, %{
+        "org_id" => org["id"],
+        "slug" => "platform",
+        "name" => "Platform"
+      })
+
+    payload = run_payload(%{"org_slug" => "false-systems", "team_slug" => "platform"})
+
+    assert {:ok, record, :inserted} = Store.record_run(store, payload)
+    assert record["run"]["team_id"] == team["id"]
+    assert [%{"name" => "test"}] = record["nodes"]
+
+    assert {:ok, ^record, :existing} = Store.record_run(store, payload)
+    assert {:ok, ^record} = Store.get_run(store, "run_001")
+
+    assert {:ok, [listed]} =
+             Store.list_runs(store, %{"team_id" => team["id"], "status" => "passed"})
+
+    assert listed["id"] == "run_001"
+
+    assert {:ok, events} = Store.audit_log(store)
+    assert Enum.count(events, &(&1["action"] == "run.recorded")) == 1
+  end
+
+  test "record_run validates team and payload", %{store: store} do
+    assert {:error, {:org_not_found, "false-systems"}} =
+             Store.record_run(
+               store,
+               run_payload(%{"org_slug" => "false-systems", "team_slug" => "platform"})
+             )
+
+    {:ok, org} = Store.create_org(store, %{"slug" => "false-systems", "name" => "False Systems"})
+
+    {:ok, _team} =
+      Store.create_team(store, %{
+        "org_id" => org["id"],
+        "slug" => "platform",
+        "name" => "Platform"
+      })
+
+    invalid_payload = put_in(run_payload(), ["run", "status"], "wat")
+    assert {:error, :team_run_invalid_payload} = Store.record_run(store, invalid_payload)
+  end
+
+  defp run_payload(run_overrides \\ %{}) do
+    %{
+      "version" => "1",
+      "run" =>
+        Map.merge(
+          %{
+            "id" => "run_001",
+            "org_slug" => "false-systems",
+            "team_slug" => "platform",
+            "status" => "passed"
+          },
+          run_overrides
+        ),
+      "nodes" => [%{"name" => "test", "kind" => "task", "status" => "passed"}],
+      "criteria_results" => [],
+      "review_results" => [],
+      "gates" => [],
+      "evidence_refs" => [%{"uri" => "file:///tmp/occurrence.json", "visibility" => "local_only"}]
+    }
+  end
+
   defp id_sequence(ids) do
     {:ok, agent} = Agent.start_link(fn -> ids end)
 

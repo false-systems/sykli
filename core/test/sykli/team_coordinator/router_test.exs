@@ -238,6 +238,84 @@ defmodule Sykli.TeamCoordinator.RouterTest do
     assert json(invalid)["error"]["code"] == "coordinator.invalid_daemon_status"
   end
 
+  test "records lists and shows runs through JSON API", %{opts: opts} do
+    :post
+    |> authed_json_conn("/v1/orgs", %{"slug" => "false-systems", "name" => "False Systems"})
+    |> call(opts)
+
+    :post
+    |> authed_json_conn("/v1/teams", %{
+      "org_id" => "org_001",
+      "slug" => "platform",
+      "name" => "Platform"
+    })
+    |> call(opts)
+
+    payload = %{
+      "version" => "1",
+      "run" => %{
+        "id" => "run_001",
+        "org_slug" => "false-systems",
+        "team_slug" => "platform",
+        "status" => "passed"
+      },
+      "nodes" => [%{"name" => "test", "kind" => "task", "status" => "passed"}],
+      "criteria_results" => [],
+      "review_results" => [],
+      "gates" => [],
+      "evidence_refs" => []
+    }
+
+    created = :post |> authed_json_conn("/v1/runs", payload) |> call(opts)
+    assert created.status == 201
+    assert json(created)["data"]["run"]["run"]["id"] == "run_001"
+
+    duplicate = :post |> authed_json_conn("/v1/runs", payload) |> call(opts)
+    assert duplicate.status == 200
+
+    list = :get |> authed_conn("/v1/runs?team_id=team_001&status=passed") |> call(opts)
+    assert [%{"id" => "run_001"}] = json(list)["data"]["items"]
+
+    show = :get |> authed_conn("/v1/runs/run_001") |> call(opts)
+    assert [%{"name" => "test"}] = json(show)["data"]["nodes"]
+  end
+
+  test "run endpoints return structured errors", %{opts: opts} do
+    unauthorized = call(conn(:get, "/v1/runs"), opts)
+    assert unauthorized.status == 401
+
+    :post
+    |> authed_json_conn("/v1/orgs", %{"slug" => "false-systems", "name" => "False Systems"})
+    |> call(opts)
+
+    :post
+    |> authed_json_conn("/v1/teams", %{
+      "org_id" => "org_001",
+      "slug" => "platform",
+      "name" => "Platform"
+    })
+    |> call(opts)
+
+    invalid =
+      :post
+      |> authed_json_conn("/v1/runs", %{
+        "version" => "1",
+        "run" => %{
+          "id" => "run_bad",
+          "org_slug" => "false-systems",
+          "team_slug" => "platform",
+          "status" => "wat"
+        }
+      })
+      |> call(opts)
+
+    assert invalid.status == 400
+    assert json(invalid)["error"]["code"] == "team.run.invalid_payload"
+
+    missing = :get |> authed_conn("/v1/runs/missing") |> call(opts)
+    assert missing.status == 404
+  end
+
   defp call(conn, opts) do
     conn
     |> fetch_query_params()

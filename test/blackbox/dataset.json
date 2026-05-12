@@ -1736,6 +1736,92 @@
       "validated_by": "Injected bug: missing coordinator session still creates a local .sykli work item."
     },
     {
+      "id": "POS-team-run-sync-passing",
+      "name": "joined daemon syncs passing run summary",
+      "fixture": "single_task",
+      "command": "port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >/dev/null; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --name run-sync-daemon --json >/dev/null; SYKLI_TEAM_TOKEN=secret sykli --json >/dev/null; SYKLI_TEAM_TOKEN=secret sykli daemon status --json >/dev/null; curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs\" >runs.json; cat runs.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.items | length == 1",
+        ".data.items[0].status == \"passed\"",
+        ".data.items[0] | has(\"logs\") | not",
+        ".data.items[0] | has(\"artifacts\") | not",
+        ".data.items[0] | has(\"token\") | not"
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 7; joined daemons publish metadata-only run summaries",
+      "validated_by": "Injected bug: run summaries are not synced, include raw evidence bytes, or leak token/log/artifact fields."
+    },
+    {
+      "id": "POS-team-run-sync-failing",
+      "name": "joined daemon syncs failing run error code and evidence ref",
+      "fixture": "empty_dir",
+      "command": "printf '%s\\n' 'IO.puts(~s({\"version\":\"1\",\"tasks\":[{\"name\":\"fail\",\"command\":\"exit 7\"}]}))' > sykli.exs; port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >/dev/null; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --name run-sync-daemon --json >/dev/null; SYKLI_TEAM_TOKEN=secret sykli --json >/dev/null || true; SYKLI_TEAM_TOKEN=secret sykli daemon status --json >/dev/null; run=$(curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs\" | jq -r '.data.items[0].id'); curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs/$run\" >run.json; cat run.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.run.status == \"failed\"",
+        ".data.run.error_code != null",
+        ".data.evidence_refs | length >= 1",
+        ".data.evidence_refs[0].visibility == \"local_only\"",
+        ".data.evidence_refs[0] | has(\"bytes\") | not"
+      ],
+      "source": "docs/local-state-plane.md evidence reference pattern; failing run sync stores references not bytes",
+      "validated_by": "Injected bug: failed summaries omit error_code/evidence_refs or upload occurrence bytes."
+    },
+    {
+      "id": "POS-team-run-sync-criteria",
+      "name": "joined daemon syncs success criteria results",
+      "fixture": "empty_dir",
+      "command": "printf '%s\\n' 'IO.puts(~s({\"version\":\"3\",\"tasks\":[{\"name\":\"test\",\"command\":\"true\",\"success_criteria\":[{\"type\":\"exit_code\",\"equals\":0}]}]}))' > sykli.exs; port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord.log 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >/dev/null; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --name run-sync-daemon --json >/dev/null; SYKLI_TEAM_TOKEN=secret sykli --json >/dev/null; SYKLI_TEAM_TOKEN=secret sykli daemon status --json >/dev/null; run=$(curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs\" | jq -r '.data.items[0].id'); curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs/$run\" >run.json; cat run.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.criteria_results | length == 1",
+        ".data.criteria_results[0].task == \"test\"",
+        ".data.criteria_results[0].type == \"exit_code\"",
+        ".data.criteria_results[0].status == \"passed\""
+      ],
+      "source": "docs/team-mode-roadmap.md Phase 7 sync set; success criteria results are projected into coordinator state",
+      "validated_by": "Injected bug: run summary drops success_criteria_results."
+    },
+    {
+      "id": "SYS-team-run-sync-outbox-replay",
+      "name": "run summary outbox replays after coordinator outage",
+      "fixture": "single_task",
+      "command": "port=$((24000 + RANDOM % 10000)); SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord1.log 2>&1 & pid=$!; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org.json; org=$(jq -r '.data.org.id' org.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >/dev/null; sykli daemon join --coordinator \"http://127.0.0.1:$port\" --org false-systems --team platform --token secret --name run-sync-daemon --json >/dev/null; kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; SYKLI_TEAM_TOKEN=secret sykli --json >/dev/null; test -f .sykli/outbox/runs/*.json; SYKLI_COORDINATOR_TOKEN=secret sykli coordinator start --port \"$port\" >coord2.log 2>&1 & pid2=$!; trap 'kill $pid2 2>/dev/null || true' EXIT; for i in {1..80}; do curl -fsS \"http://127.0.0.1:$port/health\" >/dev/null 2>&1 && break; sleep 0.1; done; curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d '{\"slug\":\"false-systems\",\"name\":\"False Systems\"}' \"http://127.0.0.1:$port/v1/orgs\" >org2.json; org2=$(jq -r '.data.org.id' org2.json); curl -fsS -H 'Authorization: Bearer secret' -H 'Content-Type: application/json' -d \"{\\\"org_id\\\":\\\"$org2\\\",\\\"slug\\\":\\\"platform\\\",\\\"name\\\":\\\"Platform\\\"}\" \"http://127.0.0.1:$port/v1/teams\" >/dev/null; SYKLI_TEAM_TOKEN=secret sykli daemon status --json >/dev/null; test ! -e .sykli/outbox/runs/*.json; curl -fsS -H 'Authorization: Bearer secret' \"http://127.0.0.1:$port/v1/runs\" >runs.json; cat runs.json",
+      "shell": true,
+      "requires": "curl",
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".ok == true",
+        ".data.items | length == 1",
+        ".data.items[0].status == \"passed\""
+      ],
+      "source": "docs/local-state-plane.md survivability; outbox replays after coordinator outage",
+      "validated_by": "Injected bug: deferred run summary is not written, not drained, or not idempotently accepted."
+    },
+    {
+      "id": "POS-team-run-sync-local-only-unchanged",
+      "name": "local-only run writes no team outbox",
+      "fixture": "single_task",
+      "command": "sykli --json >/dev/null; test ! -e .sykli/outbox/runs/*.json; jq 'del(.id, .timestamp)' .sykli/runs/latest.json >normalized.json; jq -e '.overall == \"passed\" and (.work_item_id == null) and (.contract_hash == null)' normalized.json >/dev/null; cat normalized.json",
+      "shell": true,
+      "expect_exit": 0,
+      "expect_json_jq": [
+        ".overall == \"passed\"",
+        ".tasks | length == 1"
+      ],
+      "source": "docs/local-state-plane.md survivability; daemons without coordinator sessions remain local-only",
+      "validated_by": "Injected bug: local-only runs attempt team sync or write .sykli/outbox/runs without a joined session."
+    },
+    {
       "id": "GH-001",
       "name": "Receiver refuses to start without webhook role",
       "fixture": "single_task",
