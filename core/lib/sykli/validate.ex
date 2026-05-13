@@ -133,6 +133,7 @@ defmodule Sykli.Validate do
     errors
     |> check_task_types(tasks, version)
     |> check_success_criteria(tasks, version)
+    |> check_evidence_required(tasks, version)
   end
 
   defp check_empty_names(errors, tasks) do
@@ -293,12 +294,12 @@ defmodule Sykli.Validate do
             | acc
           ]
 
-        version != "3" ->
+        version not in ["3", "4"] ->
           [
             %{
-              type: :task_type_requires_version_3,
+              type: :task_type_requires_v3_or_newer,
               task: name,
-              message: "Task '#{name}' declares task_type but pipeline version is not 3"
+              message: "Task '#{name}' declares task_type but pipeline version is not 3 or newer"
             }
             | acc
           ]
@@ -349,13 +350,43 @@ defmodule Sykli.Validate do
   defp success_criteria_error_task({_type, task_name}), do: task_name
   defp success_criteria_error_task({_type, task_name, _detail}), do: task_name
 
+  defp check_evidence_required(errors, tasks, version) do
+    tasks
+    |> Enum.filter(fn t -> valid_name?(t["name"]) and Map.has_key?(t, "evidence_required") end)
+    |> Enum.reduce(errors, fn t, acc ->
+      name = t["name"]
+      kind = if t["kind"] == "review", do: :review, else: :task
+
+      case Sykli.EvidenceRequirement.validate(t["evidence_required"], kind, version, name) do
+        :ok ->
+          acc
+
+        {:error, reason} ->
+          [evidence_required_error_to_map(reason) | acc]
+      end
+    end)
+  end
+
+  defp evidence_required_error_to_map(reason) do
+    %{
+      type: evidence_required_error_type(reason),
+      task: evidence_required_error_task(reason),
+      message: Sykli.EvidenceRequirement.message(reason)
+    }
+  end
+
+  defp evidence_required_error_type({type, _task_name}) when is_atom(type), do: type
+  defp evidence_required_error_type({type, _task_name, _detail}) when is_atom(type), do: type
+  defp evidence_required_error_task({_type, task_name}), do: task_name
+  defp evidence_required_error_task({_type, task_name, _detail}), do: task_name
+
   defp format_error(%{type: :missing_command, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :task_type_on_review, message: msg}), do: "Error: #{msg}"
-  defp format_error(%{type: :task_type_requires_version_3, message: msg}), do: "Error: #{msg}"
+  defp format_error(%{type: :task_type_requires_v3_or_newer, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :unknown_task_type, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :success_criteria_on_review, message: msg}), do: "Error: #{msg}"
 
-  defp format_error(%{type: :success_criteria_requires_version_3, message: msg}),
+  defp format_error(%{type: :success_criteria_requires_v3_or_newer, message: msg}),
     do: "Error: #{msg}"
 
   defp format_error(%{type: :invalid_success_criteria, message: msg}), do: "Error: #{msg}"
@@ -364,6 +395,16 @@ defmodule Sykli.Validate do
     do: "Error: #{msg}"
 
   defp format_error(%{type: :duplicate_exit_code_criteria, message: msg}), do: "Error: #{msg}"
+  defp format_error(%{type: :evidence_required_on_review, message: msg}), do: "Error: #{msg}"
+
+  defp format_error(%{type: :evidence_required_requires_version_4, message: msg}),
+    do: "Error: #{msg}"
+
+  defp format_error(%{type: :invalid_evidence_required, message: msg}), do: "Error: #{msg}"
+
+  defp format_error(%{type: :unknown_evidence_required_type, message: msg}),
+    do: "Error: #{msg}"
+
   defp format_error(%{type: :cycle, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :missing_dependency, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :duplicate_task, message: msg}), do: "Error: #{msg}"

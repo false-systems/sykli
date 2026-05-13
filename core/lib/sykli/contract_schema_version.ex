@@ -7,8 +7,8 @@ defmodule Sykli.ContractSchemaVersion do
   of silently treating them as an older format.
   """
 
-  @supported_versions ~w(1 2 3)
-  @current_version "3"
+  @supported_versions ~w(1 2 3 4)
+  @current_version "4"
 
   @type validation_error ::
           :missing_contract_schema_version

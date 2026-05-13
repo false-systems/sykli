@@ -7,6 +7,7 @@ defmodule Sykli.ContractSlice do
   result. Keep this reference-sized: no logs, source, artifacts, or raw outputs.
   """
 
+  alias Sykli.EvidenceRequirement
   alias Sykli.Graph.Task
   alias Sykli.Graph.Task.{AiHooks, Capability, Gate, Semantic}
   alias Sykli.SuccessCriteria
@@ -27,6 +28,7 @@ defmodule Sykli.ContractSlice do
     |> maybe_put("provides", capability_field(task, "provides"))
     |> maybe_put("needs", capability_field(task, "needs"))
     |> maybe_put("success_criteria", non_empty(Task.success_criteria(task)))
+    |> maybe_put("evidence_required", non_empty(Task.evidence_required(task)))
     |> maybe_put("target", target_map(task))
     |> maybe_put("review", review_map(task))
     |> maybe_put("gate", gate_map(task))
@@ -47,6 +49,10 @@ defmodule Sykli.ContractSlice do
     |> maybe_put(
       "success_criteria",
       normalized_value(non_empty(task[:success_criteria] || task["success_criteria"]))
+    )
+    |> maybe_put(
+      "evidence_required",
+      normalized_value(non_empty(task[:evidence_required] || task["evidence_required"]))
     )
     |> maybe_put("target", map_target(task))
     |> maybe_put("review", normalized_map(task[:review] || task["review"]))
@@ -95,6 +101,55 @@ defmodule Sykli.ContractSlice do
       status: parse_status(data["status"]),
       message: data["message"],
       evidence: data["evidence"],
+      target: data["target"]
+    }
+  end
+
+  @doc "Serializes evidence requirement results to stable string-keyed maps."
+  @spec evidence_results([EvidenceRequirement.Result.t() | map()] | nil) :: [map()]
+  def evidence_results(nil), do: []
+
+  def evidence_results(results) when is_list(results) do
+    Enum.map(results, &evidence_result_to_map/1)
+  end
+
+  def evidence_result_to_map(%EvidenceRequirement.Result{} = result) do
+    %{
+      "index" => result.index,
+      "type" => result.type,
+      "name" => result.name,
+      "status" => stringify(result.status),
+      "message" => result.message,
+      "required" => result.required,
+      "evidence_ref" => result.evidence_ref,
+      "target" => result.target
+    }
+    |> reject_empty()
+  end
+
+  def evidence_result_to_map(%{} = result) do
+    result
+    |> stringify_keys()
+    |> reject_empty()
+  end
+
+  @doc "Decodes persisted evidence requirement result maps."
+  @spec evidence_results_from_maps([map()] | nil) :: [EvidenceRequirement.Result.t()]
+  def evidence_results_from_maps(nil), do: []
+
+  def evidence_results_from_maps(results) when is_list(results) do
+    Enum.map(results, &evidence_result_from_map/1)
+  end
+
+  defp evidence_result_from_map(%{} = data) do
+    %EvidenceRequirement.Result{
+      index: data["index"],
+      type: data["type"],
+      name: data["name"],
+      status: parse_evidence_status(data["status"]),
+      message: data["message"],
+      required: data["required"],
+      evidence_ref: data["evidence_ref"],
       target: data["target"]
     }
   end
@@ -155,6 +210,14 @@ defmodule Sykli.ContractSlice do
 
   defp parse_status(value) when value in [:passed, :failed, :unsupported], do: value
   defp parse_status(_), do: :unknown
+
+  defp parse_evidence_status(value)
+       when value in ["satisfied", "missing", "unsupported", "not_evaluated"] do
+    String.to_existing_atom(value)
+  end
+
+  defp parse_evidence_status(value) when is_atom(value), do: value
+  defp parse_evidence_status(_), do: :missing
 
   defp normalized_map(nil), do: nil
   defp normalized_map(%{} = map), do: map |> to_json_compatible() |> reject_empty()

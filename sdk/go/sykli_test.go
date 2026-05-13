@@ -160,6 +160,64 @@ func TestSuccessCriteriaOmittedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestEvidenceRequiredSerialization(t *testing.T) {
+	p := New()
+	p.Task("test").
+		Run("go test ./...").
+		TaskType(TaskTypeTest).
+		EvidenceRequired(FileEvidenceNonEmpty("coverage", "coverage.out"))
+
+	result, err := emitJSON(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result["version"] != "4" {
+		t.Fatalf("expected version '4', got %v", result["version"])
+	}
+
+	task := result["tasks"].([]interface{})[0].(map[string]interface{})
+	requirements := task["evidence_required"].([]interface{})
+	requirement := requirements[0].(map[string]interface{})
+	if requirement["type"] != "file" || requirement["name"] != "coverage" {
+		t.Fatalf("unexpected evidence requirement: %#v", requirement)
+	}
+	if requirement["predicate"] != "non_empty" || requirement["ref_pattern"] != "coverage.out" {
+		t.Fatalf("unexpected file evidence requirement: %#v", requirement)
+	}
+}
+
+func TestNonFileEvidenceRequiredSerialization(t *testing.T) {
+	p := New()
+	p.Task("test").
+		Run("go test ./...").
+		EvidenceRequired(
+			AttestationEvidence("slsa").Visibility("run_history").RefPattern("attestation.json"),
+			CustomEvidence("manual-proof").Required(false).Description("optional external proof"),
+		)
+
+	result, err := emitJSON(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result["version"] != "4" {
+		t.Fatalf("expected version '4', got %v", result["version"])
+	}
+
+	task := result["tasks"].([]interface{})[0].(map[string]interface{})
+	requirements := task["evidence_required"].([]interface{})
+	attestation := requirements[0].(map[string]interface{})
+	custom := requirements[1].(map[string]interface{})
+
+	if attestation["type"] != "attestation" || attestation["visibility"] != "run_history" {
+		t.Fatalf("unexpected attestation evidence requirement: %#v", attestation)
+	}
+	if custom["type"] != "custom" || custom["required"] != false {
+		t.Fatalf("unexpected custom evidence requirement: %#v", custom)
+	}
+}
+
 func TestDuplicateExitCodeCriteriaPanics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

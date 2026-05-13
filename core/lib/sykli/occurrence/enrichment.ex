@@ -540,6 +540,10 @@ defmodule Sykli.Occurrence.Enrichment do
         "success_criteria_results",
         non_empty(Sykli.ContractSlice.success_criteria_results(result.success_criteria_results))
       )
+      |> maybe_add(
+        "evidence_results",
+        non_empty(Sykli.ContractSlice.evidence_results(result.evidence_results))
+      )
       |> maybe_add("covers", non_empty(get_semantic_covers(task)))
       |> maybe_add("inputs", non_empty(get_field(task, :inputs)))
       |> maybe_add("depends_on", non_empty(get_field(task, :depends_on)))

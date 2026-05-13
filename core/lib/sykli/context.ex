@@ -238,7 +238,8 @@ defmodule Sykli.Context do
       "agent_hints" => Sykli.AgentHints.from_failure_semantics(result[:failure_semantics]),
       "contract_slice" => result[:contract_slice],
       "success_criteria_results" =>
-        Sykli.ContractSlice.success_criteria_results(result[:success_criteria_results])
+        Sykli.ContractSlice.success_criteria_results(result[:success_criteria_results]),
+      "evidence_results" => Sykli.ContractSlice.evidence_results(result[:evidence_results])
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) or v == [] end)
     |> Map.new()

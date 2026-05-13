@@ -411,6 +411,7 @@ defmodule Sykli.CLI do
         cached: r.status == :cached
       }
       |> maybe_add_success_criteria_results(r.success_criteria_results)
+      |> maybe_add_evidence_results(r.evidence_results)
       |> maybe_add_review_result(r.review_result)
       |> maybe_add_failure_semantics(r.failure_semantics)
       |> maybe_add_agent_hints(r.failure_semantics)
@@ -431,6 +432,12 @@ defmodule Sykli.CLI do
 
   defp maybe_add_success_criteria_results(base, results) do
     Map.put(base, :success_criteria_results, Enum.map(results, &success_criteria_result_to_map/1))
+  end
+
+  defp maybe_add_evidence_results(base, []), do: base
+
+  defp maybe_add_evidence_results(base, results) do
+    Map.put(base, :evidence_results, Sykli.ContractSlice.evidence_results(results))
   end
 
   defp maybe_add_review_result(base, nil), do: base
@@ -2439,6 +2446,7 @@ defmodule Sykli.CLI do
             :success_criteria_results,
             report_success_criteria_results(t.success_criteria_results)
           )
+          |> maybe_put(:evidence_results, report_evidence_results(t.evidence_results))
           |> maybe_put(:likely_cause, t.likely_cause)
         end)
     }
@@ -2455,6 +2463,10 @@ defmodule Sykli.CLI do
 
   defp report_success_criteria_results(results),
     do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp report_evidence_results(nil), do: nil
+  defp report_evidence_results([]), do: nil
+  defp report_evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
 
   # ----- HISTORY SUBCOMMAND -----
 

@@ -25,6 +25,10 @@ Agent-readable failure output is documented in
 `contract_slice`, `success_criteria_results`, and derived `agent_hints` on
 existing machine-readable surfaces where those facts are available.
 
+Evidence requirements are documented in `docs/evidence-requirements.md`.
+`evidence_required` is SDK-emitted contract data. `evidence_results` are
+produced by Sykli after execution and are reference-only.
+
 ## Thesis
 
 Phase 3 moves Sykli from "describes how to run a graph" to "describes what the

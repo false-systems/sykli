@@ -47,6 +47,7 @@ defmodule Sykli.Graph do
     **AI-Native** - Metadata for AI assistants
       - `semantic` - what code this task covers, intent, criticality
       - `ai_hooks` - on_fail behavior, task selection mode
+      - `evidence_required` - required evidence references/proofs
       - `history_hint` - learned data (flakiness, duration, patterns)
 
     ## Accessor Functions
@@ -73,6 +74,7 @@ defmodule Sykli.Graph do
       :kind,
       :task_type,
       :success_criteria,
+      :evidence_required,
       :command,
       :inputs,
       :outputs,
@@ -152,6 +154,10 @@ defmodule Sykli.Graph do
     @doc "Returns declared task success criteria."
     @spec success_criteria(t()) :: [map()]
     def success_criteria(%__MODULE__{success_criteria: criteria}), do: criteria || []
+
+    @doc "Returns declared task evidence requirements."
+    @spec evidence_required(t()) :: [map()]
+    def evidence_required(%__MODULE__{evidence_required: requirements}), do: requirements || []
 
     @doc "Returns the task command."
     @spec command(t()) :: String.t()
@@ -392,8 +398,8 @@ defmodule Sykli.Graph do
     "Error: Review node '#{task_name}' cannot declare task_type"
   end
 
-  def format_error({:task_type_requires_version_3, task_name, version, _task_type}) do
-    "Error: Task '#{task_name}' declares task_type but pipeline version is #{inspect(version)}, not \"3\""
+  def format_error({:task_type_requires_v3_or_newer, task_name, version, _task_type}) do
+    "Error: Task '#{task_name}' declares task_type but pipeline version is #{inspect(version)}, not \"3\" or newer"
   end
 
   def format_error({:unknown_task_type, task_name, task_type}) do
@@ -404,12 +410,28 @@ defmodule Sykli.Graph do
     Sykli.SuccessCriteria.format_error(reason)
   end
 
-  def format_error({:success_criteria_requires_version_3, _task_name, _version} = reason) do
+  def format_error({:success_criteria_requires_v3_or_newer, _task_name, _version} = reason) do
     Sykli.SuccessCriteria.format_error(reason)
   end
 
   def format_error({:invalid_success_criteria, _task_name, _reason} = reason) do
     Sykli.SuccessCriteria.format_error(reason)
+  end
+
+  def format_error({:evidence_required_on_review, _task_name} = reason) do
+    Sykli.EvidenceRequirement.format_error(reason)
+  end
+
+  def format_error({:evidence_required_requires_version_4, _task_name, _version} = reason) do
+    Sykli.EvidenceRequirement.format_error(reason)
+  end
+
+  def format_error({:invalid_evidence_required, _task_name, _reason} = reason) do
+    Sykli.EvidenceRequirement.format_error(reason)
+  end
+
+  def format_error({:unknown_evidence_required_type, _task_name, _type} = reason) do
+    Sykli.EvidenceRequirement.format_error(reason)
   end
 
   def format_error({:unknown_success_criterion_type, _task_name, _type} = reason) do
@@ -429,6 +451,8 @@ defmodule Sykli.Graph do
     with {:ok, task_type} <- parse_task_type(map["task_type"], kind, version, task_name),
          {:ok, success_criteria} <-
            Sykli.SuccessCriteria.parse(map["success_criteria"], kind, version, task_name),
+         {:ok, evidence_required} <-
+           Sykli.EvidenceRequirement.parse(map["evidence_required"], kind, version, task_name),
          {:ok, services} <- parse_services(map["services"], task_name),
          {:ok, mounts} <- parse_mounts(map["mounts"], task_name) do
       {:ok,
@@ -437,6 +461,7 @@ defmodule Sykli.Graph do
          kind: kind,
          task_type: task_type,
          success_criteria: success_criteria,
+         evidence_required: evidence_required,
          command: map["command"],
          inputs: map["inputs"] || [],
          outputs: normalize_outputs(map["outputs"], kind),
@@ -485,11 +510,11 @@ defmodule Sykli.Graph do
     {:error, {:task_type_on_review, task_name}}
   end
 
-  defp parse_task_type(task_type, _kind, version, task_name) when version != "3" do
-    {:error, {:task_type_requires_version_3, task_name, version, task_type}}
+  defp parse_task_type(task_type, _kind, version, task_name) when version not in ["3", "4"] do
+    {:error, {:task_type_requires_v3_or_newer, task_name, version, task_type}}
   end
 
-  defp parse_task_type(task_type, _kind, "3", task_name) do
+  defp parse_task_type(task_type, _kind, version, task_name) when version in ["3", "4"] do
     if Sykli.TaskType.valid?(task_type) do
       {:ok, task_type}
     else

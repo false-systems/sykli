@@ -2,6 +2,7 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
   use ExUnit.Case, async: true
 
   alias Sykli.Error
+  alias Sykli.EvidenceRequirement.Result, as: EvidenceResult
   alias Sykli.Executor
   alias Sykli.Executor.TaskResult
   alias Sykli.Graph.Task
@@ -344,8 +345,138 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
                   %Result{
                     type: "file_exists",
                     status: :failed,
-                    message: "symlinks are not supported for success_criteria paths"
+                    message: "symlinks are not supported for declared check paths"
                   }
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
+  end
+
+  test "local target passes when required file evidence is satisfied", %{workdir: workdir} do
+    task =
+      task("produce-evidence",
+        command: "printf ok > evidence.txt",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "predicate" => "non_empty",
+            "ref_pattern" => "evidence.txt"
+          }
+        ]
+      )
+
+    assert {:ok, [%TaskResult{status: :passed, evidence_results: [result]}]} =
+             Executor.run([task], graph(task), target: Local, workdir: workdir)
+
+    assert %EvidenceResult{
+             type: "file",
+             name: "proof",
+             status: :satisfied,
+             target: "local"
+           } = result
+
+    assert result.evidence_ref["uri"] =~ "file://"
+  end
+
+  test "missing required file evidence fails with missing_evidence semantics", %{workdir: workdir} do
+    task =
+      task("missing-evidence",
+        command: "echo done",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "ref_pattern" => "missing.txt"
+          }
+        ]
+      )
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "missing_evidence"},
+                failure_semantics: %Sykli.FailureSemantics{class: :missing_evidence},
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :missing}
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
+  end
+
+  test "missing optional file evidence records result without failing", %{workdir: workdir} do
+    task =
+      task("optional-evidence",
+        command: "echo done",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "optional-proof",
+            "required" => false,
+            "ref_pattern" => "missing.txt"
+          }
+        ]
+      )
+
+    assert {:ok,
+            [
+              %TaskResult{
+                status: :passed,
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :missing, required: false}
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
+  end
+
+  test "target without evidence evaluator fails declared evidence explicitly", %{workdir: workdir} do
+    task =
+      task("unsupported-evidence-target",
+        command: "echo done",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "ref_pattern" => "proof.txt"
+          }
+        ]
+      )
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "unsupported_evidence_requirement_for_target"},
+                failure_semantics: %Sykli.FailureSemantics{class: :unsupported_target},
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :unsupported, target: "unsupported"}
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: UnsupportedTarget, workdir: workdir)
+  end
+
+  test "containerized local task cannot evaluate file evidence on host", %{workdir: workdir} do
+    task =
+      task("container-file-evidence",
+        command: "echo done",
+        container: "alpine:latest",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "ref_pattern" => "proof.txt"
+          }
+        ]
+      )
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "unsupported_evidence_requirement_for_target"},
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :unsupported, target: "local"}
                 ]
               }
             ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
@@ -358,11 +489,13 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
         [
           name: name,
           command: "echo ok",
+          container: nil,
           depends_on: [],
           services: [],
           outputs: %{},
           task_inputs: [],
-          success_criteria: []
+          success_criteria: [],
+          evidence_required: []
         ],
         opts
       )
