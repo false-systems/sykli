@@ -350,20 +350,29 @@ defmodule Sykli.Occurrence.Enrichment do
 
         step =
           case r.error do
+            nil ->
+              step
+
             %Sykli.Error{} = err ->
               Map.put(step, "error", %{
                 "code" => err.code,
-                "what_failed" => err.message || "task #{r.name} failed"
+                "what_failed" => err.message || "task #{r.name} failed",
+                "failure_semantics" => failure_semantics_map(r)
               })
 
             :dependency_failed ->
               Map.put(step, "error", %{
                 "code" => "dependency_failed",
-                "what_failed" => "blocked by failed dependency"
+                "what_failed" => "blocked by failed dependency",
+                "failure_semantics" => failure_semantics_map(r)
               })
 
-            _ ->
-              step
+            other ->
+              Map.put(step, "error", %{
+                "code" => "unknown",
+                "what_failed" => "task #{r.name} failed: #{inspect(other)}",
+                "failure_semantics" => failure_semantics_map(r)
+              })
           end
 
         # Remove nil description
@@ -521,6 +530,7 @@ defmodule Sykli.Occurrence.Enrichment do
       task_map
       |> maybe_add("log", task_log_path(result, run_id))
       |> maybe_add("error", error_detail_map(result.error))
+      |> maybe_add("failure_semantics", failure_semantics_map(result))
       |> maybe_add("covers", non_empty(get_semantic_covers(task)))
       |> maybe_add("inputs", non_empty(get_field(task, :inputs)))
       |> maybe_add("depends_on", non_empty(get_field(task, :depends_on)))
@@ -571,6 +581,14 @@ defmodule Sykli.Occurrence.Enrichment do
 
   def error_detail_map(other) do
     %{"message" => inspect(other)}
+  end
+
+  defp failure_semantics_map(%TaskResult{} = result) do
+    semantics =
+      result.failure_semantics ||
+        Sykli.FailureSemantics.for_result(result.status, result.error)
+
+    Sykli.FailureSemantics.to_map(semantics)
   end
 
   # ─────────────────────────────────────────────────────────────────────────────

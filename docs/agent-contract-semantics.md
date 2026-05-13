@@ -12,6 +12,10 @@ rules and definitions are binding.
 JSON remains the canonical wire format. The JSON Schema remains the canonical
 machine contract.
 
+Runtime result classification is documented separately in
+`docs/failure-semantics.md`. `failure_semantics` is produced by Sykli after
+execution; it is not an SDK-emitted pipeline field.
+
 ## Thesis
 
 Phase 3 moves Sykli from "describes how to run a graph" to "describes what the

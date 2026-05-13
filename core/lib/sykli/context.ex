@@ -233,7 +233,8 @@ defmodule Sykli.Context do
       "status" => to_string(result[:status] || :unknown),
       "duration_ms" => result[:duration_ms],
       "cached" => result[:cached] == true,
-      "error" => result[:error]
+      "error" => result[:error],
+      "failure_semantics" => Sykli.FailureSemantics.to_map(result[:failure_semantics])
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()

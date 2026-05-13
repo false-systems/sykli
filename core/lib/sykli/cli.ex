@@ -412,6 +412,7 @@ defmodule Sykli.CLI do
       }
       |> maybe_add_success_criteria_results(r.success_criteria_results)
       |> maybe_add_review_result(r.review_result)
+      |> maybe_add_failure_semantics(r.failure_semantics)
 
     case r.error do
       %Sykli.Error{} = err ->
@@ -435,6 +436,12 @@ defmodule Sykli.CLI do
 
   defp maybe_add_review_result(base, result) do
     Map.put(base, :review_result, review_result_to_map(result))
+  end
+
+  defp maybe_add_failure_semantics(base, nil), do: base
+
+  defp maybe_add_failure_semantics(base, semantics) do
+    Map.put(base, :failure_semantics, Sykli.FailureSemantics.to_map(semantics))
   end
 
   defp review_result_to_map(result) do
@@ -2113,7 +2120,8 @@ defmodule Sykli.CLI do
                     status: t.status,
                     duration_ms: t.duration_ms,
                     cached: t.cached,
-                    error: t.error
+                    error: t.error,
+                    failure_semantics: t.failure_semantics
                   }
                 end)
             }
@@ -2415,6 +2423,7 @@ defmodule Sykli.CLI do
             streak: t.streak
           }
           |> maybe_put(:error, t.error)
+          |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
           |> maybe_put(:likely_cause, t.likely_cause)
         end)
     }

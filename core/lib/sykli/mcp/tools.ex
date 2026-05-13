@@ -201,7 +201,8 @@ defmodule Sykli.MCP.Tools do
                  cached: r.cached
                }
 
-               if r.error, do: Map.put(base, :error, r.error), else: base
+               base = if r.error, do: Map.put(base, :error, r.error), else: base
+               maybe_put_failure_semantics(base, r.failure_semantics)
              end)
          }}
 
@@ -420,7 +421,8 @@ defmodule Sykli.MCP.Tools do
              tasks:
                Enum.map(results, fn r ->
                  base = %{name: r.name, status: to_string(r.status), duration_ms: r.duration_ms}
-                 if r.error, do: Map.put(base, :error, inspect(r.error)), else: base
+                 base = if r.error, do: Map.put(base, :error, inspect(r.error)), else: base
+                 maybe_put_failure_semantics(base, r.failure_semantics)
                end)
            }}
 
@@ -475,6 +477,12 @@ defmodule Sykli.MCP.Tools do
       end
 
     opts
+  end
+
+  defp maybe_put_failure_semantics(map, nil), do: map
+
+  defp maybe_put_failure_semantics(map, semantics) do
+    Map.put(map, :failure_semantics, Sykli.FailureSemantics.to_map(semantics))
   end
 
   defp safe_store_call(fun) do

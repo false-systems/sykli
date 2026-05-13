@@ -73,17 +73,22 @@ defmodule Sykli.Query.Runs do
       overall: run.overall,
       tasks:
         Enum.map(run.tasks, fn t ->
-          result = %{
-            name: t.name,
-            status: t.status,
-            duration_ms: t.duration_ms,
-            cached: t.cached == true
-          }
+          result =
+            %{
+              name: t.name,
+              status: t.status,
+              duration_ms: t.duration_ms,
+              cached: t.cached == true
+            }
+            |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
 
-          if t.error, do: Map.put(result, :error, t.error), else: result
+          maybe_put(result, :error, t.error)
         end)
     }
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp serialize_run_summary(run) do
     %{

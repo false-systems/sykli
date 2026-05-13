@@ -84,6 +84,11 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
               %TaskResult{
                 status: :failed,
                 error: %Error{code: "success_criteria_failed"},
+                failure_semantics: %Sykli.FailureSemantics{
+                  class: :criteria_failure,
+                  source: :criteria,
+                  retryable: false
+                },
                 success_criteria_results: [%Result{type: "file_exists", status: :failed}]
               }
             ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
@@ -166,6 +171,7 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
               %TaskResult{
                 status: :failed,
                 error: %Error{code: "success_criteria_failed"},
+                failure_semantics: %Sykli.FailureSemantics{class: :criteria_failure},
                 success_criteria_results: [%Result{type: "exit_code", status: :failed}]
               }
             ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
@@ -185,6 +191,10 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
               %TaskResult{
                 status: :failed,
                 error: %Error{code: "task_failed", exit_code: 7},
+                failure_semantics: %Sykli.FailureSemantics{
+                  class: :runtime_failure,
+                  source: :target
+                },
                 success_criteria_results: []
               }
             ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
@@ -202,6 +212,10 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
               %TaskResult{
                 status: :failed,
                 error: %Error{code: "unsupported_success_criteria_for_target"},
+                failure_semantics: %Sykli.FailureSemantics{
+                  class: :unsupported_target,
+                  reason: "unsupported_success_criteria"
+                },
                 success_criteria_results: [
                   %Result{type: "file_exists", status: :unsupported, target: "unsupported"}
                 ]

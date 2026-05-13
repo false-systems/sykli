@@ -55,6 +55,7 @@ defmodule Sykli.Executor do
       :error,
       :output,
       :command,
+      :failure_semantics,
       :review_result,
       success_criteria_results: []
     ]
@@ -67,6 +68,7 @@ defmodule Sykli.Executor do
             error: term() | nil,
             output: String.t() | nil,
             command: String.t() | nil,
+            failure_semantics: Sykli.FailureSemantics.t() | nil,
             review_result: Sykli.ReviewPrimitive.Result.t() | nil,
             success_criteria_results: [Sykli.SuccessCriteria.Result.t()]
           }
@@ -399,6 +401,12 @@ defmodule Sykli.Executor do
                     status: :errored,
                     duration_ms: duration,
                     error: reason,
+                    failure_semantics:
+                      Sykli.FailureSemantics.dependency_failure(
+                        "task_input_resolution_failed",
+                        "task input resolution failed",
+                        %{reason: inspect(reason)}
+                      ),
                     command: task.command
                   }
               end
@@ -416,11 +424,14 @@ defmodule Sykli.Executor do
             {{task_ref, {:exit, reason}}, original} ->
               Task.shutdown(task_ref, :brutal_kill)
 
+              error = Error.internal("task process crashed: #{inspect(reason)}")
+
               %TaskResult{
                 name: original.name,
                 status: :errored,
                 duration_ms: 0,
-                error: Error.internal("task process crashed: #{inspect(reason)}"),
+                error: error,
+                failure_semantics: Sykli.FailureSemantics.for_error(error),
                 command: original.command
               }
 
@@ -432,6 +443,11 @@ defmodule Sykli.Executor do
                 status: :errored,
                 duration_ms: 0,
                 error: Error.internal("task process timed out"),
+                failure_semantics:
+                  Sykli.FailureSemantics.timeout(
+                    "task_process_timeout",
+                    "task process timed out"
+                  ),
                 command: original.command
               }
           end)
@@ -503,6 +519,11 @@ defmodule Sykli.Executor do
         status: :blocked,
         duration_ms: 0,
         error: :dependency_failed,
+        failure_semantics:
+          Sykli.FailureSemantics.dependency_failure(
+            "dependency_failed",
+            "blocked by failed dependency"
+          ),
         command: task.command
       }
     end)
@@ -553,7 +574,18 @@ defmodule Sykli.Executor do
          ai_hooks: %{on_fail: :skip}
        })
        when status in [:failed, :errored] do
-    %TaskResult{result | status: :skipped}
+    original_semantics = Sykli.FailureSemantics.to_map(result.failure_semantics)
+
+    %TaskResult{
+      result
+      | status: :skipped,
+        failure_semantics:
+          Sykli.FailureSemantics.skipped(
+            "ai_hook_skip",
+            "task skipped by ai_hooks.on_fail",
+            %{original_failure_semantics: original_semantics}
+          )
+    }
   end
 
   defp apply_on_fail_hook(result, _task), do: result
@@ -614,11 +646,14 @@ defmodule Sykli.Executor do
 
                     duration = System.monotonic_time(:millisecond) - start_time
 
+                    error = Error.missing_secrets(task.name, missing)
+
                     %TaskResult{
                       name: task.name,
                       status: :errored,
                       duration_ms: duration,
-                      error: Error.missing_secrets(task.name, missing),
+                      error: error,
+                      failure_semantics: Sykli.FailureSemantics.for_error(error),
                       command: task.command
                     }
                 end
@@ -627,12 +662,14 @@ defmodule Sykli.Executor do
                 Output.oidc_failed(task.name, reason)
 
                 duration = System.monotonic_time(:millisecond) - start_time
+                error = Error.internal("OIDC credential exchange failed: #{reason}")
 
                 %TaskResult{
                   name: task.name,
                   status: :errored,
                   duration_ms: duration,
-                  error: Error.internal("OIDC credential exchange failed: #{reason}"),
+                  error: error,
+                  failure_semantics: Sykli.FailureSemantics.for_error(error),
                   command: task.command
                 }
             end
@@ -650,6 +687,11 @@ defmodule Sykli.Executor do
             status: :skipped,
             duration_ms: duration,
             error: nil,
+            failure_semantics:
+              Sykli.FailureSemantics.skipped(
+                "condition_not_met",
+                "task skipped because condition was not met"
+              ),
             command: task.command
           }
         end
@@ -677,6 +719,7 @@ defmodule Sykli.Executor do
       status: status,
       duration_ms: System.monotonic_time(:millisecond) - start_time,
       error: error,
+      failure_semantics: if(error, do: Sykli.FailureSemantics.for_error(error)),
       command: nil,
       review_result: review_result
     }
@@ -719,6 +762,11 @@ defmodule Sykli.Executor do
           status: :failed,
           duration_ms: duration,
           error: Error.internal("gate '#{task.name}' denied: #{reason}"),
+          failure_semantics:
+            Sykli.FailureSemantics.policy_block(
+              "gate_denied",
+              "gate '#{task.name}' denied: #{reason}"
+            ),
           command: task.command
         }
 
@@ -732,6 +780,11 @@ defmodule Sykli.Executor do
           status: :failed,
           duration_ms: duration,
           error: Error.internal("gate '#{task.name}' timed out after #{gate.timeout}s"),
+          failure_semantics:
+            Sykli.FailureSemantics.timeout(
+              "gate_timeout",
+              "gate '#{task.name}' timed out after #{gate.timeout}s"
+            ),
           command: task.command
         }
     end
@@ -907,6 +960,7 @@ defmodule Sykli.Executor do
           error: run_result.error,
           output: run_result.output,
           command: task.command,
+          failure_semantics: Sykli.FailureSemantics.for_result(:failed, run_result.error),
           success_criteria_results: run_result.success_criteria_results
         }
 
@@ -920,6 +974,7 @@ defmodule Sykli.Executor do
           error: run_result.error,
           output: run_result.output,
           command: task.command,
+          failure_semantics: Sykli.FailureSemantics.for_result(:errored, run_result.error),
           success_criteria_results: run_result.success_criteria_results
         }
     end

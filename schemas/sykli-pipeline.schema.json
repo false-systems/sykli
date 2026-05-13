@@ -105,7 +105,7 @@
       }
     },
     "successCriterion": {
-      "description": "One declared success criterion. Criteria are conjunctive: all criteria in success_criteria must pass when engine checking is implemented.",
+      "description": "One declared success criterion. Criteria are conjunctive: all criteria in success_criteria must pass when evaluated by the active target.",
       "oneOf": [
         {
           "$ref": "#/$defs/exitCodeCriterion"
@@ -338,7 +338,7 @@
           ]
         },
         "success_criteria": {
-          "description": "Declared verification metadata for executable task success beyond command completion. Requires top-level version == \"3\". Rejected on review nodes. Metadata only in Phase 3C-1; the engine does not evaluate these criteria yet.",
+          "description": "Declared verification rules for executable task success beyond command completion. Requires top-level version == \"3\". Rejected on review nodes. The executor asks the active target to evaluate these criteria after a successful command.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/successCriterion"

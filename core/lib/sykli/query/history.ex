@@ -61,6 +61,7 @@ defmodule Sykli.Query.History do
              task: task_name,
              status: :failed,
              error: task.error,
+             failure_semantics: Sykli.FailureSemantics.to_map(task.failure_semantics),
              duration_ms: task.duration_ms,
              run_id: run.id,
              timestamp: DateTime.to_iso8601(run.timestamp),
