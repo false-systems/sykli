@@ -4,6 +4,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
   alias Sykli.Error
   alias Sykli.Executor
   alias Sykli.Executor.TaskResult
+  alias Sykli.Graph.Task.AiHooks
   alias Sykli.Graph.Task
   alias Sykli.Target.Local
 
@@ -95,6 +96,22 @@ defmodule Sykli.Executor.FailureSemanticsTest do
 
     assert semantics.class == :dependency_failure
     assert semantics.reason == "dependency_failed"
+  end
+
+  test "on_fail skip preserves original failure semantics in details", %{workdir: workdir} do
+    task =
+      task("optional-failure",
+        command: "exit 3",
+        ai_hooks: %AiHooks{on_fail: :skip}
+      )
+
+    assert {:ok, [%TaskResult{status: :skipped, failure_semantics: semantics}]} =
+             Executor.run([task], graph([task]), target: Local, workdir: workdir)
+
+    assert semantics.class == :skipped
+    assert semantics.reason == "ai_hook_skip"
+    assert semantics.details["original_failure_semantics"]["class"] == "runtime_failure"
+    assert semantics.details["original_failure_semantics"]["reason"] == "command_failed"
   end
 
   defp task(name, attrs) do

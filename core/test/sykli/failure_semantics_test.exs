@@ -34,6 +34,44 @@ defmodule Sykli.FailureSemanticsTest do
              FailureSemantics.for_result(:blocked, :dependency_failed)
   end
 
+  describe "for_result/2 dispatch covers status branches" do
+    test "success-like statuses have no failure semantics" do
+      assert FailureSemantics.for_result(:passed, nil) == nil
+      assert FailureSemantics.for_result(:cached, nil) == nil
+    end
+
+    test "skipped statuses remain skipped" do
+      assert %FailureSemantics{class: :skipped, reason: "condition_not_met"} =
+               FailureSemantics.for_result(:skipped, nil)
+
+      assert %FailureSemantics{class: :skipped, reason: "manual_skip"} =
+               FailureSemantics.for_result(:skipped, :manual_skip)
+    end
+
+    test "blocked statuses remain dependency failures" do
+      assert %FailureSemantics{class: :dependency_failure, reason: "dependency_failed"} =
+               FailureSemantics.for_result(:blocked, :dependency_failed)
+
+      assert %FailureSemantics{class: :dependency_failure, reason: "missing_artifact"} =
+               FailureSemantics.for_result(:blocked, :missing_artifact)
+    end
+
+    test "Sykli.Error values are classified by error code before status fallback" do
+      error = Error.task_timeout("slow", "sleep 10", 1_000)
+
+      assert %FailureSemantics{class: :timeout, reason: "task_timeout"} =
+               FailureSemantics.for_result(:errored, error)
+    end
+
+    test "non-error errored and failed values stay calibrated" do
+      assert %FailureSemantics{class: :internal_error, reason: "process_exit"} =
+               FailureSemantics.for_result(:errored, :process_exit)
+
+      assert %FailureSemantics{class: :unknown, reason: "raw_failure"} =
+               FailureSemantics.for_result(:failed, :raw_failure)
+    end
+  end
+
   test "serializes to stable string-keyed map" do
     semantics = FailureSemantics.timeout("task_timeout", "task timed out", %{duration_ms: 1000})
 

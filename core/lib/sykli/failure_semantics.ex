@@ -8,6 +8,9 @@ defmodule Sykli.FailureSemantics do
   blocks, and skipped work without reverse-engineering error strings.
   """
 
+  # Keep @classes and the failure_class typespec in lockstep. `from_map/1`
+  # filters parsed atoms against this list, so a class missing here degrades to
+  # :unknown even if the type mentions it.
   @classes ~w(
     runtime_failure
     contract_failure
@@ -97,6 +100,8 @@ defmodule Sykli.FailureSemantics do
     new(:missing_evidence, false, :criteria, reason, message, details)
   end
 
+  # Reserved for the agent-variance contract work. V1 can deserialize it from
+  # future/local records, but no executor path emits it yet.
   def agent_variance_failure(reason, message, details \\ %{}) do
     new(:agent_variance_failure, false, :executor, reason, message, details)
   end
@@ -115,6 +120,8 @@ defmodule Sykli.FailureSemantics do
   def for_result(:blocked, reason),
     do: dependency_failure(to_reason(reason), message(reason, "task blocked by dependency"))
 
+  # Error structs carry the most precise code/type/step data; classify them via
+  # for_error/1 before any generic status fallback.
   def for_result(_status, %Sykli.Error{} = error), do: for_error(error)
 
   def for_result(:errored, reason),

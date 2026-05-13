@@ -424,16 +424,14 @@ defmodule Sykli.Executor do
             {{task_ref, {:exit, reason}}, original} ->
               Task.shutdown(task_ref, :brutal_kill)
 
+              error = Error.internal("task process crashed: #{inspect(reason)}")
+
               %TaskResult{
                 name: original.name,
                 status: :errored,
                 duration_ms: 0,
-                error: Error.internal("task process crashed: #{inspect(reason)}"),
-                failure_semantics:
-                  Sykli.FailureSemantics.internal_error(
-                    "task_process_crashed",
-                    "task process crashed"
-                  ),
+                error: error,
+                failure_semantics: Sykli.FailureSemantics.for_error(error),
                 command: original.command
               }
 
@@ -576,11 +574,17 @@ defmodule Sykli.Executor do
          ai_hooks: %{on_fail: :skip}
        })
        when status in [:failed, :errored] do
+    original_semantics = Sykli.FailureSemantics.to_map(result.failure_semantics)
+
     %TaskResult{
       result
       | status: :skipped,
         failure_semantics:
-          Sykli.FailureSemantics.skipped("ai_hook_skip", "task skipped by ai_hooks.on_fail")
+          Sykli.FailureSemantics.skipped(
+            "ai_hook_skip",
+            "task skipped by ai_hooks.on_fail",
+            %{original_failure_semantics: original_semantics}
+          )
     }
   end
 
@@ -658,17 +662,14 @@ defmodule Sykli.Executor do
                 Output.oidc_failed(task.name, reason)
 
                 duration = System.monotonic_time(:millisecond) - start_time
+                error = Error.internal("OIDC credential exchange failed: #{reason}")
 
                 %TaskResult{
                   name: task.name,
                   status: :errored,
                   duration_ms: duration,
-                  error: Error.internal("OIDC credential exchange failed: #{reason}"),
-                  failure_semantics:
-                    Sykli.FailureSemantics.internal_error(
-                      "oidc_exchange_failed",
-                      "OIDC credential exchange failed"
-                    ),
+                  error: error,
+                  failure_semantics: Sykli.FailureSemantics.for_error(error),
                   command: task.command
                 }
             end
