@@ -277,7 +277,9 @@ defmodule Sykli do
             duration_ms: t.duration_ms,
             cached: t.cached,
             error: t.error,
-            failure_semantics: t.failure_semantics
+            failure_semantics: t.failure_semantics,
+            contract_slice: t.contract_slice,
+            success_criteria_results: t.success_criteria_results
           }
         end)
     }
@@ -453,6 +455,8 @@ defmodule Sykli do
         failure_semantics:
           result.failure_semantics ||
             Sykli.FailureSemantics.for_result(result.status, result.error),
+        contract_slice: Sykli.ContractSlice.from_task(task),
+        success_criteria_results: result.success_criteria_results,
         inputs: inputs,
         streak: streak
       }

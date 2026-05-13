@@ -13,7 +13,7 @@ defmodule Sykli.SuccessCriteria do
     @enforce_keys [:index, :type, :status, :message]
     defstruct [:index, :type, :status, :message, :evidence, :target]
 
-    @type status :: :passed | :failed | :unsupported
+    @type status :: :passed | :failed | :unsupported | :unknown
 
     @type t :: %__MODULE__{
             index: non_neg_integer(),

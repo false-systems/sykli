@@ -2121,7 +2121,9 @@ defmodule Sykli.CLI do
                     duration_ms: t.duration_ms,
                     cached: t.cached,
                     error: t.error,
-                    failure_semantics: t.failure_semantics
+                    failure_semantics: t.failure_semantics,
+                    contract_slice: t.contract_slice,
+                    success_criteria_results: t.success_criteria_results
                   }
                 end)
             }
@@ -2424,6 +2426,11 @@ defmodule Sykli.CLI do
           }
           |> maybe_put(:error, t.error)
           |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+          |> maybe_put(:contract_slice, t.contract_slice)
+          |> maybe_put(
+            :success_criteria_results,
+            report_success_criteria_results(t.success_criteria_results)
+          )
           |> maybe_put(:likely_cause, t.likely_cause)
         end)
     }
@@ -2432,7 +2439,14 @@ defmodule Sykli.CLI do
   end
 
   defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp report_success_criteria_results(nil), do: nil
+  defp report_success_criteria_results([]), do: nil
+
+  defp report_success_criteria_results(results),
+    do: Sykli.ContractSlice.success_criteria_results(results)
 
   # ----- HISTORY SUBCOMMAND -----
 
