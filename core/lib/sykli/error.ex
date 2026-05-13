@@ -260,8 +260,6 @@ defmodule Sykli.Error do
   missing_evidence: Task command succeeded, but required evidence was missing.
   """
   def missing_evidence(task, results, opts \\ []) do
-    failures = Sykli.EvidenceRequirement.failures(results)
-
     %__MODULE__{
       code: "missing_evidence",
       type: :execution,
@@ -274,7 +272,7 @@ defmodule Sykli.Error do
       hints: [
         "inspect evidence_required and make the task produce the declared evidence reference"
       ],
-      notes: evidence_requirement_notes(failures)
+      notes: evidence_requirement_notes(results)
     }
   end
 

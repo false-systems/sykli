@@ -345,7 +345,7 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
                   %Result{
                     type: "file_exists",
                     status: :failed,
-                    message: "symlinks are not supported for success_criteria paths"
+                    message: "symlinks are not supported for declared check paths"
                   }
                 ]
               }
@@ -430,6 +430,58 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
             ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
   end
 
+  test "target without evidence evaluator fails declared evidence explicitly", %{workdir: workdir} do
+    task =
+      task("unsupported-evidence-target",
+        command: "echo done",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "ref_pattern" => "proof.txt"
+          }
+        ]
+      )
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "unsupported_evidence_requirement_for_target"},
+                failure_semantics: %Sykli.FailureSemantics{class: :unsupported_target},
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :unsupported, target: "unsupported"}
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: UnsupportedTarget, workdir: workdir)
+  end
+
+  test "containerized local task cannot evaluate file evidence on host", %{workdir: workdir} do
+    task =
+      task("container-file-evidence",
+        command: "echo done",
+        container: "alpine:latest",
+        evidence_required: [
+          %{
+            "type" => "file",
+            "name" => "proof",
+            "ref_pattern" => "proof.txt"
+          }
+        ]
+      )
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                error: %Error{code: "unsupported_evidence_requirement_for_target"},
+                evidence_results: [
+                  %EvidenceResult{type: "file", status: :unsupported, target: "local"}
+                ]
+              }
+            ]} = Executor.run([task], graph(task), target: Local, workdir: workdir)
+  end
+
   defp task(name, opts) do
     struct!(
       Task,
@@ -437,6 +489,7 @@ defmodule Sykli.Executor.SuccessCriteriaEnforcementTest do
         [
           name: name,
           command: "echo ok",
+          container: nil,
           depends_on: [],
           services: [],
           outputs: %{},

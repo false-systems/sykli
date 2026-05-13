@@ -34,6 +34,8 @@ Rules:
 - `visibility` defaults to `local`.
 - File evidence requires `ref_pattern`.
 - File `predicate` is `exists` or `non_empty`.
+- Non-file evidence may carry `ref_pattern` as a reserved producer-side reference
+  hint, but V1 does not evaluate it.
 
 Allowed types are `file`, `log`, `attestation`, `occurrence`, `metric`,
 `test_report`, `artifact_ref`, and `custom`.

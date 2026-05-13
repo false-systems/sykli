@@ -294,12 +294,12 @@ defmodule Sykli.Validate do
             | acc
           ]
 
-        version != "3" ->
+        version not in ["3", "4"] ->
           [
             %{
-              type: :task_type_requires_version_3,
+              type: :task_type_requires_v3_or_newer,
               task: name,
-              message: "Task '#{name}' declares task_type but pipeline version is not 3"
+              message: "Task '#{name}' declares task_type but pipeline version is not 3 or newer"
             }
             | acc
           ]
@@ -382,11 +382,11 @@ defmodule Sykli.Validate do
 
   defp format_error(%{type: :missing_command, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :task_type_on_review, message: msg}), do: "Error: #{msg}"
-  defp format_error(%{type: :task_type_requires_version_3, message: msg}), do: "Error: #{msg}"
+  defp format_error(%{type: :task_type_requires_v3_or_newer, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :unknown_task_type, message: msg}), do: "Error: #{msg}"
   defp format_error(%{type: :success_criteria_on_review, message: msg}), do: "Error: #{msg}"
 
-  defp format_error(%{type: :success_criteria_requires_version_3, message: msg}),
+  defp format_error(%{type: :success_criteria_requires_v3_or_newer, message: msg}),
     do: "Error: #{msg}"
 
   defp format_error(%{type: :invalid_success_criteria, message: msg}), do: "Error: #{msg}"

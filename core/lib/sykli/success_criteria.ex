@@ -51,7 +51,7 @@ defmodule Sykli.SuccessCriteria do
   end
 
   def validate(_criteria, _kind, version, task_name) when version not in ["3", "4"] do
-    {:error, {:success_criteria_requires_version_3, task_name, version}}
+    {:error, {:success_criteria_requires_v3_or_newer, task_name, version}}
   end
 
   def validate(criteria, _kind, version, task_name)
@@ -103,8 +103,8 @@ defmodule Sykli.SuccessCriteria do
     "Review node '#{task_name}' cannot declare success_criteria"
   end
 
-  def message({:success_criteria_requires_version_3, task_name, version}) do
-    "Task '#{task_name}' declares success_criteria but pipeline version is #{inspect(version)}, not \"3\""
+  def message({:success_criteria_requires_v3_or_newer, task_name, version}) do
+    "Task '#{task_name}' declares success_criteria but pipeline version is #{inspect(version)}, not \"3\" or newer"
   end
 
   def message({:invalid_success_criteria, task_name, reason}) do

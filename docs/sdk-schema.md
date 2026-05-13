@@ -240,6 +240,9 @@ Allowed `visibility` values are `local`, `run_history`, `occurrence`, and
 `coordinator_ref`. These describe where the reference may appear. They are not
 permission to upload evidence bytes.
 
+Non-file evidence entries may include `ref_pattern` as a reserved
+producer-side reference hint. V1 preserves it but does not evaluate it.
+
 ### `container`, `workdir`, `env`
 
 Standard. `env` keys must be non-empty (validated by every SDK; engine accepts any).

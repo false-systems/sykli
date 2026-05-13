@@ -78,7 +78,7 @@ defmodule SykliTest do
     json =
       ~s({"version":"2","tasks":[{"name":"test","command":"go test ./...","task_type":"test"}]})
 
-    assert {:error, {:task_type_requires_version_3, "test", "2", "test"}} =
+    assert {:error, {:task_type_requires_v3_or_newer, "test", "2", "test"}} =
              Sykli.Graph.parse(json)
   end
 
@@ -98,11 +98,18 @@ defmodule SykliTest do
     assert Sykli.Graph.format_error({:task_type_on_review, "review-code"}) ==
              "Error: Review node 'review-code' cannot declare task_type"
 
-    assert Sykli.Graph.format_error({:task_type_requires_version_3, "test", "2", "test"}) ==
-             ~s(Error: Task 'test' declares task_type but pipeline version is "2", not "3")
+    assert Sykli.Graph.format_error({:task_type_requires_v3_or_newer, "test", "2", "test"}) ==
+             ~s(Error: Task 'test' declares task_type but pipeline version is "2", not "3" or newer)
 
     assert Sykli.Graph.format_error({:unknown_task_type, "thing", "custom"}) ==
              ~s(Error: Task 'thing' declares unknown task_type "custom")
+  end
+
+  test "rejects evidence_required on review nodes" do
+    json =
+      ~s({"version":"4","tasks":[{"name":"review-code","kind":"review","primitive":"lint","evidence_required":[{"type":"file","name":"coverage","ref_pattern":"coverage.out"}]}]})
+
+    assert {:error, {:evidence_required_on_review, "review-code"}} = Sykli.Graph.parse(json)
   end
 
   test "parses review nodes with metadata" do

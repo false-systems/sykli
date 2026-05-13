@@ -650,7 +650,7 @@ defmodule Sykli.Target.Local do
         {:ok, stat}
 
       {:ok, %{type: :symlink}} ->
-        {:error, "symlinks are not supported for success_criteria paths", %{path: path}}
+        {:error, "symlinks are not supported for declared check paths", %{path: path}}
 
       {:ok, %{type: type}} ->
         {:error, "path is not a regular file", %{path: path, file_type: type}}
@@ -716,11 +716,11 @@ defmodule Sykli.Target.Local do
     }
   end
 
-  defp evidence_satisfied(index, type, name, required, message, evidence_ref) do
+  defp evidence_satisfied(index, type, evidence_name, required, message, evidence_ref) do
     %EvidenceResult{
       index: index,
       type: type,
-      name: name,
+      name: evidence_name,
       status: :satisfied,
       message: message,
       required: required,
@@ -729,11 +729,11 @@ defmodule Sykli.Target.Local do
     }
   end
 
-  defp evidence_missing(index, type, name, required, message, evidence_ref) do
+  defp evidence_missing(index, type, evidence_name, required, message, evidence_ref) do
     %EvidenceResult{
       index: index,
       type: type,
-      name: name,
+      name: evidence_name,
       status: :missing,
       message: message,
       required: required,
@@ -742,11 +742,11 @@ defmodule Sykli.Target.Local do
     }
   end
 
-  defp evidence_unsupported(index, type, name, required, message, evidence_ref) do
+  defp evidence_unsupported(index, type, evidence_name, required, message, evidence_ref) do
     %EvidenceResult{
       index: index,
       type: type,
-      name: name,
+      name: evidence_name,
       status: :unsupported,
       message: message,
       required: required,

@@ -185,6 +185,61 @@ func FileEvidenceNonEmpty(name, refPattern string) EvidenceRequirement {
 	return req
 }
 
+// Evidence declares a non-file evidence reference requirement.
+func Evidence(requirementType, name string) EvidenceRequirement {
+	return EvidenceRequirement{
+		requirementType: requirementType,
+		name:            name,
+		required:        true,
+		visibility:      "local",
+	}
+}
+
+// LogEvidence requires a log evidence reference.
+func LogEvidence(name string) EvidenceRequirement { return Evidence("log", name) }
+
+// AttestationEvidence requires an attestation evidence reference.
+func AttestationEvidence(name string) EvidenceRequirement { return Evidence("attestation", name) }
+
+// OccurrenceEvidence requires a FALSE Protocol occurrence evidence reference.
+func OccurrenceEvidence(name string) EvidenceRequirement { return Evidence("occurrence", name) }
+
+// MetricEvidence requires a metric evidence reference.
+func MetricEvidence(name string) EvidenceRequirement { return Evidence("metric", name) }
+
+// TestReportEvidence requires a test-report evidence reference.
+func TestReportEvidence(name string) EvidenceRequirement { return Evidence("test_report", name) }
+
+// ArtifactRefEvidence requires an artifact reference.
+func ArtifactRefEvidence(name string) EvidenceRequirement { return Evidence("artifact_ref", name) }
+
+// CustomEvidence requires a custom evidence reference.
+func CustomEvidence(name string) EvidenceRequirement { return Evidence("custom", name) }
+
+// Required controls whether absence of this evidence fails the task.
+func (e EvidenceRequirement) Required(required bool) EvidenceRequirement {
+	e.required = required
+	return e
+}
+
+// Visibility sets where the evidence reference may appear.
+func (e EvidenceRequirement) Visibility(visibility string) EvidenceRequirement {
+	e.visibility = visibility
+	return e
+}
+
+// RefPattern sets a reference pattern for evidence producers that use one.
+func (e EvidenceRequirement) RefPattern(refPattern string) EvidenceRequirement {
+	e.refPattern = refPattern
+	return e
+}
+
+// Description adds human-readable context for the requirement.
+func (e EvidenceRequirement) Description(description string) EvidenceRequirement {
+	e.description = description
+	return e
+}
+
 func validateEvidenceRequirements(taskName string, requirements []EvidenceRequirement) {
 	for _, req := range requirements {
 		if req.requirementType == "" {
@@ -193,8 +248,8 @@ func validateEvidenceRequirements(taskName string, requirements []EvidenceRequir
 		if req.name == "" {
 			log.Panic().Str("task", taskName).Msg("evidence requirement requires name")
 		}
-		if req.visibility == "" {
-			req.visibility = "local"
+		if req.visibility != "" && req.visibility != "local" && req.visibility != "run_history" && req.visibility != "occurrence" && req.visibility != "coordinator_ref" {
+			log.Panic().Str("task", taskName).Str("visibility", req.visibility).Msg("invalid evidence requirement visibility")
 		}
 		switch req.requirementType {
 		case "file":
@@ -2142,7 +2197,7 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 	type jsonEvidenceRequirement struct {
 		Type        string `json:"type"`
 		Name        string `json:"name"`
-		Required    bool   `json:"required,omitempty"`
+		Required    *bool  `json:"required,omitempty"`
 		Visibility  string `json:"visibility,omitempty"`
 		Predicate   string `json:"predicate,omitempty"`
 		RefPattern  string `json:"ref_pattern,omitempty"`
@@ -2361,11 +2416,17 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 		if len(t.evidenceRequired) > 0 {
 			evidenceRequired = make([]jsonEvidenceRequirement, len(t.evidenceRequired))
 			for j, req := range t.evidenceRequired {
+				required := req.required
+				visibility := req.visibility
+				if visibility == "" {
+					visibility = "local"
+				}
+
 				evidenceRequired[j] = jsonEvidenceRequirement{
 					Type:        req.requirementType,
 					Name:        req.name,
-					Required:    req.required,
-					Visibility:  req.visibility,
+					Required:    &required,
+					Visibility:  visibility,
 					Predicate:   req.predicate,
 					RefPattern:  req.refPattern,
 					Description: req.description,

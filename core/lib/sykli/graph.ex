@@ -398,8 +398,8 @@ defmodule Sykli.Graph do
     "Error: Review node '#{task_name}' cannot declare task_type"
   end
 
-  def format_error({:task_type_requires_version_3, task_name, version, _task_type}) do
-    "Error: Task '#{task_name}' declares task_type but pipeline version is #{inspect(version)}, not \"3\""
+  def format_error({:task_type_requires_v3_or_newer, task_name, version, _task_type}) do
+    "Error: Task '#{task_name}' declares task_type but pipeline version is #{inspect(version)}, not \"3\" or newer"
   end
 
   def format_error({:unknown_task_type, task_name, task_type}) do
@@ -410,7 +410,7 @@ defmodule Sykli.Graph do
     Sykli.SuccessCriteria.format_error(reason)
   end
 
-  def format_error({:success_criteria_requires_version_3, _task_name, _version} = reason) do
+  def format_error({:success_criteria_requires_v3_or_newer, _task_name, _version} = reason) do
     Sykli.SuccessCriteria.format_error(reason)
   end
 
@@ -511,7 +511,7 @@ defmodule Sykli.Graph do
   end
 
   defp parse_task_type(task_type, _kind, version, task_name) when version not in ["3", "4"] do
-    {:error, {:task_type_requires_version_3, task_name, version, task_type}}
+    {:error, {:task_type_requires_v3_or_newer, task_name, version, task_type}}
   end
 
   defp parse_task_type(task_type, _kind, version, task_name) when version in ["3", "4"] do
