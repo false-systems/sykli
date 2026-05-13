@@ -11,12 +11,15 @@
   "additionalProperties": false,
   "allOf": [
     {
-      "description": "Agent-native semantic fields require pipeline version 3.",
+      "description": "Agent-native semantic fields require pipeline version 3 or newer.",
       "if": {
         "properties": {
           "version": {
             "not": {
-              "const": "3"
+              "enum": [
+                "3",
+                "4"
+              ]
             }
           }
         },
@@ -46,15 +49,44 @@
           }
         }
       }
+    },
+    {
+      "description": "Evidence requirements require pipeline version 4.",
+      "if": {
+        "properties": {
+          "version": {
+            "not": {
+              "const": "4"
+            }
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "then": {
+        "properties": {
+          "tasks": {
+            "items": {
+              "not": {
+                "required": [
+                  "evidence_required"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "properties": {
     "version": {
-      "description": "Pipeline wire-format/schema version. Required; missing, malformed, or unsupported values are rejected. SDKs auto-detect: '3' if any executable task uses semantic fields such as task_type or success_criteria; otherwise '2' if any container, mount, dir, or cache resource is used; '1' otherwise.",
+      "description": "Pipeline wire-format/schema version. Required; missing, malformed, or unsupported values are rejected. SDKs auto-detect: '4' if any executable task uses evidence_required; '3' if any executable task uses semantic fields such as task_type or success_criteria; otherwise '2' if any container, mount, dir, or cache resource is used; '1' otherwise.",
       "enum": [
         "1",
         "2",
-        "3"
+        "3",
+        "4"
       ]
     },
     "tasks": {
@@ -105,7 +137,7 @@
       }
     },
     "successCriterion": {
-      "description": "One declared success criterion. Criteria are conjunctive: all criteria in success_criteria must pass when engine checking is implemented.",
+      "description": "One declared success criterion. Criteria are conjunctive: all criteria in success_criteria must pass when evaluated by the active target.",
       "oneOf": [
         {
           "$ref": "#/$defs/exitCodeCriterion"
@@ -169,6 +201,84 @@
           "minLength": 1
         }
       }
+    },
+    "evidenceRequirement": {
+      "description": "One required evidence reference/proof declaration.",
+      "type": "object",
+      "required": [
+        "type",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "file",
+            "log",
+            "attestation",
+            "occurrence",
+            "metric",
+            "test_report",
+            "artifact_ref",
+            "custom"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "visibility": {
+          "enum": [
+            "local",
+            "run_history",
+            "occurrence",
+            "coordinator_ref"
+          ]
+        },
+        "predicate": {
+          "enum": [
+            "exists",
+            "non_empty"
+          ]
+        },
+        "ref_pattern": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "ref_pattern"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "predicate"
+              ]
+            }
+          }
+        }
+      ]
     },
     "task": {
       "description": "A pipeline task (or review node when `kind == \"review\"`). The engine validates that non-gate, non-review tasks have a non-empty `command`; that rule is encoded in description rather than schema-level conditionals because gates and reviews compose with several other fields. SDKs validate cycles, duplicate names, and unknown dependencies; the schema does not.",
@@ -297,6 +407,11 @@
                   "required": [
                     "success_criteria"
                   ]
+                },
+                {
+                  "required": [
+                    "evidence_required"
+                  ]
                 }
               ]
             }
@@ -338,7 +453,7 @@
           ]
         },
         "success_criteria": {
-          "description": "Declared verification metadata for executable task success beyond command completion. Requires top-level version == \"3\". Rejected on review nodes. Metadata only in Phase 3C-1; the engine does not evaluate these criteria yet.",
+          "description": "Declared verification rules for executable task success beyond command completion. Requires top-level version == \"3\". Rejected on review nodes. The executor asks the active target to evaluate these criteria after a successful command.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/successCriterion"
@@ -361,6 +476,13 @@
               "maxContains": 1
             }
           ]
+        },
+        "evidence_required": {
+          "description": "Declared evidence references/proofs required after task success. Requires top-level version == \"4\". Rejected on review nodes. V1 evaluates local file requirements on targets that can prove their own filesystem context.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceRequirement"
+          }
         },
         "container": {
           "description": "Container image (e.g., `golang:1.21`). Triggers v2 emission.",

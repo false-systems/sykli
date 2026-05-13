@@ -214,6 +214,38 @@ defmodule SykliTest do
                %{"type" => "file_exists", "path" => "coverage.out"}
              ]
     end
+
+    test "evidence_required emits version 4" do
+      use Sykli
+
+      result =
+        pipeline do
+          task "test" do
+            run("go test ./...")
+            task_type(:test)
+
+            evidence_required([
+              file_evidence_non_empty("coverage", "coverage.out")
+            ])
+          end
+        end
+
+      decoded = result |> Sykli.Emitter.to_json() |> Jason.decode!()
+      task = Enum.at(decoded["tasks"], 0)
+
+      assert decoded["version"] == "4"
+
+      assert task["evidence_required"] == [
+               %{
+                 "type" => "file",
+                 "name" => "coverage",
+                 "required" => true,
+                 "visibility" => "local",
+                 "predicate" => "non_empty",
+                 "ref_pattern" => "coverage.out"
+               }
+             ]
+    end
   end
 
   describe "validation" do

@@ -14,6 +14,7 @@ import {
   not,
   fromEnv,
   fromVault,
+  fileEvidenceNonEmpty,
   tsInputs,
 } from './index.js';
 
@@ -130,6 +131,28 @@ describe('Pipeline', () => {
     it('does not expose successCriteria on review nodes', () => {
       const p = new Pipeline();
       expect((p.review('review-code') as any).successCriteria).toBeUndefined();
+    });
+
+    it('serializes evidence_required and emits version 4', () => {
+      const p = new Pipeline();
+      p.task('test').run('go test ./...').taskType('test').evidenceRequired([
+        fileEvidenceNonEmpty('coverage', 'coverage.out'),
+      ]);
+
+      const json = p.toJSON();
+      const task = (json.tasks as any[])[0];
+
+      expect(json.version).toBe('4');
+      expect(task.evidence_required).toEqual([
+        {
+          type: 'file',
+          name: 'coverage',
+          required: true,
+          visibility: 'local',
+          predicate: 'non_empty',
+          ref_pattern: 'coverage.out',
+        },
+      ]);
     });
 
     it('creates an experimental review node', () => {

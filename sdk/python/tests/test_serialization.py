@@ -5,7 +5,15 @@ import json
 
 import pytest
 
-from sykli import K8sOptions, Pipeline, branch, exit_code, file_exists, from_env
+from sykli import (
+    K8sOptions,
+    Pipeline,
+    branch,
+    exit_code,
+    file_evidence_non_empty,
+    file_exists,
+    from_env,
+)
 
 
 class TestJsonWireFormat:
@@ -44,6 +52,25 @@ class TestJsonWireFormat:
         assert d["tasks"][0]["success_criteria"] == [
             {"type": "exit_code", "equals": 0},
             {"type": "file_exists", "path": "coverage.out"},
+        ]
+
+    def test_evidence_required_serialization(self):
+        p = Pipeline()
+        p.task("test").run("go test ./...").task_type("test").evidence_required([
+            file_evidence_non_empty("coverage", "coverage.out"),
+        ])
+
+        d = p.to_dict()
+        assert d["version"] == "4"
+        assert d["tasks"][0]["evidence_required"] == [
+            {
+                "type": "file",
+                "name": "coverage",
+                "required": True,
+                "visibility": "local",
+                "predicate": "non_empty",
+                "ref_pattern": "coverage.out",
+            }
         ]
 
     def test_review_node(self):

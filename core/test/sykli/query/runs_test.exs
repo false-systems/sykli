@@ -16,15 +16,17 @@ defmodule Sykli.Query.RunsTest do
 
   describe "latest" do
     test "returns the most recent run", %{workdir: workdir} do
-      save_run(workdir, :passed, ~U[2026-02-20 10:00:00Z], [
-        {"test", :passed, 3000}
+      save_run(workdir, :failed, ~U[2026-02-20 10:00:00Z], [
+        {"test", :failed, 3000, "exit code 1"}
       ])
 
       {:ok, result} = Runs.execute(:latest, workdir)
 
       assert result.type == :runs
-      assert result.data.run.overall == :passed
+      assert result.data.run.overall == :failed
       assert length(result.data.run.tasks) == 1
+      assert hd(result.data.run.tasks).failure_semantics["class"] == "runtime_failure"
+      assert hd(result.data.run.tasks).agent_hints["inspect_target"] == true
     end
 
     test "returns error when no runs exist", %{workdir: workdir} do
@@ -35,11 +37,11 @@ defmodule Sykli.Query.RunsTest do
   describe "last_good" do
     test "returns the most recent passing run", %{workdir: workdir} do
       save_run(workdir, :passed, ~U[2026-02-20 10:00:00Z], [
-        {"test", :passed, 3000}
+        {"test", :passed, 3000, nil}
       ])
 
       save_run(workdir, :failed, ~U[2026-02-21 10:00:00Z], [
-        {"test", :failed, 3000}
+        {"test", :failed, 3000, nil}
       ])
 
       {:ok, result} = Runs.execute(:last_good, workdir)
@@ -50,7 +52,7 @@ defmodule Sykli.Query.RunsTest do
   describe "recent" do
     test "returns runs from last 7 days", %{workdir: workdir} do
       save_run(workdir, :passed, DateTime.utc_now(), [
-        {"test", :passed, 3000}
+        {"test", :passed, 3000, nil}
       ])
 
       {:ok, result} = Runs.execute(:recent, workdir)
@@ -62,8 +64,14 @@ defmodule Sykli.Query.RunsTest do
 
   defp save_run(workdir, overall, timestamp, task_results) do
     tasks =
-      Enum.map(task_results, fn {name, status, duration_ms} ->
-        %TaskResult{name: name, status: status, duration_ms: duration_ms}
+      Enum.map(task_results, fn {name, status, duration_ms, error} ->
+        %TaskResult{
+          name: name,
+          status: status,
+          duration_ms: duration_ms,
+          error: error,
+          failure_semantics: failure_semantics(status, error)
+        }
       end)
 
     run = %Run{
@@ -77,4 +85,9 @@ defmodule Sykli.Query.RunsTest do
 
     RunHistory.save(run, path: workdir)
   end
+
+  defp failure_semantics(:failed, _error),
+    do: Sykli.FailureSemantics.runtime_failure("command_failed", "task command failed")
+
+  defp failure_semantics(status, error), do: Sykli.FailureSemantics.for_result(status, error)
 end

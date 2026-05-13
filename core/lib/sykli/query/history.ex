@@ -61,6 +61,11 @@ defmodule Sykli.Query.History do
              task: task_name,
              status: :failed,
              error: task.error,
+             failure_semantics: Sykli.FailureSemantics.to_map(task.failure_semantics),
+             agent_hints: Sykli.AgentHints.from_failure_semantics(task.failure_semantics),
+             contract_slice: task.contract_slice,
+             success_criteria_results: success_criteria_results(task.success_criteria_results),
+             evidence_results: evidence_results(task.evidence_results),
              duration_ms: task.duration_ms,
              run_id: run.id,
              timestamp: DateTime.to_iso8601(run.timestamp),
@@ -92,6 +97,16 @@ defmodule Sykli.Query.History do
       DateTime.to_date(run.timestamp) == today
     end)
   end
+
+  defp success_criteria_results(nil), do: nil
+  defp success_criteria_results([]), do: nil
+
+  defp success_criteria_results(results),
+    do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp evidence_results(nil), do: nil
+  defp evidence_results([]), do: nil
+  defp evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
 
   defp metadata(query) do
     %{query: query, timestamp: DateTime.utc_now() |> DateTime.to_iso8601()}

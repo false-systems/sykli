@@ -35,9 +35,17 @@ defmodule Sykli.Emitter do
           Logger.error("review cannot declare success_criteria", review: task.name)
           raise "review #{inspect(task.name)} cannot declare success_criteria"
 
+        task.kind == :review and task.evidence_required != [] ->
+          Logger.error("review cannot declare evidence_required", review: task.name)
+          raise "review #{inspect(task.name)} cannot declare evidence_required"
+
         task.kind != :review and not valid_success_criteria?(task.success_criteria) ->
           Logger.error("invalid success_criteria", task: task.name)
           raise "task #{inspect(task.name)} has invalid success_criteria"
+
+        task.kind != :review and not valid_evidence_required?(task.evidence_required) ->
+          Logger.error("invalid evidence_required", task: task.name)
+          raise "task #{inspect(task.name)} has invalid evidence_required"
 
         task.kind == :review and (is_nil(task.primitive) or task.primitive == "") ->
           Logger.error("review has no primitive", review: task.name)
@@ -185,8 +193,12 @@ defmodule Sykli.Emitter do
     has_v3_features =
       Enum.any?(pipeline.tasks, &(!is_nil(&1.task_type) or &1.success_criteria != []))
 
+    has_v4_features =
+      Enum.any?(pipeline.tasks, &(&1.evidence_required != []))
+
     version =
       cond do
+        has_v4_features -> "4"
         has_v3_features -> "3"
         has_v2_features -> "2"
         true -> "1"
@@ -244,6 +256,7 @@ defmodule Sykli.Emitter do
       :success_criteria,
       non_empty_list(task.success_criteria, &success_criterion_to_json/1)
     )
+    |> maybe_put(:evidence_required, non_empty_list(task.evidence_required, & &1))
     |> maybe_put(:command, task.command)
     |> maybe_put(:container, task.container)
     |> maybe_put(:workdir, task.workdir)
@@ -286,6 +299,37 @@ defmodule Sykli.Emitter do
   end
 
   defp valid_success_criteria?(_), do: false
+
+  defp valid_evidence_required?(requirements) when is_list(requirements) do
+    Enum.all?(requirements, &valid_evidence_requirement?/1)
+  end
+
+  defp valid_evidence_required?(_), do: false
+
+  defp valid_evidence_requirement?(
+         %{
+           "type" => "file",
+           "name" => name,
+           "ref_pattern" => ref_pattern
+         } = req
+       ) do
+    is_binary(name) and name != "" and is_binary(ref_pattern) and ref_pattern != "" and
+      Map.get(req, "predicate", "exists") in ["exists", "non_empty"]
+  end
+
+  defp valid_evidence_requirement?(%{"type" => type, "name" => name})
+       when type in [
+              "log",
+              "attestation",
+              "occurrence",
+              "metric",
+              "test_report",
+              "artifact_ref",
+              "custom"
+            ],
+       do: is_binary(name) and name != ""
+
+  defp valid_evidence_requirement?(_), do: false
 
   defp valid_success_criterion?(%{type: "exit_code", equals: equals}), do: is_integer(equals)
 

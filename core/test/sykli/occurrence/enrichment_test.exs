@@ -45,6 +45,55 @@ defmodule Sykli.Occurrence.EnrichmentTest do
       assert enriched.data["summary"]["failed"] == 0
     end
 
+    test "task details include contract slice and success criteria results", %{workdir: workdir} do
+      occ = make_occurrence("run-contract-slice", "ci.run.failed", "failure")
+
+      graph = %{
+        "test" => %{
+          kind: :task,
+          command: "mix test",
+          task_type: "test",
+          semantic: %{intent: "Verify API", covers: ["lib/api/**"], criticality: :high},
+          ai_hooks: %{on_fail: :analyze, select: :smart},
+          success_criteria: [%{"type" => "exit_code", "equals" => 0}],
+          depends_on: ["build"],
+          inputs: ["lib/**/*.ex"]
+        }
+      }
+
+      results =
+        {:error,
+         [
+           %TaskResult{
+             name: "test",
+             status: :failed,
+             duration_ms: 200,
+             success_criteria_results: [
+               %Sykli.SuccessCriteria.Result{
+                 index: 0,
+                 type: "exit_code",
+                 status: :failed,
+                 message: "expected exit code 0, got 1",
+                 target: "local"
+               }
+             ]
+           }
+         ]}
+
+      enriched = Enrichment.enrich(occ, graph, results, workdir)
+      [task] = enriched.data["tasks"]
+
+      assert task["contract_slice"]["task_type"] == "test"
+      assert task["contract_slice"]["semantic"]["intent"] == "Verify API"
+
+      assert task["contract_slice"]["success_criteria"] == [
+               %{"type" => "exit_code", "equals" => 0}
+             ]
+
+      assert [%{"status" => "failed", "target" => "local"}] =
+               task["success_criteria_results"]
+    end
+
     test "enriches a failing run with error, reasoning, and history blocks", %{workdir: workdir} do
       occ = make_occurrence("run-fail", "ci.run.failed", "failure")
 
@@ -358,6 +407,18 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
       outcomes = Enum.map(steps, & &1["outcome"])
       assert outcomes == ["success", "failure", "error", "success", "skipped", "failure"]
+
+      tasks_by_name = Map.new(enriched.data["tasks"], &{&1["name"], &1})
+      assert get_in(tasks_by_name, ["fail", "failure_semantics", "class"]) == "runtime_failure"
+      assert get_in(tasks_by_name, ["fail", "agent_hints", "inspect_target"]) == true
+      assert get_in(tasks_by_name, ["err", "failure_semantics", "class"]) == "timeout"
+      assert get_in(tasks_by_name, ["err", "agent_hints", "retry_may_help"]) == true
+      assert get_in(tasks_by_name, ["skip", "failure_semantics", "class"]) == "skipped"
+
+      assert get_in(tasks_by_name, ["block", "failure_semantics", "class"]) ==
+               "dependency_failure"
+
+      assert get_in(tasks_by_name, ["block", "agent_hints", "inspect_dependencies"]) == true
     end
 
     test "failed task step includes error info", %{workdir: workdir} do
@@ -381,6 +442,24 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
       assert step["error"]["code"] == "task_failed"
       assert step["error"]["what_failed"] =~ "test"
+      assert step["error"]["failure_semantics"]["class"] == "runtime_failure"
+    end
+
+    test "unknown-shape error (string/atom/tuple) still produces error + failure_semantics block",
+         %{workdir: workdir} do
+      occ = make_occurrence("run-step-other-err", "ci.run.failed", "failure")
+      graph = %{"test" => %{command: "mix test"}}
+
+      results =
+        {:error,
+         [%TaskResult{name: "test", status: :failed, duration_ms: 50, error: "raw string boom"}]}
+
+      enriched = Enrichment.enrich(occ, graph, results, workdir)
+      step = hd(enriched.history["steps"])
+
+      assert step["error"]["code"] == "unknown"
+      assert step["error"]["what_failed"] =~ "raw string boom"
+      assert step["error"]["failure_semantics"]["class"] == "unknown"
     end
 
     test "step timestamps are offset from base timestamp", %{workdir: workdir} do

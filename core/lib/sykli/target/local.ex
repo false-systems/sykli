@@ -54,6 +54,7 @@ defmodule Sykli.Target.Local do
 
   @behaviour Sykli.Target.Behaviour
 
+  alias Sykli.EvidenceRequirement.Result, as: EvidenceResult
   alias Sykli.SuccessCriteria.Result
 
   defstruct [:workdir, :runtime, :containerless_runtime, :timeout_ms]
@@ -388,6 +389,43 @@ defmodule Sykli.Target.Local do
     end
   end
 
+  @impl true
+  def evaluate_evidence_required(task, requirements, state, opts) do
+    base_workdir = Keyword.get(opts, :workdir, state.workdir)
+    target_workdir = resolved_task_workdir(task, base_workdir)
+
+    results =
+      requirements
+      |> Enum.with_index()
+      |> Enum.map(fn {requirement, index} ->
+        evaluate_evidence_requirement(requirement, index, task, target_workdir)
+      end)
+
+    case Sykli.EvidenceRequirement.failures(results) do
+      [] ->
+        {:ok, results}
+
+      failures ->
+        error =
+          if Enum.any?(failures, &(&1.status == :unsupported)) do
+            Sykli.Error.unsupported_evidence_requirement_for_target(
+              task.name,
+              name(),
+              failures,
+              command: task.command
+            )
+          else
+            Sykli.Error.missing_evidence(
+              task.name,
+              failures,
+              command: task.command
+            )
+          end
+
+        {:error, error, results}
+    end
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # EXECUTION PARAMS
   # ─────────────────────────────────────────────────────────────────────────────
@@ -474,6 +512,122 @@ defmodule Sykli.Target.Local do
     )
   end
 
+  defp evaluate_evidence_requirement(
+         %{"type" => "file", "ref_pattern" => path, "name" => name} = requirement,
+         index,
+         %{container: nil},
+         workdir
+       ) do
+    predicate = Map.get(requirement, "predicate", "exists")
+    required = Map.get(requirement, "required", true)
+
+    with {:ok, resolved_path} <- resolve_criterion_path(path, workdir),
+         {:ok, stat} <- stat_regular_file(resolved_path, path) do
+      evaluate_file_evidence_requirement(
+        index,
+        name,
+        required,
+        predicate,
+        path,
+        resolved_path,
+        stat
+      )
+    else
+      {:error, message, evidence} ->
+        evidence_missing(index, "file", name, required, message, evidence)
+    end
+  end
+
+  defp evaluate_evidence_requirement(
+         %{"type" => "file", "ref_pattern" => path, "name" => name} = requirement,
+         index,
+         %{container: container},
+         _workdir
+       )
+       when is_binary(container) do
+    evidence_unsupported(
+      index,
+      "file",
+      name,
+      Map.get(requirement, "required", true),
+      "local target cannot evaluate file evidence inside container runtime #{inspect(container)}",
+      %{path: path, container: container}
+    )
+  end
+
+  defp evaluate_evidence_requirement(
+         %{"type" => type, "name" => name} = requirement,
+         index,
+         _task,
+         _workdir
+       ) do
+    evidence_unsupported(
+      index,
+      type,
+      name,
+      Map.get(requirement, "required", true),
+      "local target does not yet evaluate evidence_required type #{inspect(type)}",
+      requirement
+    )
+  end
+
+  defp evaluate_file_evidence_requirement(
+         index,
+         name,
+         required,
+         "exists",
+         path,
+         resolved_path,
+         _stat
+       ) do
+    evidence_satisfied(
+      index,
+      "file",
+      name,
+      required,
+      "file evidence exists",
+      file_ref(path, resolved_path)
+    )
+  end
+
+  defp evaluate_file_evidence_requirement(
+         index,
+         name,
+         required,
+         "non_empty",
+         path,
+         resolved_path,
+         %{
+           size: size
+         }
+       ) do
+    if size > 0 do
+      evidence_satisfied(
+        index,
+        "file",
+        name,
+        required,
+        "file evidence is non-empty",
+        Map.put(file_ref(path, resolved_path), "size", size)
+      )
+    else
+      evidence_missing(index, "file", name, required, "file evidence is empty", %{
+        path: path,
+        resolved_path: resolved_path,
+        size: size
+      })
+    end
+  end
+
+  defp file_ref(path, resolved_path) do
+    %{
+      "type" => "local_ref",
+      "uri" => "file://#{resolved_path}",
+      "summary" => "local file evidence: #{path}",
+      "visibility" => "local"
+    }
+  end
+
   defp resolve_criterion_path(path, workdir) do
     cond do
       Path.type(path) == :absolute ->
@@ -496,7 +650,7 @@ defmodule Sykli.Target.Local do
         {:ok, stat}
 
       {:ok, %{type: :symlink}} ->
-        {:error, "symlinks are not supported for success_criteria paths", %{path: path}}
+        {:error, "symlinks are not supported for declared check paths", %{path: path}}
 
       {:ok, %{type: type}} ->
         {:error, "path is not a regular file", %{path: path, file_type: type}}
@@ -558,6 +712,45 @@ defmodule Sykli.Target.Local do
       status: :unsupported,
       message: message,
       evidence: evidence,
+      target: name()
+    }
+  end
+
+  defp evidence_satisfied(index, type, evidence_name, required, message, evidence_ref) do
+    %EvidenceResult{
+      index: index,
+      type: type,
+      name: evidence_name,
+      status: :satisfied,
+      message: message,
+      required: required,
+      evidence_ref: evidence_ref,
+      target: name()
+    }
+  end
+
+  defp evidence_missing(index, type, evidence_name, required, message, evidence_ref) do
+    %EvidenceResult{
+      index: index,
+      type: type,
+      name: evidence_name,
+      status: :missing,
+      message: message,
+      required: required,
+      evidence_ref: evidence_ref,
+      target: name()
+    }
+  end
+
+  defp evidence_unsupported(index, type, evidence_name, required, message, evidence_ref) do
+    %EvidenceResult{
+      index: index,
+      type: type,
+      name: evidence_name,
+      status: :unsupported,
+      message: message,
+      required: required,
+      evidence_ref: evidence_ref,
       target: name()
     }
   end

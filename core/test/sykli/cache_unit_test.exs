@@ -593,6 +593,9 @@ defmodule Sykli.CacheUnitTest do
       assert Cache.format_miss_reason(:corrupted) == "cache corrupted"
       assert Cache.format_miss_reason(:blobs_missing) == "outputs missing"
       assert Cache.format_miss_reason(:config_changed) == "config changed"
+
+      assert Cache.format_miss_reason(:declared_checks_require_execution) ==
+               "declared checks require execution"
     end
 
     test "formats unknown reason as string" do

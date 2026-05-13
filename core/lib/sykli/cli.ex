@@ -411,7 +411,10 @@ defmodule Sykli.CLI do
         cached: r.status == :cached
       }
       |> maybe_add_success_criteria_results(r.success_criteria_results)
+      |> maybe_add_evidence_results(r.evidence_results)
       |> maybe_add_review_result(r.review_result)
+      |> maybe_add_failure_semantics(r.failure_semantics)
+      |> maybe_add_agent_hints(r.failure_semantics)
 
     case r.error do
       %Sykli.Error{} = err ->
@@ -431,10 +434,28 @@ defmodule Sykli.CLI do
     Map.put(base, :success_criteria_results, Enum.map(results, &success_criteria_result_to_map/1))
   end
 
+  defp maybe_add_evidence_results(base, []), do: base
+
+  defp maybe_add_evidence_results(base, results) do
+    Map.put(base, :evidence_results, Sykli.ContractSlice.evidence_results(results))
+  end
+
   defp maybe_add_review_result(base, nil), do: base
 
   defp maybe_add_review_result(base, result) do
     Map.put(base, :review_result, review_result_to_map(result))
+  end
+
+  defp maybe_add_failure_semantics(base, nil), do: base
+
+  defp maybe_add_failure_semantics(base, semantics) do
+    Map.put(base, :failure_semantics, Sykli.FailureSemantics.to_map(semantics))
+  end
+
+  defp maybe_add_agent_hints(base, nil), do: base
+
+  defp maybe_add_agent_hints(base, semantics) do
+    Map.put(base, :agent_hints, Sykli.AgentHints.from_failure_semantics(semantics))
   end
 
   defp review_result_to_map(result) do
@@ -2113,7 +2134,10 @@ defmodule Sykli.CLI do
                     status: t.status,
                     duration_ms: t.duration_ms,
                     cached: t.cached,
-                    error: t.error
+                    error: t.error,
+                    failure_semantics: t.failure_semantics,
+                    contract_slice: t.contract_slice,
+                    success_criteria_results: t.success_criteria_results
                   }
                 end)
             }
@@ -2415,6 +2439,14 @@ defmodule Sykli.CLI do
             streak: t.streak
           }
           |> maybe_put(:error, t.error)
+          |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+          |> maybe_put(:agent_hints, Sykli.AgentHints.from_failure_semantics(t.failure_semantics))
+          |> maybe_put(:contract_slice, t.contract_slice)
+          |> maybe_put(
+            :success_criteria_results,
+            report_success_criteria_results(t.success_criteria_results)
+          )
+          |> maybe_put(:evidence_results, report_evidence_results(t.evidence_results))
           |> maybe_put(:likely_cause, t.likely_cause)
         end)
     }
@@ -2423,7 +2455,18 @@ defmodule Sykli.CLI do
   end
 
   defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp report_success_criteria_results(nil), do: nil
+  defp report_success_criteria_results([]), do: nil
+
+  defp report_success_criteria_results(results),
+    do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp report_evidence_results(nil), do: nil
+  defp report_evidence_results([]), do: nil
+  defp report_evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
 
   # ----- HISTORY SUBCOMMAND -----
 

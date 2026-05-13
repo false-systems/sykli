@@ -73,17 +73,42 @@ defmodule Sykli.Query.Runs do
       overall: run.overall,
       tasks:
         Enum.map(run.tasks, fn t ->
-          result = %{
-            name: t.name,
-            status: t.status,
-            duration_ms: t.duration_ms,
-            cached: t.cached == true
-          }
+          result =
+            %{
+              name: t.name,
+              status: t.status,
+              duration_ms: t.duration_ms,
+              cached: t.cached == true
+            }
+            |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+            |> maybe_put(
+              :agent_hints,
+              Sykli.AgentHints.from_failure_semantics(t.failure_semantics)
+            )
+            |> maybe_put(:contract_slice, t.contract_slice)
+            |> maybe_put(
+              :success_criteria_results,
+              non_empty_success_criteria_results(t.success_criteria_results)
+            )
+            |> maybe_put(:evidence_results, non_empty_evidence_results(t.evidence_results))
 
-          if t.error, do: Map.put(result, :error, t.error), else: result
+          maybe_put(result, :error, t.error)
         end)
     }
   end
+
+  defp non_empty_success_criteria_results(nil), do: nil
+  defp non_empty_success_criteria_results([]), do: nil
+
+  defp non_empty_success_criteria_results(results),
+    do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp non_empty_evidence_results(nil), do: nil
+  defp non_empty_evidence_results([]), do: nil
+  defp non_empty_evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp serialize_run_summary(run) do
     %{

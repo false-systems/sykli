@@ -26,6 +26,9 @@ defmodule Sykli.Query.HistoryTest do
       assert result.data.task == "build"
       assert result.data.status == :failed
       assert result.data.error == "exit code 1"
+      assert result.data.failure_semantics["class"] == "runtime_failure"
+      assert result.data.agent_hints["inspect_target"] == true
+      assert result.data.agent_hints["retry_may_help"] == false
     end
 
     test "returns error when task has not failed", %{workdir: workdir} do
@@ -74,7 +77,13 @@ defmodule Sykli.Query.HistoryTest do
   defp save_run(workdir, overall, timestamp, task_results) do
     tasks =
       Enum.map(task_results, fn {name, status, duration_ms, error} ->
-        %TaskResult{name: name, status: status, duration_ms: duration_ms, error: error}
+        %TaskResult{
+          name: name,
+          status: status,
+          duration_ms: duration_ms,
+          error: error,
+          failure_semantics: failure_semantics(status, error)
+        }
       end)
 
     run = %Run{
@@ -88,4 +97,9 @@ defmodule Sykli.Query.HistoryTest do
 
     RunHistory.save(run, path: workdir)
   end
+
+  defp failure_semantics(:failed, _error),
+    do: Sykli.FailureSemantics.runtime_failure("command_failed", "task command failed")
+
+  defp failure_semantics(status, error), do: Sykli.FailureSemantics.for_result(status, error)
 end

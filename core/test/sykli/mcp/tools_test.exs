@@ -78,6 +78,37 @@ defmodule Sykli.MCP.ToolsTest do
       assert {:error, message} = result
       assert is_binary(message)
     end
+
+    test "run_pipeline exposes agent-readable failure facts" do
+      path = System.tmp_dir!() |> Path.join("sykli-mcp-test-#{:rand.uniform(999_999)}")
+      File.mkdir_p!(path)
+      write_pipeline(path)
+
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      assert {:ok, result} = Tools.call("run_pipeline", %{"path" => path})
+      assert is_binary(Jason.encode!(result))
+      assert result.status == "failed"
+
+      [task] = result.tasks
+      assert task.name == "contract-check"
+      assert task.error.code == "success_criteria_failed"
+      assert task.error.type == "execution"
+      assert task.error.step == "run"
+      assert task.failure_semantics["class"] == "criteria_failure"
+      assert task.agent_hints["inspect_contract"] == true
+      assert task.agent_hints["inspect_target"] == false
+      assert task.contract_slice["task_type"] == "test"
+      assert task.contract_slice["semantic"]["intent"] == "check declared outcome"
+      assert task.contract_slice["success_criteria"] == [%{"type" => "exit_code", "equals" => 1}]
+
+      assert [
+               %{
+                 "type" => "exit_code",
+                 "status" => "failed"
+               }
+             ] = task.success_criteria_results
+    end
   end
 
   describe "list/0 tool names" do
@@ -103,5 +134,23 @@ defmodule Sykli.MCP.ToolsTest do
 
       assert MapSet.equal?(names, expected)
     end
+  end
+
+  defp write_pipeline(path) do
+    json =
+      Jason.encode!(%{
+        "version" => "3",
+        "tasks" => [
+          %{
+            "name" => "contract-check",
+            "command" => "true",
+            "task_type" => "test",
+            "semantic" => %{"intent" => "check declared outcome"},
+            "success_criteria" => [%{"type" => "exit_code", "equals" => 1}]
+          }
+        ]
+      })
+
+    File.write!(Path.join(path, "sykli.exs"), "IO.puts(#{inspect(json)})")
   end
 end

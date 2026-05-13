@@ -81,10 +81,13 @@ __all__ = [
     "exit_code",
     "file_exists",
     "file_non_empty",
+    "file_evidence",
+    "file_evidence_non_empty",
     # Types
     "K8sOptions",
     "TaskType",
     "SuccessCriterion",
+    "EvidenceRequirement",
     "ValidationError",
     "ExplainContext",
     # Presets
@@ -135,6 +138,7 @@ TaskType = Literal[
 TASK_TYPES: tuple[str, ...] = get_args(TaskType)
 
 SuccessCriterion = dict[str, Any]
+EvidenceRequirement = dict[str, Any]
 
 
 def exit_code(equals: int) -> SuccessCriterion:
@@ -184,6 +188,54 @@ def _validate_success_criteria(task_name: str, criteria: Sequence[SuccessCriteri
             raise ValueError(f"task {task_name!r}: invalid success_criteria type {type_!r}")
     if exit_code_count > 1:
         raise ValueError(f"task {task_name!r}: multiple exit_code success criteria are not allowed")
+
+
+def file_evidence(name: str, ref_pattern: str) -> EvidenceRequirement:
+    """Create a file evidence requirement."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("evidence_required.name cannot be empty")
+    if not isinstance(ref_pattern, str) or not ref_pattern:
+        raise ValueError("file evidence_required.ref_pattern cannot be empty")
+    return {
+        "type": "file",
+        "name": name,
+        "required": True,
+        "visibility": "local",
+        "predicate": "exists",
+        "ref_pattern": ref_pattern,
+    }
+
+
+def file_evidence_non_empty(name: str, ref_pattern: str) -> EvidenceRequirement:
+    """Create a non-empty file evidence requirement."""
+    req = file_evidence(name, ref_pattern)
+    req["predicate"] = "non_empty"
+    return req
+
+
+def _validate_evidence_required(
+    task_name: str, requirements: Sequence[EvidenceRequirement]
+) -> None:
+    types = {"file", "log", "attestation", "occurrence", "metric", "test_report", "artifact_ref", "custom"}
+    visibilities = {"local", "run_history", "occurrence", "coordinator_ref"}
+
+    for requirement in requirements:
+        type_ = requirement.get("type")
+        if type_ not in types:
+            raise ValueError(f"task {task_name!r}: invalid evidence_required type {type_!r}")
+        if not isinstance(requirement.get("name"), str) or not requirement["name"]:
+            raise ValueError(f"task {task_name!r}: evidence_required.name cannot be empty")
+        if "required" in requirement and not isinstance(requirement["required"], bool):
+            raise ValueError(f"task {task_name!r}: evidence_required.required must be boolean")
+        if "visibility" in requirement and requirement["visibility"] not in visibilities:
+            raise ValueError(f"task {task_name!r}: invalid evidence_required visibility")
+        if type_ == "file":
+            if not isinstance(requirement.get("ref_pattern"), str) or not requirement["ref_pattern"]:
+                raise ValueError(f"task {task_name!r}: file evidence_required requires ref_pattern")
+            if requirement.get("predicate", "exists") not in {"exists", "non_empty"}:
+                raise ValueError(f"task {task_name!r}: invalid file evidence_required predicate")
+        elif "predicate" in requirement:
+            raise ValueError(f"task {task_name!r}: evidence_required.predicate is only supported for file")
 
 
 @dataclass(frozen=True)
@@ -466,6 +518,7 @@ class Task:
         self._is_gate = is_gate
         self._task_type: TaskType | None = None
         self._success_criteria: list[SuccessCriterion] = []
+        self._evidence_required: list[EvidenceRequirement] = []
         self._command: str = ""
         self._container: str = ""
         self._workdir: str = ""
@@ -528,6 +581,18 @@ class Task:
         """Declare verification metadata for this executable task."""
         _validate_success_criteria(self._name, criteria)
         self._success_criteria.extend(dict(criterion) for criterion in criteria)
+        return self
+
+    def evidence_required(self, requirements: Sequence[EvidenceRequirement]) -> Self:
+        """Declare required evidence references for this executable task."""
+        _validate_evidence_required(self._name, requirements)
+        for requirement in requirements:
+            normalized = dict(requirement)
+            normalized.setdefault("required", True)
+            normalized.setdefault("visibility", "local")
+            if normalized["type"] == "file":
+                normalized.setdefault("predicate", "exists")
+            self._evidence_required.append(normalized)
         return self
 
     def after(self, *tasks: str) -> Self:
@@ -803,6 +868,8 @@ class Task:
             d["task_type"] = self._task_type
         if self._success_criteria:
             d["success_criteria"] = [dict(criterion) for criterion in self._success_criteria]
+        if self._evidence_required:
+            d["evidence_required"] = [dict(requirement) for requirement in self._evidence_required]
         if self._container:
             d["container"] = self._container
         if self._workdir:
@@ -1327,9 +1394,20 @@ class Pipeline:
             for t in self._tasks
         )
 
+    def _has_v4_features(self) -> bool:
+        return any(isinstance(t, Task) and bool(t._evidence_required) for t in self._tasks)
+
     def _build_output(self) -> dict[str, Any]:
         has_v2_features = self._has_v2_features()
-        version = "3" if self._has_v3_features() else "2" if has_v2_features else "1"
+        version = (
+            "4"
+            if self._has_v4_features()
+            else "3"
+            if self._has_v3_features()
+            else "2"
+            if has_v2_features
+            else "1"
+        )
         output: dict[str, Any] = {"version": version}
 
         # Resources (v2)
