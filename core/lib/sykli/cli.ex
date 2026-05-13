@@ -413,6 +413,7 @@ defmodule Sykli.CLI do
       |> maybe_add_success_criteria_results(r.success_criteria_results)
       |> maybe_add_review_result(r.review_result)
       |> maybe_add_failure_semantics(r.failure_semantics)
+      |> maybe_add_agent_hints(r.failure_semantics)
 
     case r.error do
       %Sykli.Error{} = err ->
@@ -442,6 +443,12 @@ defmodule Sykli.CLI do
 
   defp maybe_add_failure_semantics(base, semantics) do
     Map.put(base, :failure_semantics, Sykli.FailureSemantics.to_map(semantics))
+  end
+
+  defp maybe_add_agent_hints(base, nil), do: base
+
+  defp maybe_add_agent_hints(base, semantics) do
+    Map.put(base, :agent_hints, Sykli.AgentHints.from_failure_semantics(semantics))
   end
 
   defp review_result_to_map(result) do
@@ -2426,6 +2433,7 @@ defmodule Sykli.CLI do
           }
           |> maybe_put(:error, t.error)
           |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+          |> maybe_put(:agent_hints, Sykli.AgentHints.from_failure_semantics(t.failure_semantics))
           |> maybe_put(:contract_slice, t.contract_slice)
           |> maybe_put(
             :success_criteria_results,

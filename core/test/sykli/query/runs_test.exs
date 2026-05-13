@@ -26,6 +26,7 @@ defmodule Sykli.Query.RunsTest do
       assert result.data.run.overall == :failed
       assert length(result.data.run.tasks) == 1
       assert hd(result.data.run.tasks).failure_semantics["class"] == "runtime_failure"
+      assert hd(result.data.run.tasks).agent_hints["inspect_target"] == true
     end
 
     test "returns error when no runs exist", %{workdir: workdir} do
