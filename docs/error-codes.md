@@ -73,6 +73,25 @@ daemon status/session JSON surfaces.
 | `daemon.join_missing_team` | `sykli daemon join` was called without `--team`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
 | `daemon.join_missing_token` | `sykli daemon join` was called without `--token` or `SYKLI_TEAM_TOKEN`. | public-unstable | `core/lib/sykli/daemon/join.ex` |
 
+### team.run
+
+Run summary sync codes are emitted by the coordinator run-summary API and
+daemon-side deferred publish path.
+
+| Code | Description | Tier | Emitted from |
+|------|-------------|------|--------------|
+| `team.run.publish_unauthorized` | The coordinator rejected run summary publish authorization. | public-unstable | `core/lib/sykli/error.ex` |
+| `team.run.publish_unavailable` | The daemon could not reach the coordinator while publishing a run summary. | public-unstable | `core/lib/sykli/error.ex` |
+| `team.run.invalid_payload` | A run summary request body was malformed or missed required fields. | public-stable | `core/lib/sykli/team_coordinator/router.ex` |
+| `team.run.body_too_large` | A run summary request body exceeded the coordinator limit. | public-stable | `core/lib/sykli/team_coordinator/router.ex` |
+
+### team.outbox
+
+| Code | Description | Tier | Emitted from |
+|------|-------------|------|--------------|
+| `team.outbox.write_failed` | The daemon could not write a deferred Team Mode sync payload. | public-unstable | `core/lib/sykli/error.ex` |
+| `team.outbox.invalid_kind` | Defensive guard for an invalid outbox kind. | internal | `core/lib/sykli/error.ex` |
+
 ### execution
 
 | Code | Description | Tier | Emitted from |

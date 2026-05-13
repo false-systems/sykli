@@ -1731,6 +1731,22 @@ if begin_case "077" "Team Work: unauthorized JSON error"; then
   fi
 fi
 
+# --- case_078: daemon status JSON includes run outbox count ---
+if begin_case "078" "Daemon: status JSON includes run outbox count"; then
+  dir=$(tmp_workdir)
+  mkdir -p "$dir/.sykli/outbox/runs"
+  printf '%s\n' '{"version":"1","run":{"id":"run_001"}}' > "$dir/.sykli/outbox/runs/run_001.json"
+
+  LAST_OUTPUT=$(cd "$dir" && "$SYKLI_BIN" daemon status --json 2>&1) && exit_code=0 || exit_code=$?
+
+  if assert_exit 0 "$exit_code"; then
+    if assert_json_field "$LAST_OUTPUT" '.data.outbox.runs' "1"; then
+      pass 0
+    fi
+  fi
+  rm -rf "$dir"
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================

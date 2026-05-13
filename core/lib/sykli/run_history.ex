@@ -27,6 +27,8 @@ defmodule Sykli.RunHistory do
       :status,
       :duration_ms,
       :error,
+      :kind,
+      :review_result,
       :failure_semantics,
       :contract_slice,
       :inputs,
@@ -44,9 +46,11 @@ defmodule Sykli.RunHistory do
             duration_ms: non_neg_integer(),
             cached: boolean(),
             error: String.t() | nil,
+            kind: String.t() | nil,
+            review_result: map() | nil,
             failure_semantics: Sykli.FailureSemantics.t() | nil,
             contract_slice: map() | nil,
-            success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
+            success_criteria_results: [Sykli.SuccessCriteria.Result.t() | map()] | nil,
             evidence_results: [Sykli.EvidenceRequirement.Result.t()],
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
@@ -318,6 +322,8 @@ defmodule Sykli.RunHistory do
       streak: tr.streak
     }
     |> maybe_add(:error, tr.error)
+    |> maybe_add(:kind, tr.kind)
+    |> maybe_add(:review_result, tr.review_result)
     |> maybe_add(:failure_semantics, Sykli.FailureSemantics.to_map(tr.failure_semantics))
     |> maybe_add(:contract_slice, tr.contract_slice)
     |> maybe_add(
@@ -369,6 +375,8 @@ defmodule Sykli.RunHistory do
       cached: data["cached"] || false,
       streak: data["streak"] || 0,
       error: data["error"],
+      kind: data["kind"],
+      review_result: data["review_result"],
       failure_semantics: Sykli.FailureSemantics.from_map(data["failure_semantics"]),
       contract_slice: data["contract_slice"],
       success_criteria_results:

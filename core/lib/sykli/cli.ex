@@ -2820,6 +2820,8 @@ defmodule Sykli.CLI do
   end
 
   defp print_daemon_status do
+    drain_team_run_outbox()
+
     case Sykli.Daemon.status() do
       {:running, info} ->
         IO.puts("")
@@ -2848,6 +2850,8 @@ defmodule Sykli.CLI do
           IO.puts("  Mesh:     #{IO.ANSI.faint()}no other nodes#{IO.ANSI.reset()}")
         end
 
+        IO.puts("  Outbox:   #{daemon_outbox_runs_count()} run(s) pending")
+
       {:stopped, info} ->
         IO.puts("")
         IO.puts("#{IO.ANSI.faint()}○ Daemon is not running#{IO.ANSI.reset()}")
@@ -2863,10 +2867,14 @@ defmodule Sykli.CLI do
           _ ->
             IO.puts("  Run 'sykli daemon start' to start")
         end
+
+        IO.puts("  Outbox:   #{daemon_outbox_runs_count()} run(s) pending")
     end
   end
 
   defp print_daemon_status_json do
+    drain_team_run_outbox()
+
     daemon =
       case Sykli.Daemon.status() do
         {:running, info} ->
@@ -2894,7 +2902,49 @@ defmodule Sykli.CLI do
         {:error, _reason} -> nil
       end
 
-    IO.puts(JsonResponse.ok(%{daemon: daemon, coordinator_session: session}))
+    IO.puts(
+      JsonResponse.ok(%{
+        daemon: daemon,
+        coordinator_session: session,
+        outbox: %{runs: daemon_outbox_runs_count()}
+      })
+    )
+  end
+
+  defp drain_team_run_outbox do
+    with {:ok, session} <- Sykli.Daemon.SessionStore.read(),
+         token when is_binary(token) and token != "" <- System.get_env("SYKLI_TEAM_TOKEN") do
+      result =
+        Sykli.Outbox.drain("runs", fn payload ->
+          Sykli.TeamCoordinator.RunClient.publish_raw(session, token, payload)
+        end)
+
+      count_synced =
+        case result do
+          {:ok, count} -> count
+          {:error, count, _reason} -> count
+        end
+
+      if count_synced > 0 do
+        remaining = daemon_outbox_runs_count()
+
+        Sykli.Occurrence.PubSub.team_outbox_drained("team-outbox", %{
+          "count_synced" => count_synced,
+          "count_remaining" => remaining
+        })
+      end
+
+      :ok
+    else
+      _ -> :ok
+    end
+  end
+
+  defp daemon_outbox_runs_count do
+    case Sykli.Outbox.pending_count("runs") do
+      {:ok, count} -> count
+      {:error, _reason} -> 0
+    end
   end
 
   defp format_role(:full), do: "full (execute + coordinate)"

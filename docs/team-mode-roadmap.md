@@ -252,7 +252,7 @@ Exit criteria:
 
 The local work CLI gains a `--team <team>` mode.
 
-Implemented in PR #193:
+Merged in PR #193:
 
 ```bash
 sykli work create "Investigate failing checkout deploy" --team platform
@@ -292,6 +292,10 @@ Exit criteria:
 
 After a local or K8s run, a joined daemon publishes a summary to the
 coordinator.
+
+Status:
+
+- Implemented in PR #194; update to `Merged in PR #194` after merge.
 
 Sync set:
 

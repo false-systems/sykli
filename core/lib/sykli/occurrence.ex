@@ -30,6 +30,9 @@ defmodule Sykli.Occurrence do
       ci.github.check_run.transitioned — GitHub check run status changed
       ci.github.check_run.transition_failed — GitHub check run update failed
       ci.github.check_suite.concluded — GitHub check suite reached terminal state
+      ci.team.run.synced — run summary published to coordinator
+      ci.team.run.sync_deferred — run summary queued for later sync
+      ci.team.outbox.drained — coordinator outbox drained on heartbeat/status
 
   ## Enrichment
 
@@ -216,6 +219,18 @@ defmodule Sykli.Occurrence do
       severity: severity,
       opts: opts
     )
+  end
+
+  def team_run_synced(run_id, data, opts \\ []) do
+    new("ci.team.run.synced", run_id, data, severity: :info, opts: opts)
+  end
+
+  def team_run_sync_deferred(run_id, data, opts \\ []) do
+    new("ci.team.run.sync_deferred", run_id, data, severity: :warning, opts: opts)
+  end
+
+  def team_outbox_drained(run_id, data, opts \\ []) do
+    new("ci.team.outbox.drained", run_id, data, severity: :info, opts: opts)
   end
 
   @doc "Create a ci.github.webhook.received occurrence."

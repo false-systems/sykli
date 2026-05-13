@@ -6,6 +6,7 @@ defmodule Sykli do
   """
 
   alias Sykli.{Detector, Graph, Executor, Cache, RunHistory, GitContext, Context, Occurrence}
+  alias Sykli.TeamCoordinator.{RunClient, RunSummary}
   alias Sykli.Graph.Task.HistoryHint
   alias Sykli.Occurrence.Enrichment
   alias Sykli.Occurrence.HistoryAnalyzer
@@ -238,6 +239,7 @@ defmodule Sykli do
 
     # save/2 uses File.write! so it raises on error (caught by rescue below)
     RunHistory.save(run, path: path)
+    maybe_sync_run_summary(path, run)
 
     # Generate AI context file
     generate_context(path, graph, run)
@@ -468,16 +470,49 @@ defmodule Sykli do
         duration_ms: result.duration_ms,
         cached: result.status == :cached,
         error: format_error_for_history(result.error),
+        kind: task_kind(task),
+        review_result: review_result_for_history(result.review_result),
         failure_semantics:
           result.failure_semantics ||
             Sykli.FailureSemantics.for_result(result.status, result.error),
         contract_slice: Sykli.ContractSlice.from_task(task),
-        success_criteria_results: result.success_criteria_results,
+        success_criteria_results:
+          Enum.map(result.success_criteria_results || [], &success_criteria_for_history/1),
         evidence_results: result.evidence_results,
         inputs: inputs,
         streak: streak
       }
     end)
+  end
+
+  defp task_kind(%Sykli.Graph.Task{} = task) do
+    if Sykli.Graph.Task.review?(task),
+      do: "review",
+      else: if(Sykli.Graph.Task.gate?(task), do: "gate", else: "task")
+  end
+
+  defp task_kind(_task), do: "task"
+
+  defp review_result_for_history(nil), do: nil
+
+  defp review_result_for_history(result) do
+    %{
+      "review_type" => result.review_type,
+      "status" => Atom.to_string(result.status),
+      "severity" => result.severity,
+      "message" => result.message,
+      "tool" => result.tool
+    }
+  end
+
+  defp success_criteria_for_history(result) do
+    %{
+      "index" => result.index,
+      "type" => result.type,
+      "status" => Atom.to_string(result.status),
+      "message" => result.message,
+      "target" => result.target
+    }
   end
 
   # Preserve structured error info for history instead of inspect-stringifying
@@ -490,6 +525,57 @@ defmodule Sykli do
   end
 
   defp format_error_for_history(other), do: inspect(other)
+
+  defp maybe_sync_run_summary(path, %RunHistory.Run{} = run) do
+    case Sykli.Daemon.SessionStore.read(path: Path.join(path, ".sykli")) do
+      {:ok, session} ->
+        summary = RunSummary.from_run(run, session: session, path: path)
+        payload = RunSummary.encode(summary)
+        prequeued? = Sykli.Outbox.enqueue("runs", payload, path: path) == :ok
+
+        Task.Supervisor.async_nolink(Sykli.TaskSupervisor, fn ->
+          publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?)
+        end)
+
+        :ok
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?) do
+    case System.get_env("SYKLI_TEAM_TOKEN") do
+      token when is_binary(token) and token != "" ->
+        case RunClient.publish(session, token, summary) do
+          {:ok, _stored} ->
+            if prequeued?, do: Sykli.Outbox.delete("runs", payload, path: path)
+
+            Sykli.Occurrence.PubSub.team_run_synced(payload["run"]["id"], %{
+              "run_id" => payload["run"]["id"]
+            })
+
+          {:error, reason} ->
+            defer_run_summary(path, payload, reason, prequeued?)
+        end
+
+      _ ->
+        require Logger
+        Logger.warning("[TeamCoordinator] run summary sync deferred: missing SYKLI_TEAM_TOKEN")
+        defer_run_summary(path, payload, :missing_team_token, prequeued?)
+    end
+  end
+
+  defp defer_run_summary(path, payload, reason, prequeued?) do
+    unless prequeued? do
+      _ = Sykli.Outbox.enqueue("runs", payload, path: path)
+    end
+
+    Sykli.Occurrence.PubSub.team_run_sync_deferred(payload["run"]["id"], %{
+      "run_id" => payload["run"]["id"],
+      "reason" => inspect(reason)
+    })
+  end
 
   defp get_previous_streaks(path) do
     case RunHistory.load_latest(path: path) do

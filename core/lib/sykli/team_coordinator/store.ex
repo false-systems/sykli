@@ -47,6 +47,10 @@ defmodule Sykli.TeamCoordinator.Store do
   def heartbeat_daemon_session(server, id, attrs),
     do: GenServer.call(server, {:heartbeat_daemon_session, id, attrs})
 
+  def record_run(server, payload), do: GenServer.call(server, {:record_run, payload})
+  def get_run(server, id), do: GenServer.call(server, {:get_run, id})
+  def list_runs(server, filters \\ %{}), do: GenServer.call(server, {:list_runs, filters})
+
   def audit_log(server), do: GenServer.call(server, :audit_log)
 
   @impl true
@@ -63,6 +67,7 @@ defmodule Sykli.TeamCoordinator.Store do
        notes_by_work_item: %{},
        daemon_sessions: %{},
        daemon_sessions_by_identity: %{},
+       runs: %{},
        audit_log: []
      }}
   end
@@ -322,6 +327,47 @@ defmodule Sykli.TeamCoordinator.Store do
     end
   end
 
+  def handle_call({:record_run, payload}, _from, state) do
+    with {:ok, record} <- build_run_record(state, payload) do
+      run_id = record["run"]["id"]
+
+      case Map.fetch(state.runs, run_id) do
+        {:ok, stored} ->
+          {:reply, {:ok, stored, :existing}, state}
+
+        :error ->
+          state =
+            state
+            |> put_in([:runs, run_id], record)
+            |> audit_run_recorded(record)
+
+          {:reply, {:ok, record, :inserted}, state}
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:get_run, id}, _from, state) do
+    {:reply, fetch_run(state, id), state}
+  end
+
+  def handle_call({:list_runs, filters}, _from, state) do
+    runs =
+      state.runs
+      |> sorted_values()
+      |> Enum.filter(fn record ->
+        run = record["run"]
+
+        filter_match?(run, "team_id", Map.get(filters, "team_id")) and
+          filter_match?(run, "work_item_id", Map.get(filters, "work_item_id")) and
+          filter_match?(run, "status", Map.get(filters, "status"))
+      end)
+      |> Enum.map(& &1["run"])
+
+    {:reply, {:ok, runs}, state}
+  end
+
   def handle_call(:audit_log, _from, state) do
     {:reply, {:ok, Enum.reverse(state.audit_log)}, state}
   end
@@ -450,6 +496,49 @@ defmodule Sykli.TeamCoordinator.Store do
   defp validate_session_id_match(id, id), do: :ok
   defp validate_session_id_match(_id, value), do: {:error, {:invalid_daemon_session_id, value}}
 
+  defp build_run_record(state, %{"version" => "1", "run" => run} = payload) when is_map(run) do
+    with {:ok, org_id} <- org_id(state, run),
+         {:ok, team_id} <- team_id(state, run, org_id),
+         {:ok, run_id} <- required_string(run, "id"),
+         {:ok, status} <- required_run_status(run),
+         :ok <- validate_list(payload, "nodes"),
+         :ok <- validate_list(payload, "criteria_results"),
+         :ok <- validate_list(payload, "review_results"),
+         :ok <- validate_list(payload, "gates"),
+         :ok <- validate_list(payload, "evidence_refs") do
+      stored_run =
+        run
+        |> Map.put("id", run_id)
+        |> Map.put("org_id", org_id)
+        |> Map.put("team_id", team_id)
+        |> Map.put("status", status)
+
+      {:ok,
+       %{
+         "id" => run_id,
+         "run" => stored_run,
+         "nodes" => Map.get(payload, "nodes", []),
+         "criteria_results" => Map.get(payload, "criteria_results", []),
+         "review_results" => Map.get(payload, "review_results", []),
+         "gates" => Map.get(payload, "gates", []),
+         "evidence_refs" => Map.get(payload, "evidence_refs", [])
+       }}
+    end
+  end
+
+  defp build_run_record(_state, _payload), do: {:error, :team_run_invalid_payload}
+
+  defp required_run_status(attrs) do
+    case Map.get(attrs, "status") do
+      status when status in ~w(passed failed) -> {:ok, status}
+      _ -> {:error, :team_run_invalid_payload}
+    end
+  end
+
+  defp validate_list(payload, field) do
+    if is_list(Map.get(payload, field, [])), do: :ok, else: {:error, :team_run_invalid_payload}
+  end
+
   defp fetch_work_item(state, id) do
     with :ok <- WorkItem.validate_id(id) do
       case Map.fetch(state.work_items, id) do
@@ -471,6 +560,19 @@ defmodule Sykli.TeamCoordinator.Store do
   end
 
   defp fetch_daemon_session(_state, id), do: {:error, {:invalid_daemon_session_id, id}}
+
+  defp fetch_run(state, id) when is_binary(id) and id not in ["", ".", ".."] do
+    if String.contains?(id, ["/", "\\", <<0>>]) do
+      {:error, {:invalid_run_id, id}}
+    else
+      case Map.fetch(state.runs, id) do
+        {:ok, run} -> {:ok, run}
+        :error -> {:error, :run_not_found}
+      end
+    end
+  end
+
+  defp fetch_run(_state, id), do: {:error, {:invalid_run_id, id}}
 
   defp supersede_existing_daemon(state, identity, new_session_id, now) do
     case Map.fetch(state.daemon_sessions_by_identity, identity) do
@@ -540,6 +642,25 @@ defmodule Sykli.TeamCoordinator.Store do
       "subject_type" => subject_type,
       "subject_id" => subject_id,
       "metadata" => %{},
+      "created_at" => now(state)
+    }
+
+    update_in(state.audit_log, &[event | &1])
+  end
+
+  defp audit_run_recorded(state, record) do
+    run = record["run"]
+
+    event = %{
+      "id" => id(state),
+      "org_id" => run["org_id"],
+      "team_id" => run["team_id"],
+      "actor_type" => "system",
+      "actor_id" => "coordinator",
+      "action" => "run.recorded",
+      "subject_type" => "run",
+      "subject_id" => run["id"],
+      "metadata" => %{"event" => "run_recorded", "status" => run["status"]},
       "created_at" => now(state)
     }
 
