@@ -117,6 +117,34 @@ export type SuccessCriterion =
   | { type: 'file_exists'; path: string }
   | { type: 'file_non_empty'; path: string };
 
+export type EvidenceRequirement = {
+  type: 'file' | 'log' | 'attestation' | 'occurrence' | 'metric' | 'test_report' | 'artifact_ref' | 'custom';
+  name: string;
+  required?: boolean;
+  visibility?: 'local' | 'run_history' | 'occurrence' | 'coordinator_ref';
+  predicate?: 'exists' | 'non_empty';
+  ref_pattern?: string;
+  description?: string;
+};
+
+export function fileEvidence(name: string, refPattern: string): EvidenceRequirement {
+  return {
+    type: 'file',
+    name,
+    required: true,
+    visibility: 'local',
+    predicate: 'exists',
+    ref_pattern: refPattern,
+  };
+}
+
+export function fileEvidenceNonEmpty(name: string, refPattern: string): EvidenceRequirement {
+  return {
+    ...fileEvidence(name, refPattern),
+    predicate: 'non_empty',
+  };
+}
+
 function validateSuccessCriteria(taskName: string, criteria: SuccessCriterion[]): void {
   let exitCodeCount = 0;
   for (const criterion of criteria) {
@@ -142,6 +170,36 @@ function validateSuccessCriteria(taskName: string, criteria: SuccessCriterion[])
   }
   if (exitCodeCount > 1) {
     throw new Error(`task '${taskName}': multiple exit_code success criteria are not allowed`);
+  }
+}
+
+function validateEvidenceRequirements(taskName: string, requirements: EvidenceRequirement[]): void {
+  const types = ['file', 'log', 'attestation', 'occurrence', 'metric', 'test_report', 'artifact_ref', 'custom'];
+  const visibilities = ['local', 'run_history', 'occurrence', 'coordinator_ref'];
+
+  for (const requirement of requirements) {
+    if (!types.includes(requirement.type)) {
+      throw new Error(`task '${taskName}': invalid evidence_required type '${(requirement as any).type}'`);
+    }
+    if (!requirement.name) {
+      throw new Error(`task '${taskName}': evidence_required.name cannot be empty`);
+    }
+    if (requirement.required !== undefined && typeof requirement.required !== 'boolean') {
+      throw new Error(`task '${taskName}': evidence_required.required must be boolean`);
+    }
+    if (requirement.visibility !== undefined && !visibilities.includes(requirement.visibility)) {
+      throw new Error(`task '${taskName}': invalid evidence_required visibility '${requirement.visibility}'`);
+    }
+    if (requirement.type === 'file') {
+      if (!requirement.ref_pattern) {
+        throw new Error(`task '${taskName}': file evidence_required requires ref_pattern`);
+      }
+      if (requirement.predicate !== undefined && !['exists', 'non_empty'].includes(requirement.predicate)) {
+        throw new Error(`task '${taskName}': invalid file evidence_required predicate '${requirement.predicate}'`);
+      }
+    } else if (requirement.predicate !== undefined) {
+      throw new Error(`task '${taskName}': evidence_required.predicate is only supported for file`);
+    }
   }
 }
 
@@ -396,6 +454,7 @@ export class Task {
   private _command?: string;
   private _taskType?: TaskType;
   private _successCriteria: SuccessCriterion[] = [];
+  private _evidenceRequired: EvidenceRequirement[] = [];
   private _container?: string;
   private _workdir?: string;
   private _env: Record<string, string> = {};
@@ -451,6 +510,19 @@ export class Task {
   successCriteria(criteria: SuccessCriterion[]): this {
     validateSuccessCriteria(this.name, criteria);
     this._successCriteria.push(...criteria);
+    return this;
+  }
+
+  evidenceRequired(requirements: EvidenceRequirement[]): this {
+    validateEvidenceRequirements(this.name, requirements);
+    this._evidenceRequired.push(
+      ...requirements.map((requirement) => ({
+        required: true,
+        visibility: 'local' as const,
+        ...(requirement.type === 'file' ? { predicate: 'exists' as const } : {}),
+        ...requirement,
+      })),
+    );
     return this;
   }
 
@@ -837,6 +909,10 @@ export class Task {
     return this._successCriteria.length > 0;
   }
 
+  _hasEvidenceRequired(): boolean {
+    return this._evidenceRequired.length > 0;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Internal accessors (for Template and Pipeline use)
   // ─────────────────────────────────────────────────────────────────────────────
@@ -904,6 +980,7 @@ export class Task {
     if (this._command) json.command = this._command;
     if (this._taskType) json.task_type = this._taskType;
     if (this._successCriteria.length > 0) json.success_criteria = this._successCriteria;
+    if (this._evidenceRequired.length > 0) json.evidence_required = this._evidenceRequired;
 
     if (this._container) json.container = this._container;
     if (this._workdir) json.workdir = this._workdir;
@@ -1143,6 +1220,11 @@ export class Review {
 
   /** @internal Whether this review declares success_criteria */
   _hasSuccessCriteria(): boolean {
+    return false;
+  }
+
+  /** @internal Whether this review declares evidence_required */
+  _hasEvidenceRequired(): boolean {
     return false;
   }
 
@@ -1576,9 +1658,10 @@ export class Pipeline {
       this.caches.length > 0 ||
       this.tasks.some((t) => t._getContainer() || t._getMounts().length > 0);
     const hasV3Features = this.tasks.some((t) => t._hasTaskType() || t._hasSuccessCriteria());
+    const hasV4Features = this.tasks.some((t) => t._hasEvidenceRequired());
 
     const json: Record<string, unknown> = {
-      version: hasV3Features ? '3' : hasV2Features ? '2' : '1',
+      version: hasV4Features ? '4' : hasV3Features ? '3' : hasV2Features ? '2' : '1',
       tasks: this.tasks.map((t) => t._toJSON()),
     };
 

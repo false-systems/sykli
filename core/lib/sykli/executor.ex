@@ -57,7 +57,8 @@ defmodule Sykli.Executor do
       :command,
       :failure_semantics,
       :review_result,
-      success_criteria_results: []
+      success_criteria_results: [],
+      evidence_results: []
     ]
 
     @type status :: :passed | :failed | :errored | :cached | :skipped | :blocked
@@ -70,7 +71,8 @@ defmodule Sykli.Executor do
             command: String.t() | nil,
             failure_semantics: Sykli.FailureSemantics.t() | nil,
             review_result: Sykli.ReviewPrimitive.Result.t() | nil,
-            success_criteria_results: [Sykli.SuccessCriteria.Result.t()]
+            success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
+            evidence_results: [Sykli.EvidenceRequirement.Result.t()]
           }
   end
 
@@ -84,7 +86,8 @@ defmodule Sykli.Executor do
       :status,
       :error,
       :output,
-      success_criteria_results: []
+      success_criteria_results: [],
+      evidence_results: []
     ]
 
     @type status :: :ok | :error | :errored
@@ -92,32 +95,36 @@ defmodule Sykli.Executor do
             status: status(),
             error: term() | nil,
             output: String.t() | nil,
-            success_criteria_results: [Sykli.SuccessCriteria.Result.t()]
+            success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
+            evidence_results: [Sykli.EvidenceRequirement.Result.t()]
           }
 
-    def ok(output, success_criteria_results) do
+    def ok(output, success_criteria_results, evidence_results \\ []) do
       %__MODULE__{
         status: :ok,
         output: output,
-        success_criteria_results: success_criteria_results
+        success_criteria_results: success_criteria_results,
+        evidence_results: evidence_results
       }
     end
 
-    def error(reason, success_criteria_results \\ []) do
+    def error(reason, success_criteria_results \\ [], evidence_results \\ []) do
       %__MODULE__{
         status: :error,
         error: reason,
         output: error_output(reason),
-        success_criteria_results: success_criteria_results
+        success_criteria_results: success_criteria_results,
+        evidence_results: evidence_results
       }
     end
 
-    def errored(reason, success_criteria_results \\ []) do
+    def errored(reason, success_criteria_results \\ [], evidence_results \\ []) do
       %__MODULE__{
         status: :errored,
         error: reason,
         output: error_output(reason),
-        success_criteria_results: success_criteria_results
+        success_criteria_results: success_criteria_results,
+        evidence_results: evidence_results
       }
     end
 
@@ -809,12 +816,14 @@ defmodule Sykli.Executor do
     workdir = state.workdir
 
     # A cached task result cannot currently prove target-owned success criteria
-    # in the execution context, so tasks with criteria run and verify normally.
+    # or evidence requirements in the execution context, so tasks with declared
+    # checks run and verify normally.
     cache_lookup =
-      if Sykli.Graph.Task.success_criteria(task) == [] do
+      if Sykli.Graph.Task.success_criteria(task) == [] and
+           Sykli.Graph.Task.evidence_required(task) == [] do
         CacheService.check_and_restore(task, workdir)
       else
-        {:miss, nil, :success_criteria_requires_execution}
+        {:miss, nil, :declared_checks_require_execution}
       end
 
     case cache_lookup do
@@ -831,7 +840,8 @@ defmodule Sykli.Executor do
           duration_ms: duration,
           error: nil,
           command: task.command,
-          success_criteria_results: []
+          success_criteria_results: [],
+          evidence_results: []
         }
 
       {:miss, cache_key, reason} ->
@@ -921,7 +931,8 @@ defmodule Sykli.Executor do
           error: nil,
           output: run_result.output,
           command: task.command,
-          success_criteria_results: run_result.success_criteria_results
+          success_criteria_results: run_result.success_criteria_results,
+          evidence_results: run_result.evidence_results
         }
 
       %TaskRunResult{status: :error} when attempt < max_attempts ->
@@ -960,7 +971,8 @@ defmodule Sykli.Executor do
           output: run_result.output,
           command: task.command,
           failure_semantics: Sykli.FailureSemantics.for_result(:failed, run_result.error),
-          success_criteria_results: run_result.success_criteria_results
+          success_criteria_results: run_result.success_criteria_results,
+          evidence_results: run_result.evidence_results
         }
 
       %TaskRunResult{status: :errored} ->
@@ -974,7 +986,8 @@ defmodule Sykli.Executor do
           output: run_result.output,
           command: task.command,
           failure_semantics: Sykli.FailureSemantics.for_result(:errored, run_result.error),
-          success_criteria_results: run_result.success_criteria_results
+          success_criteria_results: run_result.success_criteria_results,
+          evidence_results: run_result.evidence_results
         }
     end
   end
@@ -1027,12 +1040,26 @@ defmodule Sykli.Executor do
                      duration_ms
                    ) do
                 {:ok, success_criteria_results} ->
-                  if cache_key do
-                    Sykli.Cache.store(cache_key, task, outputs || [], duration_ms, workdir)
-                  end
+                  case evaluate_evidence_required(
+                         task,
+                         target,
+                         state,
+                         run_opts,
+                         output,
+                         duration_ms
+                       ) do
+                    {:ok, evidence_results} ->
+                      if cache_key do
+                        Sykli.Cache.store(cache_key, task, outputs || [], duration_ms, workdir)
+                      end
 
-                  maybe_github_status(name, "success")
-                  TaskRunResult.ok(output, success_criteria_results)
+                      maybe_github_status(name, "success")
+                      TaskRunResult.ok(output, success_criteria_results, evidence_results)
+
+                    {:error, reason, evidence_results} ->
+                      maybe_github_status(name, "failure")
+                      TaskRunResult.error(reason, success_criteria_results, evidence_results)
+                  end
 
                 {:error, reason, success_criteria_results} ->
                   maybe_github_status(name, "failure")
@@ -1042,12 +1069,19 @@ defmodule Sykli.Executor do
             :ok ->
               case evaluate_success_criteria(task, target, state, run_opts, 0, nil, duration_ms) do
                 {:ok, success_criteria_results} ->
-                  if cache_key do
-                    Sykli.Cache.store(cache_key, task, outputs || [], duration_ms, workdir)
-                  end
+                  case evaluate_evidence_required(task, target, state, run_opts, nil, duration_ms) do
+                    {:ok, evidence_results} ->
+                      if cache_key do
+                        Sykli.Cache.store(cache_key, task, outputs || [], duration_ms, workdir)
+                      end
 
-                  maybe_github_status(name, "success")
-                  TaskRunResult.ok(nil, success_criteria_results)
+                      maybe_github_status(name, "success")
+                      TaskRunResult.ok(nil, success_criteria_results, evidence_results)
+
+                    {:error, reason, evidence_results} ->
+                      maybe_github_status(name, "failure")
+                      TaskRunResult.error(reason, success_criteria_results, evidence_results)
+                  end
 
                 {:error, reason, success_criteria_results} ->
                   maybe_github_status(name, "failure")
@@ -1090,6 +1124,39 @@ defmodule Sykli.Executor do
 
         {:error,
          Sykli.Error.unsupported_success_criteria_for_target(
+           task.name,
+           target_name,
+           results,
+           command: task.command,
+           output: output,
+           duration_ms: duration_ms
+         ), results}
+      end
+    end
+  end
+
+  defp evaluate_evidence_required(task, target, state, run_opts, output, duration_ms) do
+    requirements = Sykli.Graph.Task.evidence_required(task)
+
+    if requirements == [] do
+      {:ok, []}
+    else
+      opts =
+        run_opts
+        |> Keyword.put(:command_output, output)
+        |> Keyword.put(:duration_ms, duration_ms)
+
+      if function_exported?(target, :evaluate_evidence_required, 4) do
+        target.evaluate_evidence_required(task, requirements, state, opts)
+      else
+        target_name = target_name(target)
+        message = "target does not support evidence_required evaluation"
+
+        results =
+          Sykli.EvidenceRequirement.unsupported_results(requirements, target_name, message)
+
+        {:error,
+         Sykli.Error.unsupported_evidence_requirement_for_target(
            task.name,
            target_name,
            results,

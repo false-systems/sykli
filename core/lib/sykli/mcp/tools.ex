@@ -471,6 +471,10 @@ defmodule Sykli.MCP.Tools do
       :success_criteria_results,
       non_empty(Sykli.ContractSlice.success_criteria_results(result.success_criteria_results))
     )
+    |> maybe_put(
+      :evidence_results,
+      non_empty(Sykli.ContractSlice.evidence_results(result.evidence_results))
+    )
   end
 
   defp load_contract_graph(path) do

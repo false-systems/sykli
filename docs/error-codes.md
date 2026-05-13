@@ -78,10 +78,12 @@ daemon status/session JSON surfaces.
 | Code | Description | Tier | Emitted from |
 |------|-------------|------|--------------|
 | `missing_secrets` | A task requires secrets that are not present in the execution environment. | public-stable | `core/lib/sykli/error.ex:181` |
+| `missing_evidence` | A task command and criteria passed, but one or more required evidence references were absent or unsatisfied. | public-unstable | `core/lib/sykli/error.ex` |
 | `review_primitive_failed` | A review primitive failed, errored, or was unsupported. | public-unstable | `core/lib/sykli/error.ex` |
 | `success_criteria_failed` | A task command succeeded, but one or more declared success criteria failed. | public-unstable | `core/lib/sykli/error.ex:183` |
 | `task_failed` | A task command exited non-zero; this is a content failure, not infrastructure failure. | public-stable | `core/lib/sykli/error.ex:137` |
 | `task_timeout` | A task exceeded its configured timeout. | public-stable | `core/lib/sykli/error.ex:159` |
+| `unsupported_evidence_requirement_for_target` | The active target or runtime cannot evaluate one or more declared evidence requirements. | public-unstable | `core/lib/sykli/error.ex` |
 | `unsupported_success_criteria_for_target` | The active target or runtime cannot evaluate one or more declared success criteria. | public-unstable | `core/lib/sykli/error.ex:203` |
 
 ### github.app

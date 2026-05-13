@@ -142,6 +142,20 @@ defmodule Sykli.DSL do
     end)
   end
 
+  @doc "Declares required evidence references for executable task success."
+  def evidence_required(requirements) when is_list(requirements) do
+    update_current_task(fn t ->
+      reject_review_option!(t, "evidence_required")
+      validate_evidence_required!(requirements)
+
+      %{
+        t
+        | evidence_required:
+            t.evidence_required ++ Enum.map(requirements, &normalize_evidence_requirement/1)
+      }
+    end)
+  end
+
   @doc "Builds an exit_code success criterion."
   def exit_code(code) when is_integer(code) and code in 0..255,
     do: %{type: "exit_code", equals: code}
@@ -159,6 +173,26 @@ defmodule Sykli.DSL do
     do: %{type: "file_non_empty", path: path}
 
   def file_non_empty(_), do: raise(ArgumentError, "file_non_empty path cannot be empty")
+
+  @doc "Builds a file evidence requirement."
+  def file_evidence(name, ref_pattern)
+      when is_binary(name) and name != "" and is_binary(ref_pattern) and ref_pattern != "" do
+    %{
+      type: "file",
+      name: name,
+      required: true,
+      visibility: "local",
+      predicate: "exists",
+      ref_pattern: ref_pattern
+    }
+  end
+
+  def file_evidence(_, _), do: raise(ArgumentError, "file_evidence requires name and ref_pattern")
+
+  @doc "Builds a non-empty file evidence requirement."
+  def file_evidence_non_empty(name, ref_pattern) do
+    %{file_evidence(name, ref_pattern) | predicate: "non_empty"}
+  end
 
   @doc "Sets task dependencies."
   def after_(deps) when is_list(deps) do
@@ -1201,4 +1235,80 @@ defmodule Sykli.DSL do
   defp validate_success_criterion!(_criterion) do
     raise ArgumentError, "invalid success_criteria criterion"
   end
+
+  defp validate_evidence_required!(requirements) do
+    Enum.each(requirements, &validate_evidence_requirement!/1)
+  end
+
+  defp validate_evidence_requirement!(%{type: "file", name: name, ref_pattern: ref_pattern} = req)
+       when is_binary(name) and name != "" and is_binary(ref_pattern) and ref_pattern != "" do
+    validate_file_evidence_predicate!(Map.get(req, :predicate, "exists"))
+  end
+
+  defp validate_evidence_requirement!(
+         %{"type" => "file", "name" => name, "ref_pattern" => ref_pattern} = req
+       )
+       when is_binary(name) and name != "" and is_binary(ref_pattern) and ref_pattern != "" do
+    validate_file_evidence_predicate!(Map.get(req, "predicate", "exists"))
+  end
+
+  defp validate_evidence_requirement!(%{type: type, name: name})
+       when type in [
+              "log",
+              "attestation",
+              "occurrence",
+              "metric",
+              "test_report",
+              "artifact_ref",
+              "custom"
+            ] and is_binary(name) and name != "",
+       do: :ok
+
+  defp validate_evidence_requirement!(%{"type" => type, "name" => name})
+       when type in [
+              "log",
+              "attestation",
+              "occurrence",
+              "metric",
+              "test_report",
+              "artifact_ref",
+              "custom"
+            ] and is_binary(name) and name != "",
+       do: :ok
+
+  defp validate_evidence_requirement!(%{type: type}) do
+    raise ArgumentError, "invalid evidence_required type #{inspect(type)}"
+  end
+
+  defp validate_evidence_requirement!(%{"type" => type}) do
+    raise ArgumentError, "invalid evidence_required type #{inspect(type)}"
+  end
+
+  defp validate_evidence_requirement!(_requirement) do
+    raise ArgumentError, "invalid evidence_required requirement"
+  end
+
+  defp validate_file_evidence_predicate!(predicate) when predicate in ["exists", "non_empty"],
+    do: :ok
+
+  defp validate_file_evidence_predicate!(predicate) do
+    raise ArgumentError, "invalid file evidence_required predicate #{inspect(predicate)}"
+  end
+
+  defp normalize_evidence_requirement(req) do
+    req
+    |> stringify_evidence_keys()
+    |> Map.put_new("required", true)
+    |> Map.put_new("visibility", "local")
+    |> maybe_default_file_evidence_predicate()
+  end
+
+  defp stringify_evidence_keys(req) do
+    Map.new(req, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp maybe_default_file_evidence_predicate(%{"type" => "file"} = req),
+    do: Map.put_new(req, "predicate", "exists")
+
+  defp maybe_default_file_evidence_predicate(req), do: req
 end

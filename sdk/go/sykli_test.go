@@ -160,6 +160,33 @@ func TestSuccessCriteriaOmittedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestEvidenceRequiredSerialization(t *testing.T) {
+	p := New()
+	p.Task("test").
+		Run("go test ./...").
+		TaskType(TaskTypeTest).
+		EvidenceRequired(FileEvidenceNonEmpty("coverage", "coverage.out"))
+
+	result, err := emitJSON(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result["version"] != "4" {
+		t.Fatalf("expected version '4', got %v", result["version"])
+	}
+
+	task := result["tasks"].([]interface{})[0].(map[string]interface{})
+	requirements := task["evidence_required"].([]interface{})
+	requirement := requirements[0].(map[string]interface{})
+	if requirement["type"] != "file" || requirement["name"] != "coverage" {
+		t.Fatalf("unexpected evidence requirement: %#v", requirement)
+	}
+	if requirement["predicate"] != "non_empty" || requirement["ref_pattern"] != "coverage.out" {
+		t.Fatalf("unexpected file evidence requirement: %#v", requirement)
+	}
+}
+
 func TestDuplicateExitCodeCriteriaPanics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
