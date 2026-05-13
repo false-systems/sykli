@@ -16,7 +16,7 @@ CONF="$ROOT/tests/conformance"
 CASES_DIR="$CONF/cases"
 FIXTURES_DIR="$CONF/fixtures"
 TMP_DIR=$(mktemp -d)
-SUPPORTED_SCHEMA_VERSIONS=("1" "2" "3")
+SUPPORTED_SCHEMA_VERSIONS=("1" "2" "3" "4")
 
 trap 'rm -rf "$TMP_DIR"' EXIT
 

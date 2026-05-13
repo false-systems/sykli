@@ -81,11 +81,16 @@ defmodule Sykli.Query.Runs do
               cached: t.cached == true
             }
             |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+            |> maybe_put(
+              :agent_hints,
+              Sykli.AgentHints.from_failure_semantics(t.failure_semantics)
+            )
             |> maybe_put(:contract_slice, t.contract_slice)
             |> maybe_put(
               :success_criteria_results,
               non_empty_success_criteria_results(t.success_criteria_results)
             )
+            |> maybe_put(:evidence_results, non_empty_evidence_results(t.evidence_results))
 
           maybe_put(result, :error, t.error)
         end)
@@ -97,6 +102,10 @@ defmodule Sykli.Query.Runs do
 
   defp non_empty_success_criteria_results(results),
     do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp non_empty_evidence_results(nil), do: nil
+  defp non_empty_evidence_results([]), do: nil
+  defp non_empty_evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

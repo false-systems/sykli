@@ -18,6 +18,8 @@ defmodule Sykli.Error do
   | review_primitive_failed | execution | Review primitive failed or is unsupported |
   | success_criteria_failed | execution | Declared success criteria failed |
   | unsupported_success_criteria_for_target | execution | Target cannot evaluate declared success criteria |
+  | missing_evidence | execution | Required evidence was not produced |
+  | unsupported_evidence_requirement_for_target | execution | Target cannot evaluate declared evidence requirements |
   | missing_secrets | execution | Missing secrets |
   | dependency_cycle | validation | Circular dependency in task graph |
   | invalid_service | validation | Invalid service config |
@@ -251,6 +253,48 @@ defmodule Sykli.Error do
         "or remove success_criteria that this target cannot evaluate"
       ],
       notes: criterion_notes(results)
+    }
+  end
+
+  @doc """
+  missing_evidence: Task command succeeded, but required evidence was missing.
+  """
+  def missing_evidence(task, results, opts \\ []) do
+    %__MODULE__{
+      code: "missing_evidence",
+      type: :execution,
+      message: "task '#{task}' did not produce required evidence",
+      task: task,
+      step: :run,
+      command: Keyword.get(opts, :command),
+      output: Keyword.get(opts, :output),
+      duration_ms: Keyword.get(opts, :duration_ms),
+      hints: [
+        "inspect evidence_required and make the task produce the declared evidence reference"
+      ],
+      notes: evidence_requirement_notes(results)
+    }
+  end
+
+  @doc """
+  unsupported_evidence_requirement_for_target: Target cannot evaluate evidence requirements.
+  """
+  def unsupported_evidence_requirement_for_target(task, target_name, results, opts \\ []) do
+    %__MODULE__{
+      code: "unsupported_evidence_requirement_for_target",
+      type: :execution,
+      message:
+        "target '#{target_name}' does not support evidence_required evaluation for task '#{task}'",
+      task: task,
+      step: :run,
+      command: Keyword.get(opts, :command),
+      output: Keyword.get(opts, :output),
+      duration_ms: Keyword.get(opts, :duration_ms),
+      hints: [
+        "run this task on a target that can evaluate the declared evidence_required entries",
+        "or remove evidence_required entries that this target cannot evaluate"
+      ],
+      notes: evidence_requirement_notes(results)
     }
   end
 
@@ -981,6 +1025,12 @@ defmodule Sykli.Error do
         end
 
       "success_criteria[#{result.index}] #{result.type}: #{result.status} - #{result.message}#{details}"
+    end)
+  end
+
+  defp evidence_requirement_notes(results) do
+    Enum.map(results, fn result ->
+      "evidence_required[#{result.index}] #{result.type}: #{result.status} - #{result.message}"
     end)
   end
 

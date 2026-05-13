@@ -531,10 +531,18 @@ defmodule Sykli.Occurrence.Enrichment do
       |> maybe_add("log", task_log_path(result, run_id))
       |> maybe_add("error", error_detail_map(result.error))
       |> maybe_add("failure_semantics", failure_semantics_map(result))
+      |> maybe_add(
+        "agent_hints",
+        Sykli.AgentHints.from_failure_semantics(failure_semantics_map(result))
+      )
       |> maybe_add("contract_slice", Sykli.ContractSlice.from_task(task))
       |> maybe_add(
         "success_criteria_results",
         non_empty(Sykli.ContractSlice.success_criteria_results(result.success_criteria_results))
+      )
+      |> maybe_add(
+        "evidence_results",
+        non_empty(Sykli.ContractSlice.evidence_results(result.evidence_results))
       )
       |> maybe_add("covers", non_empty(get_semantic_covers(task)))
       |> maybe_add("inputs", non_empty(get_field(task, :inputs)))

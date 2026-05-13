@@ -13,6 +13,9 @@ while still being schema-valid.
 | Fixture | Rule asserted |
 |---------|---------------|
 | `depends-on-wrong-type.json` | `depends_on` must be an array of strings. |
+| `evidence-required-file-missing-ref-pattern.json` | File evidence requirements must declare `ref_pattern`. |
+| `evidence-required-unknown-type.json` | Evidence requirement `type` is a closed enum. |
+| `evidence-required-version-3.json` | `evidence_required` is rejected under version `"3"`. |
 | `gate-invalid-strategy.json` | `gate.strategy` must be one of the schema enum values (`prompt`, `env`, `file`, `webhook`). |
 | `gate-missing-strategy.json` | `gate.strategy` is required when a gate object is present. |
 | `k8s-extra-field.json` | `k8s` rejects fields outside the canonical `{memory,cpu,gpu,raw}` shape. |
@@ -33,4 +36,3 @@ while still being schema-valid.
 | `task-with-review-primitive.json` | Normal executable tasks must not carry review-node `primitive`. |
 | `version-*.json` | Top-level `version` is required, string-typed, non-empty, and explicitly supported. |
 | `when-and-condition.json` | `when` and `condition` are mutually exclusive aliases. |
-

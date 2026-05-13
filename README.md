@@ -126,7 +126,7 @@ A pipeline is a program. Agent work needs a contract.
 flowchart TB
     Human["Human or agent author<br/><sub>intent · constraints · review needs</sub>"]
     SDK["Typed SDKs<br/><sub>Go · Rust · TypeScript · Elixir · Python</sub>"]
-    Contract["Canonical contract JSON<br/><sub>version 1 · 2 · 3</sub>"]
+    Contract["Canonical contract JSON<br/><sub>version 1 · 2 · 3 · 4</sub>"]
     Schema[("Strict schema<br/><sub>sykli-pipeline.schema.json</sub>")]
     Engine["BEAM engine<br/><sub>parse · validate · schedule · supervise</sub>"]
 
@@ -180,7 +180,7 @@ flowchart TB
 
 The engine runs on the BEAM VM. Same code on your laptop, in Docker, on Kubernetes, or across a mesh of nodes.
 
-**Wire-format versions are explicit**, not advisory: `"1"` baseline graphs, `"2"` adds resources/containers/mounts, `"3"` adds agent-native semantic fields starting with `task_type`. SDKs auto-detect from features used, and the engine rejects missing, malformed, or unsupported versions. See [`docs/sdk-schema.md`](docs/sdk-schema.md) for the field-by-field contract.
+**Wire-format versions are explicit**, not advisory: `"1"` baseline graphs, `"2"` adds resources/containers/mounts, `"3"` adds agent-native semantic fields starting with `task_type`, and `"4"` adds required evidence references. SDKs auto-detect from features used, and the engine rejects missing, malformed, or unsupported versions. See [`docs/sdk-schema.md`](docs/sdk-schema.md) for the field-by-field contract.
 
 ## Why BEAM matters
 
@@ -230,7 +230,7 @@ clustering layer.
 
 SYKLI Reviews are experimental. A review node represents a structured review step in the execution graph; it does not yet run Codex, Claude, or any other provider directly. It models the review step so future runners can execute agents in a controlled, inspectable way.
 
-Builders are available in **all five SDKs** (Go, Rust, TypeScript, Elixir, Python) with byte-equivalent JSON output. The schema rejects task-execution fields (`command`, `outputs`, `services`, `mounts`, `k8s`, `retry`, `timeout`, `task_type`, `success_criteria`) on review nodes — review primitives and shell tasks have separate, non-overlapping surfaces.
+Builders are available in **all five SDKs** (Go, Rust, TypeScript, Elixir, Python) with byte-equivalent JSON output. The schema rejects task-execution fields (`command`, `outputs`, `services`, `mounts`, `k8s`, `retry`, `timeout`, `task_type`, `success_criteria`, `evidence_required`) on review nodes — review primitives and shell tasks have separate, non-overlapping surfaces.
 
 Agentic workflows need primitives, not prompts. Asking an LLM to "review this PR" is too underspecified to be repeatable. Defining a review node with constrained context, dependencies, and explicit primitive semantics is.
 
@@ -417,7 +417,7 @@ This is the layer agents and downstream tools read. No log parsing, no regex, no
 | Component | Status |
 |-----------|--------|
 | Core engine, all 5 SDKs (Go/Rust/TS/Elixir/Python), local execution, containers, FALSE Protocol output, canonical schema, GitHub-native receiver (App + webhook + Checks API) | **Stable** |
-| Mesh distribution, K8s target, gates, SLSA attestations, remote cache (S3), review-node graph support across all SDKs, `task_type` and `success_criteria` (v3 semantic contract) | **Beta** |
+| Mesh distribution, K8s target, gates, SLSA attestations, remote cache (S3), review-node graph support across all SDKs, `task_type` and `success_criteria` (v3 semantic contract), `evidence_required` (v4 evidence contract) | **Beta** |
 | Review primitive implementations (security/api-breakage/coverage agents), multi-agent execution, structured review outputs | **In development** |
 
 ---

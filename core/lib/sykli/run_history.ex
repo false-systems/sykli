@@ -33,6 +33,7 @@ defmodule Sykli.RunHistory do
       :likely_cause,
       :verified_on,
       success_criteria_results: [],
+      evidence_results: [],
       cached: false,
       streak: 0
     ]
@@ -46,6 +47,7 @@ defmodule Sykli.RunHistory do
             failure_semantics: Sykli.FailureSemantics.t() | nil,
             contract_slice: map() | nil,
             success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
+            evidence_results: [Sykli.EvidenceRequirement.Result.t()],
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
             verified_on: String.t() | nil,
@@ -322,6 +324,7 @@ defmodule Sykli.RunHistory do
       :success_criteria_results,
       non_empty_success_criteria_results(tr.success_criteria_results)
     )
+    |> maybe_add(:evidence_results, non_empty_evidence_results(tr.evidence_results))
     |> maybe_add(:inputs, tr.inputs)
     |> maybe_add(:likely_cause, tr.likely_cause)
     |> maybe_add(:verified_on, tr.verified_on)
@@ -332,6 +335,10 @@ defmodule Sykli.RunHistory do
 
   defp non_empty_success_criteria_results(results),
     do: Sykli.ContractSlice.success_criteria_results(results)
+
+  defp non_empty_evidence_results(nil), do: nil
+  defp non_empty_evidence_results([]), do: nil
+  defp non_empty_evidence_results(results), do: Sykli.ContractSlice.evidence_results(results)
 
   defp maybe_add(map, _key, nil), do: map
   defp maybe_add(map, key, value), do: Map.put(map, key, value)
@@ -366,6 +373,7 @@ defmodule Sykli.RunHistory do
       contract_slice: data["contract_slice"],
       success_criteria_results:
         Sykli.ContractSlice.success_criteria_results_from_maps(data["success_criteria_results"]),
+      evidence_results: Sykli.ContractSlice.evidence_results_from_maps(data["evidence_results"]),
       inputs: data["inputs"],
       likely_cause: data["likely_cause"],
       verified_on: data["verified_on"]

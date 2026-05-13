@@ -196,6 +196,9 @@ defmodule Sykli.Cache do
   def format_miss_reason(:success_criteria_requires_execution),
     do: "success criteria require execution"
 
+  def format_miss_reason(:declared_checks_require_execution),
+    do: "declared checks require execution"
+
   def format_miss_reason(other), do: "#{other}"
 
   @doc """
