@@ -27,6 +27,8 @@ defmodule Sykli.Query.HistoryTest do
       assert result.data.status == :failed
       assert result.data.error == "exit code 1"
       assert result.data.failure_semantics["class"] == "runtime_failure"
+      assert result.data.agent_hints["inspect_target"] == true
+      assert result.data.agent_hints["retry_may_help"] == false
     end
 
     test "returns error when task has not failed", %{workdir: workdir} do

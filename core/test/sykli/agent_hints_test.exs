@@ -1,0 +1,57 @@
+defmodule Sykli.AgentHintsTest do
+  use ExUnit.Case, async: true
+
+  alias Sykli.{AgentHints, FailureSemantics}
+
+  test "runtime failures point agents at the target and preserve retryability" do
+    hints =
+      AgentHints.from_failure_semantics(
+        FailureSemantics.timeout("task_timeout", "task timed out")
+      )
+
+    assert hints["retry_may_help"] == true
+    assert hints["inspect_target"] == true
+    refute hints["inspect_contract"]
+    refute hints["requires_human_decision"]
+  end
+
+  test "criteria failures point agents at the contract" do
+    hints =
+      AgentHints.from_failure_semantics(
+        FailureSemantics.criteria_failure("success_criteria_failed", "criteria failed")
+      )
+
+    assert hints["inspect_contract"] == true
+    refute hints["inspect_target"]
+    refute hints["retry_may_help"]
+  end
+
+  test "unsupported targets expose target and contract inspection paths" do
+    hints =
+      AgentHints.from_failure_semantics(
+        FailureSemantics.unsupported_target("unsupported_success_criteria", "unsupported")
+      )
+
+    assert hints["inspect_target"] == true
+    assert hints["inspect_contract"] == true
+  end
+
+  test "policy blocks require a human decision without claiming retry value" do
+    hints = AgentHints.from_failure_semantics(FailureSemantics.policy_block("gate", "blocked"))
+
+    assert hints["requires_human_decision"] == true
+    refute hints["retry_may_help"]
+  end
+
+  test "unknown classifications remain explicit but conservative" do
+    hints = AgentHints.from_failure_semantics(FailureSemantics.unknown("raw", "unknown"))
+
+    assert hints == %{
+             "retry_may_help" => false,
+             "inspect_target" => false,
+             "inspect_contract" => false,
+             "inspect_dependencies" => false,
+             "requires_human_decision" => false
+           }
+  end
+end

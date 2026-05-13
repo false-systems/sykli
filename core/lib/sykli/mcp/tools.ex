@@ -171,39 +171,21 @@ defmodule Sykli.MCP.Tools do
   defp do_call("run_pipeline", args) do
     path = args["path"] || "."
     opts = build_run_opts(args)
+    graph = load_contract_graph(path)
 
     case Sykli.run(path, opts) do
       {:ok, results} ->
         {:ok,
          %{
            status: "passed",
-           tasks:
-             Enum.map(results, fn r ->
-               %{
-                 name: r.name,
-                 status: "passed",
-                 duration_ms: r.duration_ms,
-                 cached: r.cached
-               }
-             end)
+           tasks: Enum.map(results, &task_result_map(&1, graph))
          }}
 
       {:error, results} when is_list(results) ->
         {:ok,
          %{
            status: "failed",
-           tasks:
-             Enum.map(results, fn r ->
-               base = %{
-                 name: r.name,
-                 status: to_string(r.status),
-                 duration_ms: r.duration_ms,
-                 cached: r.cached
-               }
-
-               base = if r.error, do: Map.put(base, :error, r.error), else: base
-               maybe_put_failure_semantics(base, r.failure_semantics)
-             end)
+           tasks: Enum.map(results, &task_result_map(&1, graph))
          }}
 
       {:error, reason} ->
@@ -400,6 +382,7 @@ defmodule Sykli.MCP.Tools do
       name_set = MapSet.new(task_names)
       filter_fn = fn task -> MapSet.member?(name_set, task.name) end
       opts = [filter: filter_fn]
+      graph = load_contract_graph(path)
 
       case Sykli.run(path, opts) do
         {:ok, results} ->
@@ -407,10 +390,7 @@ defmodule Sykli.MCP.Tools do
            %{
              status: "passed",
              retried: task_names,
-             tasks:
-               Enum.map(results, fn r ->
-                 %{name: r.name, status: to_string(r.status), duration_ms: r.duration_ms}
-               end)
+             tasks: Enum.map(results, &task_result_map(&1, graph))
            }}
 
         {:error, results} when is_list(results) ->
@@ -418,12 +398,7 @@ defmodule Sykli.MCP.Tools do
            %{
              status: "failed",
              retried: task_names,
-             tasks:
-               Enum.map(results, fn r ->
-                 base = %{name: r.name, status: to_string(r.status), duration_ms: r.duration_ms}
-                 base = if r.error, do: Map.put(base, :error, inspect(r.error)), else: base
-                 maybe_put_failure_semantics(base, r.failure_semantics)
-               end)
+             tasks: Enum.map(results, &task_result_map(&1, graph))
            }}
 
         {:error, reason} ->
@@ -479,10 +454,70 @@ defmodule Sykli.MCP.Tools do
     opts
   end
 
-  defp maybe_put_failure_semantics(map, nil), do: map
+  defp task_result_map(result, graph) do
+    task = Map.get(graph, result.name, %{})
 
-  defp maybe_put_failure_semantics(map, semantics) do
-    Map.put(map, :failure_semantics, Sykli.FailureSemantics.to_map(semantics))
+    %{
+      name: result.name,
+      status: to_string(result.status),
+      duration_ms: result.duration_ms,
+      cached: result.status == :cached
+    }
+    |> maybe_put(:error, task_error_map(result.error))
+    |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(result.failure_semantics))
+    |> maybe_put(:agent_hints, Sykli.AgentHints.from_failure_semantics(result.failure_semantics))
+    |> maybe_put(:contract_slice, Sykli.ContractSlice.from_task(task))
+    |> maybe_put(
+      :success_criteria_results,
+      non_empty(Sykli.ContractSlice.success_criteria_results(result.success_criteria_results))
+    )
+  end
+
+  defp load_contract_graph(path) do
+    with {:ok, sdk_file} <- Detector.find(path),
+         {:ok, json} <- Detector.emit(sdk_file),
+         {:ok, graph} <- Graph.parse(json) do
+      Graph.expand_matrix(graph)
+    else
+      _ -> %{}
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp non_empty([]), do: nil
+  defp non_empty(value), do: value
+
+  defp task_error_map(nil), do: nil
+
+  defp task_error_map(%Sykli.Error{} = error) do
+    %{
+      code: error.code,
+      message: error.message,
+      exit_code: error.exit_code,
+      hints: error.hints,
+      notes: error.notes
+    }
+    |> maybe_put(:locations, non_empty(error_locations(error.locations)))
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == [] end)
+    |> Map.new()
+  end
+
+  defp task_error_map(error), do: %{message: inspect(error)}
+
+  defp error_locations(locations) do
+    Enum.map(locations || [], fn location ->
+      %{
+        file: location.file,
+        line: location.line,
+        column: location.column,
+        message: location.message
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+    end)
   end
 
   defp safe_store_call(fun) do

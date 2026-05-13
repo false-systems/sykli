@@ -235,6 +235,7 @@ defmodule Sykli.Context do
       "cached" => result[:cached] == true,
       "error" => result[:error],
       "failure_semantics" => Sykli.FailureSemantics.to_map(result[:failure_semantics]),
+      "agent_hints" => Sykli.AgentHints.from_failure_semantics(result[:failure_semantics]),
       "contract_slice" => result[:contract_slice],
       "success_criteria_results" =>
         Sykli.ContractSlice.success_criteria_results(result[:success_criteria_results])

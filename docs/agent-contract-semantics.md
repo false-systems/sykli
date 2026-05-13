@@ -20,6 +20,11 @@ Historical result contract snapshots are documented in
 `docs/result-contract-slices.md`. `contract_slice` is also produced by Sykli
 after parsing/execution; it is not an SDK-emitted pipeline field.
 
+Agent-readable failure output is documented in
+`docs/agent-readable-failure-output.md`. It exposes `failure_semantics`,
+`contract_slice`, `success_criteria_results`, and derived `agent_hints` on
+existing machine-readable surfaces where those facts are available.
+
 ## Thesis
 
 Phase 3 moves Sykli from "describes how to run a graph" to "describes what the

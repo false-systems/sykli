@@ -81,6 +81,10 @@ defmodule Sykli.Query.Runs do
               cached: t.cached == true
             }
             |> maybe_put(:failure_semantics, Sykli.FailureSemantics.to_map(t.failure_semantics))
+            |> maybe_put(
+              :agent_hints,
+              Sykli.AgentHints.from_failure_semantics(t.failure_semantics)
+            )
             |> maybe_put(:contract_slice, t.contract_slice)
             |> maybe_put(
               :success_criteria_results,

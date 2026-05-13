@@ -410,11 +410,15 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
       tasks_by_name = Map.new(enriched.data["tasks"], &{&1["name"], &1})
       assert get_in(tasks_by_name, ["fail", "failure_semantics", "class"]) == "runtime_failure"
+      assert get_in(tasks_by_name, ["fail", "agent_hints", "inspect_target"]) == true
       assert get_in(tasks_by_name, ["err", "failure_semantics", "class"]) == "timeout"
+      assert get_in(tasks_by_name, ["err", "agent_hints", "retry_may_help"]) == true
       assert get_in(tasks_by_name, ["skip", "failure_semantics", "class"]) == "skipped"
 
       assert get_in(tasks_by_name, ["block", "failure_semantics", "class"]) ==
                "dependency_failure"
+
+      assert get_in(tasks_by_name, ["block", "agent_hints", "inspect_dependencies"]) == true
     end
 
     test "failed task step includes error info", %{workdir: workdir} do
