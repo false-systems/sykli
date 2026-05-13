@@ -41,7 +41,7 @@ defmodule Sykli.RunHistory do
             duration_ms: non_neg_integer(),
             cached: boolean(),
             error: String.t() | nil,
-            failure_semantics: map() | nil,
+            failure_semantics: Sykli.FailureSemantics.t() | nil,
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
             verified_on: String.t() | nil,
