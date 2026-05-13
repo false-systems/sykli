@@ -33,6 +33,9 @@ defmodule Sykli.ContractSlice do
     |> empty_to_nil()
   end
 
+  # Keep this raw-map path in sync with the struct path above. The struct path
+  # is canonical for live graph tasks; this path preserves persisted/legacy
+  # history records that are already decoded into maps.
   def from_task(%{} = task) do
     %{}
     |> maybe_put("kind", stringify(task[:kind] || task["kind"]))
@@ -73,7 +76,7 @@ defmodule Sykli.ContractSlice do
 
   def success_criteria_result_to_map(%{} = result) do
     result
-    |> stringify_keys()
+    |> to_json_compatible()
     |> reject_empty()
   end
 
@@ -128,7 +131,7 @@ defmodule Sykli.ContractSlice do
     |> maybe_put("container", task[:container] || task["container"])
     |> maybe_put("workdir", task[:workdir] || task["workdir"])
     |> maybe_put("timeout_seconds", task[:timeout] || task["timeout"])
-    |> maybe_put("requires", non_empty(task[:requires] || task["requires"]))
+    |> maybe_put("requires", normalized_value(non_empty(task[:requires] || task["requires"])))
     |> empty_to_nil()
   end
 
@@ -150,15 +153,15 @@ defmodule Sykli.ContractSlice do
     String.to_existing_atom(value)
   end
 
-  defp parse_status(value) when is_atom(value), do: value
-  defp parse_status(_), do: :failed
+  defp parse_status(value) when value in [:passed, :failed, :unsupported], do: value
+  defp parse_status(_), do: :unknown
 
   defp normalized_map(nil), do: nil
-  defp normalized_map(%{} = map), do: map |> stringify_keys() |> reject_empty()
+  defp normalized_map(%{} = map), do: map |> to_json_compatible() |> reject_empty()
   defp normalized_map(_), do: nil
 
   defp normalized_value(nil), do: nil
-  defp normalized_value(value), do: stringify_keys(value)
+  defp normalized_value(value), do: to_json_compatible(value)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
@@ -182,14 +185,14 @@ defmodule Sykli.ContractSlice do
   defp stringify(value) when is_atom(value), do: Atom.to_string(value)
   defp stringify(value), do: value
 
-  defp stringify_keys(map) when is_map(map) do
+  defp to_json_compatible(map) when is_map(map) do
     Map.new(map, fn
-      {key, value} when is_atom(key) -> {Atom.to_string(key), stringify_keys(value)}
-      {key, value} -> {key, stringify_keys(value)}
+      {key, value} when is_atom(key) -> {Atom.to_string(key), to_json_compatible(value)}
+      {key, value} -> {key, to_json_compatible(value)}
     end)
   end
 
-  defp stringify_keys(list) when is_list(list), do: Enum.map(list, &stringify_keys/1)
-  defp stringify_keys(value) when is_atom(value), do: Atom.to_string(value)
-  defp stringify_keys(value), do: value
+  defp to_json_compatible(list) when is_list(list), do: Enum.map(list, &to_json_compatible/1)
+  defp to_json_compatible(value) when is_atom(value), do: Atom.to_string(value)
+  defp to_json_compatible(value), do: value
 end

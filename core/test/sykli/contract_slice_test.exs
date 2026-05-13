@@ -48,6 +48,33 @@ defmodule Sykli.ContractSliceTest do
     refute Map.has_key?(slice, "command")
   end
 
+  test "projects legacy raw-map task contract metadata" do
+    slice =
+      ContractSlice.from_task(%{
+        kind: :task,
+        task_type: "test",
+        semantic: %{intent: "Verify API behavior", criticality: :high},
+        ai_hooks: %{on_fail: :analyze},
+        provides: [%{name: :verified_api, value: "yes"}],
+        needs: [:deps_built],
+        success_criteria: [%{type: "exit_code", equals: 0}],
+        container: "hexpm/elixir:latest",
+        workdir: "apps/api",
+        timeout: 60,
+        requires: [:linux]
+      })
+
+    assert slice["kind"] == "task"
+    assert slice["task_type"] == "test"
+    assert slice["semantic"] == %{"intent" => "Verify API behavior", "criticality" => "high"}
+    assert slice["ai_hooks"] == %{"on_fail" => "analyze"}
+    assert slice["provides"] == [%{"name" => "verified_api", "value" => "yes"}]
+    assert slice["needs"] == ["deps_built"]
+    assert slice["success_criteria"] == [%{"type" => "exit_code", "equals" => 0}]
+    assert slice["target"]["container"] == "hexpm/elixir:latest"
+    assert slice["target"]["requires"] == ["linux"]
+  end
+
   test "projects review and gate metadata when declared" do
     review =
       parse_task(%{
@@ -117,6 +144,18 @@ defmodule Sykli.ContractSliceTest do
              ContractSlice.success_criteria_results_from_maps(
                ContractSlice.success_criteria_results(results)
              )
+  end
+
+  test "decodes unknown persisted success criteria status as unknown" do
+    assert [%Result{status: :unknown}] =
+             ContractSlice.success_criteria_results_from_maps([
+               %{"type" => "exit_code", "status" => "future_status"}
+             ])
+
+    assert [%Result{status: :unknown}] =
+             ContractSlice.success_criteria_results_from_maps([
+               %{"type" => "exit_code"}
+             ])
   end
 
   defp parse_task(pipeline) do
