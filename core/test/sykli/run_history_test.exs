@@ -68,6 +68,47 @@ defmodule Sykli.RunHistoryTest do
              } = task.failure_semantics
     end
 
+    test "round-trips contract slice and success criteria results", %{tmp_dir: tmp_dir} do
+      run = %RunHistory.Run{
+        id: "contract-slice-run",
+        timestamp: ~U[2024-01-15 10:30:00Z],
+        git_ref: "abc1234",
+        git_branch: "main",
+        tasks: [
+          %RunHistory.TaskResult{
+            name: "test",
+            status: :failed,
+            duration_ms: 100,
+            contract_slice: %{
+              "task_type" => "test",
+              "semantic" => %{"intent" => "Verify behavior"},
+              "success_criteria" => [%{"type" => "exit_code", "equals" => 0}]
+            },
+            success_criteria_results: [
+              %Sykli.SuccessCriteria.Result{
+                index: 0,
+                type: "exit_code",
+                status: :failed,
+                message: "expected exit code 0, got 1",
+                target: "local"
+              }
+            ]
+          }
+        ],
+        overall: :failed
+      }
+
+      assert :ok = RunHistory.save(run, path: tmp_dir)
+      assert {:ok, loaded} = RunHistory.load_latest(path: tmp_dir)
+      [task] = loaded.tasks
+
+      assert task.contract_slice["task_type"] == "test"
+      assert task.contract_slice["semantic"]["intent"] == "Verify behavior"
+
+      assert [%Sykli.SuccessCriteria.Result{status: :failed, target: "local"}] =
+               task.success_criteria_results
+    end
+
     test "creates latest.json symlink", %{tmp_dir: tmp_dir} do
       run = %RunHistory.Run{
         id: "test-run-2",
@@ -197,6 +238,37 @@ defmodule Sykli.RunHistoryTest do
     end
   end
 
+  describe "execution history contract slices" do
+    test "Sykli.run persists task contract slice and criteria results", %{tmp_dir: tmp_dir} do
+      json =
+        Jason.encode!(%{
+          "version" => "3",
+          "tasks" => [
+            %{
+              "name" => "test",
+              "command" => "echo ok",
+              "task_type" => "test",
+              "semantic" => %{"intent" => "Verify behavior", "covers" => ["lib/**"]},
+              "success_criteria" => [%{"type" => "exit_code", "equals" => 0}]
+            }
+          ]
+        })
+
+      File.write!(Path.join(tmp_dir, "sykli.exs"), "IO.puts(#{inspect(json)})")
+
+      assert {:ok, _results} = Sykli.run(tmp_dir)
+      assert {:ok, run} = RunHistory.load_latest(path: tmp_dir)
+      [task] = run.tasks
+
+      assert task.contract_slice["task_type"] == "test"
+      assert task.contract_slice["semantic"]["intent"] == "Verify behavior"
+      assert task.contract_slice["success_criteria"] == [%{"type" => "exit_code", "equals" => 0}]
+
+      assert [%Sykli.SuccessCriteria.Result{status: :passed, type: "exit_code"}] =
+               task.success_criteria_results
+    end
+  end
+
   describe "load_latest/1" do
     test "returns latest run", %{tmp_dir: tmp_dir} do
       run = %RunHistory.Run{
@@ -213,6 +285,37 @@ defmodule Sykli.RunHistoryTest do
       assert {:ok, loaded} = RunHistory.load_latest(path: tmp_dir)
       assert loaded.id == "test-run-5"
       assert loaded.git_ref == "abc1234"
+    end
+
+    test "loads old run history without contract slices", %{tmp_dir: tmp_dir} do
+      runs_dir = Path.join([tmp_dir, ".sykli", "runs"])
+      File.mkdir_p!(runs_dir)
+
+      File.write!(
+        Path.join(runs_dir, "latest.json"),
+        Jason.encode!(%{
+          "id" => "old-run",
+          "timestamp" => "2024-01-15T10:30:00Z",
+          "git_ref" => "abc1234",
+          "git_branch" => "main",
+          "overall" => "failed",
+          "tasks" => [
+            %{
+              "name" => "test",
+              "status" => "failed",
+              "duration_ms" => 100,
+              "cached" => false,
+              "streak" => 0,
+              "error" => "task_failed: task failed"
+            }
+          ]
+        })
+      )
+
+      assert {:ok, loaded} = RunHistory.load_latest(path: tmp_dir)
+      [task] = loaded.tasks
+      assert task.contract_slice == nil
+      assert task.success_criteria_results == []
     end
 
     test "returns error when no runs exist", %{tmp_dir: tmp_dir} do

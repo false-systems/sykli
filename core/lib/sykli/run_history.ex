@@ -28,9 +28,11 @@ defmodule Sykli.RunHistory do
       :duration_ms,
       :error,
       :failure_semantics,
+      :contract_slice,
       :inputs,
       :likely_cause,
       :verified_on,
+      success_criteria_results: [],
       cached: false,
       streak: 0
     ]
@@ -42,6 +44,8 @@ defmodule Sykli.RunHistory do
             cached: boolean(),
             error: String.t() | nil,
             failure_semantics: Sykli.FailureSemantics.t() | nil,
+            contract_slice: map() | nil,
+            success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
             inputs: [String.t()] | nil,
             likely_cause: [String.t()] | nil,
             verified_on: String.t() | nil,
@@ -313,10 +317,21 @@ defmodule Sykli.RunHistory do
     }
     |> maybe_add(:error, tr.error)
     |> maybe_add(:failure_semantics, Sykli.FailureSemantics.to_map(tr.failure_semantics))
+    |> maybe_add(:contract_slice, tr.contract_slice)
+    |> maybe_add(
+      :success_criteria_results,
+      non_empty_success_criteria_results(tr.success_criteria_results)
+    )
     |> maybe_add(:inputs, tr.inputs)
     |> maybe_add(:likely_cause, tr.likely_cause)
     |> maybe_add(:verified_on, tr.verified_on)
   end
+
+  defp non_empty_success_criteria_results(nil), do: nil
+  defp non_empty_success_criteria_results([]), do: nil
+
+  defp non_empty_success_criteria_results(results),
+    do: Sykli.ContractSlice.success_criteria_results(results)
 
   defp maybe_add(map, _key, nil), do: map
   defp maybe_add(map, key, value), do: Map.put(map, key, value)
@@ -348,6 +363,9 @@ defmodule Sykli.RunHistory do
       streak: data["streak"] || 0,
       error: data["error"],
       failure_semantics: Sykli.FailureSemantics.from_map(data["failure_semantics"]),
+      contract_slice: data["contract_slice"],
+      success_criteria_results:
+        Sykli.ContractSlice.success_criteria_results_from_maps(data["success_criteria_results"]),
       inputs: data["inputs"],
       likely_cause: data["likely_cause"],
       verified_on: data["verified_on"]

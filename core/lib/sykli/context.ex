@@ -234,9 +234,12 @@ defmodule Sykli.Context do
       "duration_ms" => result[:duration_ms],
       "cached" => result[:cached] == true,
       "error" => result[:error],
-      "failure_semantics" => Sykli.FailureSemantics.to_map(result[:failure_semantics])
+      "failure_semantics" => Sykli.FailureSemantics.to_map(result[:failure_semantics]),
+      "contract_slice" => result[:contract_slice],
+      "success_criteria_results" =>
+        Sykli.ContractSlice.success_criteria_results(result[:success_criteria_results])
     }
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Enum.reject(fn {_k, v} -> is_nil(v) or v == [] end)
     |> Map.new()
   end
 
