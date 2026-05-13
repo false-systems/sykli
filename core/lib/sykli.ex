@@ -507,10 +507,10 @@ defmodule Sykli do
       {:ok, session} ->
         summary = RunSummary.from_run(run, session: session, path: path)
         payload = RunSummary.encode(summary)
-        _ = Sykli.Outbox.enqueue("runs", payload, path: path)
+        prequeued? = Sykli.Outbox.enqueue("runs", payload, path: path) == :ok
 
         Task.Supervisor.async_nolink(Sykli.TaskSupervisor, fn ->
-          publish_or_enqueue_run_summary(session, summary, payload, path)
+          publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?)
         end)
 
         :ok
@@ -520,28 +520,32 @@ defmodule Sykli do
     end
   end
 
-  defp publish_or_enqueue_run_summary(session, summary, payload, path) do
+  defp publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?) do
     case System.get_env("SYKLI_TEAM_TOKEN") do
       token when is_binary(token) and token != "" ->
         case RunClient.publish(session, token, summary) do
           {:ok, _stored} ->
+            if prequeued?, do: Sykli.Outbox.delete("runs", payload, path: path)
+
             Sykli.Occurrence.PubSub.team_run_synced(payload["run"]["id"], %{
               "run_id" => payload["run"]["id"]
             })
 
           {:error, reason} ->
-            enqueue_run_summary(path, payload, reason)
+            defer_run_summary(path, payload, reason, prequeued?)
         end
 
       _ ->
         require Logger
         Logger.warning("[TeamCoordinator] run summary sync deferred: missing SYKLI_TEAM_TOKEN")
-        enqueue_run_summary(path, payload, :missing_team_token)
+        defer_run_summary(path, payload, :missing_team_token, prequeued?)
     end
   end
 
-  defp enqueue_run_summary(path, payload, reason) do
-    _ = Sykli.Outbox.enqueue("runs", payload, path: path)
+  defp defer_run_summary(path, payload, reason, prequeued?) do
+    unless prequeued? do
+      _ = Sykli.Outbox.enqueue("runs", payload, path: path)
+    end
 
     Sykli.Occurrence.PubSub.team_run_sync_deferred(payload["run"]["id"], %{
       "run_id" => payload["run"]["id"],

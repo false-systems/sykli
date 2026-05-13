@@ -339,7 +339,7 @@ defmodule Sykli.TeamCoordinator.Store do
           state =
             state
             |> put_in([:runs, run_id], record)
-            |> audit_run_recorded(run_id, record["run"]["status"])
+            |> audit_run_recorded(record)
 
           {:reply, {:ok, record, :inserted}, state}
       end
@@ -648,17 +648,19 @@ defmodule Sykli.TeamCoordinator.Store do
     update_in(state.audit_log, &[event | &1])
   end
 
-  defp audit_run_recorded(state, run_id, status) do
+  defp audit_run_recorded(state, record) do
+    run = record["run"]
+
     event = %{
       "id" => id(state),
-      "org_id" => nil,
-      "team_id" => nil,
+      "org_id" => run["org_id"],
+      "team_id" => run["team_id"],
       "actor_type" => "system",
       "actor_id" => "coordinator",
       "action" => "run.recorded",
       "subject_type" => "run",
-      "subject_id" => run_id,
-      "metadata" => %{"event" => "run_recorded", "status" => status},
+      "subject_id" => run["id"],
+      "metadata" => %{"event" => "run_recorded", "status" => run["status"]},
       "created_at" => now(state)
     }
 

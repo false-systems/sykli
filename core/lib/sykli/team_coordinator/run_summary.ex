@@ -9,10 +9,10 @@ defmodule Sykli.TeamCoordinator.RunSummary do
 
     * `finished_at` — `run.timestamp`, set when the run finishes and history
       is saved.
-    * `started_at` — currently equal to `finished_at`. The engine measures
-      true wall-clock start time at the executor (`Sykli.Executor.do_run/6`)
-      but does not yet propagate it onto `RunHistory.Run`. A later PR will
-      thread it through and replace this with the real value.
+    * `started_at` — derived as `finished_at - total_task_duration_ms`.
+      Because task durations are summed across parallel branches, this is an
+      approximate lower-bound start marker for sorting and display, not an
+      executor wall-clock timestamp.
     * `total_task_duration_ms` — sum of per-task `duration_ms` across the
       whole run. This is *total work*, not wall-clock: tasks at the same
       dependency level run in parallel, so this number counts parallel
@@ -37,6 +37,9 @@ defmodule Sykli.TeamCoordinator.RunSummary do
     session = Keyword.get(opts, :session, opts)
     path = Keyword.get(opts, :path, ".")
     finished_at = run.timestamp
+    total_duration_ms = total_task_duration_ms(run)
+    started_at = started_at(finished_at, total_duration_ms)
+    status = run_status!(run.overall)
 
     %__MODULE__{
       run: %{
@@ -46,12 +49,12 @@ defmodule Sykli.TeamCoordinator.RunSummary do
         "daemon_session_id" => session["session_id"] || session["daemon_session_id"],
         "work_item_id" => run.work_item_id,
         "contract_hash" => run.contract_hash,
-        "status" => Atom.to_string(run.overall),
+        "status" => status,
         "error_code" => error_code(run),
         "target" => run.platform || "local",
-        "started_at" => DateTime.to_iso8601(finished_at),
+        "started_at" => DateTime.to_iso8601(started_at),
         "finished_at" => DateTime.to_iso8601(finished_at),
-        "total_task_duration_ms" => total_task_duration_ms(run),
+        "total_task_duration_ms" => total_duration_ms,
         "git_ref" => run.git_ref,
         "git_branch" => run.git_branch
       },
@@ -93,6 +96,18 @@ defmodule Sykli.TeamCoordinator.RunSummary do
     |> Enum.map(&(&1.duration_ms || 0))
     |> Enum.sum()
     |> max(0)
+  end
+
+  defp started_at(finished_at, 0), do: finished_at
+
+  defp started_at(finished_at, total_duration_ms),
+    do: DateTime.add(finished_at, -total_duration_ms, :millisecond)
+
+  defp run_status!(status) when status in [:passed, :failed], do: Atom.to_string(status)
+
+  defp run_status!(status) do
+    raise ArgumentError,
+          "team run summary supports only :passed or :failed run status, got: #{inspect(status)}"
   end
 
   defp error_code(%RunHistory.Run{overall: :passed}), do: nil

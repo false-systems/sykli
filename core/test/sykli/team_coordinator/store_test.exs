@@ -195,6 +195,12 @@ defmodule Sykli.TeamCoordinator.StoreTest do
 
     assert {:ok, events} = Store.audit_log(store)
     assert Enum.count(events, &(&1["action"] == "run.recorded")) == 1
+
+    org_id = org["id"]
+    team_id = team["id"]
+
+    assert [%{"org_id" => ^org_id, "team_id" => ^team_id}] =
+             Enum.filter(events, &(&1["action"] == "run.recorded"))
   end
 
   test "record_run validates team and payload", %{store: store} do

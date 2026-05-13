@@ -9,8 +9,19 @@ defmodule Sykli.Outbox do
          :ok <- File.mkdir_p(dir),
          {:ok, id} <- payload_id(payload),
          {:ok, json} <-
-           Jason.encode(Sykli.Services.SecretMasker.mask_deep(payload, secrets()), pretty: true) do
+           Jason.encode(Sykli.Services.SecretMasker.mask_deep(payload, secrets())) do
       atomic_write(Path.join(dir, "#{id}.json"), json)
+    end
+  end
+
+  def delete(kind, payload, opts \\ []) when is_map(payload) do
+    with {:ok, dir} <- kind_dir(kind, opts),
+         {:ok, id} <- payload_id(payload) do
+      case File.rm(Path.join(dir, "#{id}.json")) do
+        :ok -> :ok
+        {:error, :enoent} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -31,19 +42,55 @@ defmodule Sykli.Outbox do
   defp do_drain([], _sender_fn, count), do: {:ok, count}
 
   defp do_drain([path | rest], sender_fn, count) do
+    case read_payload(path) do
+      {:ok, payload} ->
+        case normalize_send(sender_fn.(payload)) do
+          :ok ->
+            :ok = File.rm(path)
+            do_drain(rest, sender_fn, count + 1)
+
+          {:error, reason} ->
+            if permanent_failure?(reason) do
+              :ok = File.rm(path)
+              do_drain(rest, sender_fn, count)
+            else
+              {:error, count, reason}
+            end
+        end
+
+      {:error, reason} ->
+        if permanent_failure?(reason) do
+          :ok = File.rm(path)
+          do_drain(rest, sender_fn, count)
+        else
+          {:error, count, reason}
+        end
+    end
+  end
+
+  defp read_payload(path) do
     with {:ok, body} <- File.read(path),
-         {:ok, payload} <- Jason.decode(body),
-         :ok <- normalize_send(sender_fn.(payload)),
-         :ok <- File.rm(path) do
-      do_drain(rest, sender_fn, count + 1)
+         {:ok, payload} <- Jason.decode(body) do
+      {:ok, payload}
     else
-      {:error, reason} -> {:error, count, reason}
+      {:error, %Jason.DecodeError{} = error} -> {:error, {:team_run_invalid_payload, error}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp normalize_send(:ok), do: :ok
   defp normalize_send({:ok, _}), do: :ok
   defp normalize_send({:error, reason}), do: {:error, reason}
+
+  defp permanent_failure?(:team_run_invalid_payload), do: true
+  defp permanent_failure?(:team_run_body_too_large), do: true
+  defp permanent_failure?({:team_run_invalid_payload, _reason}), do: true
+
+  defp permanent_failure?({:team_coordinator_error, %{"code" => code}})
+       when code in ["team.run.invalid_payload", "team.run.body_too_large"],
+       do: true
+
+  defp permanent_failure?(_reason), do: false
 
   defp list_files(dir) do
     case File.ls(dir) do
@@ -95,8 +142,29 @@ defmodule Sykli.Outbox do
   end
 
   defp secrets do
-    System.get_env("SYKLI_TEAM_TOKEN")
-    |> List.wrap()
-    |> Enum.reject(&is_nil/1)
+    System.get_env()
+    |> Enum.filter(fn {key, _val} ->
+      Enum.any?(secret_env_patterns(), &String.contains?(key, &1))
+    end)
+    |> Enum.map(fn {_key, value} -> value end)
+    |> Enum.uniq()
+    |> Enum.filter(&(is_binary(&1) and byte_size(&1) >= 4))
+  end
+
+  defp secret_env_patterns do
+    [
+      "_TOKEN",
+      "_SECRET",
+      "_KEY",
+      "_PASSWORD",
+      "_PASS",
+      "_API_KEY",
+      "_CREDENTIAL",
+      "_AUTH",
+      "_URL",
+      "_DSN",
+      "_URI",
+      "_CONN"
+    ]
   end
 end
