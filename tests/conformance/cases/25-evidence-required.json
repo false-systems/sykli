@@ -1,0 +1,20 @@
+{
+  "version": "4",
+  "tasks": [
+    {
+      "name": "test",
+      "command": "go test ./...",
+      "task_type": "test",
+      "evidence_required": [
+        {
+          "type": "file",
+          "name": "coverage",
+          "required": true,
+          "visibility": "local",
+          "predicate": "non_empty",
+          "ref_pattern": "coverage.out"
+        }
+      ]
+    }
+  ]
+}

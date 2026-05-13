@@ -279,7 +279,8 @@ defmodule Sykli do
             error: t.error,
             failure_semantics: t.failure_semantics,
             contract_slice: t.contract_slice,
-            success_criteria_results: t.success_criteria_results
+            success_criteria_results: t.success_criteria_results,
+            evidence_results: t.evidence_results
           }
         end)
     }
@@ -457,6 +458,7 @@ defmodule Sykli do
             Sykli.FailureSemantics.for_result(result.status, result.error),
         contract_slice: Sykli.ContractSlice.from_task(task),
         success_criteria_results: result.success_criteria_results,
+        evidence_results: result.evidence_results,
         inputs: inputs,
         streak: streak
       }

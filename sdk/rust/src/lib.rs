@@ -489,13 +489,205 @@ pub enum TaskType {
     Cleanup,
 }
 
-/// Declared verification metadata for executable task success.
-/// Phase 3C-1 SDKs emit this metadata, but the engine does not evaluate it yet.
+/// Declared verification checks for executable task success.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SuccessCriterion {
     ExitCode(i32),
     FileExists(String),
     FileNonEmpty(String),
+}
+
+/// Required evidence reference/proof metadata for executable task success.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EvidenceRequirement {
+    File {
+        name: String,
+        ref_pattern: String,
+        predicate: String,
+        required: bool,
+    },
+    Ref {
+        requirement_type: String,
+        name: String,
+        required: bool,
+        visibility: String,
+        ref_pattern: Option<String>,
+        description: Option<String>,
+    },
+}
+
+impl EvidenceRequirement {
+    pub fn file(name: impl Into<String>, ref_pattern: impl Into<String>) -> Self {
+        Self::File {
+            name: name.into(),
+            ref_pattern: ref_pattern.into(),
+            predicate: "exists".to_string(),
+            required: true,
+        }
+    }
+
+    pub fn file_non_empty(name: impl Into<String>, ref_pattern: impl Into<String>) -> Self {
+        Self::File {
+            name: name.into(),
+            ref_pattern: ref_pattern.into(),
+            predicate: "non_empty".to_string(),
+            required: true,
+        }
+    }
+
+    pub fn evidence(requirement_type: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::Ref {
+            requirement_type: requirement_type.into(),
+            name: name.into(),
+            required: true,
+            visibility: "local".to_string(),
+            ref_pattern: None,
+            description: None,
+        }
+    }
+
+    pub fn log(name: impl Into<String>) -> Self {
+        Self::evidence("log", name)
+    }
+
+    pub fn attestation(name: impl Into<String>) -> Self {
+        Self::evidence("attestation", name)
+    }
+
+    pub fn occurrence(name: impl Into<String>) -> Self {
+        Self::evidence("occurrence", name)
+    }
+
+    pub fn metric(name: impl Into<String>) -> Self {
+        Self::evidence("metric", name)
+    }
+
+    pub fn test_report(name: impl Into<String>) -> Self {
+        Self::evidence("test_report", name)
+    }
+
+    pub fn artifact_ref(name: impl Into<String>) -> Self {
+        Self::evidence("artifact_ref", name)
+    }
+
+    pub fn custom(name: impl Into<String>) -> Self {
+        Self::evidence("custom", name)
+    }
+
+    pub fn required(mut self, required: bool) -> Self {
+        match &mut self {
+            EvidenceRequirement::File {
+                required: value, ..
+            } => *value = required,
+            EvidenceRequirement::Ref {
+                required: value, ..
+            } => *value = required,
+        }
+        self
+    }
+
+    pub fn visibility(mut self, visibility: impl Into<String>) -> Self {
+        match &mut self {
+            EvidenceRequirement::File { .. } => {}
+            EvidenceRequirement::Ref {
+                visibility: value, ..
+            } => *value = visibility.into(),
+        }
+        self
+    }
+
+    pub fn ref_pattern(mut self, ref_pattern: impl Into<String>) -> Self {
+        match &mut self {
+            EvidenceRequirement::File {
+                ref_pattern: value, ..
+            } => *value = ref_pattern.into(),
+            EvidenceRequirement::Ref {
+                ref_pattern: value, ..
+            } => *value = Some(ref_pattern.into()),
+        }
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        if let EvidenceRequirement::Ref {
+            description: value, ..
+        } = &mut self
+        {
+            *value = Some(description.into());
+        }
+        self
+    }
+
+    fn to_json(&self) -> JsonEvidenceRequirement {
+        match self {
+            EvidenceRequirement::File {
+                name,
+                ref_pattern,
+                predicate,
+                required,
+            } => {
+                assert!(!name.is_empty(), "file evidence name cannot be empty");
+                assert!(
+                    !ref_pattern.is_empty(),
+                    "file evidence ref_pattern cannot be empty"
+                );
+                assert!(
+                    predicate == "exists" || predicate == "non_empty",
+                    "file evidence predicate must be exists or non_empty"
+                );
+
+                JsonEvidenceRequirement {
+                    type_: "file".to_string(),
+                    name: name.clone(),
+                    required: Some(*required),
+                    visibility: "local".to_string(),
+                    predicate: Some(predicate.clone()),
+                    ref_pattern: Some(ref_pattern.clone()),
+                    description: None,
+                }
+            }
+            EvidenceRequirement::Ref {
+                requirement_type,
+                name,
+                required,
+                visibility,
+                ref_pattern,
+                description,
+            } => {
+                assert!(!name.is_empty(), "evidence name cannot be empty");
+                assert!(
+                    matches!(
+                        requirement_type.as_str(),
+                        "log"
+                            | "attestation"
+                            | "occurrence"
+                            | "metric"
+                            | "test_report"
+                            | "artifact_ref"
+                            | "custom"
+                    ),
+                    "invalid evidence requirement type"
+                );
+                assert!(
+                    matches!(
+                        visibility.as_str(),
+                        "local" | "run_history" | "occurrence" | "coordinator_ref"
+                    ),
+                    "invalid evidence visibility"
+                );
+
+                JsonEvidenceRequirement {
+                    type_: requirement_type.clone(),
+                    name: name.clone(),
+                    required: Some(*required),
+                    visibility: visibility.clone(),
+                    predicate: None,
+                    ref_pattern: ref_pattern.clone(),
+                    description: description.clone(),
+                }
+            }
+        }
+    }
 }
 
 impl SuccessCriterion {
@@ -834,6 +1026,7 @@ struct TaskData {
     name: String,
     task_type: Option<TaskType>,
     success_criteria: Vec<SuccessCriterion>,
+    evidence_required: Vec<EvidenceRequirement>,
     command: String,
     primitive: Option<String>,
     agent: Option<String>,
@@ -971,6 +1164,15 @@ impl<'a> Task<'a> {
         self.pipeline.tasks[self.index]
             .success_criteria
             .extend(criteria.iter().cloned());
+        self
+    }
+
+    /// Declares required evidence references for this executable task.
+    #[must_use]
+    pub fn evidence_required(self, requirements: &[EvidenceRequirement]) -> Self {
+        self.pipeline.tasks[self.index]
+            .evidence_required
+            .extend(requirements.iter().cloned());
         self
     }
 
@@ -2386,8 +2588,11 @@ impl Pipeline {
             .tasks
             .iter()
             .any(|t| t.task_type.is_some() || !t.success_criteria.is_empty());
+        let has_v4_features = self.tasks.iter().any(|t| !t.evidence_required.is_empty());
 
-        let version = if has_v3_features {
+        let version = if has_v4_features {
+            "4"
+        } else if has_v3_features {
             "3"
         } else if has_v2_features {
             "2"
@@ -2458,6 +2663,18 @@ impl Pipeline {
                             t.success_criteria
                                 .iter()
                                 .map(SuccessCriterion::to_json)
+                                .collect(),
+                        )
+                    },
+                    evidence_required: if t.kind == NodeKind::Review
+                        || t.evidence_required.is_empty()
+                    {
+                        None
+                    } else {
+                        Some(
+                            t.evidence_required
+                                .iter()
+                                .map(EvidenceRequirement::to_json)
                                 .collect(),
                         )
                     },
@@ -2864,6 +3081,23 @@ struct JsonSuccessCriterion {
 }
 
 #[derive(Serialize)]
+struct JsonEvidenceRequirement {
+    #[serde(rename = "type")]
+    type_: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    visibility: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predicate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
 struct JsonSecretRef {
     name: String,
     source: String,
@@ -2904,6 +3138,8 @@ struct JsonTask {
     task_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     success_criteria: Option<Vec<JsonSuccessCriterion>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_required: Option<Vec<JsonEvidenceRequirement>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3091,6 +3327,64 @@ mod tests {
             json["tasks"][0]["success_criteria"][1]["path"],
             "coverage.out"
         );
+    }
+
+    #[test]
+    fn test_evidence_required_serialization() {
+        let mut p = Pipeline::new();
+        let _ = p
+            .task("test")
+            .run("go test ./...")
+            .task_type(TaskType::Test)
+            .evidence_required(&[EvidenceRequirement::file_non_empty(
+                "coverage",
+                "coverage.out",
+            )]);
+
+        let mut buf = Vec::new();
+        p.emit_to(&mut buf).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        assert_eq!(json["version"], "4");
+        assert_eq!(json["tasks"][0]["evidence_required"][0]["type"], "file");
+        assert_eq!(json["tasks"][0]["evidence_required"][0]["name"], "coverage");
+        assert_eq!(
+            json["tasks"][0]["evidence_required"][0]["predicate"],
+            "non_empty"
+        );
+        assert_eq!(
+            json["tasks"][0]["evidence_required"][0]["ref_pattern"],
+            "coverage.out"
+        );
+    }
+
+    #[test]
+    fn test_non_file_evidence_required_serialization() {
+        let mut p = Pipeline::new();
+        let _ = p.task("test").run("go test ./...").evidence_required(&[
+            EvidenceRequirement::attestation("slsa")
+                .visibility("run_history")
+                .ref_pattern("attestation.json"),
+            EvidenceRequirement::custom("manual-proof")
+                .required(false)
+                .description("optional external proof"),
+        ]);
+
+        let mut buf = Vec::new();
+        p.emit_to(&mut buf).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        assert_eq!(json["version"], "4");
+        assert_eq!(
+            json["tasks"][0]["evidence_required"][0]["type"],
+            "attestation"
+        );
+        assert_eq!(
+            json["tasks"][0]["evidence_required"][0]["visibility"],
+            "run_history"
+        );
+        assert_eq!(json["tasks"][0]["evidence_required"][1]["type"], "custom");
+        assert_eq!(json["tasks"][0]["evidence_required"][1]["required"], false);
     }
 
     #[test]

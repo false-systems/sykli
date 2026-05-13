@@ -155,6 +155,117 @@ func validateSuccessCriteria(taskName string, criteria []SuccessCriterion) {
 	}
 }
 
+// EvidenceRequirement declares required proof that a task produced.
+type EvidenceRequirement struct {
+	requirementType string
+	name            string
+	required        bool
+	visibility      string
+	predicate       string
+	refPattern      string
+	description     string
+}
+
+// FileEvidence requires a local file evidence reference.
+func FileEvidence(name, refPattern string) EvidenceRequirement {
+	return EvidenceRequirement{
+		requirementType: "file",
+		name:            name,
+		required:        true,
+		visibility:      "local",
+		predicate:       "exists",
+		refPattern:      refPattern,
+	}
+}
+
+// FileEvidenceNonEmpty requires a non-empty local file evidence reference.
+func FileEvidenceNonEmpty(name, refPattern string) EvidenceRequirement {
+	req := FileEvidence(name, refPattern)
+	req.predicate = "non_empty"
+	return req
+}
+
+// Evidence declares a non-file evidence reference requirement.
+func Evidence(requirementType, name string) EvidenceRequirement {
+	return EvidenceRequirement{
+		requirementType: requirementType,
+		name:            name,
+		required:        true,
+		visibility:      "local",
+	}
+}
+
+// LogEvidence requires a log evidence reference.
+func LogEvidence(name string) EvidenceRequirement { return Evidence("log", name) }
+
+// AttestationEvidence requires an attestation evidence reference.
+func AttestationEvidence(name string) EvidenceRequirement { return Evidence("attestation", name) }
+
+// OccurrenceEvidence requires a FALSE Protocol occurrence evidence reference.
+func OccurrenceEvidence(name string) EvidenceRequirement { return Evidence("occurrence", name) }
+
+// MetricEvidence requires a metric evidence reference.
+func MetricEvidence(name string) EvidenceRequirement { return Evidence("metric", name) }
+
+// TestReportEvidence requires a test-report evidence reference.
+func TestReportEvidence(name string) EvidenceRequirement { return Evidence("test_report", name) }
+
+// ArtifactRefEvidence requires an artifact reference.
+func ArtifactRefEvidence(name string) EvidenceRequirement { return Evidence("artifact_ref", name) }
+
+// CustomEvidence requires a custom evidence reference.
+func CustomEvidence(name string) EvidenceRequirement { return Evidence("custom", name) }
+
+// Required controls whether absence of this evidence fails the task.
+func (e EvidenceRequirement) Required(required bool) EvidenceRequirement {
+	e.required = required
+	return e
+}
+
+// Visibility sets where the evidence reference may appear.
+func (e EvidenceRequirement) Visibility(visibility string) EvidenceRequirement {
+	e.visibility = visibility
+	return e
+}
+
+// RefPattern sets a reference pattern for evidence producers that use one.
+func (e EvidenceRequirement) RefPattern(refPattern string) EvidenceRequirement {
+	e.refPattern = refPattern
+	return e
+}
+
+// Description adds human-readable context for the requirement.
+func (e EvidenceRequirement) Description(description string) EvidenceRequirement {
+	e.description = description
+	return e
+}
+
+func validateEvidenceRequirements(taskName string, requirements []EvidenceRequirement) {
+	for _, req := range requirements {
+		if req.requirementType == "" {
+			log.Panic().Str("task", taskName).Msg("evidence requirement requires type")
+		}
+		if req.name == "" {
+			log.Panic().Str("task", taskName).Msg("evidence requirement requires name")
+		}
+		if req.visibility != "" && req.visibility != "local" && req.visibility != "run_history" && req.visibility != "occurrence" && req.visibility != "coordinator_ref" {
+			log.Panic().Str("task", taskName).Str("visibility", req.visibility).Msg("invalid evidence requirement visibility")
+		}
+		switch req.requirementType {
+		case "file":
+			if req.refPattern == "" {
+				log.Panic().Str("task", taskName).Msg("file evidence requirement requires ref_pattern")
+			}
+			if req.predicate != "" && req.predicate != "exists" && req.predicate != "non_empty" {
+				log.Panic().Str("task", taskName).Str("predicate", req.predicate).Msg("invalid file evidence predicate")
+			}
+		case "log", "attestation", "occurrence", "metric", "test_report", "artifact_ref", "custom":
+		default:
+			log.Panic().Str("task", taskName).Str("type", req.requirementType).Msg("invalid evidence requirement type")
+		}
+	}
+}
+
 func validTaskType(taskType TaskType) bool {
 	_, ok := taskTypes[taskType]
 	return ok
@@ -606,31 +717,32 @@ type gateConfig struct {
 
 // Task represents a single task in the pipeline.
 type Task struct {
-	pipeline        *Pipeline
-	name            string
-	taskType        TaskType
-	successCriteria []SuccessCriterion
-	command         string
-	container       string
-	workdir         string
-	env             map[string]string
-	mounts          []Mount
-	inputs          []string    // v1-style input file patterns
-	taskInputs      []TaskInput // v2-style inputs from other tasks
-	outputs         map[string]string
-	dependsOn       []string
-	when            string
-	whenCond        Condition   // Type-safe condition (alternative to string)
-	secrets         []string    // v1-style secret names
-	secretRefs      []SecretRef // v2-style typed secret references
-	matrix          map[string][]string
-	services        []Service
-	retry           int
-	timeout         int         // seconds
-	k8sOptions      *K8sOptions // Kubernetes-specific options
-	k8sRaw          string      // Raw K8s JSON for advanced options
-	targetName      string      // Deprecated: no longer serialized
-	requires        []string    // Required node labels for placement
+	pipeline         *Pipeline
+	name             string
+	taskType         TaskType
+	successCriteria  []SuccessCriterion
+	evidenceRequired []EvidenceRequirement
+	command          string
+	container        string
+	workdir          string
+	env              map[string]string
+	mounts           []Mount
+	inputs           []string    // v1-style input file patterns
+	taskInputs       []TaskInput // v2-style inputs from other tasks
+	outputs          map[string]string
+	dependsOn        []string
+	when             string
+	whenCond         Condition   // Type-safe condition (alternative to string)
+	secrets          []string    // v1-style secret names
+	secretRefs       []SecretRef // v2-style typed secret references
+	matrix           map[string][]string
+	services         []Service
+	retry            int
+	timeout          int         // seconds
+	k8sOptions       *K8sOptions // Kubernetes-specific options
+	k8sRaw           string      // Raw K8s JSON for advanced options
+	targetName       string      // Deprecated: no longer serialized
+	requires         []string    // Required node labels for placement
 	// AI-native fields
 	semantic Semantic
 	aiHooks  AiHooks
@@ -665,12 +777,13 @@ func (p *Pipeline) Task(name string) *Task {
 		log.Panic().Str("task", name).Msg("task/review already exists")
 	}
 	t := &Task{
-		pipeline:        p,
-		name:            name,
-		env:             make(map[string]string),
-		mounts:          make([]Mount, 0),
-		outputs:         make(map[string]string),
-		successCriteria: make([]SuccessCriterion, 0),
+		pipeline:         p,
+		name:             name,
+		env:              make(map[string]string),
+		mounts:           make([]Mount, 0),
+		outputs:          make(map[string]string),
+		successCriteria:  make([]SuccessCriterion, 0),
+		evidenceRequired: make([]EvidenceRequirement, 0),
 	}
 	log.Debug().Str("task", name).Msg("registered task")
 	p.tasks = append(p.tasks, t)
@@ -709,12 +822,13 @@ func (p *Pipeline) Gate(name string) *Task {
 		log.Panic().Str("gate", name).Msg("task/gate/review already exists with this name")
 	}
 	t := &Task{
-		pipeline:        p,
-		name:            name,
-		env:             make(map[string]string),
-		mounts:          make([]Mount, 0),
-		outputs:         make(map[string]string),
-		successCriteria: make([]SuccessCriterion, 0),
+		pipeline:         p,
+		name:             name,
+		env:              make(map[string]string),
+		mounts:           make([]Mount, 0),
+		outputs:          make(map[string]string),
+		successCriteria:  make([]SuccessCriterion, 0),
+		evidenceRequired: make([]EvidenceRequirement, 0),
 		gate: &gateConfig{
 			strategy: "prompt",
 			timeout:  3600,
@@ -850,6 +964,13 @@ func (t *Task) TaskType(taskType TaskType) *Task {
 func (t *Task) SuccessCriteria(criteria ...SuccessCriterion) *Task {
 	validateSuccessCriteria(t.name, criteria)
 	t.successCriteria = append(t.successCriteria, criteria...)
+	return t
+}
+
+// EvidenceRequired declares required evidence references for this executable task.
+func (t *Task) EvidenceRequired(requirements ...EvidenceRequirement) *Task {
+	validateEvidenceRequirements(t.name, requirements)
+	t.evidenceRequired = append(t.evidenceRequired, requirements...)
 	return t
 }
 
@@ -2023,6 +2144,7 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 	version := "1"
 	hasV2Features := len(p.dirs) > 0 || len(p.caches) > 0
 	hasV3Features := false
+	hasV4Features := false
 	for _, t := range p.tasks {
 		if t.taskType != "" {
 			hasV3Features = true
@@ -2030,14 +2152,19 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 		if len(t.successCriteria) > 0 {
 			hasV3Features = true
 		}
+		if len(t.evidenceRequired) > 0 {
+			hasV4Features = true
+		}
 		if t.container != "" || len(t.mounts) > 0 {
 			hasV2Features = true
 		}
-		if hasV2Features && hasV3Features {
+		if hasV2Features && hasV3Features && hasV4Features {
 			break
 		}
 	}
-	if hasV3Features {
+	if hasV4Features {
+		version = "4"
+	} else if hasV3Features {
 		version = "3"
 	} else if hasV2Features {
 		version = "2"
@@ -2065,6 +2192,16 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 		Type   string `json:"type"`
 		Equals *int   `json:"equals,omitempty"`
 		Path   string `json:"path,omitempty"`
+	}
+
+	type jsonEvidenceRequirement struct {
+		Type        string `json:"type"`
+		Name        string `json:"name"`
+		Required    *bool  `json:"required,omitempty"`
+		Visibility  string `json:"visibility,omitempty"`
+		Predicate   string `json:"predicate,omitempty"`
+		RefPattern  string `json:"ref_pattern,omitempty"`
+		Description string `json:"description,omitempty"`
 	}
 
 	type jsonSecretRef struct {
@@ -2109,32 +2246,33 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 	}
 
 	type jsonTask struct {
-		Name            string                 `json:"name"`
-		Kind            string                 `json:"kind,omitempty"`
-		TaskType        string                 `json:"task_type,omitempty"`
-		SuccessCriteria []jsonSuccessCriterion `json:"success_criteria,omitempty"`
-		Command         string                 `json:"command,omitempty"`
-		Container       string                 `json:"container,omitempty"`
-		Workdir         string                 `json:"workdir,omitempty"`
-		Env             map[string]string      `json:"env,omitempty"`
-		Mounts          []jsonMount            `json:"mounts,omitempty"`
-		Inputs          []string               `json:"inputs,omitempty"`      // v1-style file patterns
-		TaskInputs      []jsonTaskInput        `json:"task_inputs,omitempty"` // v2-style inputs from other tasks
-		Outputs         any                    `json:"outputs,omitempty"`
-		DependsOn       []string               `json:"depends_on,omitempty"`
-		Primitive       string                 `json:"primitive,omitempty"`
-		Agent           string                 `json:"agent,omitempty"`
-		Context         []string               `json:"context,omitempty"`
-		Deterministic   *bool                  `json:"deterministic,omitempty"`
-		When            string                 `json:"when,omitempty"`
-		Secrets         []string               `json:"secrets,omitempty"`
-		SecretRefs      []jsonSecretRef        `json:"secret_refs,omitempty"` // v2-style typed secrets
-		Matrix          map[string][]string    `json:"matrix,omitempty"`
-		Services        []jsonService          `json:"services,omitempty"`
-		Retry           int                    `json:"retry,omitempty"`
-		Timeout         int                    `json:"timeout,omitempty"`
-		K8s             *jsonK8sOptions        `json:"k8s,omitempty"`      // K8s-specific options
-		Requires        []string               `json:"requires,omitempty"` // Required node labels
+		Name             string                    `json:"name"`
+		Kind             string                    `json:"kind,omitempty"`
+		TaskType         string                    `json:"task_type,omitempty"`
+		SuccessCriteria  []jsonSuccessCriterion    `json:"success_criteria,omitempty"`
+		EvidenceRequired []jsonEvidenceRequirement `json:"evidence_required,omitempty"`
+		Command          string                    `json:"command,omitempty"`
+		Container        string                    `json:"container,omitempty"`
+		Workdir          string                    `json:"workdir,omitempty"`
+		Env              map[string]string         `json:"env,omitempty"`
+		Mounts           []jsonMount               `json:"mounts,omitempty"`
+		Inputs           []string                  `json:"inputs,omitempty"`      // v1-style file patterns
+		TaskInputs       []jsonTaskInput           `json:"task_inputs,omitempty"` // v2-style inputs from other tasks
+		Outputs          any                       `json:"outputs,omitempty"`
+		DependsOn        []string                  `json:"depends_on,omitempty"`
+		Primitive        string                    `json:"primitive,omitempty"`
+		Agent            string                    `json:"agent,omitempty"`
+		Context          []string                  `json:"context,omitempty"`
+		Deterministic    *bool                     `json:"deterministic,omitempty"`
+		When             string                    `json:"when,omitempty"`
+		Secrets          []string                  `json:"secrets,omitempty"`
+		SecretRefs       []jsonSecretRef           `json:"secret_refs,omitempty"` // v2-style typed secrets
+		Matrix           map[string][]string       `json:"matrix,omitempty"`
+		Services         []jsonService             `json:"services,omitempty"`
+		Retry            int                       `json:"retry,omitempty"`
+		Timeout          int                       `json:"timeout,omitempty"`
+		K8s              *jsonK8sOptions           `json:"k8s,omitempty"`      // K8s-specific options
+		Requires         []string                  `json:"requires,omitempty"` // Required node labels
 		// Capability-based dependencies
 		Provides []jsonProvide `json:"provides,omitempty"`
 		Needs    []string      `json:"needs,omitempty"`
@@ -2274,24 +2412,47 @@ func (p *Pipeline) EmitTo(w io.Writer) error {
 			}
 		}
 
+		var evidenceRequired []jsonEvidenceRequirement
+		if len(t.evidenceRequired) > 0 {
+			evidenceRequired = make([]jsonEvidenceRequirement, len(t.evidenceRequired))
+			for j, req := range t.evidenceRequired {
+				required := req.required
+				visibility := req.visibility
+				if visibility == "" {
+					visibility = "local"
+				}
+
+				evidenceRequired[j] = jsonEvidenceRequirement{
+					Type:        req.requirementType,
+					Name:        req.name,
+					Required:    &required,
+					Visibility:  visibility,
+					Predicate:   req.predicate,
+					RefPattern:  req.refPattern,
+					Description: req.description,
+				}
+			}
+		}
+
 		jt := jsonTask{
-			Name:            t.name,
-			TaskType:        string(t.taskType),
-			SuccessCriteria: successCriteria,
-			Command:         t.command,
-			Container:       t.container,
-			Workdir:         t.workdir,
-			Env:             env,
-			Mounts:          mounts,
-			Inputs:          t.inputs,   // v1-style file patterns
-			TaskInputs:      taskInputs, // v2-style inputs from other tasks
-			DependsOn:       t.dependsOn,
-			When:            when,
-			Secrets:         t.secrets,
-			SecretRefs:      secretRefs, // v2-style typed secrets
-			Matrix:          t.matrix,
-			Retry:           t.retry,
-			Timeout:         t.timeout,
+			Name:             t.name,
+			TaskType:         string(t.taskType),
+			SuccessCriteria:  successCriteria,
+			EvidenceRequired: evidenceRequired,
+			Command:          t.command,
+			Container:        t.container,
+			Workdir:          t.workdir,
+			Env:              env,
+			Mounts:           mounts,
+			Inputs:           t.inputs,   // v1-style file patterns
+			TaskInputs:       taskInputs, // v2-style inputs from other tasks
+			DependsOn:        t.dependsOn,
+			When:             when,
+			Secrets:          t.secrets,
+			SecretRefs:       secretRefs, // v2-style typed secrets
+			Matrix:           t.matrix,
+			Retry:            t.retry,
+			Timeout:          t.timeout,
 			Services: func() []jsonService {
 				if len(t.services) == 0 {
 					return nil

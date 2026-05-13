@@ -1,0 +1,16 @@
+{
+  "version": "3",
+  "tasks": [
+    {
+      "name": "test",
+      "command": "go test ./...",
+      "evidence_required": [
+        {
+          "type": "file",
+          "name": "coverage",
+          "ref_pattern": "coverage.out"
+        }
+      ]
+    }
+  ]
+}

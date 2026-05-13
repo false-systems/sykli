@@ -471,6 +471,10 @@ defmodule Sykli.MCP.Tools do
       :success_criteria_results,
       non_empty(Sykli.ContractSlice.success_criteria_results(result.success_criteria_results))
     )
+    |> maybe_put(
+      :evidence_results,
+      non_empty(Sykli.ContractSlice.evidence_results(result.evidence_results))
+    )
   end
 
   defp load_contract_graph(path) do
@@ -545,7 +549,7 @@ defmodule Sykli.MCP.Tools do
   defp format_error({:missing_tool, tool, hint}), do: "Missing #{tool}: #{hint}"
   defp format_error({:task_type_on_review, _} = reason), do: Sykli.Graph.format_error(reason)
 
-  defp format_error({:task_type_requires_version_3, _, _, _} = reason),
+  defp format_error({:task_type_requires_v3_or_newer, _, _, _} = reason),
     do: Sykli.Graph.format_error(reason)
 
   defp format_error({:unknown_task_type, _, _} = reason), do: Sykli.Graph.format_error(reason)

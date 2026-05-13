@@ -207,7 +207,25 @@ defmodule Sykli.Target.Behaviour do
               {:ok, [Sykli.SuccessCriteria.Result.t()]}
               | {:error, Sykli.Error.t(), [Sykli.SuccessCriteria.Result.t()]}
 
-  @optional_callbacks evaluate_success_criteria: 4
+  @doc """
+  Evaluates declared evidence requirements in the target-owned execution context.
+
+  This callback is called only after the task command and success criteria
+  succeed. Targets must evaluate requirements relative to their own filesystem
+  and evidence model. A target that cannot evaluate a requirement must return an
+  unsupported result; the executor treats unsupported required evidence as task
+  failure.
+  """
+  @callback evaluate_evidence_required(
+              task_spec(),
+              [map()],
+              state(),
+              run_opts()
+            ) ::
+              {:ok, [Sykli.EvidenceRequirement.Result.t()]}
+              | {:error, Sykli.Error.t(), [Sykli.EvidenceRequirement.Result.t()]}
+
+  @optional_callbacks evaluate_success_criteria: 4, evaluate_evidence_required: 4
 
   # ─────────────────────────────────────────────────────────────────────────────
   # SECRETS

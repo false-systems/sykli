@@ -149,6 +149,22 @@ defmodule Sykli.FailureSemantics do
     )
   end
 
+  def for_error(%Sykli.Error{code: "missing_evidence"} = error) do
+    missing_evidence(
+      "missing_evidence",
+      error.message || "required evidence was missing",
+      error_details(error)
+    )
+  end
+
+  def for_error(%Sykli.Error{code: "unsupported_evidence_requirement_for_target"} = error) do
+    unsupported_target(
+      "unsupported_evidence_requirement",
+      error.message || "target cannot evaluate evidence requirements",
+      error_details(error)
+    )
+  end
+
   def for_error(%Sykli.Error{code: "task_timeout"} = error) do
     timeout("task_timeout", error.message || "task timed out", error_details(error))
   end
