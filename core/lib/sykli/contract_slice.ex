@@ -129,7 +129,7 @@ defmodule Sykli.ContractSlice do
 
   def evidence_result_to_map(%{} = result) do
     result
-    |> stringify_keys()
+    |> to_json_compatible()
     |> reject_empty()
   end
 

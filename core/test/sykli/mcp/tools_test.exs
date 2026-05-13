@@ -93,6 +93,8 @@ defmodule Sykli.MCP.ToolsTest do
       [task] = result.tasks
       assert task.name == "contract-check"
       assert task.error.code == "success_criteria_failed"
+      assert task.error.type == "execution"
+      assert task.error.step == "run"
       assert task.failure_semantics["class"] == "criteria_failure"
       assert task.agent_hints["inspect_contract"] == true
       assert task.agent_hints["inspect_target"] == false

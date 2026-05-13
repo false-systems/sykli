@@ -51,7 +51,27 @@ defmodule Sykli.AgentHintsTest do
              "inspect_target" => false,
              "inspect_contract" => false,
              "inspect_dependencies" => false,
-             "requires_human_decision" => false
+             "requires_human_decision" => false,
+             "unknown_failure_class" => true
            }
+  end
+
+  test "unrecognized future classifications preserve retryability and mark the gap" do
+    hints =
+      AgentHints.from_failure_semantics(%{
+        "class" => "future_failure",
+        "retryable" => true,
+        "source" => "target",
+        "reason" => "future",
+        "message" => "future"
+      })
+
+    assert hints["retry_may_help"] == true
+    assert hints["unknown_failure_class"] == true
+    refute hints["inspect_target"]
+  end
+
+  test "malformed hint input returns nil instead of looking like success" do
+    assert AgentHints.from_failure_semantics(%{"reason" => "missing-class"}) == nil
   end
 end

@@ -170,18 +170,17 @@ defmodule Sykli.MCP.Tools do
 
   defp do_call("run_pipeline", args) do
     path = args["path"] || "."
-    opts = build_run_opts(args)
-    graph = load_contract_graph(path)
+    opts = Keyword.put(build_run_opts(args), :return_graph, true)
 
     case Sykli.run(path, opts) do
-      {:ok, results} ->
+      {:ok, results, graph} ->
         {:ok,
          %{
            status: "passed",
            tasks: Enum.map(results, &task_result_map(&1, graph))
          }}
 
-      {:error, results} when is_list(results) ->
+      {:error, results, graph} when is_list(results) ->
         {:ok,
          %{
            status: "failed",
@@ -381,11 +380,10 @@ defmodule Sykli.MCP.Tools do
     else
       name_set = MapSet.new(task_names)
       filter_fn = fn task -> MapSet.member?(name_set, task.name) end
-      opts = [filter: filter_fn]
-      graph = load_contract_graph(path)
+      opts = [filter: filter_fn, return_graph: true]
 
       case Sykli.run(path, opts) do
-        {:ok, results} ->
+        {:ok, results, graph} ->
           {:ok,
            %{
              status: "passed",
@@ -393,7 +391,7 @@ defmodule Sykli.MCP.Tools do
              tasks: Enum.map(results, &task_result_map(&1, graph))
            }}
 
-        {:error, results} when is_list(results) ->
+        {:error, results, graph} when is_list(results) ->
           {:ok,
            %{
              status: "failed",
@@ -477,16 +475,6 @@ defmodule Sykli.MCP.Tools do
     )
   end
 
-  defp load_contract_graph(path) do
-    with {:ok, sdk_file} <- Detector.find(path),
-         {:ok, json} <- Detector.emit(sdk_file),
-         {:ok, graph} <- Graph.parse(json) do
-      Graph.expand_matrix(graph)
-    else
-      _ -> %{}
-    end
-  end
-
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
@@ -499,6 +487,8 @@ defmodule Sykli.MCP.Tools do
   defp task_error_map(%Sykli.Error{} = error) do
     %{
       code: error.code,
+      type: stringify_atom(error.type),
+      step: stringify_atom(error.step),
       message: error.message,
       exit_code: error.exit_code,
       hints: error.hints,
@@ -509,7 +499,15 @@ defmodule Sykli.MCP.Tools do
     |> Map.new()
   end
 
-  defp task_error_map(error), do: %{message: inspect(error)}
+  defp task_error_map(error) when is_atom(error) do
+    %{message: Atom.to_string(error), raw: Atom.to_string(error)}
+  end
+
+  defp task_error_map(error), do: %{message: inspect(error), raw: inspect(error)}
+
+  defp stringify_atom(nil), do: nil
+  defp stringify_atom(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_atom(value), do: value
 
   defp error_locations(locations) do
     Enum.map(locations || [], fn location ->

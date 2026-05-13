@@ -14,7 +14,8 @@ defmodule Sykli.AgentHints do
     "inspect_target" => false,
     "inspect_contract" => false,
     "inspect_dependencies" => false,
-    "requires_human_decision" => false
+    "requires_human_decision" => false,
+    "unknown_failure_class" => false
   }
 
   @type t :: %{
@@ -72,7 +73,13 @@ defmodule Sykli.AgentHints do
     Map.put(@empty, "inspect_contract", true)
   end
 
-  defp from_map(_map), do: @empty
+  defp from_map(%{"class" => _class} = semantics) do
+    @empty
+    |> Map.put("retry_may_help", retryable?(semantics))
+    |> Map.put("unknown_failure_class", true)
+  end
+
+  defp from_map(_map), do: nil
 
   defp retryable?(%{"retryable" => true}), do: true
   defp retryable?(_semantics), do: false

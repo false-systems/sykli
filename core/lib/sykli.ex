@@ -18,6 +18,7 @@ defmodule Sykli do
     - filter: function to filter tasks (receives task, returns boolean)
     - save_history: whether to save run history (default: true)
     - target: target module to use (default: Sykli.Target.Local)
+    - return_graph: when true, include the filtered graph used for execution
   """
   def run(path \\ ".", opts \\ []) do
     case Cache.init() do
@@ -65,7 +66,7 @@ defmodule Sykli do
                 save_run_history(path, result, filtered_graph, opts)
               end
 
-              result
+              maybe_return_graph(result, filtered_graph, opts)
 
             error ->
               error
@@ -152,6 +153,20 @@ defmodule Sykli do
       _ -> Detector.emit(sdk_file)
     end
   end
+
+  defp maybe_return_graph({:ok, results}, graph, opts) do
+    if Keyword.get(opts, :return_graph, false),
+      do: {:ok, results, graph},
+      else: {:ok, results}
+  end
+
+  defp maybe_return_graph({:error, results}, graph, opts) when is_list(results) do
+    if Keyword.get(opts, :return_graph, false),
+      do: {:error, results, graph},
+      else: {:error, results}
+  end
+
+  defp maybe_return_graph(result, _graph, _opts), do: result
 
   # Filter graph (map of name => task) to only include matching tasks + their dependencies
   defp filter_graph(graph, filter_fn) when is_map(graph) do
