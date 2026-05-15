@@ -14,13 +14,19 @@ Current slice fields are optional and reference-sized:
 - `provides`
 - `needs`
 - `success_criteria`
+- `evidence_required`
 - `target`
 - `review`
 - `gate`
 
+`target` contains `container`, `workdir`, `timeout_seconds`, and `requires`,
+omitting keys whose values are nil or empty. `review` contains `primitive`,
+`agent`, `context`, and `deterministic`, and is only present for review tasks.
+
 Run history also stores `success_criteria_results` beside the slice. Occurrence
 task details include both the declared `success_criteria` in `contract_slice`
-and the evaluated `success_criteria_results`.
+and the evaluated `success_criteria_results`. Run history and occurrence task
+details also carry `evidence_results` alongside the slice.
 
 The slice intentionally excludes command output, logs, source code, prompts,
 artifacts, and raw generated content. Evidence remains local/reference-oriented.
@@ -28,7 +34,6 @@ artifacts, and raw generated content. Evidence remains local/reference-oriented.
 V1 does not add:
 
 - new SDK or pipeline schema fields
-- evidence requirements
 - risk/effects
 - agent metadata or variance
 - gate decision type changes

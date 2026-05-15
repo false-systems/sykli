@@ -9,6 +9,7 @@ The stable facts are:
   execution.
 - `contract_slice`: compact task contract context when available.
 - `success_criteria_results`: evaluated criteria results when criteria ran.
+- `evidence_results`: evaluated evidence requirement results when evidence ran.
 - `agent_hints`: conservative booleans derived only from `failure_semantics`.
 
 `agent_hints` is not a diagnosis engine. It does not infer root cause and does
@@ -20,7 +21,8 @@ not propose a fix. It only exposes which follow-up paths are semantically valid:
   "inspect_target": true,
   "inspect_contract": false,
   "inspect_dependencies": false,
-  "requires_human_decision": false
+  "requires_human_decision": false,
+  "unknown_failure_class": false
 }
 ```
 
@@ -33,9 +35,11 @@ Current derivation:
 - `timeout`: inspect the target; retry only when marked retryable.
 - `dependency_failure`: inspect dependencies.
 - `policy_block`: a human decision path is required.
-- `unknown`, `internal_error`, and `skipped`: no strong hint is emitted beyond
-  explicit false values.
+- `missing_evidence`: inspect the declared contract.
+- `agent_variance_failure`: inspect the declared contract.
+- any other class, including `unknown`, `internal_error`, and `skipped`: mark
+  `unknown_failure_class`; retry only when the failure semantics says it is
+  retryable.
 
 This is V1. It does not implement natural-language recommendations,
-`evidence_required`, risk/effects, agent variance, failure-mode learning, or new
-SDK contract fields.
+risk/effects, failure-mode learning, or new SDK contract fields.
