@@ -8,6 +8,7 @@ Protocol notes:
 - Lifecycle: `initialize`, `initialized`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
 - Tool result shape: `tools/call` returns MCP `content` with one `text` item. Successful tool maps are JSON-encoded into that text field; errors are plain text with `isError: true`.
 - JSON envelope: tools do **not** currently return the `Sykli.CLI.JsonResponse` envelope.
+- Typed result metadata: `run_pipeline`, `retry_task`, and `get_failure` task records may carry `failure_semantics`, `agent_hints`, `contract_slice`, `success_criteria_results`, and `evidence_results`. See `docs/failure-semantics.md`, `docs/agent-readable-failure-output.md`, and `docs/result-contract-slices.md`.
 
 ## Current Tools
 
@@ -37,17 +38,46 @@ Return:
 
 ```json
 {
-  "status": "passed",
+  "status": "failed",
   "tasks": [
     {
       "name": "test",
-      "status": "passed",
+      "status": "failed",
       "duration_ms": 42,
-      "cached": false
+      "cached": false,
+      "failure_semantics": {
+        "class": "criteria_failure",
+        "retryable": false,
+        "source": "criteria",
+        "reason": "success_criteria_failed",
+        "message": "task 'test' failed success_criteria"
+      },
+      "agent_hints": {
+        "retry_may_help": false,
+        "inspect_target": false,
+        "inspect_contract": true,
+        "inspect_dependencies": false,
+        "requires_human_decision": false,
+        "unknown_failure_class": false
+      },
+      "success_criteria_results": [
+        {
+          "index": 0,
+          "type": "exit_code",
+          "status": "failed",
+          "message": "expected exit code 0"
+        }
+      ]
     }
   ]
 }
 ```
+
+Each task may also include optional `error`, `failure_semantics`,
+`agent_hints`, `contract_slice`, `success_criteria_results`, and
+`evidence_results`; each is omitted when empty/nil. See
+`docs/failure-semantics.md`, `docs/agent-readable-failure-output.md`, and
+`docs/result-contract-slices.md` for the shapes.
 
 ### `explain_pipeline`
 
@@ -69,6 +99,11 @@ Parameters:
 | `run_id` | string | no | acceptable | No pattern hint for valid run IDs. |
 
 Return: raw occurrence JSON map encoded as text, or prose error.
+
+The returned occurrence contains typed result-metadata fields in each
+`data.tasks[]` record; see `docs/false-protocol-schema.md` for the on-disk
+shape. Each `history.steps[].error` sub-object includes `failure_semantics`
+alongside `code` and `what_failed`.
 
 ### `suggest_tests`
 
@@ -141,6 +176,9 @@ Parameters:
 
 Return: structured retry result map encoded as JSON text, or prose error.
 
+`retry_task` uses the same per-task return shape as `run_pipeline`, so the same
+typed result-metadata fields apply.
+
 ### `run_fix`
 
 Parameters:
@@ -151,6 +189,11 @@ Parameters:
 | `task` | string | no | acceptable | Restricts analysis to a named failed task. |
 
 Return: `Sykli.Fix.analyze/2` map encoded as JSON text, or prose error.
+
+`run_fix` returns the fix-analysis map produced by `Sykli.Fix.analyze/2`. It
+does not surface `failure_semantics`, `agent_hints`, `contract_slice`,
+`success_criteria_results`, or `evidence_results` as top-level fields. Agents
+that want those typed facts should call `get_failure`.
 
 ## Gaps And Recommendations
 

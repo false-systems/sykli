@@ -100,10 +100,28 @@ Fields:
 | `context.labels` | object | yes | public-stable | Correlation labels. Includes `sykli.run_id` and node label when available. |
 | `data.git` | object | terminal events | public-unstable | Git branch, SHA, remote, changed files, and recent commits. Values may be `null` outside Git repos. |
 | `data.summary` | object | terminal events | public-stable | Count of task statuses: `passed`, `failed`, `errored`, `cached`, `skipped`. |
-| `data.tasks` | array | terminal events | public-stable | Per-task status records. Each item has `name`, `status`, `cached`, `duration_ms`, optional `command`, optional `log`, optional `error`. |
+| `data.tasks` | array | terminal events | public-stable | Per-task status records. |
+| `data.tasks[].name` | string | yes | public-stable | Task name. |
+| `data.tasks[].status` | string | yes | public-stable | Task result status as a string. |
+| `data.tasks[].cached` | boolean | yes | public-stable | Whether the task result came from cache. |
+| `data.tasks[].duration_ms` | integer | yes | public-stable | Task duration in milliseconds. |
+| `data.tasks[].command` | string or null | no | public-unstable | Task command when available. |
+| `data.tasks[].log` | string | no | public-unstable | Relative path to the captured task log; omitted when empty/nil. |
+| `data.tasks[].error` | object | no | public-stable | Per-task error details; omitted when empty/nil. |
+| `data.tasks[].failure_semantics` | object | no | public-unstable | Normalized failure classification. Omitted when empty/nil. See `docs/failure-semantics.md`. |
+| `data.tasks[].agent_hints` | object | no | public-unstable | Conservative booleans derived from `failure_semantics`. Omitted when empty/nil. See `docs/agent-readable-failure-output.md`. |
+| `data.tasks[].contract_slice` | object | no | public-unstable | Compact projection of the task contract. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
+| `data.tasks[].success_criteria_results` | array | no | public-unstable | Per-criterion evaluation results when `success_criteria` ran. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
+| `data.tasks[].evidence_results` | array | no | public-unstable | Per-requirement evaluation results when `evidence_required` ran. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
+| `data.tasks[].covers` | array | no | public-unstable | Semantic coverage entries declared by the task; omitted when empty/nil. |
+| `data.tasks[].inputs` | array | no | public-unstable | Task input paths; omitted when empty/nil. |
+| `data.tasks[].depends_on` | array | no | public-unstable | Upstream task dependencies; omitted when empty/nil. |
+| `data.tasks[].blocks` | array | no | public-unstable | Downstream tasks blocked by this task; omitted when empty/nil. |
+| `data.tasks[].history` | object | no | public-unstable | Per-task history details; omitted when empty/nil. |
 | `error` | object | failed terminal events | public-stable | Top-level failure summary with stable `code`, `message`, and `what_failed`. |
 | `reasoning` | object | failed terminal events | public-unstable | Heuristic explanation block with `summary`, `explanation`, and `confidence`. |
 | `history` | object | terminal events | public-stable | Ordered execution steps with action, outcome, timestamp, duration, and optional error. |
+| `history.steps[].error` | object | no | public-unstable | Optional step error with `code`, `what_failed`, and `failure_semantics`. See `docs/failure-semantics.md`. |
 
 ## `.sykli/attestation.json` And `.sykli/attestations/*`
 
@@ -222,8 +240,15 @@ Fields:
 | `tasks[].streak` | integer | no | public-unstable | Consecutive pass/fail streak used by history analysis. |
 | `tasks[].inputs` | array | yes | public-unstable | Input paths contributing to task history. |
 | `tasks[].error` | string | failed tasks | public-stable | Compact `code: message` failure string. |
+| `tasks[].failure_semantics` | object | no | public-unstable | Normalized failure classification. Omitted when empty/nil. See `docs/failure-semantics.md`. |
+| `tasks[].contract_slice` | object | no | public-unstable | Compact projection of the task contract. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
+| `tasks[].success_criteria_results` | array | no | public-unstable | Per-criterion evaluation results when `success_criteria` ran. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
+| `tasks[].evidence_results` | array | no | public-unstable | Per-requirement evaluation results when `evidence_required` ran. Omitted when empty/nil. See `docs/result-contract-slices.md`. |
 | `git_ref` | string | yes | public-unstable | Git ref or `unknown`. |
 | `git_branch` | string | yes | public-unstable | Git branch or `unknown`. |
+
+`agent_hints` is intentionally not persisted in run history; it is derived from
+`failure_semantics` at occurrence, MCP, and context emission time.
 
 ## `.sykli/context.json`
 
@@ -298,6 +323,7 @@ Fields:
 | `coverage` | object | yes | public-unstable | File-to-task coverage map and uncovered patterns. |
 | `health` | object | no | public-unstable | Recent run aggregate health: success rate, average duration, flaky tasks, last success. |
 | `last_run` | object | no | public-stable | Latest run summary if history exists. |
+| `last_run.tasks[]` | array | no | public-unstable | Latest per-task result records may include `failure_semantics`, `agent_hints`, `contract_slice`, `success_criteria_results`, and `evidence_results`; each is omitted when empty/nil. See `docs/failure-semantics.md`, `docs/agent-readable-failure-output.md`, and `docs/result-contract-slices.md`. |
 
 ## `.sykli/test-map.json`
 
