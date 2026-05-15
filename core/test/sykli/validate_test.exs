@@ -277,6 +277,15 @@ defmodule Sykli.ValidateTest do
       assert Enum.any?(result.errors, &(&1.type == :missing_command))
     end
 
+    test "detects task with null command" do
+      json = ~s({"version":"1","tasks": [{"name": "test", "command": null}]})
+
+      result = Validate.validate_json(json)
+
+      assert result.valid == false
+      assert Enum.any?(result.errors, &(&1.type == :missing_command))
+    end
+
     test "exempts gate tasks from command requirement" do
       json =
         ~s({"version":"1","tasks": [{"name": "approval", "gate": {"strategy": "prompt", "message": "ok?"}}]})
