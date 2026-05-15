@@ -57,6 +57,11 @@ defmodule Sykli.Runtime.FakeTest do
       Fake.run("x", nil, [], fake_recorder: self(), fake_script: %{run: {:error, :boom}})
       assert_receive {:sykli_runtime_fake, {:run, "x", nil, [], _opts}}
     end
+
+    test "models sleep commands that exceed timeout_ms as timeouts" do
+      assert {:error, :timeout} = Fake.run("sleep 30", nil, [], timeout_ms: 100)
+      assert {:ok, 0, 0, ""} = Fake.run("sleep 0.01", nil, [], timeout_ms: 100)
+    end
   end
 
   describe "services" do

@@ -347,5 +347,4 @@ These shape how code decisions get made. They are not aspirational — the test 
 
 ## Known Issues
 
-- `--timeout` flag doesn't enforce timeouts on local target (tasks run to completion)
 - Docker-tagged tests are skipped when no Docker daemon is available; run them explicitly with `mix test.docker`.

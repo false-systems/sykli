@@ -50,7 +50,7 @@ defmodule Sykli.Runtime.Fake do
   @impl true
   def run(command, image, mounts, opts) do
     record(opts, {:run, command, image, mounts, opts})
-    scripted(opts, :run, {:ok, 0, 0, ""})
+    scripted(opts, :run, default_run(command, opts))
   end
 
   @impl true
@@ -84,6 +84,41 @@ defmodule Sykli.Runtime.Fake do
     opts
     |> Keyword.get(:fake_script, %{})
     |> Map.get(op, default)
+  end
+
+  defp default_run(command, opts) do
+    case fake_sleep_ms(command) do
+      sleep_ms when is_integer(sleep_ms) ->
+        timeout_ms = Keyword.get(opts, :timeout_ms)
+
+        if is_integer(timeout_ms) and sleep_ms > timeout_ms do
+          {:error, :timeout}
+        else
+          {:ok, 0, 0, ""}
+        end
+
+      nil ->
+        {:ok, 0, 0, ""}
+    end
+  end
+
+  defp fake_sleep_ms(command) when is_binary(command) do
+    case String.split(command) do
+      ["sleep", duration] -> parse_duration_ms(duration)
+      _other -> nil
+    end
+  end
+
+  defp fake_sleep_ms(_command), do: nil
+
+  defp parse_duration_ms(duration) do
+    case Float.parse(duration) do
+      {seconds, ""} when seconds >= 0 ->
+        round(seconds * 1000)
+
+      _other ->
+        nil
+    end
   end
 
   defp deterministic_id(prefix, seed) do
