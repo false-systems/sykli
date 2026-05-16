@@ -104,6 +104,27 @@ defmodule Sykli.Gate.Store do
     end
   end
 
+  @doc "Applies a coordinator-delivered gate decision to local state."
+  def apply_remote_decision(payload, opts \\ [])
+
+  def apply_remote_decision(payload, opts) when is_map(payload) do
+    with {:ok, id} <- required_string(payload, "id"),
+         {:ok, gate} <- get(id, opts),
+         {:ok, result} <- remote_transition(gate, payload, opts) do
+      case result do
+        {:changed, updated} ->
+          :ok = save(updated, opts)
+          emit_decision_received(updated, payload)
+          {:ok, updated, :changed}
+
+        {:unchanged, gate} ->
+          {:ok, gate, :unchanged}
+      end
+    end
+  end
+
+  def apply_remote_decision(_payload, _opts), do: {:error, {:invalid_gate_decision, :not_object}}
+
   defp gate_path(id, opts) do
     with :ok <- GateDecision.validate_id(id) do
       dir = gates_dir(opts)
@@ -115,6 +136,72 @@ defmodule Sykli.Gate.Store do
       else
         {:error, {:gate_path_escape, id}}
       end
+    end
+  end
+
+  defp remote_transition(%GateDecision{} = gate, payload, opts) do
+    status = payload["status"]
+    reason = payload["reason"]
+    decided_by = payload["decided_by"]
+
+    cond do
+      gate.status == status and gate.reason == reason and gate.decided_by == decided_by ->
+        {:ok, {:unchanged, gate}}
+
+      gate.status not in ["waiting", "blocked"] ->
+        {:ok, {:unchanged, gate}}
+
+      status == "approved" ->
+        gate
+        |> GateDecision.approve(reason, remote_opts(payload, opts, decided_by))
+        |> changed()
+
+      status == "rejected" ->
+        gate
+        |> GateDecision.reject(reason, remote_opts(payload, opts, decided_by))
+        |> changed()
+
+      true ->
+        {:error, {:invalid_gate_status, status}}
+    end
+  end
+
+  defp changed({:ok, gate}), do: {:ok, {:changed, gate}}
+  defp changed({:error, reason}), do: {:error, reason}
+
+  defp remote_opts(payload, opts, decided_by) do
+    opts
+    |> Keyword.take([:now])
+    |> Keyword.put(:decided_by, decided_by)
+    |> maybe_put_now(payload["decided_at"])
+  end
+
+  defp maybe_put_now(opts, nil), do: opts
+  defp maybe_put_now(opts, ""), do: opts
+  defp maybe_put_now(opts, decided_at), do: Keyword.put(opts, :now, decided_at)
+
+  defp emit_decision_received(%GateDecision{} = gate, payload) do
+    run_id = gate.run_id || payload["run_id"] || "unknown"
+
+    Sykli.Occurrence.PubSub.team_gate_decision_received(run_id, %{
+      "id" => gate.id,
+      "run_id" => gate.run_id,
+      "work_item_id" => gate.work_item_id,
+      "status" => gate.status,
+      "decided_by" => gate.decided_by,
+      "decided_at" => gate.decided_at,
+      "reason" => gate.reason
+    })
+  end
+
+  defp required_string(map, field) do
+    case Map.get(map, field) do
+      value when is_binary(value) ->
+        value = String.trim(value)
+        if value == "", do: {:error, {:invalid_gate_field, field, :empty}}, else: {:ok, value}
+
+      _ ->
+        {:error, {:invalid_gate_field, field, nil}}
     end
   end
 

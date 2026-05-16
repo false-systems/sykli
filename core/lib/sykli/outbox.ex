@@ -80,14 +80,23 @@ defmodule Sykli.Outbox do
 
   defp normalize_send(:ok), do: :ok
   defp normalize_send({:ok, _}), do: :ok
+  defp normalize_send({:ok, _, _}), do: :ok
   defp normalize_send({:error, reason}), do: {:error, reason}
 
   defp permanent_failure?(:team_run_invalid_payload), do: true
   defp permanent_failure?(:team_run_body_too_large), do: true
+  defp permanent_failure?(:team_gate_invalid_payload), do: true
+  defp permanent_failure?(:team_gate_body_too_large), do: true
   defp permanent_failure?({:team_run_invalid_payload, _reason}), do: true
+  defp permanent_failure?({:team_gate_invalid_payload, _reason}), do: true
 
   defp permanent_failure?({:team_coordinator_error, %{"code" => code}})
-       when code in ["team.run.invalid_payload", "team.run.body_too_large"],
+       when code in [
+              "team.run.invalid_payload",
+              "team.run.body_too_large",
+              "gate.invalid_payload",
+              "gate.body_too_large"
+            ],
        do: true
 
   defp permanent_failure?(_reason), do: false

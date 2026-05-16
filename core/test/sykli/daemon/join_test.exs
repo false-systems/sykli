@@ -38,7 +38,8 @@ defmodule Sykli.Daemon.JoinTest do
              "current_work_item_id" => nil,
              "labels" => ["macos"],
              "capabilities" => ["local"],
-             "last_run_id" => "run_001"
+             "last_run_id" => "run_001",
+             "acknowledged_decision_ids" => []
            }
   end
 
@@ -118,6 +119,27 @@ defmodule Sykli.Daemon.JoinTest do
       end)
 
     assert Jason.decode!(output)["error"]["code"] == "daemon.join_missing_coordinator"
+  end
+
+  test "heartbeat response only acknowledges applied gate decisions" do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "sykli-join-gate-ack-test-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    decision = %{
+      "id" => "missing_gate",
+      "run_id" => "run_001",
+      "status" => "approved",
+      "decided_by" => "member:reviewer",
+      "decided_at" => @now,
+      "reason" => "Reviewed"
+    }
+
+    assert {:ok, []} = Join.apply_heartbeat_response(%{"decisions" => [decision]}, path: tmp)
   end
 
   defmodule FakeClient do

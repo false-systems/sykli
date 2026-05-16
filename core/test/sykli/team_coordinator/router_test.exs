@@ -280,6 +280,83 @@ defmodule Sykli.TeamCoordinator.RouterTest do
     assert [%{"name" => "test"}] = json(show)["data"]["nodes"]
   end
 
+  test "publishes lists and decides gates through JSON API", %{opts: opts} do
+    :post
+    |> authed_json_conn("/v1/orgs", %{"slug" => "false-systems", "name" => "False Systems"})
+    |> call(opts)
+
+    :post
+    |> authed_json_conn("/v1/teams", %{
+      "org_id" => "org_001",
+      "slug" => "platform",
+      "name" => "Platform"
+    })
+    |> call(opts)
+
+    join =
+      :post
+      |> authed_json_conn("/v1/daemon-sessions", %{
+        "daemon_id" => "daemon-x",
+        "org" => "false-systems",
+        "team" => "platform",
+        "labels" => ["local"],
+        "capabilities" => ["local"],
+        "version" => "0.6.1"
+      })
+      |> call(opts)
+
+    session_id = json(join)["data"]["session_id"]
+
+    created =
+      :post
+      |> authed_json_conn("/v1/gates", %{
+        "org_slug" => "false-systems",
+        "team_slug" => "platform",
+        "daemon_session_id" => session_id,
+        "id" => "gate_001",
+        "run_id" => "run_001",
+        "work_item_id" => nil,
+        "status" => "waiting",
+        "decided_by" => nil,
+        "decided_at" => nil,
+        "reason" => nil
+      })
+      |> call(opts)
+
+    assert created.status == 201
+    assert json(created)["data"]["gate"]["id"] == "gate_001"
+
+    list =
+      :get |> authed_conn("/v1/gates?org_slug=false-systems&team_slug=platform") |> call(opts)
+
+    assert [%{"id" => "gate_001", "status" => "waiting"}] = json(list)["data"]["items"]
+
+    decided =
+      :post
+      |> authed_json_conn("/v1/gates/gate_001/decisions", %{
+        "org_slug" => "false-systems",
+        "team_slug" => "platform",
+        "status" => "approved",
+        "decided_by" => "member:reviewer",
+        "decided_at" => "2026-05-09T10:05:00Z",
+        "reason" => "Reviewed"
+      })
+      |> call(opts)
+
+    assert decided.status == 200
+    assert json(decided)["data"]["gate"]["status"] == "approved"
+
+    heartbeat =
+      :post
+      |> authed_json_conn("/v1/daemon-sessions/#{session_id}/heartbeat", %{
+        "session_id" => session_id,
+        "status" => "available"
+      })
+      |> call(opts)
+
+    assert [%{"id" => "gate_001", "status" => "approved"}] = json(heartbeat)["data"]["decisions"]
+  end
+
   test "run endpoints return structured errors", %{opts: opts} do
     unauthorized = call(conn(:get, "/v1/runs"), opts)
     assert unauthorized.status == 401

@@ -324,6 +324,10 @@ Exit criteria:
 The coordinator becomes the place where one person approves something
 another person ran.
 
+Status:
+
+- Implemented in this change.
+
 Flow:
 
 1. The daemon executing a run reaches a gate. It POSTs `gate.requested`

@@ -9,11 +9,13 @@ defmodule Sykli.TeamCoordinator.Store do
 
   use GenServer
 
+  alias Sykli.TeamCoordinator.GateDecisionSummary
   alias Sykli.WorkItem
 
   @assignment_types WorkItem.assignment_types()
   @heartbeat_statuses ~w(available busy offline degraded draining)
   @heartbeat_interval_seconds 15
+  @gate_terminal_statuses ~w(approved rejected expired)
 
   def start_link(opts \\ []) do
     {server_opts, init_opts} = Keyword.split(opts, [:name])
@@ -50,6 +52,13 @@ defmodule Sykli.TeamCoordinator.Store do
   def record_run(server, payload), do: GenServer.call(server, {:record_run, payload})
   def get_run(server, id), do: GenServer.call(server, {:get_run, id})
   def list_runs(server, filters \\ %{}), do: GenServer.call(server, {:list_runs, filters})
+  def upsert_gate(server, payload), do: GenServer.call(server, {:upsert_gate, payload})
+
+  def record_gate_decision(server, id, attrs),
+    do: GenServer.call(server, {:record_gate_decision, id, attrs})
+
+  def get_gate(server, id), do: GenServer.call(server, {:get_gate, id})
+  def list_gates(server, filters \\ %{}), do: GenServer.call(server, {:list_gates, filters})
 
   def audit_log(server), do: GenServer.call(server, :audit_log)
 
@@ -68,6 +77,8 @@ defmodule Sykli.TeamCoordinator.Store do
        daemon_sessions: %{},
        daemon_sessions_by_identity: %{},
        runs: %{},
+       gates: %{},
+       pending_gate_decisions: %{},
        audit_log: []
      }}
   end
@@ -295,6 +306,7 @@ defmodule Sykli.TeamCoordinator.Store do
     with {:ok, session} <- fetch_daemon_session(state, id),
          :ok <- validate_session_id_match(id, Map.get(attrs, "session_id")),
          {:ok, status} <- required_heartbeat_status(attrs),
+         {:ok, acknowledged_ids} <- optional_string_list(attrs, "acknowledged_decision_ids", []),
          {:ok, labels} <- optional_string_list(attrs, "labels", session["labels"]),
          {:ok, capabilities} <-
            optional_string_list(attrs, "capabilities", session["capabilities"]) do
@@ -312,12 +324,15 @@ defmodule Sykli.TeamCoordinator.Store do
 
       state =
         state
+        |> acknowledge_gate_decisions(id, acknowledged_ids)
         |> put_in([:daemon_sessions, id], updated)
         |> audit("daemon.heartbeat", "daemon_session", id, session["org_id"], session["team_id"])
 
+      decisions = Map.get(state.pending_gate_decisions, id, [])
+
       heartbeat = %{
         "next_heartbeat_seconds" => @heartbeat_interval_seconds,
-        "decisions" => [],
+        "decisions" => decisions,
         "assignments" => []
       }
 
@@ -366,6 +381,71 @@ defmodule Sykli.TeamCoordinator.Store do
       |> Enum.map(& &1["run"])
 
     {:reply, {:ok, runs}, state}
+  end
+
+  def handle_call({:upsert_gate, payload}, _from, state) do
+    with {:ok, record} <- build_gate_record(state, payload) do
+      gate_id = record["id"]
+
+      case Map.fetch(state.gates, gate_id) do
+        {:ok, stored} ->
+          {:reply, {:ok, stored, :existing}, state}
+
+        :error ->
+          state =
+            state
+            |> put_in([:gates, gate_id], record)
+            |> audit_gate_requested(record)
+
+          {:reply, {:ok, record, :inserted}, state}
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:record_gate_decision, id, attrs}, _from, state) do
+    with {:ok, gate} <- fetch_gate(state, id),
+         :ok <- validate_gate_team_claim(state, gate, attrs),
+         :ok <- ensure_gate_decidable(gate),
+         {:ok, decision} <- build_gate_decision(attrs, state) do
+      updated =
+        gate
+        |> Map.merge(decision)
+        |> Map.put("updated_at", now(state))
+
+      state =
+        state
+        |> put_in([:gates, id], updated)
+        |> enqueue_gate_decision(updated)
+        |> audit_gate_decision_recorded(updated)
+
+      {:reply, {:ok, updated}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:get_gate, id}, _from, state) do
+    {:reply, fetch_gate(state, id), state}
+  end
+
+  def handle_call({:list_gates, filters}, _from, state) do
+    with {:ok, filters} <- gate_filters(state, filters) do
+      gates =
+        state.gates
+        |> sorted_values()
+        |> Enum.filter(fn gate ->
+          filter_match?(gate, "org_id", Map.get(filters, "org_id")) and
+            filter_match?(gate, "team_id", Map.get(filters, "team_id")) and
+            filter_match?(gate, "status", Map.get(filters, "status"))
+        end)
+        |> Enum.map(&gate_public_map/1)
+
+      {:reply, {:ok, gates}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:audit_log, _from, state) do
@@ -496,6 +576,154 @@ defmodule Sykli.TeamCoordinator.Store do
   defp validate_session_id_match(id, id), do: :ok
   defp validate_session_id_match(_id, value), do: {:error, {:invalid_daemon_session_id, value}}
 
+  defp gate_filters(state, filters) do
+    with {:ok, org_id} <- optional_org_id(state, filters),
+         {:ok, team_id} <- optional_team_id(state, filters, org_id) do
+      {:ok,
+       filters
+       |> Map.put("org_id", org_id)
+       |> Map.put("team_id", team_id)}
+    end
+  end
+
+  defp optional_org_id(_state, %{"org_id" => org_id}) when is_binary(org_id) and org_id != "",
+    do: {:ok, org_id}
+
+  defp optional_org_id(state, %{"org_slug" => slug}) when is_binary(slug) and slug != "",
+    do: org_id(state, %{"org_slug" => slug})
+
+  defp optional_org_id(_state, _filters), do: {:ok, nil}
+
+  defp optional_team_id(_state, %{"team_id" => team_id}, _org_id)
+       when is_binary(team_id) and team_id != "",
+       do: {:ok, team_id}
+
+  defp optional_team_id(state, %{"team_slug" => slug}, org_id)
+       when is_binary(slug) and slug != "" and is_binary(org_id),
+       do: team_id(state, %{"team_slug" => slug}, org_id)
+
+  defp optional_team_id(_state, %{"team_slug" => slug}, nil)
+       when is_binary(slug) and slug != "",
+       do: {:error, {:org_not_found, nil}}
+
+  defp optional_team_id(_state, _filters, _org_id), do: {:ok, nil}
+
+  defp build_gate_record(state, payload) do
+    with :ok <- validate_exact_keys(payload, gate_publish_fields()),
+         {:ok, org_id} <- org_id(state, payload),
+         {:ok, team_id} <- team_id(state, payload, org_id),
+         {:ok, daemon_session_id} <- required_string(payload, "daemon_session_id"),
+         {:ok, session} <- fetch_gate_daemon_session(state, daemon_session_id),
+         :ok <- validate_session_team(session, team_id),
+         {:ok, summary} <- GateDecisionSummary.from_map(Map.take(payload, gate_payload_fields())),
+         :ok <- validate_waiting_gate(summary.gate["status"]) do
+      now = now(state)
+
+      {:ok,
+       summary.gate
+       |> Map.put("org_id", org_id)
+       |> Map.put("team_id", team_id)
+       |> Map.put("daemon_session_id", daemon_session_id)
+       |> Map.put("created_at", now)
+       |> Map.put("updated_at", now)}
+    end
+  end
+
+  defp fetch_gate_daemon_session(state, id) do
+    case fetch_daemon_session(state, id) do
+      {:ok, session} -> {:ok, session}
+      {:error, {:daemon_session_not_found, _id}} -> {:error, :team_gate_unknown_session}
+      {:error, {:invalid_daemon_session_id, _id}} -> {:error, :team_gate_unknown_session}
+    end
+  end
+
+  defp validate_session_team(%{"team_id" => team_id}, team_id), do: :ok
+  defp validate_session_team(_session, _team_id), do: {:error, :team_gate_team_mismatch}
+
+  defp validate_waiting_gate("waiting"), do: :ok
+  defp validate_waiting_gate(_status), do: {:error, :team_gate_invalid_payload}
+
+  defp validate_gate_team_claim(state, gate, attrs) do
+    with {:ok, org_id} <- org_id(state, attrs),
+         {:ok, team_id} <- team_id(state, attrs, org_id) do
+      if gate["team_id"] == team_id do
+        :ok
+      else
+        {:error, :team_gate_team_mismatch}
+      end
+    end
+  end
+
+  defp build_gate_decision(attrs, state) do
+    with :ok <-
+           validate_exact_keys(attrs, ~w(org_slug team_slug status decided_by decided_at reason)),
+         {:ok, status} <- required_gate_decision_status(attrs),
+         {:ok, decided_by} <- required_string(attrs, "decided_by"),
+         {:ok, reason} <- required_string(attrs, "reason") do
+      {:ok,
+       %{
+         "status" => status,
+         "decided_by" => decided_by,
+         "decided_at" => blank_to_nil(attrs["decided_at"]) || now(state),
+         "reason" => reason
+       }}
+    end
+  end
+
+  defp required_gate_decision_status(attrs) do
+    case Map.get(attrs, "status") do
+      status when status in ~w(approved rejected) -> {:ok, status}
+      _ -> {:error, :team_gate_invalid_decision}
+    end
+  end
+
+  defp ensure_gate_decidable(%{"status" => status}) when status in ["waiting", "blocked"], do: :ok
+
+  defp ensure_gate_decidable(%{"status" => status}) when status in @gate_terminal_statuses,
+    do: {:error, {:team_gate_terminal, status}}
+
+  defp ensure_gate_decidable(_gate), do: {:error, :team_gate_invalid_decision}
+
+  defp enqueue_gate_decision(state, gate) do
+    payload = gate_public_map(gate)
+    session_id = gate["daemon_session_id"]
+
+    update_in(state, [:pending_gate_decisions, session_id], fn
+      nil -> [payload]
+      decisions -> replace_decision(decisions, payload)
+    end)
+  end
+
+  defp replace_decision(decisions, payload) do
+    decisions
+    |> Enum.reject(&(&1["id"] == payload["id"]))
+    |> Kernel.++([payload])
+  end
+
+  defp acknowledge_gate_decisions(state, _session_id, []), do: state
+
+  defp acknowledge_gate_decisions(state, session_id, ids) do
+    update_in(state, [:pending_gate_decisions, session_id], fn
+      nil -> []
+      decisions -> Enum.reject(decisions, &(&1["id"] in ids))
+    end)
+  end
+
+  defp gate_payload_fields do
+    ~w(id run_id work_item_id status decided_by decided_at reason)
+  end
+
+  defp gate_publish_fields do
+    ~w(org_slug team_slug daemon_session_id id run_id work_item_id status decided_by decided_at reason)
+  end
+
+  defp gate_public_map(gate), do: Map.take(gate, gate_payload_fields())
+
+  defp validate_exact_keys(map, allowed) do
+    extra = Map.keys(map) -- allowed
+    if extra == [], do: :ok, else: {:error, :team_gate_invalid_payload}
+  end
+
   defp build_run_record(state, %{"version" => "1", "run" => run} = payload) when is_map(run) do
     with {:ok, org_id} <- org_id(state, run),
          {:ok, team_id} <- team_id(state, run, org_id),
@@ -574,10 +802,22 @@ defmodule Sykli.TeamCoordinator.Store do
 
   defp fetch_run(_state, id), do: {:error, {:invalid_run_id, id}}
 
+  defp fetch_gate(state, id) when is_binary(id) and id not in ["", ".", ".."] do
+    with :ok <- Sykli.GateDecision.validate_id(id) do
+      case Map.fetch(state.gates, id) do
+        {:ok, gate} -> {:ok, gate}
+        :error -> {:error, {:gate_not_found, id}}
+      end
+    end
+  end
+
+  defp fetch_gate(_state, id), do: {:error, {:invalid_gate_id, id}}
+
   defp supersede_existing_daemon(state, identity, new_session_id, now) do
     case Map.fetch(state.daemon_sessions_by_identity, identity) do
       {:ok, old_session_id} ->
-        update_in(state, [:daemon_sessions, old_session_id], fn
+        state
+        |> update_in([:daemon_sessions, old_session_id], fn
           nil ->
             nil
 
@@ -587,9 +827,25 @@ defmodule Sykli.TeamCoordinator.Store do
             |> Map.put("superseded_by", new_session_id)
             |> Map.put("updated_at", now)
         end)
+        |> move_pending_gate_decisions(old_session_id, new_session_id)
 
       :error ->
         state
+    end
+  end
+
+  defp move_pending_gate_decisions(state, old_session_id, new_session_id) do
+    case Map.pop(state.pending_gate_decisions, old_session_id) do
+      {nil, pending} ->
+        %{state | pending_gate_decisions: pending}
+
+      {decisions, pending} ->
+        merged =
+          Enum.reduce(decisions, Map.get(pending, new_session_id, []), fn decision, acc ->
+            replace_decision(acc, decision)
+          end)
+
+        %{state | pending_gate_decisions: Map.put(pending, new_session_id, merged)}
     end
   end
 
@@ -661,6 +917,40 @@ defmodule Sykli.TeamCoordinator.Store do
       "subject_type" => "run",
       "subject_id" => run["id"],
       "metadata" => %{"event" => "run_recorded", "status" => run["status"]},
+      "created_at" => now(state)
+    }
+
+    update_in(state.audit_log, &[event | &1])
+  end
+
+  defp audit_gate_requested(state, gate) do
+    event = %{
+      "id" => id(state),
+      "org_id" => gate["org_id"],
+      "team_id" => gate["team_id"],
+      "actor_type" => "daemon_session",
+      "actor_id" => gate["daemon_session_id"],
+      "action" => "gate.requested",
+      "subject_type" => "gate",
+      "subject_id" => gate["id"],
+      "metadata" => %{"status" => gate["status"]},
+      "created_at" => now(state)
+    }
+
+    update_in(state.audit_log, &[event | &1])
+  end
+
+  defp audit_gate_decision_recorded(state, gate) do
+    event = %{
+      "id" => id(state),
+      "org_id" => gate["org_id"],
+      "team_id" => gate["team_id"],
+      "actor_type" => "member",
+      "actor_id" => gate["decided_by"],
+      "action" => "gate.decision_recorded",
+      "subject_type" => "gate",
+      "subject_id" => gate["id"],
+      "metadata" => %{"status" => gate["status"], "reason" => gate["reason"]},
       "created_at" => now(state)
     }
 
