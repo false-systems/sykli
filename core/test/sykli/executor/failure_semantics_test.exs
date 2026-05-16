@@ -70,6 +70,38 @@ defmodule Sykli.Executor.FailureSemanticsTest do
     assert semantics.source == :target
   end
 
+  test "global timeout is enforced by the local fake runtime without waiting for command completion",
+       %{workdir: workdir} do
+    task = task("slow", command: "sleep 30")
+    start_time = System.monotonic_time(:millisecond)
+
+    assert {:error,
+            [
+              %TaskResult{
+                status: :failed,
+                duration_ms: duration_ms,
+                error: %Error{code: "task_timeout"},
+                failure_semantics: semantics
+              }
+            ]} =
+             Executor.run([task], graph([task]),
+               target: Local,
+               runtime: Sykli.Runtime.Fake,
+               workdir: workdir,
+               timeout: 100
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - start_time
+
+    assert duration_ms < 1_000
+    assert elapsed_ms < 1_000
+    assert semantics.class == :timeout
+    assert semantics.reason == "task_timeout"
+    assert semantics.details["code"] == "task_timeout"
+    # Timeout failure semantics record the configured timeout, not measured wall-clock runtime.
+    assert semantics.details["duration_ms"] == 100
+  end
+
   test "condition skip is classified as skipped and not as failure", %{workdir: workdir} do
     task =
       task("conditional", command: "echo no", condition: "branch == 'definitely-not-current'")
