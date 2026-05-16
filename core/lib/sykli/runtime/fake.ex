@@ -31,6 +31,14 @@ defmodule Sykli.Runtime.Fake do
 
   Calls are still recorded when scripted.
 
+  ## Timeout modeling
+
+  When no `:run` script is provided, the Fake models only bare `sleep N`
+  commands, where `N` is an integer or fractional second value. If that
+  modeled duration exceeds `opts[:timeout_ms]`, `run/4` returns
+  `{:error, :timeout}` without actually sleeping. Compound shell commands
+  and absolute sleep paths are not parsed.
+
   ## Determinism
 
   No wall clock, no global RNG. Identifiers derive from `:erlang.phash2/1`

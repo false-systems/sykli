@@ -62,6 +62,10 @@ defmodule Sykli.Runtime.FakeTest do
       assert {:error, :timeout} = Fake.run("sleep 30", nil, [], timeout_ms: 100)
       assert {:ok, 0, 0, ""} = Fake.run("sleep 0.01", nil, [], timeout_ms: 100)
     end
+
+    test "models sleep commands without timeout_ms as success" do
+      assert {:ok, 0, 0, ""} = Fake.run("sleep 30", nil, [], [])
+    end
   end
 
   describe "services" do

@@ -98,6 +98,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
     assert semantics.class == :timeout
     assert semantics.reason == "task_timeout"
     assert semantics.details["code"] == "task_timeout"
+    # Timeout failure semantics record the configured timeout, not measured wall-clock runtime.
     assert semantics.details["duration_ms"] == 100
   end
 
