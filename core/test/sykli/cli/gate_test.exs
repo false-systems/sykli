@@ -1,9 +1,10 @@
 defmodule Sykli.CLI.GateTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
 
   alias Sykli.CLI.Gate
+  alias Sykli.Daemon.SessionStore
   alias Sykli.Gate.Store
 
   @moduletag :tmp_dir
@@ -148,6 +149,84 @@ defmodule Sykli.CLI.GateTest do
     end
   end
 
+  describe "team gate commands" do
+    test "missing session for team returns JSON envelope", %{tmp_dir: tmp_dir} do
+      result =
+        run_json(["list", "--team", "platform", "--json"],
+          path: tmp_dir,
+          gate_client: __MODULE__.FakeGateClient,
+          expect: 1
+        )
+
+      assert result["ok"] == false
+      assert result["error"]["code"] == "gate.no_team_session"
+
+      assert result["error"]["message"] ==
+               "no team session for \"platform\"; run `sykli daemon join` first"
+    end
+
+    test "session without token returns JSON envelope", %{tmp_dir: tmp_dir} do
+      write_session(tmp_dir)
+
+      result =
+        run_json(["list", "--team", "platform", "--json"],
+          path: tmp_dir,
+          gate_client: __MODULE__.FakeGateClient,
+          expect: 1
+        )
+
+      assert result["ok"] == false
+      assert result["error"]["code"] == "gate.missing_team_token"
+
+      assert result["error"]["message"] ==
+               "team session \"platform\" found but no token; pass --token or set SYKLI_TEAM_TOKEN"
+    end
+
+    test "--token flag wins over SYKLI_TEAM_TOKEN", %{tmp_dir: tmp_dir} do
+      write_session(tmp_dir)
+      old = System.get_env("SYKLI_TEAM_TOKEN")
+      System.put_env("SYKLI_TEAM_TOKEN", "env-token")
+      on_exit(fn -> restore_env("SYKLI_TEAM_TOKEN", old) end)
+
+      result =
+        run_json(
+          [
+            "approve",
+            "gate_001",
+            "--team",
+            "platform",
+            "--token",
+            "flag-token",
+            "--reason",
+            "Reviewed",
+            "--json"
+          ],
+          path: tmp_dir,
+          gate_client: __MODULE__.FakeGateClient,
+          now: @later
+        )
+
+      assert result["data"]["source"] == "team"
+      assert_received {:record_gate_decision, "flag-token", "gate_001", decision}
+      assert decision["status"] == "approved"
+      assert decision["decided_by"] == "member:test-user"
+    end
+
+    test "gates list --team routes to coordinator", %{tmp_dir: tmp_dir} do
+      write_session(tmp_dir)
+
+      result =
+        run_json(["list", "--team", "platform", "--token", "secret", "--json"],
+          path: tmp_dir,
+          gate_client: __MODULE__.FakeGateClient
+        )
+
+      assert result["data"]["source"] == "team"
+      assert result["data"]["gates"] == [%{"id" => "gate_001", "status" => "waiting"}]
+      assert_received {:list_team_gates, "secret"}
+    end
+  end
+
   defp run_json(args, opts) do
     opts = Keyword.put_new(opts, :default_actor_id, "test-user")
     expected_code = Keyword.get(opts, :expect, 0)
@@ -167,5 +246,37 @@ defmodule Sykli.CLI.GateTest do
       |> Keyword.put(:path, tmp_dir)
 
     assert {:ok, _gate} = Store.create(opts)
+  end
+
+  defp write_session(tmp_dir) do
+    assert {:ok, _session} =
+             SessionStore.write(
+               %{
+                 "coordinator" => "http://coordinator.test",
+                 "org" => "false-systems",
+                 "team" => "platform",
+                 "daemon_id" => "daemon-x",
+                 "session_id" => "sess_001",
+                 "team_id" => "team_001",
+                 "labels" => [],
+                 "capabilities" => ["local"]
+               },
+               path: tmp_dir
+             )
+  end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
+
+  defmodule FakeGateClient do
+    def list(_session, token, _opts) do
+      send(self(), {:list_team_gates, token})
+      {:ok, [%{"id" => "gate_001", "status" => "waiting"}]}
+    end
+
+    def record_decision(_session, token, id, decision, _opts) do
+      send(self(), {:record_gate_decision, token, id, decision})
+      {:ok, Map.put(decision, "id", id)}
+    end
   end
 end

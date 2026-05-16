@@ -780,6 +780,27 @@ defmodule Sykli.Error do
     }
   end
 
+  def gate_no_team_session(slug) do
+    %__MODULE__{
+      code: "gate.no_team_session",
+      type: :runtime,
+      message: "no team session for #{inspect(slug)}; run `sykli daemon join` first",
+      step: :setup,
+      hints: []
+    }
+  end
+
+  def gate_missing_team_token(slug) do
+    %__MODULE__{
+      code: "gate.missing_team_token",
+      type: :runtime,
+      message:
+        "team session #{inspect(slug)} found but no token; pass --token or set SYKLI_TEAM_TOKEN",
+      step: :setup,
+      hints: []
+    }
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # TEAM RUN SYNC ERRORS
   # ─────────────────────────────────────────────────────────────────────────────

@@ -732,7 +732,7 @@ defmodule Sykli.Executor do
     }
   end
 
-  defp run_gate(%Sykli.Graph.Task{} = task, _state, progress, run_id) do
+  defp run_gate(%Sykli.Graph.Task{} = task, state, progress, run_id) do
     prefix = progress_prefix(progress)
     gate = Sykli.Graph.Task.gate(task)
 
@@ -740,9 +740,22 @@ defmodule Sykli.Executor do
 
     # Emit gate waiting event (run_id may be nil for CLI runs)
     maybe_emit_gate_waiting(run_id, task.name, gate)
+    team_gate = maybe_publish_team_gate(task, state, run_id)
 
     start_time = System.monotonic_time(:millisecond)
-    result = Sykli.Services.GateService.wait(gate)
+
+    result =
+      case team_gate do
+        {:ok, local_gate} ->
+          Sykli.Services.GateService.wait_team(local_gate.id,
+            path: Map.get(state, :workdir, "."),
+            timeout: gate.timeout
+          )
+
+        :ok ->
+          Sykli.Services.GateService.wait(gate)
+      end
+
     duration = System.monotonic_time(:millisecond) - start_time
 
     case result do
@@ -1296,6 +1309,88 @@ defmodule Sykli.Executor do
 
   defp maybe_emit_gate_resolved(run_id, name, outcome, approver, duration) do
     OccPubSub.gate_resolved(run_id, name, outcome, approver, duration)
+  end
+
+  defp maybe_publish_team_gate(_task, _state, nil), do: :ok
+
+  defp maybe_publish_team_gate(%Sykli.Graph.Task{} = task, state, run_id) do
+    workdir = Map.get(state, :workdir, ".")
+    gate_id = team_gate_id(run_id, task.name)
+
+    with {:ok, session} <- Sykli.Daemon.SessionStore.read(path: Path.join(workdir, ".sykli")),
+         token when is_binary(token) and token != "" <- System.get_env("SYKLI_TEAM_TOKEN"),
+         {:ok, gate} <- load_or_create_team_gate(gate_id, task, run_id, session, workdir) do
+      summary = Sykli.TeamCoordinator.GateDecisionSummary.from_gate_decision(gate)
+      encoded_summary = Sykli.TeamCoordinator.GateDecisionSummary.encode(summary)
+
+      OccPubSub.team_gate_requested(run_id, encoded_summary)
+
+      case team_gate_client().publish_waiting(session, token, summary) do
+        {:ok, _published} ->
+          {:ok, gate}
+
+        {:error, _reason} ->
+          payload =
+            encoded_summary
+            |> Map.put("org_slug", session["org"])
+            |> Map.put("team_slug", session["team"])
+            |> Map.put("daemon_session_id", session["session_id"])
+
+          :ok = Sykli.Outbox.enqueue("gates", payload, path: workdir)
+          OccPubSub.team_gate_sync_deferred(run_id, payload)
+          {:ok, gate}
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp load_or_create_team_gate(id, task, run_id, session, workdir) do
+    case Sykli.Gate.Store.get(id, path: workdir) do
+      {:ok, gate} ->
+        {:ok, gate}
+
+      {:error, {:gate_not_found, ^id}} ->
+        Sykli.Gate.Store.create(
+          path: workdir,
+          id: id,
+          run_id: run_id,
+          node_id: task.name,
+          requested_by_type: "daemon",
+          requested_by_id: session["daemon_id"]
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp team_gate_id(run_id, task_name) do
+    raw = "#{run_id}-#{task_name}"
+
+    sanitized =
+      ~r/[^A-Za-z0-9_.-]/
+      |> Regex.replace(raw, "-")
+      |> ensure_gate_id_prefix()
+
+    if String.length(sanitized) <= 128 do
+      sanitized
+    else
+      hash =
+        :crypto.hash(:sha256, raw)
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 16)
+
+      String.slice(sanitized, 0, 111) <> "-" <> hash
+    end
+  end
+
+  defp ensure_gate_id_prefix(<<first::binary-size(1), _rest::binary>> = id) do
+    if Regex.match?(~r/[A-Za-z0-9]/, first), do: id, else: "g-" <> id
+  end
+
+  defp team_gate_client do
+    Application.get_env(:sykli, :team_gate_client, Sykli.TeamCoordinator.GateClient)
   end
 
   # ----- OCCURRENCE EMISSION (cache, skip, retry) -----

@@ -3,8 +3,8 @@ defmodule Sykli.TeamCoordinator.Router do
   Plug router for the self-hosted Team Mode coordinator skeleton.
 
   This HTTP surface coordinates org/team/work metadata only. It deliberately
-  exposes no execution, shell, log upload, artifact upload, run, gate, or
-  evidence endpoints.
+  exposes no execution, shell, log upload, artifact upload, or evidence
+  endpoints.
   """
 
   import Plug.Conn
@@ -104,6 +104,52 @@ defmodule Sykli.TeamCoordinator.Router do
   defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs", id]} = conn, opts) do
     with {:ok, run} <- Store.get_run(store(opts), id) do
       send_json(conn, 200, run)
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "gates"]} = conn, opts) do
+    with {:ok, body, conn} <- read_gate_json(conn),
+         {:ok, gate, mode} <- Store.upsert_gate(store(opts), body) do
+      status = if mode == :inserted, do: 201, else: 200
+      send_json(conn, status, %{gate: gate})
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates"]} = conn, opts) do
+    conn = fetch_query_params(conn)
+
+    filters =
+      conn.query_params
+      |> Map.take(["org_id", "org_slug", "team_id", "team_slug", "status"])
+      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+      |> Map.new()
+
+    with {:ok, gates} <- Store.list_gates(store(opts), filters) do
+      send_json(conn, 200, %{items: gates})
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates", id]} = conn, opts) do
+    with {:ok, gate} <- Store.get_gate(store(opts), id) do
+      send_json(conn, 200, %{gate: gate})
+    else
+      {:error, reason} -> send_error(conn, reason)
+    end
+  end
+
+  defp route_v1(
+         %Plug.Conn{method: "POST", path_info: ["v1", "gates", id, "decisions"]} = conn,
+         opts
+       ) do
+    with {:ok, body, conn} <- read_gate_json(conn),
+         {:ok, gate} <- Store.record_gate_decision(store(opts), id, body) do
+      send_json(conn, 200, %{gate: gate})
     else
       {:error, reason} -> send_error(conn, reason)
     end
@@ -221,6 +267,14 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
+  defp read_gate_json(conn) do
+    case read_json(conn) do
+      {:error, :coordinator_invalid_payload} -> {:error, :team_gate_invalid_payload}
+      {:error, :coordinator_payload_too_large} -> {:error, :team_gate_body_too_large}
+      other -> other
+    end
+  end
+
   defp send_json(conn, status, data) do
     conn
     |> put_resp_content_type("application/json")
@@ -244,9 +298,15 @@ defmodule Sykli.TeamCoordinator.Router do
   defp status_for(:coordinator_invalid_payload), do: 400
   defp status_for(:coordinator_payload_too_large), do: 413
   defp status_for(:team_run_body_too_large), do: 413
+  defp status_for(:team_gate_body_too_large), do: 413
   defp status_for(:coordinator_body_read_failed), do: 408
   defp status_for(:coordinator_route_not_found), do: 404
   defp status_for(:team_run_invalid_payload), do: 400
+  defp status_for(:team_gate_invalid_payload), do: 400
+  defp status_for(:team_gate_invalid_decision), do: 400
+  defp status_for(:team_gate_unknown_session), do: 403
+  defp status_for(:team_gate_team_mismatch), do: 403
+  defp status_for({:team_gate_terminal, _status}), do: 409
   defp status_for({:missing_field, _field}), do: 400
   defp status_for({:invalid_field, _field}), do: 400
   defp status_for({:duplicate_org_slug, _slug}), do: 409
@@ -264,6 +324,8 @@ defmodule Sykli.TeamCoordinator.Router do
   defp status_for({:daemon_session_not_found, _id}), do: 404
   defp status_for(:run_not_found), do: 404
   defp status_for({:invalid_run_id, _id}), do: 400
+  defp status_for({:gate_not_found, _id}), do: 404
+  defp status_for({:invalid_gate_id, _id}), do: 400
   defp status_for(_reason), do: 500
 
   defp coordinator_error(:coordinator_unauthorized),
@@ -286,6 +348,9 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error(:team_run_body_too_large),
     do: error("team.run.body_too_large", "run summary body exceeds coordinator limit")
+
+  defp coordinator_error(:team_gate_body_too_large),
+    do: error("gate.body_too_large", "gate payload exceeds coordinator limit")
 
   defp coordinator_error(:coordinator_body_read_failed),
     do: error("coordinator.body_read_failed", "failed to read request body")
@@ -347,6 +412,24 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error({:invalid_run_id, id}),
     do: error("team.run.invalid_payload", "invalid run id: #{inspect(id)}")
+
+  defp coordinator_error(:team_gate_invalid_payload),
+    do: error("gate.invalid_payload", "gate payload is invalid")
+
+  defp coordinator_error(:team_gate_invalid_decision),
+    do: error("gate.invalid_decision", "gate decision payload is invalid")
+
+  defp coordinator_error(:team_gate_unknown_session),
+    do: error("gate.unknown_session", "daemon session was not found for gate publish")
+
+  defp coordinator_error(:team_gate_team_mismatch),
+    do: error("gate.team_mismatch", "session does not belong to claimed team")
+
+  defp coordinator_error({:team_gate_terminal, status}),
+    do: error("gate.terminal", "gate is already terminal: #{status}")
+
+  defp coordinator_error({:gate_not_found, id}), do: Error.gate_not_found(id)
+  defp coordinator_error({:invalid_gate_id, id}), do: Error.invalid_gate_id(id)
 
   defp coordinator_error(reason),
     do: error("coordinator.internal_error", "coordinator failed: #{inspect(reason)}")

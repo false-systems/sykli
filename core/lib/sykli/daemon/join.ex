@@ -72,8 +72,28 @@ defmodule Sykli.Daemon.Join do
       "current_work_item_id" => Map.get(attrs, "current_work_item_id"),
       "labels" => Map.get(attrs, "labels", session["labels"] || []),
       "capabilities" => Map.get(attrs, "capabilities", session["capabilities"] || []),
-      "last_run_id" => Map.get(attrs, "last_run_id")
+      "last_run_id" => Map.get(attrs, "last_run_id"),
+      "acknowledged_decision_ids" => Map.get(attrs, "acknowledged_decision_ids", [])
     }
+  end
+
+  def apply_heartbeat_response(response, opts \\ []) when is_map(response) do
+    decisions = Map.get(response, "decisions", [])
+
+    decisions
+    |> Enum.reduce({:ok, []}, fn
+      decision, {:ok, acked} when is_map(decision) ->
+        case Sykli.Gate.Store.apply_remote_decision(decision, opts) do
+          {:ok, _gate, _mode} -> {:ok, [decision["id"] | acked]}
+          {:error, _reason} -> {:ok, acked}
+        end
+
+      _decision, {:ok, acked} ->
+        {:ok, acked}
+    end)
+    |> case do
+      {:ok, ids} -> {:ok, Enum.reverse(Enum.reject(ids, &is_nil/1))}
+    end
   end
 
   defp persist_session(opts, payload, data, runtime_opts) do

@@ -91,7 +91,7 @@ Fields:
 | Field | Type | Required | Stability | Semantics |
 |-------|------|----------|-----------|-----------|
 | `id` | string | yes | public-stable | ULID-like occurrence identifier. Distinct from `run_id`. |
-| `type` | string | yes | public-stable | FALSE Protocol event type. Current families include `ci.run.*`, `ci.task.*`, `ci.cache.*`, `ci.gate.*`, and `ci.github.*`. |
+| `type` | string | yes | public-stable | FALSE Protocol event type. Current families include `ci.run.*`, `ci.task.*`, `ci.cache.*`, `ci.gate.*`, `ci.github.*`, `ci.team.run.*`, `ci.team.gate.*`, and `ci.team.outbox.*`. |
 | `timestamp` | string | yes | public-stable | ISO-8601 event timestamp. |
 | `source` | string | yes | public-stable | Event source, default `sykli` unless configured. |
 | `protocol_version` | string | yes | public-stable | FALSE Protocol version. Current value is `"1.0"`. |

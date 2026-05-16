@@ -25,6 +25,16 @@ defmodule Sykli.Services.GateService do
     wait_webhook(gate)
   end
 
+  @doc "Waits for a team-mode gate decision mirrored into the local gate store."
+  @spec wait_team(String.t(), keyword()) :: approval_result()
+  def wait_team(id, opts \\ []) when is_binary(id) do
+    timeout = Keyword.get(opts, :timeout, 3600)
+    poll_interval = Keyword.get(opts, :poll_interval_ms, 250)
+    deadline = System.monotonic_time(:millisecond) + timeout * 1000
+
+    do_wait_team(id, opts, poll_interval, deadline)
+  end
+
   defp wait_prompt(%Gate{message: message, timeout: timeout}) do
     prompt = message || "Approve? [y/n]"
 
@@ -159,6 +169,31 @@ defmodule Sykli.Services.GateService do
   end
 
   defp wait_webhook(_), do: {:denied, "webhook strategy requires webhook_url to be set"}
+
+  defp do_wait_team(id, opts, poll_interval, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      {:timed_out}
+    else
+      case Sykli.Gate.Store.get(id, opts) do
+        {:ok, %{status: "approved"} = gate} ->
+          {:approved, gate.decided_by || "team"}
+
+        {:ok, %{status: "rejected"} = gate} ->
+          {:denied, gate.reason || "team gate rejected"}
+
+        {:ok, %{status: "expired"}} ->
+          {:timed_out}
+
+        {:ok, _gate} ->
+          Process.sleep(poll_interval)
+          do_wait_team(id, opts, poll_interval, deadline)
+
+        {:error, _reason} ->
+          Process.sleep(poll_interval)
+          do_wait_team(id, opts, poll_interval, deadline)
+      end
+    end
+  end
 
   defp parse_webhook_response(body) do
     case Jason.decode(body) do
