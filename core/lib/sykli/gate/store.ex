@@ -115,6 +115,7 @@ defmodule Sykli.Gate.Store do
         {:changed, updated} ->
           :ok = save(updated, opts)
           emit_decision_received(updated, payload)
+          broadcast_gate_decision(updated)
           {:ok, updated, :changed}
 
         {:unchanged, gate} ->
@@ -192,6 +193,14 @@ defmodule Sykli.Gate.Store do
       "decided_at" => gate.decided_at,
       "reason" => gate.reason
     })
+  end
+
+  defp broadcast_gate_decision(%GateDecision{} = gate) do
+    Phoenix.PubSub.broadcast(
+      Sykli.PubSub,
+      "gate:" <> gate.id,
+      {:gate_decided, gate.status, gate.decided_by || "team"}
+    )
   end
 
   defp required_string(map, field) do

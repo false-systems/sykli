@@ -34,6 +34,7 @@ defmodule Sykli.Occurrence do
       ci.team.run.sync_deferred — run summary queued for later sync
       ci.team.gate.requested — gate request published to coordinator
       ci.team.gate.decision_received — gate decision received from coordinator
+      ci.team.gate.apply_failed — gate decision failed to apply locally
       ci.team.gate.sync_deferred — gate request queued for later sync
       ci.team.outbox.drained — coordinator outbox drained on heartbeat/status
 
@@ -238,6 +239,10 @@ defmodule Sykli.Occurrence do
 
   def team_gate_decision_received(run_id, data, opts \\ []) do
     new("ci.team.gate.decision_received", run_id, data, severity: :info, opts: opts)
+  end
+
+  def team_gate_apply_failed(run_id, data, opts \\ []) do
+    new("ci.team.gate.apply_failed", run_id, data, severity: :warning, opts: opts)
   end
 
   def team_gate_sync_deferred(run_id, data, opts \\ []) do

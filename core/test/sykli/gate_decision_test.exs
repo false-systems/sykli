@@ -43,6 +43,11 @@ defmodule Sykli.GateDecisionTest do
                "evidence_refs" => [%{"type" => "occurrence", "uri" => "occ://1"}]
              }
     end
+
+    test "accepts per-run gate ids with colon separators" do
+      assert {:ok, gate} = GateDecision.new(id: "run_001:approve", now: @now)
+      assert gate.id == "run_001:approve"
+    end
   end
 
   describe "decision transitions" do

@@ -9,6 +9,10 @@ defmodule Sykli.Daemon.Join do
   alias Sykli.Error
   alias Sykli.Error.Formatter
 
+  require Logger
+
+  @gate_apply_retry_cap 10
+
   def run(args, runtime_opts \\ []) do
     case parse(args) do
       {:ok, :help, _opts} ->
@@ -84,8 +88,21 @@ defmodule Sykli.Daemon.Join do
     |> Enum.reduce({:ok, []}, fn
       decision, {:ok, acked} when is_map(decision) ->
         case Sykli.Gate.Store.apply_remote_decision(decision, opts) do
-          {:ok, _gate, _mode} -> {:ok, [decision["id"] | acked]}
-          {:error, _reason} -> {:ok, acked}
+          {:ok, _gate, _mode} ->
+            reset_gate_apply_failures(decision, opts)
+            {:ok, [decision["id"] | acked]}
+
+          {:error, reason} ->
+            if record_gate_apply_failure(decision, reason, opts) > @gate_apply_retry_cap do
+              Logger.error("dropping gate decision after repeated local apply failures",
+                id: decision["id"],
+                reason: inspect(reason)
+              )
+
+              {:ok, [decision["id"] | acked]}
+            else
+              {:ok, acked}
+            end
         end
 
       _decision, {:ok, acked} ->
@@ -94,6 +111,36 @@ defmodule Sykli.Daemon.Join do
     |> case do
       {:ok, ids} -> {:ok, Enum.reverse(Enum.reject(ids, &is_nil/1))}
     end
+  end
+
+  defp record_gate_apply_failure(decision, reason, opts) do
+    id = decision["id"]
+    key = gate_apply_failure_key(id, opts)
+    count = Process.get(key, 0) + 1
+    Process.put(key, count)
+
+    Logger.warning("failed to apply remote gate decision",
+      id: id,
+      reason: inspect(reason),
+      attempt: count
+    )
+
+    Sykli.Occurrence.PubSub.team_gate_apply_failed(decision["run_id"] || "unknown", %{
+      "id" => id,
+      "reason" => inspect(reason)
+    })
+
+    count
+  end
+
+  defp reset_gate_apply_failures(decision, opts) do
+    Process.delete(gate_apply_failure_key(decision["id"], opts))
+    :ok
+  end
+
+  defp gate_apply_failure_key(id, opts) do
+    session_id = Keyword.get(opts, :session_id, :default)
+    {__MODULE__, :gate_apply_failure, session_id, id}
   end
 
   defp persist_session(opts, payload, data, runtime_opts) do

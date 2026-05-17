@@ -710,11 +710,11 @@ defmodule Sykli.TeamCoordinator.Store do
   end
 
   defp gate_payload_fields do
-    ~w(id run_id work_item_id status decided_by decided_at reason)
+    ~w(id run_id node_id work_item_id status decided_by decided_at reason)
   end
 
   defp gate_publish_fields do
-    ~w(org_slug team_slug daemon_session_id id run_id work_item_id status decided_by decided_at reason)
+    ~w(org_slug team_slug daemon_session_id id run_id node_id work_item_id status decided_by decided_at reason)
   end
 
   defp gate_public_map(gate), do: Map.take(gate, gate_payload_fields())

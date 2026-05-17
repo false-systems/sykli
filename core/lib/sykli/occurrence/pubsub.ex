@@ -170,6 +170,12 @@ defmodule Sykli.Occurrence.PubSub do
     occ
   end
 
+  def team_gate_apply_failed(run_id, data) do
+    occ = Occurrence.team_gate_apply_failed(run_id, mask_team_data(data))
+    broadcast(occ)
+    occ
+  end
+
   def team_gate_sync_deferred(run_id, data) do
     occ = Occurrence.team_gate_sync_deferred(run_id, mask_team_data(data))
     broadcast(occ)

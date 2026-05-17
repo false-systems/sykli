@@ -17,7 +17,7 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
         now: fn -> @now end,
         id:
           id_sequence(
-            ~w(org_001 audit_001 team_001 audit_002 team_002 audit_003 sess_x audit_004 sess_y audit_005 sess_other audit_006 gate_audit_001 decision_audit_001 hb_audit_001 hb_audit_002 hb_audit_003 sess_new audit_007 hb_audit_004)
+            ~w(org_001 audit_001 team_001 audit_002 team_002 audit_003 sess_x audit_004 sess_y audit_005 sess_other audit_006 gate_audit_001 decision_audit_001 hb_audit_001 hb_audit_002 hb_audit_003 sess_new audit_007 hb_audit_004 gate_audit_002 decision_audit_002 hb_audit_005 gate_audit_003 decision_audit_003 hb_audit_006 gate_audit_004 hb_audit_007)
           )
       )
 
@@ -90,8 +90,6 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
     assert {:ok, ["gate_001"]} =
              Join.apply_heartbeat_response(%{"decisions" => [decision]}, path: tmp)
 
-    assert_receive %Sykli.Occurrence{type: "ci.team.gate.decision_received"}, 500
-
     assert {:ok, local_gate} = GateStore.get("gate_001", path: tmp)
     assert local_gate.status == "approved"
     assert local_gate.decided_by == "member:reviewer-y"
@@ -110,7 +108,8 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
     assert {:ok, ["gate_001"]} =
              Join.apply_heartbeat_response(%{"decisions" => [decision]}, path: tmp)
 
-    refute_receive %Sykli.Occurrence{type: "ci.team.gate.decision_received"}, 100
+    assert [%Sykli.Occurrence{type: "ci.team.gate.decision_received"}] =
+             collect_decision_received_occurrences(500)
 
     assert {:ok, unchanged} = GateStore.get("gate_001", path: tmp)
     assert unchanged.decided_at == @later
@@ -151,7 +150,7 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
     }
 
     run_id = "run_001"
-    gate_id = "run_001-approve-deploy"
+    gate_id = "run_001:approve deploy"
     PubSub.subscribe(run_id)
 
     executor =
@@ -196,6 +195,137 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
     assert {:ok, local_gate} = GateStore.get(gate_id, path: tmp)
     assert local_gate.status == "approved"
     assert local_gate.decided_by == "member:reviewer-y"
+  end
+
+  test "executor returns immediately when team decision arrived before wait starts", %{
+    store: store,
+    daemon_x: daemon_x
+  } do
+    tmp = tmp_dir()
+    install_fake_gate_client(store)
+    put_team_token("secret")
+    write_session(tmp, daemon_x)
+
+    run_id = "run_race"
+    gate_id = "run_race:approve"
+
+    assert {:ok, _local_gate} =
+             GateStore.create(
+               path: tmp,
+               id: gate_id,
+               run_id: run_id,
+               node_id: "approve",
+               status: "approved",
+               decided_by: "member:reviewer-y",
+               now: @now
+             )
+
+    task = gate_task("approve", 5)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:ok, [%Executor.TaskResult{name: "approve", status: :passed}]} =
+             Executor.run([task], %{"approve" => task},
+               target: Sykli.Target.Local,
+               workdir: tmp,
+               run_id: run_id
+             )
+
+    assert System.monotonic_time(:millisecond) - started_at < 500
+  end
+
+  test "executor team gate timeout is still respected", %{store: store, daemon_x: daemon_x} do
+    tmp = tmp_dir()
+    install_fake_gate_client(store)
+    put_team_token("secret")
+    write_session(tmp, daemon_x)
+
+    task = gate_task("approve", 1)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, [%Executor.TaskResult{name: "approve", status: :failed}]} =
+             Executor.run([task], %{"approve" => task},
+               target: Sykli.Target.Local,
+               workdir: tmp,
+               run_id: "run_timeout"
+             )
+
+    duration = System.monotonic_time(:millisecond) - started_at
+    assert duration >= 900
+    assert duration < 2_000
+  end
+
+  test "gate ids are isolated by run id when the same gate node is rerun", %{
+    store: store,
+    daemon_x: daemon_x
+  } do
+    tmp = tmp_dir()
+    install_fake_gate_client(store)
+    put_team_token("secret")
+    write_session(tmp, daemon_x)
+
+    task = gate_task("approve", 2)
+    run1_id = "run_one"
+    run2_id = "run_two"
+    gate1_id = "run_one:approve"
+    gate2_id = "run_two:approve"
+
+    executor =
+      Task.async(fn ->
+        Executor.run([task], %{"approve" => task},
+          target: Sykli.Target.Local,
+          workdir: tmp,
+          run_id: run1_id
+        )
+      end)
+
+    assert_receive {:publish_waiting, "secret", ^gate1_id}, 1_000
+
+    assert {:ok, _decided} =
+             Store.record_gate_decision(store, gate1_id, %{
+               "org_slug" => "false-systems",
+               "team_slug" => "platform",
+               "status" => "approved",
+               "decided_by" => "member:reviewer-y",
+               "decided_at" => @later,
+               "reason" => "Evidence reviewed"
+             })
+
+    assert {:ok, heartbeat, _session} =
+             Store.heartbeat_daemon_session(store, daemon_x["id"], %{
+               "session_id" => daemon_x["id"],
+               "status" => "available"
+             })
+
+    assert [%{"id" => ^gate1_id} = decision] = heartbeat["decisions"]
+
+    assert {:ok, [^gate1_id]} =
+             Join.apply_heartbeat_response(%{"decisions" => [decision]}, path: tmp)
+
+    assert {:ok, {:ok, [%Executor.TaskResult{status: :passed}]}} = Task.yield(executor, 1_000)
+
+    assert {:ok, run1_gate} = GateStore.get(gate1_id, path: tmp)
+    assert run1_gate.decided_at == @later
+    assert run1_gate.decided_by == "member:reviewer-y"
+
+    executor2 =
+      Task.async(fn ->
+        Executor.run([task], %{"approve" => task},
+          target: Sykli.Target.Local,
+          workdir: tmp,
+          run_id: run2_id
+        )
+      end)
+
+    assert_receive {:publish_waiting, "secret", ^gate2_id}, 1_000
+    assert {:ok, run2_gate} = GateStore.get(gate2_id, path: tmp)
+    assert run2_gate.status == "waiting"
+    assert run2_gate.node_id == "approve"
+
+    assert {:ok, reloaded_run1} = GateStore.get(gate1_id, path: tmp)
+    assert reloaded_run1.decided_at == @later
+    assert reloaded_run1.decided_by == "member:reviewer-y"
+
+    Task.shutdown(executor2, :brutal_kill)
   end
 
   test "publish validates session routing and claimed team", %{
@@ -275,12 +405,22 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
       "daemon_session_id" => session["id"],
       "id" => "gate_001",
       "run_id" => "run_001",
+      "node_id" => "approve",
       "work_item_id" => nil,
       "status" => "waiting",
       "decided_by" => nil,
       "decided_at" => nil,
       "reason" => nil
     }
+  end
+
+  defp collect_decision_received_occurrences(timeout) do
+    receive do
+      %Sykli.Occurrence{type: "ci.team.gate.decision_received"} = occurrence ->
+        [occurrence | collect_decision_received_occurrences(100)]
+    after
+      timeout -> []
+    end
   end
 
   defp tmp_dir do
@@ -303,6 +443,31 @@ defmodule Sykli.TeamCoordinator.GateSyncTest do
       restore_app_env(:test_gate_store, old_store)
       restore_app_env(:test_gate_recorder, old_pid)
     end)
+  end
+
+  defp write_session(tmp, session) do
+    assert {:ok, _session} =
+             SessionStore.write(
+               %{
+                 "coordinator" => "http://coordinator.test",
+                 "org" => "false-systems",
+                 "team" => "platform",
+                 "daemon_id" => "daemon-x",
+                 "session_id" => session["id"],
+                 "team_id" => session["team_id"],
+                 "labels" => [],
+                 "capabilities" => ["local"]
+               },
+               path: Path.join(tmp, ".sykli")
+             )
+  end
+
+  defp gate_task(name, timeout) do
+    %Sykli.Graph.Task{
+      name: name,
+      depends_on: [],
+      gate: %Sykli.Graph.Task.Gate{strategy: :env, timeout: timeout, env_var: "NEVER_SET"}
+    }
   end
 
   defp put_team_token(token) do

@@ -161,7 +161,7 @@ defmodule Sykli.GateDecision do
   def from_map(_), do: {:error, {:invalid_gate_decision, :not_object}}
 
   def validate_id(id) when is_binary(id) do
-    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/, id) do
+    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9_.: -]{0,127}$/, id) do
       :ok
     else
       {:error, {:invalid_gate_id, id}}

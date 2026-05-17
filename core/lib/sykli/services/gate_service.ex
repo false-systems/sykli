@@ -29,10 +29,9 @@ defmodule Sykli.Services.GateService do
   @spec wait_team(String.t(), keyword()) :: approval_result()
   def wait_team(id, opts \\ []) when is_binary(id) do
     timeout = Keyword.get(opts, :timeout, 3600)
-    poll_interval = Keyword.get(opts, :poll_interval_ms, 250)
     deadline = System.monotonic_time(:millisecond) + timeout * 1000
 
-    do_wait_team(id, opts, poll_interval, deadline)
+    wait_team_pubsub(id, opts, deadline)
   end
 
   defp wait_prompt(%Gate{message: message, timeout: timeout}) do
@@ -170,30 +169,68 @@ defmodule Sykli.Services.GateService do
 
   defp wait_webhook(_), do: {:denied, "webhook strategy requires webhook_url to be set"}
 
-  defp do_wait_team(id, opts, poll_interval, deadline) do
-    if System.monotonic_time(:millisecond) > deadline do
-      {:timed_out}
-    else
-      case Sykli.Gate.Store.get(id, opts) do
-        {:ok, %{status: "approved"} = gate} ->
-          {:approved, gate.decided_by || "team"}
+  defp wait_team_pubsub(id, opts, deadline) do
+    topic = "gate:" <> id
 
-        {:ok, %{status: "rejected"} = gate} ->
-          {:denied, gate.reason || "team gate rejected"}
+    case team_gate_status(id, opts) do
+      {:terminal, result} ->
+        result
 
-        {:ok, %{status: "expired"}} ->
-          {:timed_out}
+      :waiting ->
+        :ok = Phoenix.PubSub.subscribe(Sykli.PubSub, topic)
 
-        {:ok, _gate} ->
-          Process.sleep(poll_interval)
-          do_wait_team(id, opts, poll_interval, deadline)
-
-        {:error, _reason} ->
-          Process.sleep(poll_interval)
-          do_wait_team(id, opts, poll_interval, deadline)
-      end
+        try do
+          case team_gate_status(id, opts) do
+            {:terminal, result} -> result
+            :waiting -> receive_team_gate_decision(id, opts, deadline)
+          end
+        after
+          Phoenix.PubSub.unsubscribe(Sykli.PubSub, topic)
+        end
     end
   end
+
+  defp receive_team_gate_decision(id, opts, deadline) do
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:gate_decided, status, decided_by} ->
+        gate_result(status, decided_by)
+
+      _other ->
+        receive_team_gate_decision(id, opts, deadline)
+    after
+      timeout ->
+        case team_gate_status(id, opts) do
+          {:terminal, result} -> result
+          :waiting -> {:timed_out}
+        end
+    end
+  end
+
+  defp team_gate_status(id, opts) do
+    case Sykli.Gate.Store.get(id, opts) do
+      {:ok, %{status: "approved"} = gate} ->
+        {:terminal, {:approved, gate.decided_by || "team"}}
+
+      {:ok, %{status: "rejected"} = gate} ->
+        {:terminal, {:denied, gate.decided_by || gate.reason || "team gate rejected"}}
+
+      {:ok, %{status: "expired"} = gate} ->
+        {:terminal, {:denied, gate.decided_by || "team gate expired"}}
+
+      {:ok, _gate} ->
+        :waiting
+
+      {:error, _reason} ->
+        :waiting
+    end
+  end
+
+  defp gate_result("approved", decided_by), do: {:approved, decided_by || "team"}
+  defp gate_result("rejected", decided_by), do: {:denied, decided_by || "team"}
+  defp gate_result("expired", decided_by), do: {:denied, decided_by || "team gate expired"}
+  defp gate_result(_status, _decided_by), do: {:timed_out}
 
   defp parse_webhook_response(body) do
     case Jason.decode(body) do
