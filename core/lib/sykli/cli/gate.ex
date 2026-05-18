@@ -168,7 +168,10 @@ defmodule Sykli.CLI.Gate do
           IO.puts("No team gates")
         else
           IO.puts("Team gates:")
-          Enum.each(gates, fn gate -> IO.puts("  #{gate["id"]}  #{gate["status"]}") end)
+
+          Enum.each(gates, fn gate ->
+            IO.puts("  #{gate["id"]}  #{gate["status"]}  #{gate["node_id"] || "-"}")
+          end)
         end
       end)
     else

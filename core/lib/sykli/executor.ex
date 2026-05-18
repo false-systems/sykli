@@ -1323,10 +1323,9 @@ defmodule Sykli.Executor do
       summary = Sykli.TeamCoordinator.GateDecisionSummary.from_gate_decision(gate)
       encoded_summary = Sykli.TeamCoordinator.GateDecisionSummary.encode(summary)
 
-      OccPubSub.team_gate_requested(run_id, encoded_summary)
-
       case team_gate_client().publish_waiting(session, token, summary) do
         {:ok, _published} ->
+          OccPubSub.team_gate_requested(run_id, encoded_summary)
           {:ok, gate}
 
         {:error, _reason} ->
@@ -1337,6 +1336,7 @@ defmodule Sykli.Executor do
             |> Map.put("daemon_session_id", session["session_id"])
 
           :ok = Sykli.Outbox.enqueue("gates", payload, path: workdir)
+          OccPubSub.team_gate_requested(run_id, payload)
           OccPubSub.team_gate_sync_deferred(run_id, payload)
           {:ok, gate}
       end
@@ -1366,27 +1366,18 @@ defmodule Sykli.Executor do
   end
 
   defp team_gate_id(run_id, task_name) do
-    raw = "#{run_id}-#{task_name}"
+    id = "#{run_id}:#{task_name}"
 
-    sanitized =
-      ~r/[^A-Za-z0-9_.-]/
-      |> Regex.replace(raw, "-")
-      |> ensure_gate_id_prefix()
-
-    if String.length(sanitized) <= 128 do
-      sanitized
+    if String.length(id) <= 128 do
+      id
     else
       hash =
-        :crypto.hash(:sha256, raw)
+        :crypto.hash(:sha256, id)
         |> Base.encode16(case: :lower)
         |> binary_part(0, 16)
 
-      String.slice(sanitized, 0, 111) <> "-" <> hash
+      String.slice(id, 0, 111) <> "-" <> hash
     end
-  end
-
-  defp ensure_gate_id_prefix(<<first::binary-size(1), _rest::binary>> = id) do
-    if Regex.match?(~r/[A-Za-z0-9]/, first), do: id, else: "g-" <> id
   end
 
   defp team_gate_client do

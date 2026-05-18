@@ -8,7 +8,7 @@ defmodule Sykli.TeamCoordinator.GateDecisionSummary do
 
   alias Sykli.GateDecision
 
-  @fields ~w(id run_id work_item_id status decided_by decided_at reason)
+  @fields ~w(id run_id node_id work_item_id status decided_by decided_at reason)
 
   @enforce_keys [:gate]
   defstruct gate: %{}
@@ -18,6 +18,7 @@ defmodule Sykli.TeamCoordinator.GateDecisionSummary do
       gate: %{
         "id" => gate.id,
         "run_id" => gate.run_id,
+        "node_id" => gate.node_id,
         "work_item_id" => gate.work_item_id,
         "status" => gate.status,
         "decided_by" => gate.decided_by,
@@ -32,6 +33,7 @@ defmodule Sykli.TeamCoordinator.GateDecisionSummary do
          {:ok, id} <- required_string(map, "id"),
          :ok <- GateDecision.validate_id(id),
          {:ok, run_id} <- required_string(map, "run_id"),
+         :ok <- validate_optional_string(map["node_id"]),
          :ok <- validate_optional_string(map["work_item_id"]),
          :ok <- GateDecision.validate_status(map["status"]),
          :ok <- validate_optional_string(map["decided_by"]),

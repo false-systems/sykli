@@ -222,7 +222,11 @@ defmodule Sykli.CLI.GateTest do
         )
 
       assert result["data"]["source"] == "team"
-      assert result["data"]["gates"] == [%{"id" => "gate_001", "status" => "waiting"}]
+
+      assert result["data"]["gates"] == [
+               %{"id" => "gate_001", "node_id" => "approve", "status" => "waiting"}
+             ]
+
       assert_received {:list_team_gates, "secret"}
     end
   end
@@ -271,7 +275,7 @@ defmodule Sykli.CLI.GateTest do
   defmodule FakeGateClient do
     def list(_session, token, _opts) do
       send(self(), {:list_team_gates, token})
-      {:ok, [%{"id" => "gate_001", "status" => "waiting"}]}
+      {:ok, [%{"id" => "gate_001", "node_id" => "approve", "status" => "waiting"}]}
     end
 
     def record_decision(_session, token, id, decision, _opts) do

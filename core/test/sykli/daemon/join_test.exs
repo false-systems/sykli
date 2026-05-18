@@ -139,7 +139,53 @@ defmodule Sykli.Daemon.JoinTest do
       "reason" => "Reviewed"
     }
 
+    Sykli.Occurrence.PubSub.subscribe("run_001")
+
     assert {:ok, []} = Join.apply_heartbeat_response(%{"decisions" => [decision]}, path: tmp)
+    assert_receive %Sykli.Occurrence{type: "ci.team.gate.apply_failed"}, 500
+  end
+
+  test "heartbeat response drops a gate decision after repeated apply failures" do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "sykli-join-gate-retry-cap-test-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    decision = %{
+      "id" => "missing_gate_retry",
+      "run_id" => "run_001",
+      "status" => "approved",
+      "decided_by" => "member:reviewer",
+      "decided_at" => @now,
+      "reason" => "Reviewed"
+    }
+
+    Sykli.Occurrence.PubSub.subscribe("run_001")
+
+    for _ <- 1..10 do
+      assert {:ok, []} =
+               Join.apply_heartbeat_response(%{"decisions" => [decision]},
+                 path: tmp,
+                 session_id: "sess_001"
+               )
+    end
+
+    assert {:ok, ["missing_gate_retry"]} =
+             Join.apply_heartbeat_response(%{"decisions" => [decision]},
+               path: tmp,
+               session_id: "sess_001"
+             )
+
+    for _ <- 1..11 do
+      assert_receive %Sykli.Occurrence{
+                       type: "ci.team.gate.apply_failed",
+                       data: %{"id" => "missing_gate_retry"}
+                     },
+                     500
+    end
   end
 
   defmodule FakeClient do
