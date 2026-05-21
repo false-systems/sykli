@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Most recent first. Older shipped features (Phase 3B `task_type`, Phase 3C `success_criteria`, schema-as-canonical-contract, `target` removed, review nodes) are now load-bearing architecture — see §"SDKs", §"Patterns & Conventions" ("Engine vocabulary modules"), and the `ReviewPrimitive` row in §"Key Modules".
 
 - **Team Mode gate approval sync** added Phase 8 coordinator gate metadata: daemons publish waiting gate summaries, reviewers approve or reject through team-scoped CLI calls, heartbeat responses deliver decisions back to the originating daemon session, and `.sykli/outbox/gates/` replays deferred gate publishes.
+- **Typed failure semantics + contract slices** make task results self-describing for agents. The executor classifies every terminal result into a `Sykli.FailureSemantics` struct (`class`, `retryable`, `source`, `reason`, `message`; classes include `runtime_failure`, `contract_failure`, `criteria_failure`, `unsupported_target`, `timeout`, `dependency_failure`, `policy_block`, `skipped`, `missing_evidence`, `internal_error`, `unknown`) and attaches a reference-sized `Sykli.ContractSlice` (post-parse snapshot of the declared task semantics that governed the result — never logs/source/artifacts). `Sykli.AgentHints` derives next-step hints from the semantics. All three are persisted in history/occurrences and surfaced through CLI `--json` and MCP, so agents distinguish failure kinds without parsing error strings. See `docs/failure-semantics.md`, `docs/result-contract-slices.md`, and `docs/agent-readable-failure-output.md`.
 - **Team Mode run summary sync** added Phase 7 coordinator projection: joined daemons publish metadata-only run summaries to `POST /v1/runs`, the coordinator stores idempotent run records plus node/criteria/review/gate/evidence refs, and `.sykli/outbox/runs/` replays deferred publishes. No logs, source, artifacts, contract bytes, or tokens cross this boundary.
 - **Evidence requirements are versioned contract fields.** Pipeline `version: "4"` adds executable-task `evidence_required` declarations. V1 evaluates local file evidence refs on the local shell target, persists `evidence_results`, and fails missing required proof with `missing_evidence`; unsupported requirement/target combinations fail explicitly. See `docs/evidence-requirements.md`.
 - **Team Mode foundation** shipped — local work-item and gate-decision stores, `sykli run --work` association with deterministic `contract_hash`, daemon join + heartbeat protocol, self-hosted coordinator skeleton (in-memory store, bearer-token auth), work-item sync via `sykli work ... --team <team>`, deterministic review primitive dispatch (`api_breakage`), and canonical contract hashing. CLI surface: `sykli work`, `sykli gate`, `sykli coordinator`, `sykli daemon join`. The four coordination modes (Local-only / Trusted LAN mesh / Self-hosted coordinator / Hybrid) are normative — see `docs/coordination-modes.md` and the design index under §"Other docs". Phases 0–8 of `docs/team-mode-roadmap.md` are implemented; Phase 9 (Kubernetes deployment) is next.
@@ -88,6 +89,7 @@ eval/harness/run.sh --case 001 --dry-run    # preview without running
 - `docs/daemon-join-protocol.md` — outbound daemon join + heartbeat + reconnect semantics.
 - `docs/team-mode-roadmap.md` / `docs/team-mode-security.md` — phasing and security posture.
 - `docs/review-primitives.md` — review-node dispatch contract and the `review_result` shape.
+- `docs/failure-semantics.md` / `docs/result-contract-slices.md` / `docs/agent-readable-failure-output.md` — typed failure classification, the result contract slice, and how both surface to agents.
 - `docs/runtimes.md` — runtime selection priority chain.
 - `examples/` and `test_projects/` — runnable sample pipelines for manual testing.
 
@@ -178,8 +180,11 @@ Local-first is binding: anything new must work in mode 1 with no network. The co
 | `ReviewPrimitive` | `review_primitive.ex` | Deterministic dispatch for `kind: "review"` nodes. Canonical names only (e.g. `api_breakage`); hyphenated aliases are rejected. Returns `Result{review_type, status, severity, message, tool, findings, evidence}`. Unsupported primitives fail explicitly — never silently skipped. |
 | `ContractHash` | `contract_hash.ex` | `sha256:` hashes for emitted SDK JSON. Canonicalizes by re-encoding parsed JSON so formatting and SDK-side comments don't perturb the hash. Used as Team Mode contract identity. |
 | `CLI.{Coordinator,Gate,Work}` | `cli/{coordinator,gate,work}.ex` | Subcommand modules for the Team Mode CLI surface. All `--json` output flows through `CLI.JsonResponse`. |
+| `FailureSemantics` | `failure_semantics.ex` | Normalized terminal-result classification (`class`, `retryable`, `source`, `reason`, `message`). Independent of the pipeline contract schema. Produced by the executor; `to_map/1` ↔ `from_map/1` round-trip for history/occurrences. Unknown classes degrade to `:unknown`. |
+| `ContractSlice` | `contract_slice.ex` | Reference-sized post-parse snapshot of a task's declared semantics (`from_task/1`), stored with result evidence to explain *which contract governed* a result. Never carries logs/source/artifacts/raw output. |
+| `AgentHints` | `agent_hints.ex` | Derives agent next-step hints from a `FailureSemantics`. Surfaced in CLI `--json` and MCP alongside the semantics. |
 
-Other modules in `lib/sykli/`: Context, Explain, Fix, Plan, Query, Delta, MCP.Server, SCM, Services, Telemetry, HTTP, Attestation, Target.K8s.
+Other modules in `lib/sykli/`: Context, Explain, Fix, Plan, Query, Delta, Simulate, MCP.Server, SCM, Services, Telemetry, HTTP, Attestation, Target.K8s.
 
 See `docs/mcp-tools.md` for the current MCP tool surface, return shapes, composability notes, and audit recommendations.
 
@@ -192,7 +197,7 @@ See `docs/mcp-tools.md` for the current MCP tool surface, return shapes, composa
 - `:skipped` — condition not met
 - `:blocked` — dependency failed
 
-When checking for failures, always match both: `status in [:failed, :errored]`. The distinction matters for AI analysis — `:failed` gets causality analysis, `:errored` gets infrastructure diagnostics.
+When checking for failures, always match both: `status in [:failed, :errored]`. The distinction matters for AI analysis — `:failed` gets causality analysis, `:errored` gets infrastructure diagnostics. Beyond the coarse status, every terminal result also carries a `failure_semantics` (typed `class`/`retryable`/`source`) and a `contract_slice` (the declared semantics that governed it) — see the "Typed failure semantics + contract slices" entry under §"Recent changes".
 
 ### Task Schema (Three Layers)
 
@@ -263,6 +268,7 @@ Key env vars (see `cli.ex` and module docs for full details):
 - `SYKLI_SOURCE_URI` — override occurrence `source` field (default: `"sykli"`)
 - `SYKLI_DRAIN_TIMEOUT_MS` — graceful shutdown drain timeout (default: 30000)
 - `SYKLI_K8S_NAMESPACE` — K8s target namespace (default: `"sykli"`)
+- `SYKLI_TEAM_TOKEN` — bearer token for Team Mode coordinator sync (work commands, daemon join, run-summary publish). Read from env or CLI `--token`; masked as a secret in occurrence persistence/webhooks — never log or persist it
 - `SYKLI_GITHUB_APP_ID` — GitHub App ID for the webhook receiver
 - `SYKLI_GITHUB_APP_PRIVATE_KEY` — Path to PEM file (or PEM literal) for App JWT signing
 - `SYKLI_GITHUB_WEBHOOK_SECRET` — HMAC secret for webhook signature verification
