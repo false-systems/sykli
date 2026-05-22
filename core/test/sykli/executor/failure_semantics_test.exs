@@ -62,7 +62,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
   test "timeout is classified distinctly from runtime failure", %{workdir: workdir} do
     task = task("slow", command: "sleep 10")
 
-    assert {:error, [%TaskResult{status: :failed, failure_semantics: semantics}]} =
+    assert {:error, [%TaskResult{status: :errored, failure_semantics: semantics}]} =
              Executor.run([task], graph([task]), target: TimeoutTarget, workdir: workdir)
 
     assert semantics.class == :timeout
@@ -78,7 +78,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
     assert {:error,
             [
               %TaskResult{
-                status: :failed,
+                status: :errored,
                 duration_ms: duration_ms,
                 error: %Error{code: "task_timeout"},
                 failure_semantics: semantics

@@ -1104,7 +1104,7 @@ defmodule Sykli.Executor do
 
             {:error, reason} ->
               maybe_github_status(name, "failure")
-              TaskRunResult.error(reason)
+              task_error_result(reason)
           end
         after
           # Always stop services, even on failure
@@ -1116,6 +1116,11 @@ defmodule Sykli.Executor do
         TaskRunResult.error({:service_start_failed, reason})
     end
   end
+
+  defp task_error_result(%Sykli.Error{code: "task_timeout"} = reason),
+    do: TaskRunResult.errored(reason)
+
+  defp task_error_result(reason), do: TaskRunResult.error(reason)
 
   defp evaluate_success_criteria(task, target, state, run_opts, exit_code, output, duration_ms) do
     criteria = Sykli.Graph.Task.success_criteria(task)

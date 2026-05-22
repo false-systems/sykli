@@ -1,0 +1,31 @@
+{
+  "task_type": [
+    "build",
+    "test",
+    "lint",
+    "format",
+    "scan",
+    "package",
+    "publish",
+    "deploy",
+    "migrate",
+    "generate",
+    "verify",
+    "cleanup"
+  ],
+  "success_criteria": [
+    "exit_code",
+    "file_exists",
+    "file_non_empty"
+  ],
+  "evidence_required": [
+    "file",
+    "log",
+    "attestation",
+    "occurrence",
+    "metric",
+    "test_report",
+    "artifact_ref",
+    "custom"
+  ]
+}

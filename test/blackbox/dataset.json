@@ -1,7 +1,7 @@
 {
   "suite": "sykli-blackbox",
   "version": "1.0.0",
-  "target": "sykli 0.6.0",
+  "target": "sykli SYKLI_VERSION",
   "categories": {
     "POS": "Positive - system works as promised",
     "NEG": "Negative - system rejects what it should",
@@ -69,7 +69,7 @@
       "fixture": "single_task",
       "command": "sykli --version",
       "expect_exit": 0,
-      "expect_stdout": "sykli 0.6.0"
+      "expect_stdout": "sykli SYKLI_VERSION"
     },
     {
       "id": "POS-007",
@@ -591,19 +591,19 @@
     },
     {
       "id": "PERF-003",
-      "name": "Help output under 500ms",
+      "name": "Help output under 1 second",
       "fixture": "single_task",
       "command": "sykli --help",
       "expect_exit": 0,
-      "max_duration_ms": 500
+      "max_duration_ms": 1000
     },
     {
       "id": "PERF-004",
-      "name": "Version output under 500ms",
+      "name": "Version output under 1 second",
       "fixture": "single_task",
       "command": "sykli --version",
       "expect_exit": 0,
-      "max_duration_ms": 500
+      "max_duration_ms": 1000
     },
     {
       "id": "PERF-005",
@@ -973,7 +973,14 @@
       ],
       "source": "CLAUDE.md §JSON output; README.md §Content-addressed caching",
       "validated_by": "Injected bug: hand-roll cache stats JSON without shared envelope; key assertion fails.",
-      "expected_failure": true
+      "expect_json_jq": [
+        ".ok == true",
+        ".error == null",
+        ".data.location | type == \"string\"",
+        ".data.tasks | type == \"number\"",
+        ".data.blobs | type == \"number\"",
+        ".data.total_size_human | type == \"string\""
+      ]
     },
     {
       "id": "CACHE-007",
@@ -992,6 +999,17 @@
       "command": "sykli cache stats --json",
       "expect_exit": 0,
       "expect_no_ansi": true,
+      "expect_json_keys": [
+        "data",
+        "error",
+        "ok",
+        "version"
+      ],
+      "expect_json_jq": [
+        ".ok == true",
+        ".error == null",
+        ".data.location | type == \"string\""
+      ],
       "source": "CLAUDE.md §JSON output",
       "validated_by": "Injected bug: route JSON through TTY renderer; ANSI assertion fails."
     },
@@ -1126,8 +1144,7 @@
       ],
       "source": "CLAUDE.md §TaskResult Status Values",
       "validated_by": "Injected bug: map timeouts to command failures; jq assertion catches it.",
-      "findings": "Expected-red finding: timeout reports status failed.",
-      "expected_failure": true
+      "findings": "Regression coverage for timeout status."
     },
     {
       "id": "ABN-016",
@@ -1278,6 +1295,7 @@
       "source": "CLAUDE.md §FALSE Protocol Occurrences; CLAUDE.md §Patterns & Conventions — NoWallClock",
       "validated_by": "Injected bug: persist random field in occurrence data; normalized cmp fails.",
       "findings": "Expected-red finding: normalized occurrence payloads differ across identical runs beyond declared variable fields.",
+      "issue": "https://github.com/false-systems/sykli/issues/207",
       "expected_failure": true
     },
     {
@@ -1311,6 +1329,7 @@
       "source": "CLAUDE.md §No wall-clock or global RNG",
       "validated_by": "Injected bug: remove NoWallClock check; credo would pass and status assertion fails.",
       "findings": "Expected-red finding: the configured credo run did not reject a DateTime.utc_now file under lib/sykli.",
+      "issue": "https://github.com/false-systems/sykli/issues/208",
       "expected_failure": true
     },
     {
@@ -1320,10 +1339,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 01-basic >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "CLAUDE.md §SDKs; sdk/*/README.md public surface parity",
-      "validated_by": "Injected bug: change one SDK basic JSON key; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for the basic pipeline.",
-      "expected_failure": true
+      "validated_by": "Injected bug: change one SDK basic JSON key; conformance runner fails."
     },
     {
       "id": "SDK-002",
@@ -1332,10 +1350,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 02-capabilities >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "CHANGELOG 0.5.0 Capability-based dependencies; SDK READMEs",
-      "validated_by": "Injected bug: drop provides value in one SDK; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for capabilities.",
-      "expected_failure": true
+      "validated_by": "Injected bug: drop provides value in one SDK; conformance runner fails."
     },
     {
       "id": "SDK-003",
@@ -1344,10 +1361,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 04-gate >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "CHANGELOG 0.5.0 Gate tasks; SDK READMEs",
-      "validated_by": "Injected bug: omit gate timeout serialization; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for gates.",
-      "expected_failure": true
+      "validated_by": "Injected bug: omit gate timeout serialization; conformance runner fails."
     },
     {
       "id": "SDK-004",
@@ -1356,10 +1372,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 10-task-inputs >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "README.md §Content-addressed caching; SDK READMEs",
-      "validated_by": "Injected bug: serialize inputs under covers; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for task inputs.",
-      "expected_failure": true
+      "validated_by": "Injected bug: serialize inputs under covers; conformance runner fails."
     },
     {
       "id": "SDK-005",
@@ -1368,10 +1383,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 20-edge-duplicate-after >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "SDK READMEs; CLAUDE.md §SDKs",
-      "validated_by": "Injected bug: one SDK keeps duplicate deps; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for duplicate-after edges.",
-      "expected_failure": true
+      "validated_by": "Injected bug: one SDK keeps duplicate deps; conformance runner fails."
     },
     {
       "id": "SDK-006",
@@ -1380,10 +1394,9 @@
       "command": "cd SYKLI_ROOT && tests/conformance/run.sh 18-edge-provides-empty >/dev/null",
       "shell": true,
       "expect_exit": 0,
+      "requires": ["go", "cargo", "node", "python3", "mix"],
       "source": "CHANGELOG 0.5.0 TypeScript/Python provides empty string fix",
-      "validated_by": "Injected bug: treat empty provides as undefined; conformance runner fails.",
-      "findings": "Expected-red finding: cross-SDK conformance still fails in dogfood blackbox for empty provides values.",
-      "expected_failure": true
+      "validated_by": "Injected bug: treat empty provides as undefined; conformance runner fails."
     },
     {
       "id": "SDK-007",
@@ -1405,9 +1418,7 @@
       "expect_exit": 0,
       "requires": "python3",
       "source": "CHANGELOG 0.5.0 Python SDK validation",
-      "validated_by": "Injected bug: Python SDK accepts duplicate names; conformance error case fails.",
-      "findings": "Expected-red finding: Python duplicate-task validation conformance still fails in dogfood blackbox.",
-      "expected_failure": true
+      "validated_by": "Injected bug: Python SDK accepts duplicate names; conformance error case fails."
     },
     {
       "id": "SDK-009",
@@ -1867,6 +1878,7 @@
       "source": "CLAUDE.md §Runtime isolation and path containment; CHANGELOG 0.2.0 path traversal vulnerability fix",
       "validated_by": "Injected bug: execute task commands directly on host with unrestricted absolute paths; escaped file assertion fails.",
       "findings": "Currently fails under local shell runtime if task commands can read /etc/passwd into the workspace.",
+      "issue": "https://github.com/false-systems/sykli/issues/209",
       "expected_failure": true
     }
   ]

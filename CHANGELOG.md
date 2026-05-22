@@ -9,10 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Monster Phase A CI foundation.** CI now runs the full evaluation pyramid:
+  Credo, black-box CLI tests, cross-SDK conformance, and merge-to-main oracle
+  evals. Local developers can reproduce the same path with `cd core && mix verify`
+  or `make verify`.
+- **Vocabulary drift guard.** `schemas/vocabulary.json` is now the canonical
+  vocabulary manifest, `scripts/gen-vocab.py --check` verifies committed
+  engine/schema/SDK copies against it in local verify and CI, and the task-type
+  conformance case now exercises every supported value.
 - **TypeScript `k8sRaw` object overload.** Advanced Kubernetes fields can now
   be passed as a structured object instead of an escaped JSON string, e.g.
   `.k8sRaw({ nodeSelector: { gpu: "true" } })`.
 - **SDK contract cleanup release note.** `docs/releases/0.6.2-contract-cleanup.md` summarizes the Phase 1 through Phase 2C contract cleanup: canonical schema, schema-validated conformance fixtures, `version` semantics, `target` removal, TypeScript K8sOptions narrowing, Python conformance interpreter detection, and experimental review-node support across SDKs.
+
+### Changed
+
+- **Black-box expected-red handling is now issue-backed.** The harness fails an
+  `expected_failure` case that lacks an `issue` URL, reads the expected CLI
+  version from `VERSION`, supports per-case toolchain `requires`, and retires
+  stale SDK expected-red flags.
+- **Timeouts classify as infrastructure errors.** Task timeouts now surface as
+  `:errored` results instead of content failures.
+
+### Fixed
+
+- **`sykli cache stats --json` now returns a JSON envelope.** The cache stats
+  command supports `--json` through `Sykli.CLI.JsonResponse`, and the black-box
+  suite asserts the JSON shape instead of only checking for absent ANSI output.
+- **Black-box version checks no longer drift.** POS-006 substitutes the root
+  `VERSION` value instead of hardcoding an old release string.
 
 ### Removed
 

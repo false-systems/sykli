@@ -5,6 +5,7 @@
 #
 # Additional Phase 2.5 predicates are backward-compatible:
 #   expected_failure: true                 pass only if the case exposes a known contract gap
+#                                             and carries an issue reference
 #   expect_stdout_not_contains: ["text"]   fail if combined stdout/stderr contains any string
 #   expect_no_ansi: true                   fail if stdout/stderr contains ANSI CSI escapes
 #   expect_json_keys: ["ok", ...]          require exact top-level keys in JSON output
@@ -15,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SYKLI_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SYKLI_BIN="${SYKLI_BIN:-$SYKLI_ROOT/core/sykli}"
+SYKLI_VERSION="$(tr -d '[:space:]' < "$SYKLI_ROOT/VERSION")"
 DATASET="$SCRIPT_DIR/dataset.json"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
@@ -72,12 +74,14 @@ if ! command -v perl &>/dev/null; then
   exit 1
 fi
 
-# Portable millisecond timestamp
+# Portable monotonic millisecond timestamp for duration checks.
 now_ms() {
-  if date +%s%3N 2>/dev/null | grep -qE '^[0-9]{13,}$'; then
+  if command -v ruby &>/dev/null; then
+    ruby -e 'puts (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000).to_i'
+  elif command -v perl &>/dev/null && perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'clock_gettime(CLOCK_MONOTONIC)' >/dev/null 2>&1; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%d\n", clock_gettime(CLOCK_MONOTONIC) * 1000'
+  elif date +%s%3N 2>/dev/null | grep -qE '^[0-9]{13,}$'; then
     date +%s%3N
-  elif command -v perl &>/dev/null; then
-    perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'
   else
     echo $(( $(date +%s) * 1000 ))
   fi
@@ -131,10 +135,32 @@ setup_fixture() {
 
 check_requires() {
   local requires="$1"
-  if [ -z "$requires" ] || [ "$requires" = "null" ]; then
+  if [ -z "$requires" ] || [ "$requires" = "null" ] || [ "$requires" = "[]" ]; then
     return 0
   fi
+
+  local tools
+  if tools=$(echo "$requires" | jq -er 'if type == "array" then .[] elif type == "string" then . else empty end' 2>/dev/null); then
+    while IFS= read -r tool; do
+      if [ -n "$tool" ] && ! command -v "$tool" &>/dev/null; then
+        return 1
+      fi
+    done <<< "$tools"
+    return 0
+  fi
+
   command -v "$requires" &>/dev/null
+}
+
+format_requires() {
+  local requires="$1"
+  if [ -z "$requires" ] || [ "$requires" = "null" ] || [ "$requires" = "[]" ]; then
+    echo ""
+  elif echo "$requires" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "$requires" | jq -r 'join(",")'
+  else
+    echo "$requires"
+  fi
 }
 
 strip_ansi() {
@@ -160,6 +186,7 @@ run_test() {
   local expect_json_keys="${16}"
   local expect_json_jq="${17}"
   local expected_failure="${18}"
+  local issue="${19}"
 
   TOTAL=$((TOTAL + 1))
 
@@ -179,7 +206,7 @@ run_test() {
   # Check prerequisites
   if ! check_requires "$requires"; then
     SKIP=$((SKIP + 1))
-    printf "  ${YELLOW}○ %-10s${RESET} %s ${DIM}(requires: %s)${RESET}\n" "$id" "$name" "$requires"
+    printf "  ${YELLOW}○ %-10s${RESET} %s ${DIM}(requires: %s)${RESET}\n" "$id" "$name" "$(format_requires "$requires")"
     return 0
   fi
 
@@ -195,6 +222,7 @@ run_test() {
 
   # Replace 'sykli' in command with actual binary path
   local full_cmd="${cmd//SYKLI_ROOT/$SYKLI_ROOT}"
+  full_cmd="${full_cmd//SYKLI_VERSION/$SYKLI_VERSION}"
   full_cmd=$(SYKLI_BIN_REPL="$SYKLI_BIN" perl -pe 's/(?<![A-Za-z0-9_.\/-])sykli(?![A-Za-z0-9_.-])/$ENV{SYKLI_BIN_REPL}/g' <<< "$full_cmd")
 
   # Execute
@@ -233,6 +261,7 @@ $stderr_clean"
 
   # Stdout contains exact string
   if [ $failed -eq 0 ] && [ -n "$expect_stdout" ] && [ "$expect_stdout" != "null" ]; then
+    expect_stdout="${expect_stdout//SYKLI_VERSION/$SYKLI_VERSION}"
     if ! echo "$all_output" | grep -qF "$expect_stdout"; then
       failed=1
       fail_reason="stdout missing: '$expect_stdout'"
@@ -392,6 +421,16 @@ $stderr_clean"
   fi
 
   if [ "$expected_failure" = "true" ]; then
+    if [ -z "$issue" ]; then
+      FAIL=$((FAIL + 1))
+      FAILURES+=("$id: expected_failure cases must include an issue reference")
+      printf "  ${RED}✗ %-10s${RESET} %s${duration_str}\n" "$id" "$name"
+      if [ $VERBOSE -eq 1 ]; then
+        echo -e "    ${DIM}Reason: expected_failure cases must include an issue reference${RESET}"
+      fi
+      return 0
+    fi
+
     if [ $failed -eq 1 ]; then
       XFAIL=$((XFAIL + 1))
       EXPECTED_FAILURES+=("$id: $fail_reason")
@@ -447,7 +486,7 @@ for category in POS NEG SYS INT PERF LOAD ABN CACHE JSON DET SDK UI GH WORK GATE
     expect_json=$(echo "$case_json" | jq -c '.expect_json // empty')
     expect_json_contains=$(echo "$case_json" | jq -c '.expect_json_contains // empty')
     max_duration_ms=$(echo "$case_json" | jq -r '.max_duration_ms // empty')
-    requires=$(echo "$case_json" | jq -r '.requires // empty')
+    requires=$(echo "$case_json" | jq -c '.requires // empty')
     use_shell=$(echo "$case_json" | jq -r '.shell // empty')
     expect_dir=$(echo "$case_json" | jq -r '.expect_dir // empty')
     expect_stdout_not_contains=$(echo "$case_json" | jq -c '.expect_stdout_not_contains // empty')
@@ -455,13 +494,14 @@ for category in POS NEG SYS INT PERF LOAD ABN CACHE JSON DET SDK UI GH WORK GATE
     expect_json_keys=$(echo "$case_json" | jq -c '.expect_json_keys // empty')
     expect_json_jq=$(echo "$case_json" | jq -c '.expect_json_jq // empty')
     expected_failure=$(echo "$case_json" | jq -r '.expected_failure // empty')
+    issue=$(echo "$case_json" | jq -r '.issue // empty')
 
     run_test "$id" "$name" "$fixture" "$cmd" "$expect_exit" \
       "$expect_stdout" "$expect_stdout_contains" "$expect_json" \
       "$expect_json_contains" "$max_duration_ms" "$requires" \
       "$use_shell" "$expect_dir" "$expect_stdout_not_contains" \
       "$expect_no_ansi" "$expect_json_keys" "$expect_json_jq" \
-      "$expected_failure"
+      "$expected_failure" "$issue"
   done <<< "$cases"
 
   echo ""
