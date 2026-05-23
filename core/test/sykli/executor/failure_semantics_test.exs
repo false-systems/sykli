@@ -93,8 +93,12 @@ defmodule Sykli.Executor.FailureSemanticsTest do
 
     elapsed_ms = System.monotonic_time(:millisecond) - start_time
 
-    assert duration_ms < 1_000
-    assert elapsed_ms < 1_000
+    # The 100ms timeout must fire well before the 30s command completes.
+    # Bounds are generous (vs the 30s command) so slow/loaded CI runners don't
+    # flake on setup/teardown overhead, while still proving the executor
+    # returned early instead of waiting for `sleep 30`.
+    assert duration_ms < 5_000
+    assert elapsed_ms < 10_000
     assert semantics.class == :timeout
     assert semantics.reason == "task_timeout"
     assert semantics.details["code"] == "task_timeout"
