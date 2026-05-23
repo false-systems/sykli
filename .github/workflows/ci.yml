@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Run on PRs targeting main and on stacked PRs targeting a feature branch
+    # (the Monster PR-train stacks phases on feature/ branches).
+    branches: [main, 'feature/**']
 
 jobs:
   core:
