@@ -54,8 +54,17 @@ defmodule Sykli.Mesh.Transport.Sim.EventQueueTest do
   end
 
   property "repeated pop returns entries in ascending {at_ms, seq} order" do
+    # seqs must be unique so {at_ms, seq} is a total order (the property below
+    # compares against a full-triple sort). Draw from a wide range with a bounded
+    # length: the default StreamData.integer() generates from a tiny range at low
+    # generation sizes, so uniq_list_of exhausts its duplicate-retry limit and
+    # raises StreamData.TooManyDuplicatesError (seed-dependent flake).
     check all(
-            seqs <- StreamData.uniq_list_of(StreamData.integer()),
+            seqs <-
+              StreamData.uniq_list_of(
+                StreamData.integer(-1_000_000..1_000_000),
+                max_length: 50
+              ),
             at_times <-
               StreamData.list_of(StreamData.non_negative_integer(), length: length(seqs)),
             events <- StreamData.list_of(StreamData.term(), length: length(seqs))
