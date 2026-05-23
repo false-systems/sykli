@@ -360,6 +360,15 @@ run_negative_case() {
 echo "SDK Conformance Tests"
 echo ""
 
+# Warm up the Elixir SDK once. The first `mix run` compiles the project and
+# would otherwise emit build output instead of clean JSON on stdout, failing
+# only the first Elixir case on a cold checkout / CI (other SDKs send build
+# output to stderr, which is discarded). Done before any case so single-case
+# runs are covered too.
+if command -v mix >/dev/null 2>&1 && [[ -z "$FILTER_SDK" || "$FILTER_SDK" == "elixir" ]]; then
+  (cd "$ROOT/sdk/elixir" && mix compile >/dev/null 2>&1) || true
+fi
+
 if [[ -n "$FILTER_CASE" ]]; then
   if [[ "$FILTER_CASE" == err-* ]]; then
     run_negative_case "$FILTER_CASE"
