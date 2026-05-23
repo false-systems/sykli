@@ -1289,12 +1289,12 @@
       "id": "DET-003",
       "name": "Occurrence shape is stable after stripping variable fields",
       "fixture": "single_task",
-      "command": "mkdir -p r1 r2 && cp sykli.exs r1/ && cp sykli.exs r2/ && (cd r1 && sykli >/dev/null) && (cd r2 && sykli >/dev/null) && jq 'del(.id,.timestamp,.context.labels[\"sykli.run_id\"],.data.tasks[].duration_ms,.data.duration_ms,.history.duration_ms,.history.steps[].duration_ms,.history.steps[].timestamp,.data.tasks[].log)' r1/.sykli/occurrence.json > a.json && jq 'del(.id,.timestamp,.context.labels[\"sykli.run_id\"],.data.tasks[].duration_ms,.data.duration_ms,.history.duration_ms,.history.steps[].duration_ms,.history.steps[].timestamp,.data.tasks[].log)' r2/.sykli/occurrence.json > b.json && cmp -s a.json b.json",
+      "command": "mkdir -p r1 r2 && cp sykli.exs r1/ && cp sykli.exs r2/ && (cd r1 && sykli >/dev/null) && (cd r2 && sykli >/dev/null) && jq 'del(.id,.timestamp,.context.labels[\"sykli.run_id\"],.data.tasks[].duration_ms,.data.duration_ms,.history.duration_ms,.history.steps[].duration_ms,.history.steps[].timestamp) | .data.tasks |= map(if .log? then .log |= sub(\"logs/[^/]+/\";\"logs/RUN_ID/\") else . end)' r1/.sykli/occurrence.json > a.json && jq 'del(.id,.timestamp,.context.labels[\"sykli.run_id\"],.data.tasks[].duration_ms,.data.duration_ms,.history.duration_ms,.history.steps[].duration_ms,.history.steps[].timestamp) | .data.tasks |= map(if .log? then .log |= sub(\"logs/[^/]+/\";\"logs/RUN_ID/\") else . end)' r2/.sykli/occurrence.json > b.json && cmp -s a.json b.json",
       "shell": true,
       "expect_exit": 0,
       "source": "CLAUDE.md §FALSE Protocol Occurrences; CLAUDE.md §Patterns & Conventions — NoWallClock",
-      "validated_by": "Injected bug: persist a random field in occurrence data; the fresh-state cmp catches it.",
-      "findings": "Determinism holds for identical input from clean state. Each run uses a fresh .sykli/ (so run 2 is not a cache hit) and the run_id-bearing log path is stripped alongside id/run_id/timestamps."
+      "validated_by": "Injected bug: persist a random field in occurrence data; the fresh-workspace cmp catches it.",
+      "findings": "Determinism holds for identical input from clean state. Each run uses a fresh workspace (distinct cache key, so neither is a cache hit); only the variable run-id segment of the log path is normalized, keeping the rest of the log evidence path under comparison."
     },
     {
       "id": "DET-004",
