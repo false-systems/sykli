@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Most recent first. Older shipped features (Phase 3B `task_type`, Phase 3C `success_criteria`, schema-as-canonical-contract, `target` removed, review nodes) are now load-bearing architecture — see §"SDKs", §"Patterns & Conventions" ("Engine vocabulary modules"), and the `ReviewPrimitive` row in §"Key Modules".
 
+- **Monster Phase A CI foundation** wires the full evaluation pyramid into CI:
+  Credo, black-box CLI tests, cross-SDK conformance, and merge-to-main oracle
+  evals. `mix verify` / `make verify` run the same local path. Black-box
+  expected-red cases now require issue URLs, stale SDK expected-red flags are
+  retired, `cache stats --json` uses the shared JSON envelope, timeouts classify
+  as `:errored`, and `schemas/vocabulary.json` plus
+  `scripts/gen-vocab.py --check` guard contract vocabulary across engine,
+  schema, SDKs, and conformance fixtures.
 - **Team Mode gate approval sync** added Phase 8 coordinator gate metadata: daemons publish waiting gate summaries, reviewers approve or reject through team-scoped CLI calls, heartbeat responses deliver decisions back to the originating daemon session, and `.sykli/outbox/gates/` replays deferred gate publishes.
 - **Typed failure semantics + contract slices** make task results self-describing for agents. The executor classifies every terminal result into a `Sykli.FailureSemantics` struct (`class`, `retryable`, `source`, `reason`, `message`; classes include `runtime_failure`, `contract_failure`, `criteria_failure`, `unsupported_target`, `timeout`, `dependency_failure`, `policy_block`, `skipped`, `missing_evidence`, `internal_error`, `unknown`) and attaches a reference-sized `Sykli.ContractSlice` (post-parse snapshot of the declared task semantics that governed the result — never logs/source/artifacts). `Sykli.AgentHints` derives next-step hints from the semantics. All three are persisted in history/occurrences and surfaced through CLI `--json` and MCP, so agents distinguish failure kinds without parsing error strings. See `docs/failure-semantics.md`, `docs/result-contract-slices.md`, and `docs/agent-readable-failure-output.md`.
 - **Team Mode run summary sync** added Phase 7 coordinator projection: joined daemons publish metadata-only run summaries to `POST /v1/runs`, the coordinator stores idempotent run records plus node/criteria/review/gate/evidence refs, and `.sykli/outbox/runs/` replays deferred publishes. No logs, source, artifacts, contract bytes, or tokens cross this boundary.
@@ -35,9 +43,12 @@ mix test.integration      # alias: mix test --only integration
 mix format                # format code
 mix credo                 # lint (includes custom NoWallClock check)
 mix escript.build         # dev binary → core/sykli (escript, requires Erlang on PATH)
+mix verify                # local CI pyramid: format, test, credo, build, blackbox, conformance
 mix release sykli         # production release via Burrito (self-contained, see RELEASE.md)
 ./sykli --help            # smoke test the binary
 ```
+
+From the repository root, `make verify` runs the same `core` alias.
 
 SDK conformance tests (validates SDK JSON output against expected cases):
 ```bash
@@ -246,7 +257,7 @@ Five SDKs in `sdk/` — Go, Rust, TypeScript, Elixir, Python. All support the fu
 
 **Wire-format version auto-detect** (consistent across all five SDKs): `"4"` if any executable task uses `evidence_required`; else `"3"` if any executable task uses `task_type` or `success_criteria`; else `"2"` if any container/mount/dir/cache resource is used; else `"1"`. Newer versions are supersets of older ones — when v4/v3 features combine with resources, the pipeline emits the newer version *and* a populated `resources` block.
 
-**SDK ↔ engine boundary.** Each SDK is a separate project (`sdk/<lang>/`) with its own dependency tree. SDKs cannot import engine modules — the engine's `Sykli.TaskType` is unreachable from the Elixir SDK at `sdk/elixir/`. Each SDK carries its own copy of shared vocabulary (the 12 task_type values, etc.). When the canonical contract gains a value, update *every* SDK's local copy plus the schema plus `Sykli.TaskType`.
+**SDK ↔ engine boundary.** Each SDK is a separate project (`sdk/<lang>/`) with its own dependency tree. SDKs cannot import engine modules — the engine's `Sykli.TaskType` is unreachable from the Elixir SDK at `sdk/elixir/`. Shared vocabulary is owned by `schemas/vocabulary.json` and checked by `scripts/gen-vocab.py --check`. When the canonical contract gains a value, update the manifest, every SDK's local copy, the schema, `Sykli.TaskType`, and the conformance fixtures.
 
 SDK detection order: `.go` → `.rs` → `.exs` → `.ts` → `.py`
 

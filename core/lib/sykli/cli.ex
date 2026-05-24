@@ -3092,6 +3092,14 @@ defmodule Sykli.CLI do
 
   # ----- CACHE SUBCOMMANDS -----
 
+  defp handle_cache(["stats", "--json"]) do
+    output_cache_stats_json()
+  end
+
+  defp handle_cache(["--json", "stats"]) do
+    output_cache_stats_json()
+  end
+
   defp handle_cache(["stats"]) do
     stats = Sykli.Cache.stats()
 
@@ -3140,6 +3148,20 @@ defmodule Sykli.CLI do
     )
 
     IO.puts("  path                  Print cache directory path")
+  end
+
+  defp output_cache_stats_json do
+    stats = Sykli.Cache.stats()
+
+    IO.puts(
+      JsonResponse.ok(%{
+        location: Sykli.Cache.get_cache_dir(),
+        tasks: stats.meta_count,
+        blobs: stats.blob_count,
+        total_size_bytes: stats.total_size,
+        total_size_human: stats.total_size_human
+      })
+    )
   end
 
   # Parse duration like "7d", "24h", "30m", "60s" into seconds

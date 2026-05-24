@@ -1,16 +1,17 @@
 {
   "version": "3",
   "tasks": [
-    {
-      "name": "build",
-      "command": "go build ./...",
-      "task_type": "build"
-    },
-    {
-      "name": "test",
-      "command": "go test ./...",
-      "task_type": "test",
-      "depends_on": ["build"]
-    }
+    { "name": "build", "command": "echo build", "task_type": "build" },
+    { "name": "test", "command": "echo test", "task_type": "test", "depends_on": ["build"] },
+    { "name": "lint", "command": "echo lint", "task_type": "lint", "depends_on": ["test"] },
+    { "name": "format", "command": "echo format", "task_type": "format", "depends_on": ["lint"] },
+    { "name": "scan", "command": "echo scan", "task_type": "scan", "depends_on": ["format"] },
+    { "name": "package", "command": "echo package", "task_type": "package", "depends_on": ["scan"] },
+    { "name": "publish", "command": "echo publish", "task_type": "publish", "depends_on": ["package"] },
+    { "name": "deploy", "command": "echo deploy", "task_type": "deploy", "depends_on": ["publish"] },
+    { "name": "migrate", "command": "echo migrate", "task_type": "migrate", "depends_on": ["deploy"] },
+    { "name": "generate", "command": "echo generate", "task_type": "generate", "depends_on": ["migrate"] },
+    { "name": "verify", "command": "echo verify", "task_type": "verify", "depends_on": ["generate"] },
+    { "name": "cleanup", "command": "echo cleanup", "task_type": "cleanup", "depends_on": ["verify"] }
   ]
 }

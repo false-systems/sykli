@@ -62,7 +62,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
   test "timeout is classified distinctly from runtime failure", %{workdir: workdir} do
     task = task("slow", command: "sleep 10")
 
-    assert {:error, [%TaskResult{status: :failed, failure_semantics: semantics}]} =
+    assert {:error, [%TaskResult{status: :errored, failure_semantics: semantics}]} =
              Executor.run([task], graph([task]), target: TimeoutTarget, workdir: workdir)
 
     assert semantics.class == :timeout
@@ -78,7 +78,7 @@ defmodule Sykli.Executor.FailureSemanticsTest do
     assert {:error,
             [
               %TaskResult{
-                status: :failed,
+                status: :errored,
                 duration_ms: duration_ms,
                 error: %Error{code: "task_timeout"},
                 failure_semantics: semantics
@@ -93,8 +93,12 @@ defmodule Sykli.Executor.FailureSemanticsTest do
 
     elapsed_ms = System.monotonic_time(:millisecond) - start_time
 
-    assert duration_ms < 1_000
-    assert elapsed_ms < 1_000
+    # The 100ms timeout must fire well before the 30s command completes.
+    # Bounds are generous (vs the 30s command) so slow/loaded CI runners don't
+    # flake on setup/teardown overhead, while still proving the executor
+    # returned early instead of waiting for `sleep 30`.
+    assert duration_ms < 5_000
+    assert elapsed_ms < 10_000
     assert semantics.class == :timeout
     assert semantics.reason == "task_timeout"
     assert semantics.details["code"] == "task_timeout"

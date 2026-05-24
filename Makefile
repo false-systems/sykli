@@ -1,6 +1,6 @@
 VERSION ?= $(shell tr -d '[:space:]' < VERSION)
 
-.PHONY: release publish dry-run check-version bump-version test-release-scripts
+.PHONY: release publish dry-run check-version bump-version test-release-scripts verify
 
 release:
 	./scripts/release.sh $(VERSION)
@@ -19,3 +19,6 @@ bump-version:
 
 test-release-scripts:
 	./tests/release/run.sh
+
+verify:
+	cd core && mix verify

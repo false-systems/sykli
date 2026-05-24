@@ -30,7 +30,16 @@ defmodule Sykli.MixProject do
     [
       "test.docker": ["test --only docker"],
       "test.integration": ["test --only integration"],
-      "test.podman": ["test --only podman"]
+      "test.podman": ["test --only podman"],
+      verify: [
+        "format --check-formatted",
+        "test",
+        "credo",
+        "escript.build",
+        "cmd python3 ../scripts/gen-vocab.py --check",
+        "cmd ../test/blackbox/run.sh",
+        "cmd ../tests/conformance/run.sh"
+      ]
     ]
   end
 
