@@ -10,11 +10,27 @@ defmodule Sykli.ContractHash do
   @doc "Computes a sha256-prefixed hash for emitted contract JSON."
   def from_json(json) when is_binary(json) do
     with {:ok, decoded} <- Jason.decode(json) do
-      {:ok, from_bytes(Jason.encode!(decoded))}
+      {:ok, from_bytes(Jason.encode!(canonicalize(decoded)))}
     else
       {:error, reason} -> {:error, {:contract_hash_failed, :emitted_json, reason}}
     end
   end
+
+  # Canonicalize by recursively sorting object keys so the hash is independent of
+  # map iteration order. Elixir preserves insertion order only for small maps;
+  # maps with >32 keys switch to a hashed representation whose iteration order is
+  # implementation-defined and not guaranteed stable across OTP versions. Two
+  # semantically-identical contracts emitted with different key orders must hash
+  # identically. Jason.OrderedObject encodes keys in the exact order we provide.
+  defp canonicalize(map) when is_map(map) do
+    map
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
+  defp canonicalize(scalar), do: scalar
 
   @doc "Computes a sha256-prefixed hash for raw bytes."
   def from_bytes(bytes) when is_binary(bytes) do

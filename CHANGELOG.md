@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale SDK expected-red flags.
 - **Timeouts classify as infrastructure errors.** Task timeouts now surface as
   `:errored` results instead of content failures.
+- **Monster Phase B — `NoWallClock` determinism guard widened.** The custom Credo
+  check now also covers pure contract and output-shaping transforms (graph
+  parsing/validation, the vocabulary modules, contract hashing, and occurrence
+  serialization), not just simulator transport. Time-stamping engine modules
+  (occurrence factory, run history, cache, OIDC, coordinator) stay intentionally
+  exempt — a CI engine records real time; output determinism is guarded by tests.
+- **DET-003 black-box case corrected.** It now asserts occurrence determinism from
+  clean state (two fresh workspaces) and strips the run_id-bearing log path. The
+  engine was already deterministic; the prior case reused `.sykli/` (so the second
+  run was a cache hit) and under-stripped, masking the real contract.
 
 ### Fixed
 
@@ -38,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suite asserts the JSON shape instead of only checking for absent ANSI output.
 - **Black-box version checks no longer drift.** POS-006 substitutes the root
   `VERSION` value instead of hardcoding an old release string.
+- **Stable `contract_hash` canonicalization.** `Sykli.ContractHash.from_json/1`
+  recursively sorts object keys before hashing, so semantically-identical
+  contracts hash identically regardless of map iteration order. Maps with >32 keys
+  previously used a hashed representation whose iteration order is not guaranteed
+  stable across OTP versions, which could yield divergent hashes for the same
+  contract.
 
 ### Removed
 
