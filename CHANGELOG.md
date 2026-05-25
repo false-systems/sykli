@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Coordinator client refuses plaintext token transmission (Monster Phase C, C1).**
+  `Sykli.Coordinator.Client` now refuses to send the Team Mode bearer token over
+  plaintext HTTP to a non-loopback host — it returns `{:error, {:insecure_transport,
+  url}}` and logs an error instead of leaking the token on the wire. HTTPS and
+  loopback hosts are unaffected; `SYKLI_COORDINATOR_INSECURE=1` is an explicit
+  opt-in (with a loud warning). All token-bearing paths (work/run/gate clients and
+  daemon join) route through this client; `Sykli.HTTP.check_token_transport/1` is
+  the shared decision.
 - **OTP hardening (Monster Phase E).**
   - Fire-and-forget side effects (GitHub commit-status updates, async S3 cache
     writes) use `Task.Supervisor.start_child` instead of `async_nolink`, so

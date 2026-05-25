@@ -15,6 +15,25 @@ defmodule Sykli.Coordinator.Client do
 
   def request_json(method, base_url, path, token, body) do
     url = build_url(base_url, path)
+
+    case Sykli.HTTP.check_token_transport(url) do
+      :ok ->
+        warn_if_insecure(url)
+        do_request(method, url, token, body)
+
+      {:error, :insecure_transport} ->
+        require Logger
+
+        Logger.error(
+          "[Coordinator.Client] refusing to send bearer token over plaintext HTTP to " <>
+            "#{url} — use https, a loopback host, or set SYKLI_COORDINATOR_INSECURE=1 to override"
+        )
+
+        {:error, {:insecure_transport, url}}
+    end
+  end
+
+  defp do_request(method, url, token, body) do
     headers = headers(token)
     request = request_tuple(method, url, headers, body)
     http_opts = [{:timeout, @timeout_ms}] ++ Sykli.HTTP.ssl_opts(url)
@@ -25,6 +44,17 @@ defmodule Sykli.Coordinator.Client do
 
       {:error, reason} ->
         {:error, {:coordinator_unavailable, reason}}
+    end
+  end
+
+  defp warn_if_insecure(url) do
+    unless Sykli.HTTP.secure_transport?(url) or Sykli.HTTP.loopback_url?(url) do
+      require Logger
+
+      Logger.warning(
+        "[Coordinator.Client] sending bearer token over plaintext HTTP to #{url} " <>
+          "(SYKLI_COORDINATOR_INSECURE is set)"
+      )
     end
   end
 
