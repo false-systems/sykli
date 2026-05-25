@@ -1866,16 +1866,16 @@
     },
     {
       "id": "GH-004",
-      "name": "Absolute host path read from task command fails safely",
-      "fixture": "path_traversal_command",
-      "command": "sykli >/dev/null 2>&1 || true; test ! -s escaped.txt",
-      "shell": true,
-      "expect_exit": 0,
-      "source": "CLAUDE.md §Runtime isolation and path containment; CHANGELOG 0.2.0 path traversal vulnerability fix",
-      "validated_by": "Injected bug: execute task commands directly on host with unrestricted absolute paths; escaped file assertion fails.",
-      "findings": "Currently fails under local shell runtime if task commands can read /etc/passwd into the workspace.",
-      "issue": "https://github.com/false-systems/sykli/issues/209",
-      "expected_failure": true
+      "name": "Engine contains success-criteria paths that escape the workdir",
+      "fixture": "path_traversal_criterion",
+      "command": "sykli --json",
+      "expect_exit": 1,
+      "expect_json_jq": [
+        ".data.tasks[0].status == \"failed\"",
+        ".data.tasks[0].success_criteria_results[0].message == \"path escapes task workdir\""
+      ],
+      "source": "docs/runtime-trust-model.md; CLAUDE.md §Runtime isolation and path containment; CHANGELOG 0.2.0 path traversal fix",
+      "validated_by": "Injected bug: skip path containment on criterion paths; the traversing ../etc/passwd path would resolve outside the workdir instead of being rejected. Asserts Sykli's own path containment (per the trust model: the Shell runtime is not a command sandbox, but the engine contains its own file ops)."
     }
   ]
 }
