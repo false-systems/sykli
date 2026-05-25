@@ -43,4 +43,30 @@ defmodule Sykli.HTTPTest do
       assert [] == HTTP.ssl_opts("http://example.com")
     end
   end
+
+  describe "check_ssrf/1" do
+    # IP-literal hosts so resolution is deterministic and DNS-free.
+    test "blocks loopback" do
+      assert {:error, _} = HTTP.check_ssrf("http://127.0.0.1:8080/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[::1]/hook")
+    end
+
+    test "blocks link-local / cloud metadata (169.254.0.0/16)" do
+      assert {:error, _} = HTTP.check_ssrf("http://169.254.169.254/latest/meta-data/")
+    end
+
+    test "blocks RFC1918 private ranges" do
+      assert {:error, _} = HTTP.check_ssrf("http://10.0.0.5/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://192.168.1.1/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://172.16.0.1/hook")
+    end
+
+    test "allows public addresses" do
+      assert :ok = HTTP.check_ssrf("https://8.8.8.8/hook")
+    end
+
+    test "rejects a URL with no host" do
+      assert {:error, _} = HTTP.check_ssrf("not-a-url")
+    end
+  end
 end

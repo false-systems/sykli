@@ -63,4 +63,53 @@ defmodule Sykli.HTTP do
   @doc "True when the operator has explicitly opted into plaintext token transport."
   @spec insecure_opt_in?() :: boolean()
   def insecure_opt_in?, do: System.get_env(@insecure_opt_in_env) in ["1", "true"]
+
+  @doc """
+  SSRF guard for outbound webhook URLs.
+
+  Resolves the URL host and rejects loopback, link-local (incl. the cloud
+  metadata range `169.254.0.0/16`), and private addresses — for both IPv4 and
+  IPv6 — so a pipeline-declared webhook can't be pointed at internal services or
+  the instance metadata endpoint. Returns `:ok` or `{:error, reason}`.
+  """
+  @spec check_ssrf(String.t()) :: :ok | {:error, String.t()}
+  def check_ssrf(url) do
+    case URI.parse(url).host do
+      nil ->
+        {:error, "URL has no host"}
+
+      host ->
+        host_charlist = String.to_charlist(host)
+
+        case :inet.getaddr(host_charlist, :inet) do
+          {:ok, ip} ->
+            if private_ip?(ip), do: {:error, "URL resolves to a private address"}, else: :ok
+
+          {:error, _} ->
+            case :inet.getaddr(host_charlist, :inet6) do
+              {:ok, ip6} ->
+                if private_ip6?(ip6),
+                  do: {:error, "URL resolves to a private address"},
+                  else: :ok
+
+              {:error, reason} ->
+                {:error, "cannot resolve host: #{inspect(reason)}"}
+            end
+        end
+    end
+  end
+
+  defp private_ip?({127, _, _, _}), do: true
+  defp private_ip?({10, _, _, _}), do: true
+  defp private_ip?({172, b, _, _}) when b >= 16 and b <= 31, do: true
+  defp private_ip?({192, 168, _, _}), do: true
+  defp private_ip?({169, 254, _, _}), do: true
+  defp private_ip?({0, 0, 0, 0}), do: true
+  defp private_ip?(_), do: false
+
+  defp private_ip6?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp private_ip6?({0xFE80, _, _, _, _, _, _, _}), do: true
+  defp private_ip6?({0xFC00, _, _, _, _, _, _, _}), do: true
+  defp private_ip6?({0xFD00, _, _, _, _, _, _, _}), do: true
+  defp private_ip6?(_), do: false
 end

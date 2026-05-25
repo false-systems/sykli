@@ -78,54 +78,9 @@ defmodule Sykli.Services.NotificationService do
 
   # ----- SSRF GUARD -----
 
-  defp validate_url_not_private(url) do
-    uri = URI.parse(url)
-
-    case uri.host do
-      nil ->
-        {:error, "Webhook URL has no host"}
-
-      host ->
-        host_charlist = String.to_charlist(host)
-
-        case :inet.getaddr(host_charlist, :inet) do
-          {:ok, ip} ->
-            if private_ip?(ip) do
-              {:error, "Webhook URL resolves to a private address"}
-            else
-              :ok
-            end
-
-          {:error, _} ->
-            # Also try IPv6
-            case :inet.getaddr(host_charlist, :inet6) do
-              {:ok, ip6} ->
-                if private_ip6?(ip6) do
-                  {:error, "Webhook URL resolves to a private address"}
-                else
-                  :ok
-                end
-
-              {:error, reason} ->
-                {:error, "Cannot resolve webhook host: #{inspect(reason)}"}
-            end
-        end
-    end
-  end
-
-  defp private_ip?({127, _, _, _}), do: true
-  defp private_ip?({10, _, _, _}), do: true
-  defp private_ip?({172, b, _, _}) when b >= 16 and b <= 31, do: true
-  defp private_ip?({192, 168, _, _}), do: true
-  defp private_ip?({169, 254, _, _}), do: true
-  defp private_ip?({0, 0, 0, 0}), do: true
-  defp private_ip?(_), do: false
-
-  defp private_ip6?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
-  defp private_ip6?({0xFE80, _, _, _, _, _, _, _}), do: true
-  defp private_ip6?({0xFC00, _, _, _, _, _, _, _}), do: true
-  defp private_ip6?({0xFD00, _, _, _, _, _, _, _}), do: true
-  defp private_ip6?(_), do: false
+  # Delegated to the shared Sykli.HTTP.check_ssrf/1 so notification and gate
+  # webhooks enforce identical loopback/link-local/private-address blocking.
+  defp validate_url_not_private(url), do: Sykli.HTTP.check_ssrf(url)
 
   # Auto-detect Slack webhook format
   defp format_payload(url, event) do
