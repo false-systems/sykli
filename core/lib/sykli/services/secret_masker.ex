@@ -6,6 +6,8 @@ defmodule Sykli.Services.SecretMasker do
   webhook payloads, or CLI output.
   """
 
+  alias Sykli.Services.SecretPatterns
+
   @mask "***MASKED***"
   @min_secret_length 4
 
@@ -29,11 +31,19 @@ defmodule Sykli.Services.SecretMasker do
   Recursively mask secret values in maps, lists, and strings.
   """
   @spec mask_deep(term(), [String.t()]) :: term()
-  def mask_deep(data, []), do: data
   def mask_deep(data, secrets) when is_binary(data), do: mask_string(data, secrets)
 
   def mask_deep(data, secrets) when is_map(data) do
-    Map.new(data, fn {k, v} -> {k, mask_deep(v, secrets)} end)
+    Map.new(data, fn {key, value} ->
+      value =
+        if SecretPatterns.secret_key?(key) do
+          mask_value(value)
+        else
+          mask_deep(value, secrets)
+        end
+
+      {key, value}
+    end)
   end
 
   def mask_deep(data, secrets) when is_list(data) do
@@ -41,4 +51,14 @@ defmodule Sykli.Services.SecretMasker do
   end
 
   def mask_deep(data, _secrets), do: data
+
+  defp mask_value(value) when is_binary(value), do: @mask
+
+  defp mask_value(value) when is_map(value) do
+    Map.new(value, fn {key, nested} -> {key, mask_value(nested)} end)
+  end
+
+  defp mask_value(value) when is_list(value), do: Enum.map(value, &mask_value/1)
+  defp mask_value(value) when is_nil(value), do: nil
+  defp mask_value(_value), do: @mask
 end

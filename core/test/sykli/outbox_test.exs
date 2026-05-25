@@ -74,4 +74,21 @@ defmodule Sykli.OutboxTest do
     assert {:error, :team_outbox_invalid_kind} =
              Sykli.Outbox.enqueue("../runs", @payload, path: tmp_dir)
   end
+
+  test "enqueue masks explicit run secrets before writing payload", %{tmp_dir: tmp_dir} do
+    payload = %{
+      "version" => "1",
+      "run" => %{"id" => "run_secret", "error_code" => "leaked-from-output"},
+      "nodes" => [%{"name" => "build", "message" => "token leaked-from-output"}]
+    }
+
+    assert :ok =
+             Sykli.Outbox.enqueue("runs", payload, path: tmp_dir, secrets: ["leaked-from-output"])
+
+    path = Path.join([tmp_dir, ".sykli", "outbox", "runs", "run_secret.json"])
+    decoded = path |> File.read!() |> Jason.decode!()
+
+    assert decoded["run"]["error_code"] == "***MASKED***"
+    assert decoded["nodes"] == [%{"name" => "build", "message" => "token ***MASKED***"}]
+  end
 end

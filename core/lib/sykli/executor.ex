@@ -29,6 +29,7 @@ defmodule Sykli.Executor do
   alias Sykli.Services.OIDCService
   alias Sykli.Services.PredictiveWarnings
   alias Sykli.Services.ProgressTracker
+  alias Sykli.Services.SecretPatterns
   alias Sykli.Services.SecretValidator
 
   # Note: we DON'T alias Sykli.Graph.Task because it shadows Elixir's Task module
@@ -57,6 +58,7 @@ defmodule Sykli.Executor do
       :command,
       :failure_semantics,
       :review_result,
+      secret_values: [],
       success_criteria_results: [],
       evidence_results: []
     ]
@@ -71,6 +73,7 @@ defmodule Sykli.Executor do
             command: String.t() | nil,
             failure_semantics: Sykli.FailureSemantics.t() | nil,
             review_result: Sykli.ReviewPrimitive.Result.t() | nil,
+            secret_values: [String.t()],
             success_criteria_results: [Sykli.SuccessCriteria.Result.t()],
             evidence_results: [Sykli.EvidenceRequirement.Result.t()]
           }
@@ -140,6 +143,7 @@ defmodule Sykli.Executor do
       :target,
       :timeout,
       :run_id,
+      :oidc_service,
       # nil means unconstrained on a bare struct; run/3 replaces it with the computed default.
       max_parallel: nil,
       continue_on_failure: false
@@ -149,6 +153,7 @@ defmodule Sykli.Executor do
             target: module(),
             timeout: pos_integer(),
             run_id: String.t() | nil,
+            oidc_service: module(),
             max_parallel: pos_integer(),
             continue_on_failure: boolean()
           }
@@ -172,6 +177,7 @@ defmodule Sykli.Executor do
     target = Keyword.get(opts, :target) || Keyword.get(opts, :executor, @default_target)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     run_id = Keyword.get(opts, :run_id)
+    oidc_service = Keyword.get(opts, :oidc_service, OIDCService)
     max_parallel = Keyword.get(opts, :max_parallel, default_max_parallel())
     continue_on_failure = Keyword.get(opts, :continue_on_failure, false)
     start_time = System.monotonic_time(:millisecond)
@@ -181,6 +187,7 @@ defmodule Sykli.Executor do
       target: target,
       timeout: timeout,
       run_id: run_id,
+      oidc_service: oidc_service,
       max_parallel: max_parallel,
       continue_on_failure: continue_on_failure
     }
@@ -395,7 +402,14 @@ defmodule Sykli.Executor do
                 :ok ->
                   %TaskResult{} =
                     result =
-                    run_single(task, state, {task_num, total}, config.target, config.run_id)
+                    run_single(
+                      task,
+                      state,
+                      {task_num, total},
+                      config.target,
+                      config.run_id,
+                      config.oidc_service
+                    )
 
                   duration = System.monotonic_time(:millisecond) - start_time
                   %TaskResult{result | duration_ms: duration}
@@ -612,10 +626,11 @@ defmodule Sykli.Executor do
           map(),
           {pos_integer(), pos_integer()},
           module(),
-          String.t() | nil
+          String.t() | nil,
+          module()
         ) ::
           TaskResult.t()
-  defp run_single(%Sykli.Graph.Task{} = task, state, progress, target, run_id) do
+  defp run_single(%Sykli.Graph.Task{} = task, state, progress, target, run_id, oidc_service) do
     start_time = System.monotonic_time(:millisecond)
 
     cond do
@@ -628,13 +643,27 @@ defmodule Sykli.Executor do
       true ->
         # Check condition first
         if should_run?(task) do
+          # Keep this list in sync with every path that injects secrets into task.env.
+          literal_secret_values = SecretPatterns.values_from_pairs(task.env || %{})
+
           # Resolve secret_refs before execution
-          task = resolve_secret_refs(task)
+          {task, ref_secret_values} = resolve_secret_refs(task)
+
+          secret_values =
+            SecretPatterns.normalize_values(literal_secret_values ++ ref_secret_values)
 
           # OIDC credential exchange (if configured)
           try do
-            case OIDCService.exchange(task, state) do
+            case oidc_service.exchange(task, state) do
               {:ok, oidc_env} ->
+                oidc_secret_values =
+                  oidc_env
+                  |> Map.values()
+                  |> SecretPatterns.normalize_values()
+
+                run_secret_values =
+                  SecretPatterns.normalize_values(secret_values ++ oidc_secret_values)
+
                 # Merge OIDC env vars into task env
                 task =
                   if map_size(oidc_env) > 0 do
@@ -646,7 +675,9 @@ defmodule Sykli.Executor do
                 # Validate required secrets are present (via target)
                 case validate_secrets(task, state, target) do
                   :ok ->
-                    run_task_with_cache(task, state, progress, target, start_time, run_id)
+                    task
+                    |> run_task_with_cache(state, progress, target, start_time, run_id)
+                    |> with_secret_values(run_secret_values)
 
                   {:error, missing} ->
                     Output.missing_secrets(task.name, missing)
@@ -663,6 +694,7 @@ defmodule Sykli.Executor do
                       failure_semantics: Sykli.FailureSemantics.for_error(error),
                       command: task.command
                     }
+                    |> with_secret_values(run_secret_values)
                 end
 
               {:error, reason} ->
@@ -679,9 +711,10 @@ defmodule Sykli.Executor do
                   failure_semantics: Sykli.FailureSemantics.for_error(error),
                   command: task.command
                 }
+                |> with_secret_values(secret_values)
             end
           after
-            OIDCService.cleanup_temp_files()
+            oidc_service.cleanup_temp_files()
           end
         else
           Output.task_skipped("", task.name, "condition not met")
@@ -703,6 +736,11 @@ defmodule Sykli.Executor do
           }
         end
     end
+  end
+
+  defp with_secret_values(%TaskResult{} = result, values) do
+    values = SecretPatterns.normalize_values((result.secret_values || []) ++ values)
+    %TaskResult{result | secret_values: values}
   end
 
   defp run_review(%Sykli.Graph.Task{} = task, state, progress) do
@@ -1228,10 +1266,10 @@ defmodule Sykli.Executor do
         end
       end)
 
-    %{task | env: Map.merge(task.env || %{}, resolved)}
+    {%{task | env: Map.merge(task.env || %{}, resolved)}, Map.values(resolved)}
   end
 
-  defp resolve_secret_refs(task), do: task
+  defp resolve_secret_refs(task), do: {task, []}
 
   defp resolve_single_secret_ref(%{source: "env", key: key}) do
     case System.get_env(key) do

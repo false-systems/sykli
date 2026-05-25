@@ -5,11 +5,13 @@ defmodule Sykli.Outbox do
   @max_drain 100
 
   def enqueue(kind, payload, opts \\ []) when is_map(payload) do
+    secrets = Sykli.Services.SecretPatterns.all_values(Keyword.get(opts, :secrets, []))
+
     with {:ok, dir} <- kind_dir(kind, opts),
          :ok <- File.mkdir_p(dir),
          {:ok, id} <- payload_id(payload),
          {:ok, json} <-
-           Jason.encode(Sykli.Services.SecretMasker.mask_deep(payload, secrets())) do
+           Jason.encode(Sykli.Services.SecretMasker.mask_deep(payload, secrets)) do
       atomic_write(Path.join(dir, "#{id}.json"), json)
     end
   end
@@ -148,32 +150,5 @@ defmodule Sykli.Outbox do
         File.rm(tmp_path)
         {:error, {:team_outbox_write_failed, reason}}
     end
-  end
-
-  defp secrets do
-    System.get_env()
-    |> Enum.filter(fn {key, _val} ->
-      Enum.any?(secret_env_patterns(), &String.contains?(key, &1))
-    end)
-    |> Enum.map(fn {_key, value} -> value end)
-    |> Enum.uniq()
-    |> Enum.filter(&(is_binary(&1) and byte_size(&1) >= 4))
-  end
-
-  defp secret_env_patterns do
-    [
-      "_TOKEN",
-      "_SECRET",
-      "_KEY",
-      "_PASSWORD",
-      "_PASS",
-      "_API_KEY",
-      "_CREDENTIAL",
-      "_AUTH",
-      "_URL",
-      "_DSN",
-      "_URI",
-      "_CONN"
-    ]
   end
 end

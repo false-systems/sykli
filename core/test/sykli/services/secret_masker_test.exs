@@ -50,8 +50,24 @@ defmodule Sykli.Services.SecretMaskerTest do
     end
 
     test "handles empty secrets list" do
-      data = %{"a" => "b"}
+      data = %{"detail" => "b"}
       assert SecretMasker.mask_deep(data, []) == data
+    end
+
+    test "redacts values under secret-like keys even without known secret values" do
+      data = %{
+        "password" => "literal-from-config",
+        :api_key => "atom-key-secret",
+        "nested" => %{"DATABASE_URL" => "postgres://user:pass@example/db"},
+        "details" => "literal-from-config"
+      }
+
+      result = SecretMasker.mask_deep(data, [])
+
+      assert result["password"] == "***MASKED***"
+      assert result[:api_key] == "***MASKED***"
+      assert result["nested"]["DATABASE_URL"] == "***MASKED***"
+      assert result["details"] == "literal-from-config"
     end
 
     test "masks strings in deeply nested structures (map inside list inside map)" do
@@ -122,13 +138,13 @@ defmodule Sykli.Services.SecretMaskerTest do
     end
 
     test "handles list of mixed types" do
-      data = ["text with secret_value_here", 42, nil, %{"key" => "has secret_value_here too"}]
+      data = ["text with secret_value_here", 42, nil, %{"detail" => "has secret_value_here too"}]
       result = SecretMasker.mask_deep(data, ["secret_value_here"])
 
       assert Enum.at(result, 0) == "text with ***MASKED***"
       assert Enum.at(result, 1) == 42
       assert Enum.at(result, 2) == nil
-      assert Enum.at(result, 3) == %{"key" => "has ***MASKED*** too"}
+      assert Enum.at(result, 3) == %{"detail" => "has ***MASKED*** too"}
     end
   end
 

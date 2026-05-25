@@ -23,6 +23,24 @@ defmodule Sykli.TeamCoordinator.RunClientTest do
     assert_received {:post, "https://sykli.internal", "/v1/runs", "secret", %{"run" => _}}
   end
 
+  test "publish masks explicit secrets in encoded summary" do
+    summary =
+      struct!(RunSummary,
+        run: %{"id" => "run_001", "status" => "failed", "error_code" => "token leaked-value"},
+        nodes: [%{"name" => "build", "message" => "leaked-value"}]
+      )
+
+    assert {:ok, %{"id" => "run_001"}} =
+             RunClient.publish(@session, "secret", summary,
+               client: __MODULE__.FakeClient,
+               secrets: ["leaked-value"]
+             )
+
+    assert_received {:post, _, _, _, body}
+    assert body["run"]["error_code"] == "token ***MASKED***"
+    assert body["nodes"] == [%{"name" => "build", "message" => "***MASKED***"}]
+  end
+
   test "publish_raw list and show use run endpoints" do
     assert {:ok, %{"id" => "run_001"}} =
              RunClient.publish_raw(@session, "secret", @payload, client: __MODULE__.FakeClient)

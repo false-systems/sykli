@@ -7,12 +7,21 @@ defmodule Sykli.Occurrence.EnrichmentTest do
 
   @tmp_dir System.tmp_dir!()
 
+  defmodule NotificationProbe do
+    def notify(payload) do
+      send(Application.fetch_env!(:sykli, :notification_test_pid), {:notification, payload})
+      :ok
+    end
+  end
+
   setup do
     test_dir = Path.join(@tmp_dir, "enrichment_test_#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(test_dir)
 
     on_exit(fn ->
       File.rm_rf!(test_dir)
+      Application.delete_env(:sykli, :notification_service)
+      Application.delete_env(:sykli, :notification_test_pid)
     end)
 
     {:ok, workdir: test_dir}
@@ -589,6 +598,60 @@ defmodule Sykli.Occurrence.EnrichmentTest do
       binary = File.read!(etf)
       decoded_etf = :erlang.binary_to_term(binary)
       assert decoded_etf["id"] == "run-write"
+    end
+
+    test "masks run-scoped secrets in occurrence and attestation files", %{workdir: workdir} do
+      secret = "file-sourced-secret-value"
+      occ = make_occurrence("run-secret", "ci.run.failed", "failure")
+
+      graph = %{
+        "build" => %{command: "deploy --token #{secret}", container: nil, outputs: []}
+      }
+
+      error = %Sykli.Error{
+        code: "task_failed",
+        message: "command printed #{secret}",
+        output: "stderr contained #{secret}",
+        exit_code: 1
+      }
+
+      results =
+        {:error,
+         [
+           %TaskResult{
+             name: "build",
+             status: :failed,
+             duration_ms: 100,
+             error: error,
+             output: "stderr contained #{secret}",
+             secret_values: [secret]
+           }
+         ]}
+
+      Application.put_env(:sykli, :notification_service, NotificationProbe)
+      Application.put_env(:sykli, :notification_test_pid, self())
+
+      assert :ok = Enrichment.enrich_and_persist(occ, graph, results, workdir)
+
+      occurrence = Path.join([workdir, ".sykli", "occurrence.json"]) |> File.read!()
+      refute occurrence =~ secret
+      assert occurrence =~ "***MASKED***"
+
+      assert_received {:notification, payload}
+      payload_json = Jason.encode!(payload)
+      refute payload_json =~ secret
+      assert payload_json =~ "***MASKED***"
+
+      envelope =
+        Path.join([workdir, ".sykli", "attestation.json"])
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert {:ok, attestation} = Sykli.Attestation.Envelope.decode_payload(envelope)
+      attestation_json = Jason.encode!(attestation)
+
+      refute attestation_json =~ secret
+      assert attestation_json =~ "***MASKED***"
     end
   end
 
