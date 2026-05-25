@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Gate webhooks are SSRF-guarded (Monster Phase C, C4).** A pipeline-declared
+  gate `webhook_url` is now resolved and rejected if it points at a loopback,
+  link-local (incl. the cloud metadata range `169.254.0.0/16`), or private
+  address — closing an SSRF/metadata-exfiltration sink. The check is the new
+  shared `Sykli.HTTP.check_ssrf/1`, extracted from the existing notification
+  webhook guard so both paths enforce identical blocking (IPv4 + IPv6).
 - **Coordinator client refuses plaintext token transmission (Monster Phase C, C1).**
   `Sykli.Coordinator.Client` now refuses to send the Team Mode bearer token over
   plaintext HTTP to a non-loopback host — it returns `{:error, {:insecure_transport,

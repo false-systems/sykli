@@ -130,40 +130,46 @@ defmodule Sykli.Services.GateService do
 
   defp wait_webhook(%Gate{webhook_url: url, message: message, timeout: timeout})
        when is_binary(url) and url != "" do
-    body =
-      Jason.encode!(%{
-        type: "gate_approval_request",
-        message: message || "Gate approval requested",
-        timestamp: DateTime.to_iso8601(DateTime.utc_now())
-      })
+    # SSRF guard: a pipeline-declared gate webhook must not be pointed at
+    # loopback/link-local/private addresses (e.g. the cloud metadata endpoint).
+    with :ok <- Sykli.HTTP.check_ssrf(url) do
+      body =
+        Jason.encode!(%{
+          type: "gate_approval_request",
+          message: message || "Gate approval requested",
+          timestamp: DateTime.to_iso8601(DateTime.utc_now())
+        })
 
-    url_charlist = String.to_charlist(url)
-    timeout_ms = timeout * 1000
+      url_charlist = String.to_charlist(url)
+      timeout_ms = timeout * 1000
 
-    headers = [
-      {~c"content-type", ~c"application/json"},
-      {~c"accept", ~c"application/json"}
-    ]
+      headers = [
+        {~c"content-type", ~c"application/json"},
+        {~c"accept", ~c"application/json"}
+      ]
 
-    http_opts = [timeout: timeout_ms, connect_timeout: 5_000] ++ Sykli.HTTP.ssl_opts(url)
+      http_opts = [timeout: timeout_ms, connect_timeout: 5_000] ++ Sykli.HTTP.ssl_opts(url)
 
-    case :httpc.request(
-           :post,
-           {url_charlist, headers, ~c"application/json", body},
-           http_opts,
-           []
-         ) do
-      {:ok, {{_, status, _}, _headers, resp_body}} when status in 200..299 ->
-        parse_webhook_response(to_string(resp_body))
+      case :httpc.request(
+             :post,
+             {url_charlist, headers, ~c"application/json", body},
+             http_opts,
+             []
+           ) do
+        {:ok, {{_, status, _}, _headers, resp_body}} when status in 200..299 ->
+          parse_webhook_response(to_string(resp_body))
 
-      {:ok, {{_, status, _}, _headers, _resp_body}} ->
-        {:denied, "webhook returned HTTP #{status}"}
+        {:ok, {{_, status, _}, _headers, _resp_body}} ->
+          {:denied, "webhook returned HTTP #{status}"}
 
-      {:error, :timeout} ->
-        {:timed_out}
+        {:error, :timeout} ->
+          {:timed_out}
 
-      {:error, reason} ->
-        {:denied, "webhook request failed: #{inspect(reason)}"}
+        {:error, reason} ->
+          {:denied, "webhook request failed: #{inspect(reason)}"}
+      end
+    else
+      {:error, reason} -> {:denied, "webhook_url blocked: #{reason}"}
     end
   end
 
