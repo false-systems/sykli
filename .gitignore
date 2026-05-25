@@ -73,6 +73,7 @@ docs/*
 !docs/local-state-plane.md
 !docs/mcp-tools.md
 !docs/review-primitives.md
+!docs/runtime-trust-model.md
 !docs/runtimes.md
 !docs/sdk-schema.md
 !docs/self-hosted-coordinator.md

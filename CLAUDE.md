@@ -102,6 +102,7 @@ eval/harness/run.sh --case 001 --dry-run    # preview without running
 - `docs/review-primitives.md` — review-node dispatch contract and the `review_result` shape.
 - `docs/failure-semantics.md` / `docs/result-contract-slices.md` / `docs/agent-readable-failure-output.md` — typed failure classification, the result contract slice, and how both surface to agents.
 - `docs/runtimes.md` — runtime selection priority chain.
+- `docs/runtime-trust-model.md` — the Shell runtime is not a security sandbox (trusted repo code only; use a container runtime for untrusted pipelines); Sykli's own file ops are path-contained. Normative for `GH-004`.
 - `examples/` and `test_projects/` — runnable sample pipelines for manual testing.
 
 Before every commit: `mix format && mix test && mix escript.build`

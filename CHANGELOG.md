@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Runtime trust model documented; GH-004 reframed (Monster Phase C, C5).** New
+  `docs/runtime-trust-model.md` states the trust boundary: the Shell runtime is
+  **not** a security sandbox (it runs trusted repository code with the invoking
+  user's privileges; use a container runtime for untrusted pipelines), while
+  Sykli's *own* file operations stay path-contained. The black-box `GH-004` case
+  now asserts that real guarantee — a `success_criteria` path that traverses the
+  workdir is rejected with `path escapes task workdir` — instead of an unmet
+  command-sandboxing assumption. This retires the **last** `expected_failure`
+  case; the black-box suite now has zero known-broken cases.
 - **Gate webhooks are SSRF-guarded (Monster Phase C, C4).** A pipeline-declared
   gate `webhook_url` is now resolved and rejected if it points at a loopback,
   link-local (incl. the cloud metadata range `169.254.0.0/16`), or private
