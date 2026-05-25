@@ -61,8 +61,23 @@ defmodule Sykli.HTTPTest do
       assert {:error, _} = HTTP.check_ssrf("http://172.16.0.1/hook")
     end
 
-    test "allows public addresses" do
+    test "blocks the full IPv6 link-local (fe80::/10) and ULA (fc00::/7) ranges" do
+      # Non-boundary addresses that exact-hextet matching let through.
+      assert {:error, _} = HTTP.check_ssrf("http://[fe90::1]/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[febf::1]/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[fc01::1]/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[fd12:3456::1]/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[fdff::1]/hook")
+    end
+
+    test "blocks IPv4-mapped IPv6 pointing at private/link-local ranges" do
+      assert {:error, _} = HTTP.check_ssrf("http://[::ffff:169.254.169.254]/hook")
+      assert {:error, _} = HTTP.check_ssrf("http://[::ffff:10.0.0.1]/hook")
+    end
+
+    test "allows public addresses (IPv4 and global IPv6)" do
       assert :ok = HTTP.check_ssrf("https://8.8.8.8/hook")
+      assert :ok = HTTP.check_ssrf("https://[2606:4700:4700::1111]/")
     end
 
     test "rejects a URL with no host" do

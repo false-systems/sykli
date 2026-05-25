@@ -4,6 +4,8 @@ defmodule Sykli.HTTP do
   Provides TLS verification options for HTTPS endpoints.
   """
 
+  import Bitwise
+
   @doc """
   Returns SSL options for :httpc that verify server certificates and hostnames.
   """
@@ -80,22 +82,29 @@ defmodule Sykli.HTTP do
 
       host ->
         host_charlist = String.to_charlist(host)
+        v4 = resolve_addrs(host_charlist, :inet)
+        v6 = resolve_addrs(host_charlist, :inet6)
 
-        case :inet.getaddr(host_charlist, :inet) do
-          {:ok, ip} ->
-            if private_ip?(ip), do: {:error, "URL resolves to a private address"}, else: :ok
+        cond do
+          v4 == [] and v6 == [] ->
+            {:error, "cannot resolve host"}
 
-          {:error, _} ->
-            case :inet.getaddr(host_charlist, :inet6) do
-              {:ok, ip6} ->
-                if private_ip6?(ip6),
-                  do: {:error, "URL resolves to a private address"},
-                  else: :ok
+          # Block if ANY resolved address is private. A host can return multiple
+          # A/AAAA records and :httpc re-resolves when it sends, so checking a
+          # single sampled address is not enough for an SSRF guard.
+          Enum.any?(v4, &private_ip?/1) or Enum.any?(v6, &private_ip6?/1) ->
+            {:error, "URL resolves to a private address"}
 
-              {:error, reason} ->
-                {:error, "cannot resolve host: #{inspect(reason)}"}
-            end
+          true ->
+            :ok
         end
+    end
+  end
+
+  defp resolve_addrs(host_charlist, family) do
+    case :inet.getaddrs(host_charlist, family) do
+      {:ok, addrs} -> addrs
+      {:error, _} -> []
     end
   end
 
@@ -107,9 +116,18 @@ defmodule Sykli.HTTP do
   defp private_ip?({0, 0, 0, 0}), do: true
   defp private_ip?(_), do: false
 
+  defp private_ip6?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
   defp private_ip6?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
-  defp private_ip6?({0xFE80, _, _, _, _, _, _, _}), do: true
-  defp private_ip6?({0xFC00, _, _, _, _, _, _, _}), do: true
-  defp private_ip6?({0xFD00, _, _, _, _, _, _, _}), do: true
+
+  # IPv4-mapped (::ffff:a.b.c.d) — check the embedded IPv4 against the v4 ranges
+  # so a mapped private/link-local address can't bypass the guard.
+  defp private_ip6?({0, 0, 0, 0, 0, 0xFFFF, ab, cd}) do
+    private_ip?({ab >>> 8, ab &&& 0xFF, cd >>> 8, cd &&& 0xFF})
+  end
+
+  # Compare the masked first hextet, not exact equality: link-local is fe80::/10
+  # (fe80–febf) and unique-local is fc00::/7 (fc00–fdff).
+  defp private_ip6?({h, _, _, _, _, _, _, _}) when (h &&& 0xFFC0) == 0xFE80, do: true
+  defp private_ip6?({h, _, _, _, _, _, _, _}) when (h &&& 0xFE00) == 0xFC00, do: true
   defp private_ip6?(_), do: false
 end
