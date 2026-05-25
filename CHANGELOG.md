@@ -54,9 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Webhook replay-protection and installation-token ETS tables are created at
     application start (owned by a long-lived process) rather than lazily by a
     transient request process — they no longer silently reset on request churn.
-  - `Sykli.Reporter`'s moduledoc now states it is wired into no supervisor (the
-    Trusted-LAN-mesh occurrence-forwarding path is inactive pending a wire-vs-retire
-    decision); the code no longer implies a running capability.
 - **`sykli cache stats --json` now returns a JSON envelope.** The cache stats
   command supports `--json` through `Sykli.CLI.JsonResponse`, and the black-box
   suite asserts the JSON shape instead of only checking for absent ANSI output.
@@ -71,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **In-process BEAM-mesh occurrence aggregation retired (`Sykli.Reporter` + `Sykli.Coordinator`).** The worker→coordinator forwarder (`Reporter`) was started by no supervisor, and its consumer (the in-process `Coordinator` GenServer, started in daemon coordinator/full mode) therefore had no producer and no query consumers. Both modules and the daemon wiring were removed; Team Mode coordination uses the self-hosted HTTP coordinator (`Sykli.Coordinator.Client` → `POST /v1/...`), which is unaffected. Daemon `:coordinator`/`:full` roles still differ in execution eligibility; they simply no longer start the dead GenServer.
 - **`target` field removed from canonical SDK-emitted pipeline JSON.** All five SDKs no longer serialize `target`, and the JSON Schema rejects it as an unknown task field. The engine never read `target` (the parser ignored it and the executor did not honor it), so removing it is contract cleanup, not a behavior change. SDK builder methods (`.target(...)` / `Target(...)`) are kept as deprecated no-ops so existing call sites still compile; downstream tooling that grepped emitted JSON for `"target":` will need to use concrete execution requirement fields (`container`, `resources`, `mounts`, `k8s`, `services`, `workdir`, `env`) instead. The Python builder now also raises a `DeprecationWarning` on call.
 
 ## [0.6.1] - 2026-05-05
