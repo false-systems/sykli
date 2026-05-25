@@ -125,6 +125,21 @@ defmodule Sykli.CoordinatorTest do
       nodes = Coordinator.connected_nodes()
       assert is_list(nodes)
     end
+
+    test "reports connectivity without blocking on unreachable nodes" do
+      # Inject a node that is not actually connected (tests run non-distributed).
+      send(Coordinator, {:nodeup, :"fake@127.0.0.1"})
+      sync_coordinator()
+
+      nodes = Coordinator.connected_nodes()
+
+      entry = Enum.find(nodes, &(&1.node == :"fake@127.0.0.1"))
+      assert entry, "expected the injected node to be tracked"
+      # Connectivity is derived from Node.list/0 (a local BIF), so an unreachable
+      # node is simply absent from the set. The previous Node.ping/1 here did
+      # blocking network I/O and would wedge the GenServer past the call timeout.
+      refute entry.connected
+    end
   end
 
   describe "task occurrences" do

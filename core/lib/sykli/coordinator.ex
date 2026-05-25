@@ -124,10 +124,15 @@ defmodule Sykli.Coordinator do
 
   @impl true
   def handle_call(:connected_nodes, _from, state) do
+    # Determine connectivity from the BEAM's current connection set (Node.list/0,
+    # a fast local BIF) rather than Node.ping/1, which does blocking network I/O.
+    # A single unreachable node would otherwise wedge this GenServer past the
+    # default call timeout, cascading :timeout crashes into every caller.
+    connected = MapSet.new(Node.list())
+
     nodes =
-      state.nodes
-      |> Enum.map(fn {node, last_seen} ->
-        %{node: node, last_seen: last_seen, connected: Node.ping(node) == :pong}
+      Enum.map(state.nodes, fn {node, last_seen} ->
+        %{node: node, last_seen: last_seen, connected: MapSet.member?(connected, node)}
       end)
 
     {:reply, nodes, state}

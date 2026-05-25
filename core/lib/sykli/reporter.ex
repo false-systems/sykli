@@ -1,6 +1,19 @@
 defmodule Sykli.Reporter do
   @moduledoc """
-  Forwards local occurrences to the coordinator node.
+  Forwards local occurrences to the coordinator node (Trusted LAN mesh / mode 2).
+
+  > ## Status: defined but NOT wired into any supervisor
+  >
+  > This implements the BEAM-mesh worker→coordinator occurrence-forwarding path
+  > for the Trusted LAN mesh coordination mode, but it is started **nowhere** —
+  > so the forwarding does not run. The consumer (`Sykli.Coordinator`) IS started
+  > in daemon coordinator/full mode (`daemon.ex`) yet currently has no producer.
+  > Completing mode 2 means adding this to the worker/full daemon children (and
+  > making its connectivity check non-blocking, like `Coordinator.connected_nodes`);
+  > retiring it means deleting this module and the Coordinator's `{:occurrence}`
+  > ingestion. That wire-vs-retire choice is a pending decision — see
+  > `docs/coordination-modes.md`. (Mode 3, the self-hosted HTTP coordinator, is a
+  > separate path and already works.)
 
   The Reporter subscribes to all local occurrences and forwards them
   to the Coordinator GenServer on the coordinator node. Occurrences
