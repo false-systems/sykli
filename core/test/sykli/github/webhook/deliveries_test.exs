@@ -39,4 +39,22 @@ defmodule Sykli.GitHub.Webhook.DeliveriesTest do
     assert :ok = Deliveries.evict(nil)
     assert :ok = Deliveries.evict(:atom)
   end
+
+  test "replay table is created at startup and owned by a long-lived process" do
+    assert :ets.whereis(:sykli_github_webhook_deliveries) != :undefined
+
+    owner = :ets.info(:sykli_github_webhook_deliveries, :owner)
+    assert is_pid(owner) and Process.alive?(owner)
+    # Owned by the application master (created in Sykli.Application.start/2), not
+    # by this transient test process — so it outlives request/test processes and
+    # replay protection is not silently reset when a caller exits.
+    refute owner == self()
+  end
+
+  test "setup/0 is idempotent and does not reset existing entries" do
+    assert :ok = Deliveries.setup()
+    assert :ok = Deliveries.accept("setup-idempotent", 1_000)
+    assert :ok = Deliveries.setup()
+    assert {:error, :duplicate_delivery} = Deliveries.accept("setup-idempotent", 1_100)
+  end
 end

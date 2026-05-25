@@ -147,7 +147,9 @@ defmodule Sykli.Cache.TieredRepository do
 
   defp async_l2(fun) do
     if circuit_closed?() do
-      Task.Supervisor.async_nolink(Sykli.TaskSupervisor, fn ->
+      # Fire-and-forget: start_child (not async_nolink) so the caller's mailbox
+      # never accumulates unconsumed {ref, result}/{:DOWN, ...} reply messages.
+      Task.Supervisor.start_child(Sykli.TaskSupervisor, fn ->
         try do
           fun.()
           record_success()

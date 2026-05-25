@@ -1196,7 +1196,10 @@ defmodule Sykli.Executor do
   end
 
   defp maybe_github_status(task_name, state) do
-    Task.Supervisor.async_nolink(Sykli.TaskSupervisor, fn ->
+    # Fire-and-forget: start_child (not async_nolink) so the spawning process
+    # never accumulates {ref, result}/{:DOWN, ...} reply messages it never
+    # consumes. Matters for long-lived callers like the MCP server.
+    Task.Supervisor.start_child(Sykli.TaskSupervisor, fn ->
       case Sykli.SCM.update_status(task_name, state) do
         :ok ->
           :ok

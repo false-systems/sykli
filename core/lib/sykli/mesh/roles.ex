@@ -73,6 +73,14 @@ defmodule Sykli.Mesh.Roles do
     :ok
   end
 
+  @doc false
+  # Eagerly create the table from a long-lived owner (the application master,
+  # via Sykli.Application.start/2) so it outlives transient request processes.
+  def setup do
+    ensure_table()
+    :ok
+  end
+
   defp ensure_table do
     case :ets.whereis(@table) do
       :undefined ->

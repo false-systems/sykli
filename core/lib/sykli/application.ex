@@ -19,6 +19,13 @@ defmodule Sykli.Application do
 
   @impl true
   def start(_type, _args) do
+    # Create the public ETS tables from this long-lived process (the application
+    # master) rather than letting them be created lazily inside a transient
+    # request process — a table owned by a request process dies with it, silently
+    # resetting webhook replay protection and the installation-token cache.
+    Sykli.GitHub.Webhook.Deliveries.setup()
+    Sykli.GitHub.App.Cache.setup()
+    Sykli.Mesh.Roles.setup()
     Sykli.Mesh.Roles.bootstrap_local_roles()
 
     children = [

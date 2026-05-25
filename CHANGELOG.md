@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OTP hardening (Monster Phase E).**
+  - Fire-and-forget side effects (GitHub commit-status updates, async S3 cache
+    writes) use `Task.Supervisor.start_child` instead of `async_nolink`, so
+    long-lived callers (e.g. the MCP server) no longer accumulate unconsumed
+    `{ref, result}`/`{:DOWN, ...}` task reply messages.
+  - `Sykli.Coordinator.connected_nodes/0` derives connectivity from `Node.list/0`
+    instead of blocking `Node.ping/1` inside a GenServer callback, which could
+    wedge the coordinator past the call timeout and cascade `:timeout` crashes.
+  - Webhook replay-protection and installation-token ETS tables are created at
+    application start (owned by a long-lived process) rather than lazily by a
+    transient request process — they no longer silently reset on request churn.
+  - `Sykli.Reporter`'s moduledoc now states it is wired into no supervisor (the
+    Trusted-LAN-mesh occurrence-forwarding path is inactive pending a wire-vs-retire
+    decision); the code no longer implies a running capability.
 - **`sykli cache stats --json` now returns a JSON envelope.** The cache stats
   command supports `--json` through `Sykli.CLI.JsonResponse`, and the black-box
   suite asserts the JSON shape instead of only checking for absent ANSI output.
