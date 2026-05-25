@@ -551,11 +551,11 @@ defmodule Sykli.Daemon do
 
       :coordinator ->
         Logger.info("[Sykli.Daemon] Coordinator mode - will not execute tasks")
-        base ++ [Sykli.Coordinator]
+        base
 
       :full ->
         Logger.info("[Sykli.Daemon] Full mode - can execute and coordinate")
-        base ++ [Sykli.Coordinator]
+        base
     end
   end
 
