@@ -9,6 +9,7 @@ defmodule Sykli.CLI.Coordinator do
   alias Sykli.CLI.JsonResponse
   alias Sykli.Error
   alias Sykli.Error.Formatter
+  alias Sykli.TeamCoordinator.Auth
 
   @default_port 8620
   @default_bind "127.0.0.1"
@@ -21,6 +22,9 @@ defmodule Sykli.CLI.Coordinator do
 
       {:ok, :start, opts} ->
         start(opts)
+
+      {:ok, :mint_token, opts} ->
+        mint_token(opts)
 
       {:error, reason, opts} ->
         output_error(reason, Keyword.get(opts, :json, false))
@@ -75,6 +79,9 @@ defmodule Sykli.CLI.Coordinator do
       positionals == ["start"] ->
         {:ok, :start, opts}
 
+      positionals == ["mint-token"] ->
+        {:ok, :mint_token, opts}
+
       true ->
         {:error, {:invalid_coordinator_command, Enum.join(positionals, " ")}, opts}
     end
@@ -110,6 +117,24 @@ defmodule Sykli.CLI.Coordinator do
   defp parse_flags([<<"--token=", value::binary>> | rest], opts, positionals),
     do: parse_flags(rest, [{:token, value} | opts], positionals)
 
+  defp parse_flags(["--org", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:org, value} | opts], positionals)
+
+  defp parse_flags([<<"--org=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:org, value} | opts], positionals)
+
+  defp parse_flags(["--team", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:team, value} | opts], positionals)
+
+  defp parse_flags([<<"--team=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:team, value} | opts], positionals)
+
+  defp parse_flags(["--role", value | rest], opts, positionals),
+    do: parse_flags(rest, [{:role, value} | opts], positionals)
+
+  defp parse_flags([<<"--role=", value::binary>> | rest], opts, positionals),
+    do: parse_flags(rest, [{:role, value} | opts], positionals)
+
   defp parse_flags([<<"--", _::binary>> = flag | rest], opts, positionals) do
     opts =
       if "--json" in rest do
@@ -128,6 +153,36 @@ defmodule Sykli.CLI.Coordinator do
     case Keyword.get(opts, :token) || System.get_env("SYKLI_COORDINATOR_TOKEN") do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, :coordinator_token_required}
+    end
+  end
+
+  defp mint_token(opts) do
+    json? = Keyword.get(opts, :json, false)
+
+    with {:ok, admin_token} <- token(opts),
+         {:ok, org} <- required_option(opts, :org),
+         {:ok, team} <- required_option(opts, :team),
+         {:ok, role} <- required_option(opts, :role),
+         {:ok, token} <-
+           Auth.mint_team_token(%{"org" => org, "team" => team, "role" => role},
+             token: admin_token
+           ) do
+      if json? do
+        IO.puts(JsonResponse.ok(%{token: token, org: org, team: team, role: role}))
+      else
+        IO.puts(token)
+      end
+
+      0
+    else
+      {:error, reason} -> output_error(reason, json?)
+    end
+  end
+
+  defp required_option(opts, key) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, {:missing_coordinator_option, key}}
     end
   end
 
@@ -174,6 +229,26 @@ defmodule Sykli.CLI.Coordinator do
       message: "coordinator start requires a token",
       step: :setup,
       hints: ["set SYKLI_COORDINATOR_TOKEN or pass --token <token>"]
+    }
+  end
+
+  defp coordinator_error({:missing_coordinator_option, key}) do
+    %Error{
+      code: "coordinator.invalid_command",
+      type: :validation,
+      message: "missing coordinator option: --#{String.replace(to_string(key), "_", "-")}",
+      step: :validate,
+      hints: ["use: sykli coordinator mint-token --org <slug> --team <slug> --role <role>"]
+    }
+  end
+
+  defp coordinator_error(:coordinator_invalid_token_claims) do
+    %Error{
+      code: "coordinator.invalid_command",
+      type: :validation,
+      message: "invalid coordinator token claims",
+      step: :validate,
+      hints: ["role must be one of: owner, member, approver"]
     }
   end
 
@@ -246,10 +321,14 @@ defmodule Sykli.CLI.Coordinator do
 
     Commands:
       sykli coordinator start --token TOKEN [--port PORT] [--bind ADDRESS]
+      sykli coordinator mint-token --org ORG --team TEAM --role ROLE --token TOKEN
 
     Options:
       --json          Output startup status as JSON before serving
       --token TOKEN   Bearer token required for non-health API endpoints
+      --org ORG       Org slug for mint-token
+      --team TEAM     Team slug for mint-token
+      --role ROLE     Team token role: owner, member, or approver
       --port PORT     HTTP port (default: #{@default_port})
       --bind ADDRESS  Listen address (default: #{@default_bind}; use 0.0.0.0 only intentionally)
 

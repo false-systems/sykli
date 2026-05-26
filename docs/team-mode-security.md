@@ -252,6 +252,21 @@ defaults silently.
   credentials live on the coordinator side only and are mounted from
   Kubernetes Secrets.
 
+## Coordinator authorization
+
+- `SYKLI_COORDINATOR_TOKEN` is the admin bootstrap token. It can create
+  orgs and teams, mint team tokens, and access all team-scoped
+  resources.
+- `sykli coordinator mint-token --org <slug> --team <slug> --role
+  <role>` creates stateless HMAC-signed team tokens. Claims are limited
+  to `{org, team, role}`; the current format has no expiry claim, so
+  rotation means rotating the coordinator signing secret.
+- Team tokens are enforced by the coordinator router. A token for team X
+  cannot list, read, create, or mutate team Y work items, run summaries,
+  gates, or daemon sessions.
+- Gate decisions require `owner` or `approver`. A `member` token can see
+  its team's gate state but cannot approve or reject a gate.
+
 ## Audit log
 
 Mandatory. Append-only. Written for at least:

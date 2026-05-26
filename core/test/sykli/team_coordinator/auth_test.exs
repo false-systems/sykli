@@ -30,7 +30,43 @@ defmodule Sykli.TeamCoordinator.AuthTest do
       |> conn("/v1/orgs")
       |> Plug.Conn.put_req_header("authorization", "Bearer secret")
 
-    assert :ok = Auth.authorize(conn, token: "secret")
+    assert {:ok, %{type: :admin, role: "owner"}} = Auth.authorize(conn, token: "secret")
+  end
+
+  test "mints and verifies team-scoped tokens" do
+    assert {:ok, token} =
+             Auth.mint_team_token(
+               %{"org" => "false-systems", "team" => "platform", "role" => "approver"},
+               token: "secret"
+             )
+
+    conn =
+      :get
+      |> conn("/v1/runs")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+
+    assert {:ok, principal} = Auth.authorize(conn, token: "secret")
+    assert principal.type == :team
+    assert principal.org == "false-systems"
+    assert principal.team == "platform"
+    assert principal.role == "approver"
+  end
+
+  test "rejects tampered team tokens" do
+    assert {:ok, token} =
+             Auth.mint_team_token(
+               %{"org" => "false-systems", "team" => "platform", "role" => "member"},
+               token: "secret"
+             )
+
+    tampered = token <> "x"
+
+    conn =
+      :get
+      |> conn("/v1/runs")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{tampered}")
+
+    assert {:error, :coordinator_unauthorized} = Auth.authorize(conn, token: "secret")
   end
 
   test "reports missing token configuration" do

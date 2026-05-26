@@ -11,6 +11,7 @@ defmodule Sykli.TeamCoordinator.Router do
 
   alias Sykli.CLI.JsonResponse
   alias Sykli.TeamCoordinator.{Auth, Store}
+  alias Sykli.TeamCoordinator.Auth.Principal
   alias Sykli.Error
 
   @max_body_bytes 1_000_000
@@ -24,8 +25,9 @@ defmodule Sykli.TeamCoordinator.Router do
   end
 
   def call(%Plug.Conn{path_info: ["v1" | _]} = conn, opts) do
-    with :ok <- Auth.authorize(conn, opts) do
-      route_v1(conn, opts)
+    with {:ok, principal} <- Auth.authorize(conn, opts),
+         {:ok, scope} <- principal_scope(principal, opts) do
+      route_v1(conn, opts, scope)
     else
       {:error, reason} -> send_error(conn, reason)
     end
@@ -33,8 +35,9 @@ defmodule Sykli.TeamCoordinator.Router do
 
   def call(conn, _opts), do: send_error(conn, :coordinator_route_not_found)
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "orgs"]} = conn, opts) do
-    with {:ok, body, conn} <- read_json(conn),
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "orgs"]} = conn, opts, scope) do
+    with :ok <- require_admin(scope),
+         {:ok, body, conn} <- read_json(conn),
          {:ok, org} <- Store.create_org(store(opts), body) do
       send_json(conn, 201, %{org: org})
     else
@@ -42,14 +45,18 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "orgs"]} = conn, opts) do
-    with {:ok, orgs} <- Store.list_orgs(store(opts)) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "orgs"]} = conn, opts, scope) do
+    with :ok <- require_admin(scope),
+         {:ok, orgs} <- Store.list_orgs(store(opts)) do
       send_json(conn, 200, %{items: orgs})
+    else
+      {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "teams"]} = conn, opts) do
-    with {:ok, body, conn} <- read_json(conn),
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "teams"]} = conn, opts, scope) do
+    with :ok <- require_admin(scope),
+         {:ok, body, conn} <- read_json(conn),
          {:ok, team} <- Store.create_team(store(opts), body) do
       send_json(conn, 201, %{team: team})
     else
@@ -57,13 +64,16 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "teams"]} = conn, opts) do
-    with {:ok, teams} <- Store.list_teams(store(opts)) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "teams"]} = conn, opts, scope) do
+    with :ok <- require_admin(scope),
+         {:ok, teams} <- Store.list_teams(store(opts)) do
       send_json(conn, 200, %{items: teams})
+    else
+      {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "work-items"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "work-items"]} = conn, opts, scope) do
     conn = fetch_query_params(conn)
 
     filters =
@@ -72,13 +82,17 @@ defmodule Sykli.TeamCoordinator.Router do
       |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
       |> Map.new()
 
-    with {:ok, items} <- Store.list_work_items(store(opts), filters) do
+    with {:ok, filters} <- scope_filters(scope, filters),
+         {:ok, items} <- Store.list_work_items(store(opts), filters) do
       send_json(conn, 200, %{items: items})
+    else
+      {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "runs"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "runs"]} = conn, opts, scope) do
     with {:ok, body, conn} <- read_run_json(conn),
+         :ok <- authorize_payload_team(scope, Map.get(body, "run", %{})),
          {:ok, run, mode} <- Store.record_run(store(opts), body) do
       status = if mode == :inserted, do: 201, else: 200
       send_json(conn, status, %{run: run})
@@ -87,30 +101,35 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs"]} = conn, opts, scope) do
     conn = fetch_query_params(conn)
 
     filters =
       conn.query_params
-      |> Map.take(["team_id", "work_item_id", "status"])
+      |> Map.take(["org_id", "team_id", "work_item_id", "status"])
       |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
       |> Map.new()
 
-    with {:ok, runs} <- Store.list_runs(store(opts), filters) do
+    with {:ok, filters} <- scope_filters(scope, filters),
+         {:ok, runs} <- Store.list_runs(store(opts), filters) do
       send_json(conn, 200, %{items: runs})
+    else
+      {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs", id]} = conn, opts) do
-    with {:ok, run} <- Store.get_run(store(opts), id) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "runs", id]} = conn, opts, scope) do
+    with {:ok, run} <- Store.get_run(store(opts), id),
+         :ok <- authorize_resource(scope, run["run"]) do
       send_json(conn, 200, run)
     else
       {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "gates"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "gates"]} = conn, opts, scope) do
     with {:ok, body, conn} <- read_gate_json(conn),
+         :ok <- authorize_payload_team(scope, body),
          {:ok, gate, mode} <- Store.upsert_gate(store(opts), body) do
       status = if mode == :inserted, do: 201, else: 200
       send_json(conn, status, %{gate: gate})
@@ -119,7 +138,7 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates"]} = conn, opts, scope) do
     conn = fetch_query_params(conn)
 
     filters =
@@ -128,15 +147,17 @@ defmodule Sykli.TeamCoordinator.Router do
       |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
       |> Map.new()
 
-    with {:ok, gates} <- Store.list_gates(store(opts), filters) do
+    with {:ok, filters} <- scope_filters(scope, filters),
+         {:ok, gates} <- Store.list_gates(store(opts), filters) do
       send_json(conn, 200, %{items: gates})
     else
       {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates", id]} = conn, opts) do
-    with {:ok, gate} <- Store.get_gate(store(opts), id) do
+  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "gates", id]} = conn, opts, scope) do
+    with {:ok, gate} <- Store.get_gate(store(opts), id),
+         :ok <- authorize_resource(scope, gate) do
       send_json(conn, 200, %{gate: gate})
     else
       {:error, reason} -> send_error(conn, reason)
@@ -145,9 +166,14 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp route_v1(
          %Plug.Conn{method: "POST", path_info: ["v1", "gates", id, "decisions"]} = conn,
-         opts
+         opts,
+         scope
        ) do
-    with {:ok, body, conn} <- read_gate_json(conn),
+    with :ok <- require_gate_decider(scope),
+         {:ok, gate} <- Store.get_gate(store(opts), id),
+         :ok <- authorize_resource(scope, gate),
+         {:ok, body, conn} <- read_gate_json(conn),
+         :ok <- authorize_payload_team(scope, body),
          {:ok, gate} <- Store.record_gate_decision(store(opts), id, body) do
       send_json(conn, 200, %{gate: gate})
     else
@@ -155,8 +181,9 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "work-items"]} = conn, opts) do
+  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "work-items"]} = conn, opts, scope) do
     with {:ok, body, conn} <- read_json(conn),
+         :ok <- authorize_payload_team(scope, body),
          {:ok, item} <- Store.create_work_item(store(opts), body) do
       send_json(conn, 201, %{work_item: item})
     else
@@ -164,8 +191,13 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "work-items", id]} = conn, opts) do
-    with {:ok, item} <- Store.get_work_item(store(opts), id) do
+  defp route_v1(
+         %Plug.Conn{method: "GET", path_info: ["v1", "work-items", id]} = conn,
+         opts,
+         scope
+       ) do
+    with {:ok, item} <- Store.get_work_item(store(opts), id),
+         :ok <- authorize_resource(scope, item) do
       send_json(conn, 200, %{work_item: item})
     else
       {:error, reason} -> send_error(conn, reason)
@@ -174,9 +206,12 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp route_v1(
          %Plug.Conn{method: "POST", path_info: ["v1", "work-items", id, "claim"]} = conn,
-         opts
+         opts,
+         scope
        ) do
-    with {:ok, body, conn} <- read_json(conn),
+    with {:ok, item} <- Store.get_work_item(store(opts), id),
+         :ok <- authorize_resource(scope, item),
+         {:ok, body, conn} <- read_json(conn),
          {:ok, item} <- Store.claim_work_item(store(opts), id, body) do
       send_json(conn, 200, %{work_item: item})
     else
@@ -186,9 +221,12 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp route_v1(
          %Plug.Conn{method: "POST", path_info: ["v1", "work-items", id, "notes"]} = conn,
-         opts
+         opts,
+         scope
        ) do
-    with {:ok, body, conn} <- read_json(conn),
+    with {:ok, item} <- Store.get_work_item(store(opts), id),
+         :ok <- authorize_resource(scope, item),
+         {:ok, body, conn} <- read_json(conn),
          {:ok, note} <- Store.add_note(store(opts), id, body) do
       send_json(conn, 201, %{note: note})
     else
@@ -196,8 +234,13 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "POST", path_info: ["v1", "daemon-sessions"]} = conn, opts) do
+  defp route_v1(
+         %Plug.Conn{method: "POST", path_info: ["v1", "daemon-sessions"]} = conn,
+         opts,
+         scope
+       ) do
     with {:ok, body, conn} <- read_json(conn),
+         :ok <- authorize_payload_team(scope, body),
          {:ok, response, _session} <- Store.create_daemon_session(store(opts), body) do
       send_json(conn, 201, response)
     else
@@ -205,7 +248,11 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions"]} = conn, opts) do
+  defp route_v1(
+         %Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions"]} = conn,
+         opts,
+         scope
+       ) do
     conn = fetch_query_params(conn)
 
     filters =
@@ -214,13 +261,21 @@ defmodule Sykli.TeamCoordinator.Router do
       |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
       |> Map.new()
 
-    with {:ok, sessions} <- Store.list_daemon_sessions(store(opts), filters) do
+    with {:ok, filters} <- scope_filters(scope, filters),
+         {:ok, sessions} <- Store.list_daemon_sessions(store(opts), filters) do
       send_json(conn, 200, %{items: sessions})
+    else
+      {:error, reason} -> send_error(conn, reason)
     end
   end
 
-  defp route_v1(%Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions", id]} = conn, opts) do
-    with {:ok, session} <- Store.get_daemon_session(store(opts), id) do
+  defp route_v1(
+         %Plug.Conn{method: "GET", path_info: ["v1", "daemon-sessions", id]} = conn,
+         opts,
+         scope
+       ) do
+    with {:ok, session} <- Store.get_daemon_session(store(opts), id),
+         :ok <- authorize_resource(scope, session) do
       send_json(conn, 200, %{daemon_session: session})
     else
       {:error, reason} -> send_error(conn, reason)
@@ -230,9 +285,12 @@ defmodule Sykli.TeamCoordinator.Router do
   defp route_v1(
          %Plug.Conn{method: "POST", path_info: ["v1", "daemon-sessions", id, "heartbeat"]} =
            conn,
-         opts
+         opts,
+         scope
        ) do
-    with {:ok, body, conn} <- read_json(conn),
+    with {:ok, session} <- Store.get_daemon_session(store(opts), id),
+         :ok <- authorize_resource(scope, session),
+         {:ok, body, conn} <- read_json(conn),
          {:ok, heartbeat, _session} <- Store.heartbeat_daemon_session(store(opts), id, body) do
       send_json(conn, 200, heartbeat)
     else
@@ -240,7 +298,7 @@ defmodule Sykli.TeamCoordinator.Router do
     end
   end
 
-  defp route_v1(conn, _opts), do: send_error(conn, :coordinator_route_not_found)
+  defp route_v1(conn, _opts, _scope), do: send_error(conn, :coordinator_route_not_found)
 
   defp read_json(conn) do
     case read_body(conn, length: @max_body_bytes, read_timeout: @read_timeout_ms) do
@@ -291,8 +349,81 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp store(opts), do: Keyword.fetch!(opts, :store)
 
+  defp principal_scope(%Principal{type: :admin}, _opts), do: {:ok, :admin}
+
+  defp principal_scope(%Principal{type: :team, org: org, team: team, role: role}, opts) do
+    with {:ok, scope} <- Store.resolve_team(store(opts), org, team) do
+      {:ok, Map.put(scope, "role", role)}
+    end
+  end
+
+  defp require_admin(:admin), do: :ok
+  defp require_admin(_scope), do: {:error, :coordinator_forbidden}
+
+  defp require_gate_decider(:admin), do: :ok
+
+  defp require_gate_decider(%{"role" => role}) when role in ["owner", "approver"], do: :ok
+  defp require_gate_decider(_scope), do: {:error, :coordinator_forbidden}
+
+  defp scope_filters(:admin, filters), do: {:ok, filters}
+
+  defp scope_filters(scope, filters) do
+    with :ok <- authorize_payload_team(scope, filters) do
+      {:ok,
+       filters
+       |> Map.delete("org_slug")
+       |> Map.delete("team_slug")
+       |> Map.put("org_id", scope["org_id"])
+       |> Map.put("team_id", scope["team_id"])}
+    end
+  end
+
+  defp authorize_resource(:admin, _resource), do: :ok
+
+  defp authorize_resource(scope, resource) when is_map(resource) do
+    if Map.get(resource, "org_id") == scope["org_id"] and
+         Map.get(resource, "team_id") == scope["team_id"] do
+      :ok
+    else
+      {:error, :coordinator_forbidden}
+    end
+  end
+
+  defp authorize_resource(_scope, _resource), do: {:error, :coordinator_forbidden}
+
+  defp authorize_payload_team(:admin, _payload), do: :ok
+
+  defp authorize_payload_team(scope, payload) when is_map(payload) do
+    checks = [
+      {"org_id", scope["org_id"]},
+      {"team_id", scope["team_id"]},
+      {"org_slug", scope["org_slug"]},
+      {"team_slug", scope["team_slug"]},
+      {"org", scope["org_slug"]},
+      {"team", scope["team_slug"]}
+    ]
+
+    if Enum.all?(checks, fn {key, expected} -> absent_or_equal?(payload, key, expected) end) do
+      :ok
+    else
+      {:error, :coordinator_forbidden}
+    end
+  end
+
+  defp authorize_payload_team(_scope, _payload), do: {:error, :coordinator_forbidden}
+
+  defp absent_or_equal?(payload, key, expected) do
+    case Map.get(payload, key) do
+      nil -> true
+      "" -> true
+      ^expected -> true
+      _other -> false
+    end
+  end
+
   defp status_for(:coordinator_unauthorized), do: 401
   defp status_for(:coordinator_malformed_auth), do: 401
+  defp status_for(:coordinator_forbidden), do: 403
   defp status_for(:coordinator_auth_not_configured), do: 503
   defp status_for(:coordinator_invalid_json), do: 400
   defp status_for(:coordinator_invalid_payload), do: 400
@@ -336,6 +467,9 @@ defmodule Sykli.TeamCoordinator.Router do
 
   defp coordinator_error(:coordinator_auth_not_configured),
     do: error("coordinator.auth_not_configured", "coordinator auth token is not configured")
+
+  defp coordinator_error(:coordinator_forbidden),
+    do: error("coordinator.forbidden", "token is not authorized for this team resource")
 
   defp coordinator_error(:coordinator_invalid_json),
     do: error("coordinator.invalid_json", "request body is not valid JSON")

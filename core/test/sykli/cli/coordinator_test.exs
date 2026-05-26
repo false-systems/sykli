@@ -4,6 +4,7 @@ defmodule Sykli.CLI.CoordinatorTest do
   import ExUnit.CaptureIO
 
   alias Sykli.CLI.Coordinator
+  alias Sykli.TeamCoordinator.Auth
 
   test "help documents explicit bind behavior" do
     output = capture_io(fn -> assert Coordinator.run(["--help"]) == 0 end)
@@ -24,5 +25,32 @@ defmodule Sykli.CLI.CoordinatorTest do
              "ok" => false,
              "error" => %{"code" => "coordinator.invalid_bind"}
            } = Jason.decode!(output)
+  end
+
+  test "mint-token emits an admin-signed team token as JSON" do
+    output =
+      capture_io(fn ->
+        assert Coordinator.run([
+                 "mint-token",
+                 "--token",
+                 "admin-secret",
+                 "--org",
+                 "false-systems",
+                 "--team",
+                 "platform",
+                 "--role",
+                 "approver",
+                 "--json"
+               ]) == 0
+      end)
+
+    decoded = Jason.decode!(output)
+    token = decoded["data"]["token"]
+
+    assert decoded["data"]["role"] == "approver"
+    assert {:ok, principal} = Auth.verify_team_token(token, "admin-secret")
+    assert principal.org == "false-systems"
+    assert principal.team == "platform"
+    assert principal.role == "approver"
   end
 end
