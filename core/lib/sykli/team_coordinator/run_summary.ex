@@ -21,6 +21,8 @@ defmodule Sykli.TeamCoordinator.RunSummary do
   """
 
   alias Sykli.RunHistory
+  alias Sykli.Services.SecretMasker
+  alias Sykli.Services.SecretPatterns
 
   @version "1"
 
@@ -66,7 +68,9 @@ defmodule Sykli.TeamCoordinator.RunSummary do
     }
   end
 
-  def encode(%__MODULE__{} = summary) do
+  def encode(%__MODULE__{} = summary, opts \\ []) do
+    secrets = SecretPatterns.all_values(Keyword.get(opts, :secrets, []))
+
     %{
       "version" => summary.version,
       "run" => summary.run,
@@ -76,6 +80,7 @@ defmodule Sykli.TeamCoordinator.RunSummary do
       "gates" => summary.gates,
       "evidence_refs" => summary.evidence_refs
     }
+    |> SecretMasker.mask_deep(secrets)
   end
 
   defp run_node(%RunHistory.TaskResult{} = task) do

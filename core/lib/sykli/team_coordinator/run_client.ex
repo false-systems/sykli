@@ -5,7 +5,12 @@ defmodule Sykli.TeamCoordinator.RunClient do
   alias Sykli.TeamCoordinator.RunSummary
 
   def publish(session, token, %RunSummary{} = summary, opts \\ []) do
-    publish_raw(session, token, RunSummary.encode(summary), opts)
+    publish_raw(
+      session,
+      token,
+      RunSummary.encode(summary, secrets: Keyword.get(opts, :secrets, [])),
+      opts
+    )
   end
 
   def publish_raw(session, token, payload, opts \\ []) when is_map(payload) do

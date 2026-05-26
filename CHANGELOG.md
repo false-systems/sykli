@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work items, run summaries, gates, or daemon sessions. Gate decisions
   require `owner` or `approver`; `member` tokens receive
   `coordinator.forbidden`.
+- **Runtime-resolved secrets are masked (Monster Phase C, C3).** The engine now
+  carries per-run resolved secret values from `secret_refs`, OIDC credential
+  exchange, and literal secret-like task env keys into occurrence persistence,
+  notification payloads, run-summary sync/outbox payloads, and SLSA
+  attestations. Secret-pattern matching is centralized and structured payloads
+  also redact values under secret-like keys.
 - **Runtime trust model documented; GH-004 reframed (Monster Phase C, C5).** New
   `docs/runtime-trust-model.md` states the trust boundary: the Shell runtime is
   **not** a security sandbox (it runs trusted repository code with the invoking

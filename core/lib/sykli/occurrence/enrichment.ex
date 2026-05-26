@@ -17,6 +17,8 @@ defmodule Sykli.Occurrence.Enrichment do
   alias Sykli.Occurrence.Store
   alias Sykli.RunHistory
   alias Sykli.Services.CausalityService
+  alias Sykli.Services.SecretMasker
+  alias Sykli.Services.SecretPatterns
 
   @max_output_lines 200
 
@@ -35,18 +37,18 @@ defmodule Sykli.Occurrence.Enrichment do
           :ok | {:error, term()}
   def enrich_and_persist(%Occurrence{} = occ, graph, executor_result, workdir) do
     enriched = enrich(occ, graph, executor_result, workdir)
-    result = persist(enriched, workdir)
+    secrets = secrets_for_result(executor_result)
+    result = persist(enriched, workdir, secrets)
 
     # Generate SLSA provenance attestation for terminal events
     if occ.type in ["ci.run.passed", "ci.run.failed"] do
-      persist_attestation(enriched, graph, workdir)
+      persist_attestation(enriched, graph, workdir, secrets)
     end
 
     # Fire-and-forget webhook notification for terminal events (masked)
     if occ.type in ["ci.run.passed", "ci.run.failed"] do
-      secrets = collect_secrets_from_env()
-      masked = Sykli.Services.SecretMasker.mask_deep(to_persistence_map(enriched), secrets)
-      Sykli.Services.NotificationService.notify(masked)
+      masked = SecretMasker.mask_deep(to_persistence_map(enriched), secrets)
+      notification_service().notify(masked)
     end
 
     result
@@ -610,18 +612,9 @@ defmodule Sykli.Occurrence.Enrichment do
 
   @max_json_occurrences 20
 
-  defp persist(%Occurrence{} = occ, workdir) do
+  defp persist(%Occurrence{} = occ, workdir, secrets) do
     occurrence_map = to_persistence_map(occ)
-
-    # Mask any resolved secrets from the occurrence data before persisting
-    secrets = collect_secrets_from_env()
-
-    occurrence_map =
-      if secrets != [] do
-        Sykli.Services.SecretMasker.mask_deep(occurrence_map, secrets)
-      else
-        occurrence_map
-      end
+    occurrence_map = SecretMasker.mask_deep(occurrence_map, secrets)
 
     dir = Path.join(workdir, ".sykli")
 
@@ -729,13 +722,13 @@ defmodule Sykli.Occurrence.Enrichment do
   # SLSA ATTESTATION
   # ─────────────────────────────────────────────────────────────────────────────
 
-  defp persist_attestation(enriched, graph, workdir) do
+  defp persist_attestation(enriched, graph, workdir, secrets) do
     dir = Path.join(workdir, ".sykli")
 
     # Per-run attestation
     case Sykli.Attestation.generate(enriched, graph, workdir) do
       {:ok, attestation} ->
-        write_attestation(attestation, Path.join(dir, "attestation.json"))
+        write_attestation(attestation, Path.join(dir, "attestation.json"), secrets)
 
       {:error, :no_subjects} ->
         :ok
@@ -751,7 +744,7 @@ defmodule Sykli.Occurrence.Enrichment do
         :ok ->
           Enum.each(per_task, fn {task_name, attestation} ->
             safe_name = String.replace(task_name, "/", ":")
-            write_attestation(attestation, Path.join(att_dir, "#{safe_name}.json"))
+            write_attestation(attestation, Path.join(att_dir, "#{safe_name}.json"), secrets)
           end)
 
         {:error, _} ->
@@ -761,7 +754,8 @@ defmodule Sykli.Occurrence.Enrichment do
   end
 
   # Write attestation as DSSE envelope (signed if key available, unsigned otherwise)
-  defp write_attestation(attestation, path) do
+  defp write_attestation(attestation, path, secrets) do
+    attestation = SecretMasker.mask_deep(attestation, secrets)
     {:ok, envelope} = Sykli.Attestation.Envelope.wrap(attestation)
 
     envelope =
@@ -797,6 +791,20 @@ defmodule Sykli.Occurrence.Enrichment do
   defp extract_results({:ok, results}) when is_list(results), do: results
   defp extract_results({:error, results}) when is_list(results), do: results
   defp extract_results(_), do: []
+
+  defp secrets_for_result(executor_result) do
+    executor_result
+    |> extract_results()
+    |> Enum.flat_map(fn
+      %TaskResult{secret_values: values} -> values || []
+      _other -> []
+    end)
+    |> SecretPatterns.all_values()
+  end
+
+  defp notification_service do
+    Application.get_env(:sykli, :notification_service, Sykli.Services.NotificationService)
+  end
 
   defp get_field(%{} = task, field), do: Map.get(task, field)
 
@@ -844,32 +852,5 @@ defmodule Sykli.Occurrence.Enrichment do
     map
     |> Enum.reject(fn {_k, v} -> is_nil(v) or v == [] end)
     |> Map.new()
-  end
-
-  # Collect secret values from env vars for masking.
-  # Matches common patterns (_TOKEN, _SECRET, _KEY, etc.) and connection
-  # string env vars (DATABASE_URL, REDIS_DSN, etc.).
-  @secret_env_patterns [
-    "_TOKEN",
-    "_SECRET",
-    "_KEY",
-    "_PASSWORD",
-    "_PASS",
-    "_API_KEY",
-    "_CREDENTIAL",
-    "_AUTH",
-    "_URL",
-    "_DSN",
-    "_URI",
-    "_CONN"
-  ]
-  defp collect_secrets_from_env do
-    System.get_env()
-    |> Enum.filter(fn {key, _val} ->
-      Enum.any?(@secret_env_patterns, &String.contains?(key, &1))
-    end)
-    |> Enum.map(fn {_key, val} -> val end)
-    |> Enum.uniq()
-    |> Enum.filter(&(byte_size(&1) >= 4))
   end
 end

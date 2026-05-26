@@ -11,6 +11,7 @@ defmodule Sykli do
   alias Sykli.Occurrence.Enrichment
   alias Sykli.Occurrence.HistoryAnalyzer
   alias Sykli.Services.CausalityService
+  alias Sykli.Services.SecretPatterns
 
   @doc """
   Run the sykli pipeline.
@@ -239,7 +240,7 @@ defmodule Sykli do
 
     # save/2 uses File.write! so it raises on error (caught by rescue below)
     RunHistory.save(run, path: path)
-    maybe_sync_run_summary(path, run)
+    maybe_sync_run_summary(path, run, run_secret_values(result))
 
     # Generate AI context file
     generate_context(path, graph, run)
@@ -526,15 +527,24 @@ defmodule Sykli do
 
   defp format_error_for_history(other), do: inspect(other)
 
-  defp maybe_sync_run_summary(path, %RunHistory.Run{} = run) do
+  defp maybe_sync_run_summary(path, %RunHistory.Run{} = run, secret_values) do
     case Sykli.Daemon.SessionStore.read(path: Path.join(path, ".sykli")) do
       {:ok, session} ->
         summary = RunSummary.from_run(run, session: session, path: path)
-        payload = RunSummary.encode(summary)
-        prequeued? = Sykli.Outbox.enqueue("runs", payload, path: path) == :ok
+        payload = RunSummary.encode(summary, secrets: secret_values)
+
+        prequeued? =
+          Sykli.Outbox.enqueue("runs", payload, path: path, secrets: secret_values) == :ok
 
         Task.Supervisor.async_nolink(Sykli.TaskSupervisor, fn ->
-          publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?)
+          publish_or_enqueue_run_summary(
+            session,
+            summary,
+            payload,
+            path,
+            prequeued?,
+            secret_values
+          )
         end)
 
         :ok
@@ -544,10 +554,10 @@ defmodule Sykli do
     end
   end
 
-  defp publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?) do
+  defp publish_or_enqueue_run_summary(session, summary, payload, path, prequeued?, secret_values) do
     case System.get_env("SYKLI_TEAM_TOKEN") do
       token when is_binary(token) and token != "" ->
-        case RunClient.publish(session, token, summary) do
+        case RunClient.publish(session, token, summary, secrets: secret_values) do
           {:ok, _stored} ->
             if prequeued?, do: Sykli.Outbox.delete("runs", payload, path: path)
 
@@ -576,6 +586,20 @@ defmodule Sykli do
       "reason" => inspect(reason)
     })
   end
+
+  defp run_secret_values(result) do
+    result
+    |> executor_results()
+    |> Enum.flat_map(fn
+      %Executor.TaskResult{secret_values: values} -> values || []
+      _other -> []
+    end)
+    |> SecretPatterns.normalize_values()
+  end
+
+  defp executor_results({:ok, results}) when is_list(results), do: results
+  defp executor_results({:error, results}) when is_list(results), do: results
+  defp executor_results(_other), do: []
 
   defp get_previous_streaks(path) do
     case RunHistory.load_latest(path: path) do
