@@ -4,9 +4,10 @@
 
 Design and implementation reference for the Sykli Coordinator service.
 The initial skeleton is implemented with an in-memory store,
-bearer-token auth, org/team/work item endpoints, and daemon
-join/heartbeat endpoints. Durable Postgres storage, run sync, gate sync,
-and deployment manifests remain future implementation slices.
+admin bootstrap token auth, signed team tokens, org/team/work item
+endpoints, run sync, gate sync, and daemon join/heartbeat endpoints.
+Durable Postgres storage and deployment manifests remain future
+implementation slices.
 
 ## Product sentence
 
@@ -94,6 +95,26 @@ Properties:
 - **No execution on the coordinator.** It does not run user pipelines.
 - **One process surface.** All state is in one Postgres database. No
   Kafka, Redis, or external broker is required to start.
+
+## Authorization model
+
+`SYKLI_COORDINATOR_TOKEN` is the admin bootstrap token. It has owner
+access to all coordinator endpoints and is the signing secret used by
+`sykli coordinator mint-token`.
+
+Team tokens are stateless signed bearer tokens carrying `{org, team,
+role}` claims. The current token format has no expiry claim; rotation is
+done by rotating the coordinator token/signing secret. Roles are:
+
+- `owner` — team-scoped read/write access, including gate decisions.
+- `approver` — team-scoped access and gate decisions.
+- `member` — team-scoped work/run/session/gate access, but not gate
+  decisions.
+
+List endpoints are scoped to the token's team. If a team token supplies
+a conflicting `org_id`, `team_id`, `org_slug`, or `team_slug`, the API
+returns `403 coordinator.forbidden` instead of widening the query.
+Single-resource endpoints also enforce the stored resource's team.
 
 ## Coordinator responsibilities (v0)
 

@@ -4,7 +4,7 @@ defmodule Sykli.TeamCoordinator.RouterTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Sykli.TeamCoordinator.{Router, Store}
+  alias Sykli.TeamCoordinator.{Auth, Router, Store}
 
   @token "test-token"
   @now "2026-05-09T10:00:00Z"
@@ -280,6 +280,128 @@ defmodule Sykli.TeamCoordinator.RouterTest do
     assert [%{"name" => "test"}] = json(show)["data"]["nodes"]
   end
 
+  test "team tokens are scoped to their team for run endpoints" do
+    {:ok, store} =
+      Store.start_link(
+        now: fn -> @now end,
+        id:
+          id_sequence(
+            ~w(org_001 audit_001 team_001 audit_002 team_002 audit_003 audit_004 audit_005)
+          )
+      )
+
+    opts = [store: store, token: @token]
+
+    {:ok, _org} = Store.create_org(store, %{"slug" => "false-systems", "name" => "False Systems"})
+
+    {:ok, _team} =
+      Store.create_team(store, %{
+        "org_id" => "org_001",
+        "slug" => "platform",
+        "name" => "Platform"
+      })
+
+    {:ok, _other} =
+      Store.create_team(store, %{"org_id" => "org_001", "slug" => "infra", "name" => "Infra"})
+
+    {:ok, _run, :inserted} = Store.record_run(store, run_payload("run_platform", "platform"))
+    {:ok, _run, :inserted} = Store.record_run(store, run_payload("run_infra", "infra"))
+
+    {:ok, token} =
+      Auth.mint_team_token(%{"org" => "false-systems", "team" => "platform", "role" => "member"},
+        token: @token
+      )
+
+    own_list = :get |> authed_conn("/v1/runs?team_id=team_001", token) |> call(opts)
+    assert own_list.status == 200
+    assert [%{"id" => "run_platform"}] = json(own_list)["data"]["items"]
+
+    cross_list = :get |> authed_conn("/v1/runs?team_id=team_002", token) |> call(opts)
+    assert cross_list.status == 403
+    assert json(cross_list)["error"]["code"] == "coordinator.forbidden"
+
+    cross_show = :get |> authed_conn("/v1/runs/run_infra", token) |> call(opts)
+    assert cross_show.status == 403
+    assert json(cross_show)["error"]["code"] == "coordinator.forbidden"
+
+    admin_list = :get |> authed_conn("/v1/runs?team_id=team_002") |> call(opts)
+    assert admin_list.status == 200
+    assert [%{"id" => "run_infra"}] = json(admin_list)["data"]["items"]
+  end
+
+  test "team tokens cannot read other team work gates or daemon sessions" do
+    {:ok, store} =
+      Store.start_link(
+        now: fn -> @now end,
+        id:
+          id_sequence(
+            ~w(org_001 audit_001 team_001 audit_002 team_002 audit_003 work_001 audit_004 work_002 audit_005 sess_001 audit_006 sess_002 audit_007 audit_008 audit_009)
+          )
+      )
+
+    opts = [store: store, token: @token]
+    setup_two_teams!(store)
+
+    {:ok, _work} =
+      Store.create_work_item(store, %{
+        "org_id" => "org_001",
+        "team_id" => "team_001",
+        "title" => "Platform work"
+      })
+
+    {:ok, _other_work} =
+      Store.create_work_item(store, %{
+        "org_id" => "org_001",
+        "team_id" => "team_002",
+        "title" => "Infra work"
+      })
+
+    {:ok, _join, platform_session} =
+      Store.create_daemon_session(store, daemon_payload("daemon-platform", "platform"))
+
+    {:ok, _join, infra_session} =
+      Store.create_daemon_session(store, daemon_payload("daemon-infra", "infra"))
+
+    {:ok, _gate, :inserted} =
+      Store.upsert_gate(
+        store,
+        gate_payload("gate_platform", platform_session["session_id"], "platform")
+      )
+
+    {:ok, _gate, :inserted} =
+      Store.upsert_gate(store, gate_payload("gate_infra", infra_session["session_id"], "infra"))
+
+    {:ok, token} =
+      Auth.mint_team_token(%{"org" => "false-systems", "team" => "platform", "role" => "member"},
+        token: @token
+      )
+
+    for path <- [
+          "/v1/work-items?team_id=team_002",
+          "/v1/work-items/work_002",
+          "/v1/daemon-sessions?team_id=team_002",
+          "/v1/daemon-sessions/sess_002",
+          "/v1/gates?team_id=team_002",
+          "/v1/gates/gate_infra"
+        ] do
+      conn = :get |> authed_conn(path, token) |> call(opts)
+      assert conn.status == 403
+      assert json(conn)["error"]["code"] == "coordinator.forbidden"
+    end
+
+    member_decision =
+      :post
+      |> authed_json_conn(
+        "/v1/gates/gate_platform/decisions",
+        gate_decision_payload("platform"),
+        token
+      )
+      |> call(opts)
+
+    assert member_decision.status == 403
+    assert json(member_decision)["error"]["code"] == "coordinator.forbidden"
+  end
+
   test "publishes lists and decides gates through JSON API", %{opts: opts} do
     :post
     |> authed_json_conn("/v1/orgs", %{"slug" => "false-systems", "name" => "False Systems"})
@@ -400,9 +522,13 @@ defmodule Sykli.TeamCoordinator.RouterTest do
   end
 
   defp authed_conn(method, path) do
+    authed_conn(method, path, @token)
+  end
+
+  defp authed_conn(method, path, token) do
     method
     |> conn(path)
-    |> put_req_header("authorization", "Bearer #{@token}")
+    |> put_req_header("authorization", "Bearer #{token}")
   end
 
   defp json_conn(method, path, body) do
@@ -412,9 +538,81 @@ defmodule Sykli.TeamCoordinator.RouterTest do
   end
 
   defp authed_json_conn(method, path, body) do
+    authed_json_conn(method, path, body, @token)
+  end
+
+  defp authed_json_conn(method, path, body, token) do
     method
     |> json_conn(path, body)
-    |> put_req_header("authorization", "Bearer #{@token}")
+    |> put_req_header("authorization", "Bearer #{token}")
+  end
+
+  defp setup_two_teams!(store) do
+    {:ok, _org} = Store.create_org(store, %{"slug" => "false-systems", "name" => "False Systems"})
+
+    {:ok, _team} =
+      Store.create_team(store, %{
+        "org_id" => "org_001",
+        "slug" => "platform",
+        "name" => "Platform"
+      })
+
+    {:ok, _other} =
+      Store.create_team(store, %{"org_id" => "org_001", "slug" => "infra", "name" => "Infra"})
+  end
+
+  defp run_payload(id, team_slug) do
+    %{
+      "version" => "1",
+      "run" => %{
+        "id" => id,
+        "org_slug" => "false-systems",
+        "team_slug" => team_slug,
+        "status" => "passed"
+      },
+      "nodes" => [],
+      "criteria_results" => [],
+      "review_results" => [],
+      "gates" => [],
+      "evidence_refs" => []
+    }
+  end
+
+  defp daemon_payload(id, team) do
+    %{
+      "daemon_id" => id,
+      "org" => "false-systems",
+      "team" => team,
+      "labels" => ["local"],
+      "capabilities" => ["local"],
+      "version" => "0.6.1"
+    }
+  end
+
+  defp gate_payload(id, session_id, team_slug) do
+    %{
+      "org_slug" => "false-systems",
+      "team_slug" => team_slug,
+      "daemon_session_id" => session_id,
+      "id" => id,
+      "run_id" => "run_#{team_slug}",
+      "work_item_id" => nil,
+      "status" => "waiting",
+      "decided_by" => nil,
+      "decided_at" => nil,
+      "reason" => nil
+    }
+  end
+
+  defp gate_decision_payload(team_slug) do
+    %{
+      "org_slug" => "false-systems",
+      "team_slug" => team_slug,
+      "status" => "approved",
+      "decided_by" => "member:reviewer",
+      "decided_at" => "2026-05-09T10:05:00Z",
+      "reason" => "Reviewed"
+    }
   end
 
   defp json(conn), do: Jason.decode!(conn.resp_body)

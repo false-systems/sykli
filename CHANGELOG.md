@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-team coordinator authorization (Monster Phase C, C2).** The
+  self-hosted coordinator now supports stateless signed team tokens via
+  `sykli coordinator mint-token --org <slug> --team <slug> --role
+  <role>`. The existing coordinator token remains the admin bootstrap
+  token, while team tokens are scoped to their org/team and role.
 - **Monster Phase A CI foundation.** CI now runs the full evaluation pyramid:
   Credo, black-box CLI tests, cross-SDK conformance, and merge-to-main oracle
   evals. Local developers can reproduce the same path with `cd core && mix verify`
@@ -43,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Coordinator team isolation is enforced (Monster Phase C, C2).** Team
+  tokens can no longer widen list filters or read/mutate another team's
+  work items, run summaries, gates, or daemon sessions. Gate decisions
+  require `owner` or `approver`; `member` tokens receive
+  `coordinator.forbidden`.
 - **Runtime trust model documented; GH-004 reframed (Monster Phase C, C5).** New
   `docs/runtime-trust-model.md` states the trust boundary: the Shell runtime is
   **not** a security sandbox (it runs trusted repository code with the invoking

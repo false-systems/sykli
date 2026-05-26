@@ -26,6 +26,10 @@ defmodule Sykli.TeamCoordinator.Store do
   def list_orgs(server), do: GenServer.call(server, :list_orgs)
   def create_team(server, attrs), do: GenServer.call(server, {:create_team, attrs})
   def list_teams(server), do: GenServer.call(server, :list_teams)
+
+  def resolve_team(server, org_slug, team_slug),
+    do: GenServer.call(server, {:resolve_team, org_slug, team_slug})
+
   def create_work_item(server, attrs), do: GenServer.call(server, {:create_work_item, attrs})
 
   def list_work_items(server, filters \\ %{}),
@@ -139,6 +143,22 @@ defmodule Sykli.TeamCoordinator.Store do
 
   def handle_call(:list_teams, _from, state) do
     {:reply, {:ok, sorted_values(state.teams)}, state}
+  end
+
+  def handle_call({:resolve_team, org_slug, team_slug}, _from, state) do
+    result =
+      with {:ok, org_id} <- org_id(state, %{"org_slug" => org_slug}),
+           {:ok, team_id} <- team_id(state, %{"team_slug" => team_slug}, org_id) do
+        {:ok,
+         %{
+           "org_id" => org_id,
+           "team_id" => team_id,
+           "org_slug" => org_slug,
+           "team_slug" => team_slug
+         }}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:create_work_item, attrs}, _from, state) do
@@ -374,7 +394,8 @@ defmodule Sykli.TeamCoordinator.Store do
       |> Enum.filter(fn record ->
         run = record["run"]
 
-        filter_match?(run, "team_id", Map.get(filters, "team_id")) and
+        filter_match?(run, "org_id", Map.get(filters, "org_id")) and
+          filter_match?(run, "team_id", Map.get(filters, "team_id")) and
           filter_match?(run, "work_item_id", Map.get(filters, "work_item_id")) and
           filter_match?(run, "status", Map.get(filters, "status"))
       end)

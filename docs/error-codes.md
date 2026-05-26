@@ -32,6 +32,7 @@ surface is still young. They are emitted in the JSON envelope returned by
 | `coordinator.body_read_failed` | Plug failed to read the coordinator request body. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:194` |
 | `coordinator.duplicate_org_slug` | An org create request used an org slug that already exists. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:206` |
 | `coordinator.duplicate_team_slug` | A team create request used a team slug that already exists in the org. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:209` |
+| `coordinator.forbidden` | A valid coordinator token attempted to access or mutate a resource outside its authorized team scope. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
 | `coordinator.daemon_session_not_found` | A daemon session lookup or heartbeat referenced a session that does not exist. | public-unstable | `core/lib/sykli/team_coordinator/router.ex` |
 | `coordinator.internal_error` | Fallback coordinator API error for an unexpected structured reason. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:227` |
 | `coordinator.invalid_assignment_type` | A work claim request used an unsupported assignment type. | public-unstable | `core/lib/sykli/team_coordinator/router.ex:221` |
