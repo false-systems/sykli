@@ -1,0 +1,15 @@
+[package]
+name = "sykli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Executes declared graphs and proves what ran"
+license = "MIT"
+repository = "https://github.com/false-systems/sykli"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,6 @@
+/target
+/.sykli/
+/.claude/
+/.teko/
+/.toimija/*
+!/.toimija/repo.yaml
