@@ -14,8 +14,9 @@ Kisko runs workers. Ahti stores records. Sykli runs graphs.
 
 **Bootstrapping.** The founding document and decision records are in
 [`docs/founding.md`](docs/founding.md) and [`docs/adr/`](docs/adr/). The v0
-slice — parse, validate, execute, cache, delta, receipt — is not implemented
-yet; the CLI says so honestly.
+engine slice — parse, validate, execute, local cache, delta plan, receipt — is
+implemented with the Rust SDK, contract locking, and release guardrails;
+distribution packaging remains.
 
 The predecessor (Elixir implementation, five SDKs, schema v1–v5) lives at
 [false-systems/sykli-elixir](https://github.com/false-systems/sykli-elixir)
@@ -35,6 +36,45 @@ stated re-entry condition.
 ```bash
 cargo build
 cargo test
+cargo xtask gate
+```
+
+## Contract
+
+Repositories expose `sykli.rs` as an opt-in Cargo binary:
+
+```toml
+[features]
+sykli = ["dep:sykli"]
+
+[[bin]]
+name = "sykli"
+path = "sykli.rs"
+required-features = ["sykli"]
+
+[dependencies]
+sykli = { git = "https://github.com/false-systems/sykli", optional = true }
+```
+
+The emitter uses `sykli::Pipeline`:
+
+```rust
+use sykli::Pipeline;
+
+fn main() {
+    let mut pipeline = Pipeline::new();
+    let _ = pipeline.task("test").run("cargo test");
+    pipeline.emit();
+}
+```
+
+The CLI compiles it automatically:
+
+```bash
+sykli lock
+sykli validate
+sykli run
+sykli plan --changed src/lib.rs
 ```
 
 ## License

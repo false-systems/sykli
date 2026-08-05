@@ -1,21 +1,20 @@
-name: CI
+name: Release guard
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read
 
 jobs:
-  gate:
-    name: Gate
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
-          components: clippy, rustfmt
-      - run: cargo xtask gate
+      - run: cargo test --workspace --release --locked
+      - run: cargo build --release --locked
+      - run: cargo publish --package sykli --dry-run --locked
