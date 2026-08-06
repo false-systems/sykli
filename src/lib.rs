@@ -606,7 +606,7 @@ fn cache_hit(task: &Task, root: &Path, cache_dir: &Path) -> Result<Option<TaskRe
         || metadata.cache_key != cache_key
         || metadata.task != task.name
         || metadata.outputs != task.outputs
-        || !metadata.provenance.receipt_path.exists()
+        || !provenance_resolves(&metadata.provenance)?
     {
         return Ok(None);
     }
@@ -685,25 +685,43 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn provenance_resolves(provenance: &CacheProvenance) -> Result<bool> {
+    let bytes = match fs::read(&provenance.receipt_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(Error::Io {
+                path: provenance.receipt_path.clone(),
+                source,
+            });
+        }
+    };
+    Ok(sha256_hex(&bytes) == provenance.receipt_hash)
+}
+
 fn cache_key(task: &Task, root: &Path) -> Result<String> {
     let base = task_workdir(task, root);
     let inputs = task
         .inputs
         .iter()
-        .map(|path| {
+        .map(|path| -> Result<InputDigest> {
             let input_path = base.join(path);
             let sha256 = match fs::read(&input_path) {
                 Ok(bytes) => Some(sha256_hex(&bytes)),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => None,
-                Err(_) => None,
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: input_path,
+                        source,
+                    });
+                }
             };
-            InputDigest {
+            Ok(InputDigest {
                 path: path.clone(),
                 sha256,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let key_input = CacheKeyInput {
         task,
         inputs,

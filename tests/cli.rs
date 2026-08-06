@@ -156,6 +156,12 @@ fn run_reuses_cache_hits_with_receipt_provenance() {
         .output()
         .expect("binary runs");
     assert!(first.status.success());
+    let first_text = String::from_utf8(first.stdout).expect("utf8");
+    let first_json: serde_json::Value = serde_json::from_str(&first_text).expect("json");
+    let first_receipt_path = first_json["receipt_path"]
+        .as_str()
+        .expect("receipt path is string")
+        .to_string();
     assert_eq!(
         std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
         "run"
@@ -179,6 +185,18 @@ fn run_reuses_cache_hits_with_receipt_provenance() {
     assert!(text.contains(r#""outcome": "cached""#));
     assert!(text.contains(r#""cache_provenance""#));
 
+    std::fs::write(&first_receipt_path, "tampered").expect("tamper receipt");
+    std::fs::remove_file(dir.join("out.txt")).expect("remove output");
+    let tampered = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().expect("utf8 path"), "--json"])
+        .output()
+        .expect("binary runs");
+    assert!(tampered.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
+        "runrun"
+    );
+
     std::fs::write(dir.join("in.txt"), "two").expect("change input");
     std::fs::remove_file(dir.join("out.txt")).expect("remove output");
     let third = Command::new(env!("CARGO_BIN_EXE_sykli"))
@@ -188,8 +206,36 @@ fn run_reuses_cache_hits_with_receipt_provenance() {
     assert!(third.status.success());
     assert_eq!(
         std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
-        "runrun"
+        "runrunrun"
     );
+}
+
+#[test]
+fn run_errors_when_declared_input_cannot_be_read() {
+    let dir = temp_dir("input-error");
+    let contract = dir.join("sykli.json");
+    std::fs::create_dir(dir.join("input-dir")).expect("create input dir");
+    std::fs::write(
+        &contract,
+        r#"{
+          "schema": "sykli-contract.v1",
+          "tasks": [
+            {
+              "name": "build",
+              "run": "printf no",
+              "inputs": ["input-dir"],
+              "outputs": ["out.txt"]
+            }
+          ]
+        }"#,
+    )
+    .expect("write contract");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().expect("utf8 path"), "--json"])
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(2));
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
