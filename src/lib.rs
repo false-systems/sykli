@@ -81,6 +81,7 @@ pub enum RunOutcome {
 pub struct TaskReceipt {
     pub name: String,
     pub command: String,
+    pub workdir: PathBuf,
     pub outcome: TaskOutcome,
     pub exit_code: Option<i32>,
     pub started_at_ms: u128,
@@ -90,6 +91,9 @@ pub struct TaskReceipt {
     pub stderr: String,
     pub stdout_sha256: String,
     pub stderr_sha256: String,
+    pub cache_key: Option<String>,
+    pub cache_provenance: Option<CacheProvenance>,
+    pub declared_outputs: Vec<PathBuf>,
     pub missing_outputs: Vec<String>,
 }
 
@@ -100,6 +104,7 @@ pub enum TaskOutcome {
     Failed,
     Blocked,
     Errored,
+    Cached,
 }
 
 #[derive(Debug)]
@@ -115,6 +120,34 @@ pub enum Error {
     Validation(String),
     Serialize(serde_json::Error),
     ThreadPanic(String),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheProvenance {
+    pub receipt_hash: String,
+    pub receipt_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CacheMetadata {
+    schema: String,
+    cache_key: String,
+    task: String,
+    outputs: Vec<PathBuf>,
+    provenance: CacheProvenance,
+}
+
+#[derive(Serialize)]
+struct CacheKeyInput<'a> {
+    task: &'a Task,
+    inputs: Vec<InputDigest>,
+    runtime_fingerprint: &'a str,
+}
+
+#[derive(Serialize)]
+struct InputDigest {
+    path: PathBuf,
+    sha256: Option<String>,
 }
 
 impl fmt::Display for Error {
@@ -210,7 +243,7 @@ pub fn plan(valid: &ValidContract) -> Plan {
     }
 }
 
-pub fn run(valid: &ValidContract, root: &Path) -> Result<Receipt> {
+pub fn run(valid: &ValidContract, root: &Path, cache_dir: &Path) -> Result<Receipt> {
     let run_started_at_ms = unix_time_ms();
     let mut completed = BTreeMap::<String, TaskOutcome>::new();
     let mut task_runs = Vec::new();
@@ -228,13 +261,17 @@ pub fn run(valid: &ValidContract, root: &Path) -> Result<Receipt> {
                 .get(name)
                 .expect("validated plan names existing tasks")
                 .clone();
-            if task
-                .after
-                .iter()
-                .any(|dep| completed.get(dep) != Some(&TaskOutcome::Passed))
-            {
+            if task.after.iter().any(|dep| {
+                !matches!(
+                    completed.get(dep),
+                    Some(TaskOutcome::Passed | TaskOutcome::Cached)
+                )
+            }) {
                 task_runs.push(blocked_task_run(&task));
                 completed.insert(task.name.clone(), TaskOutcome::Blocked);
+            } else if let Some(cached) = cache_hit(&task, root, cache_dir)? {
+                completed.insert(task.name.clone(), TaskOutcome::Cached);
+                task_runs.push(cached);
             } else {
                 let root = root.to_path_buf();
                 handles.push((
@@ -253,7 +290,7 @@ pub fn run(valid: &ValidContract, root: &Path) -> Result<Receipt> {
 
     let outcome = if task_runs
         .iter()
-        .all(|task| task.outcome == TaskOutcome::Passed)
+        .all(|task| matches!(task.outcome, TaskOutcome::Passed | TaskOutcome::Cached))
     {
         RunOutcome::Passed
     } else {
@@ -288,6 +325,57 @@ pub fn write_receipt(receipt: Receipt, receipt_dir: &Path) -> Result<StoredRecei
         receipt_hash,
         receipt,
     })
+}
+
+pub fn populate_cache(stored: &StoredReceipt, root: &Path, cache_dir: &Path) -> Result<()> {
+    for task in &stored.receipt.tasks {
+        if task.outcome != TaskOutcome::Passed || !task.missing_outputs.is_empty() {
+            continue;
+        }
+        let Some(cache_key) = &task.cache_key else {
+            continue;
+        };
+        if task.declared_outputs.is_empty() {
+            continue;
+        }
+        let entry_dir = cache_dir.join(cache_key);
+        let outputs_dir = entry_dir.join("outputs");
+        fs::create_dir_all(&outputs_dir).map_err(|source| Error::Io {
+            path: outputs_dir.clone(),
+            source,
+        })?;
+        for output in &task.declared_outputs {
+            let source = root.join(&task.workdir).join(output);
+            let target = outputs_dir.join(output);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|source| Error::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::copy(&source, &target).map_err(|err| Error::Io {
+                path: source.clone(),
+                source: err,
+            })?;
+        }
+        let metadata = CacheMetadata {
+            schema: "sykli-cache-entry.v1".into(),
+            cache_key: cache_key.clone(),
+            task: task.name.clone(),
+            outputs: task.declared_outputs.clone(),
+            provenance: CacheProvenance {
+                receipt_hash: stored.receipt_hash.clone(),
+                receipt_path: stored.receipt_path.clone(),
+            },
+        };
+        let metadata_path = entry_dir.join("metadata.json");
+        let bytes = serde_json::to_vec_pretty(&metadata).map_err(Error::Serialize)?;
+        fs::write(&metadata_path, bytes).map_err(|source| Error::Io {
+            path: metadata_path,
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 pub fn load_valid_contract(path: &Path) -> Result<ValidContract> {
@@ -410,6 +498,7 @@ fn plan_levels(contract: &Contract) -> Result<Vec<Vec<String>>> {
 fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
     let started_at_ms = unix_time_ms();
     let started = Instant::now();
+    let cache_key = cache_key(task, root).ok();
     let mut command = Command::new("sh");
     command.arg("-c").arg(&task.run);
     command.current_dir(task_workdir(task, root));
@@ -427,6 +516,7 @@ fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
             TaskReceipt {
                 name: task.name.clone(),
                 command: task.run.clone(),
+                workdir: task_relative_workdir(task),
                 outcome: if command_passed && outputs_present {
                     TaskOutcome::Passed
                 } else {
@@ -440,6 +530,9 @@ fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
                 stderr,
                 stdout_sha256: sha256_hex(&output.stdout),
                 stderr_sha256: sha256_hex(&output.stderr),
+                cache_key,
+                cache_provenance: None,
+                declared_outputs: task.outputs.clone(),
                 missing_outputs,
             }
         }
@@ -448,6 +541,7 @@ fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
             TaskReceipt {
                 name: task.name.clone(),
                 command: task.run.clone(),
+                workdir: task_relative_workdir(task),
                 outcome: TaskOutcome::Errored,
                 exit_code: None,
                 started_at_ms,
@@ -457,6 +551,9 @@ fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
                 stderr: stderr.clone(),
                 stdout_sha256: sha256_hex(b""),
                 stderr_sha256: sha256_hex(stderr.as_bytes()),
+                cache_key,
+                cache_provenance: None,
+                declared_outputs: task.outputs.clone(),
                 missing_outputs: Vec::new(),
             }
         }
@@ -468,6 +565,7 @@ fn blocked_task_run(task: &Task) -> TaskReceipt {
     TaskReceipt {
         name: task.name.clone(),
         command: task.run.clone(),
+        workdir: task_relative_workdir(task),
         outcome: TaskOutcome::Blocked,
         exit_code: None,
         started_at_ms: timestamp,
@@ -477,8 +575,83 @@ fn blocked_task_run(task: &Task) -> TaskReceipt {
         stderr: String::new(),
         stdout_sha256: sha256_hex(b""),
         stderr_sha256: sha256_hex(b""),
+        cache_key: None,
+        cache_provenance: None,
+        declared_outputs: task.outputs.clone(),
         missing_outputs: Vec::new(),
     }
+}
+
+fn cache_hit(task: &Task, root: &Path, cache_dir: &Path) -> Result<Option<TaskReceipt>> {
+    if task.outputs.is_empty() {
+        return Ok(None);
+    }
+    let cache_key = cache_key(task, root)?;
+    let entry_dir = cache_dir.join(&cache_key);
+    let metadata_path = entry_dir.join("metadata.json");
+    let metadata = match fs::read(&metadata_path) {
+        Ok(bytes) => match serde_json::from_slice::<CacheMetadata>(&bytes) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(None),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Io {
+                path: metadata_path,
+                source,
+            });
+        }
+    };
+    if metadata.schema != "sykli-cache-entry.v1"
+        || metadata.cache_key != cache_key
+        || metadata.task != task.name
+        || metadata.outputs != task.outputs
+        || !metadata.provenance.receipt_path.exists()
+    {
+        return Ok(None);
+    }
+
+    let outputs_dir = entry_dir.join("outputs");
+    for output in &task.outputs {
+        if !outputs_dir.join(output).is_file() {
+            return Ok(None);
+        }
+    }
+    let base = task_workdir(task, root);
+    for output in &task.outputs {
+        let source = outputs_dir.join(output);
+        let target = base.join(output);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| Error::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::copy(&source, &target).map_err(|err| Error::Io {
+            path: source,
+            source: err,
+        })?;
+    }
+
+    let timestamp = unix_time_ms();
+    Ok(Some(TaskReceipt {
+        name: task.name.clone(),
+        command: task.run.clone(),
+        workdir: task_relative_workdir(task),
+        outcome: TaskOutcome::Cached,
+        exit_code: Some(0),
+        started_at_ms: timestamp,
+        finished_at_ms: timestamp,
+        duration_ms: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_sha256: sha256_hex(b""),
+        stderr_sha256: sha256_hex(b""),
+        cache_key: Some(cache_key),
+        cache_provenance: Some(metadata.provenance),
+        declared_outputs: task.outputs.clone(),
+        missing_outputs: Vec::new(),
+    }))
 }
 
 fn task_workdir(task: &Task, root: &Path) -> PathBuf {
@@ -486,6 +659,10 @@ fn task_workdir(task: &Task, root: &Path) -> PathBuf {
         .as_ref()
         .map(|workdir| root.join(workdir))
         .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn task_relative_workdir(task: &Task) -> PathBuf {
+    task.workdir.clone().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn missing_outputs(task: &Task, root: &Path) -> Vec<String> {
@@ -506,6 +683,34 @@ fn unix_time_ms() -> u128 {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn cache_key(task: &Task, root: &Path) -> Result<String> {
+    let base = task_workdir(task, root);
+    let inputs = task
+        .inputs
+        .iter()
+        .map(|path| {
+            let input_path = base.join(path);
+            let sha256 = match fs::read(&input_path) {
+                Ok(bytes) => Some(sha256_hex(&bytes)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => None,
+                Err(_) => None,
+            };
+            InputDigest {
+                path: path.clone(),
+                sha256,
+            }
+        })
+        .collect();
+    let key_input = CacheKeyInput {
+        task,
+        inputs,
+        runtime_fingerprint: "shell:sh",
+    };
+    let bytes = serde_json::to_vec(&key_input).map_err(Error::Serialize)?;
+    Ok(sha256_hex(&bytes))
 }
 
 #[cfg(test)]

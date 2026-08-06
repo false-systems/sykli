@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use sykli::{Error, RunOutcome, load_valid_contract, plan, run, write_receipt};
+use sykli::{Error, RunOutcome, load_valid_contract, plan, populate_cache, run, write_receipt};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +50,10 @@ enum Command {
         #[arg(long)]
         receipt_dir: Option<PathBuf>,
 
+        /// Directory where local cache entries are read and written
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -64,8 +68,9 @@ fn main() -> ExitCode {
         Command::Run {
             contract,
             receipt_dir,
+            cache_dir,
             json,
-        } => run_cmd(contract, receipt_dir, json),
+        } => run_cmd(contract, receipt_dir, cache_dir, json),
     };
 
     match result {
@@ -106,15 +111,22 @@ fn plan_cmd(contract: PathBuf, json: bool) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_cmd(contract: PathBuf, receipt_dir: Option<PathBuf>, json: bool) -> Result<ExitCode, Error> {
+fn run_cmd(
+    contract: PathBuf,
+    receipt_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<ExitCode, Error> {
     let valid = load_valid_contract(&contract)?;
     let root = contract
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let receipt = run(&valid, root)?;
+    let cache_dir = cache_dir.unwrap_or_else(|| root.join(".sykli").join("cache"));
+    let receipt = run(&valid, root, &cache_dir)?;
     let success = receipt.outcome == RunOutcome::Passed;
     let receipt_dir = receipt_dir.unwrap_or_else(|| root.join(".sykli").join("receipts"));
     let stored = write_receipt(receipt, &receipt_dir)?;
+    populate_cache(&stored, root, &cache_dir)?;
     if json {
         print_json(&stored)?;
     } else {

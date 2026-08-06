@@ -130,6 +130,68 @@ fn run_executes_shell_tasks_and_blocks_dependents() {
     assert!(receipt_path.contains(".sykli/receipts/rcpt_"));
 }
 
+#[test]
+fn run_reuses_cache_hits_with_receipt_provenance() {
+    let dir = temp_dir("cache");
+    let contract = dir.join("sykli.json");
+    std::fs::write(dir.join("in.txt"), "one").expect("write input");
+    std::fs::write(
+        &contract,
+        r#"{
+          "schema": "sykli-contract.v1",
+          "tasks": [
+            {
+              "name": "build",
+              "run": "printf run >> marker.txt; printf cached > out.txt",
+              "inputs": ["in.txt"],
+              "outputs": ["out.txt"]
+            }
+          ]
+        }"#,
+    )
+    .expect("write contract");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().expect("utf8 path"), "--json"])
+        .output()
+        .expect("binary runs");
+    assert!(first.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
+        "run"
+    );
+
+    std::fs::remove_file(dir.join("out.txt")).expect("remove output");
+    let second = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().expect("utf8 path"), "--json"])
+        .output()
+        .expect("binary runs");
+    assert!(second.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).expect("output"),
+        "cached"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
+        "run"
+    );
+    let text = String::from_utf8(second.stdout).expect("utf8");
+    assert!(text.contains(r#""outcome": "cached""#));
+    assert!(text.contains(r#""cache_provenance""#));
+
+    std::fs::write(dir.join("in.txt"), "two").expect("change input");
+    std::fs::remove_file(dir.join("out.txt")).expect("remove output");
+    let third = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().expect("utf8 path"), "--json"])
+        .output()
+        .expect("binary runs");
+    assert!(third.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("marker.txt")).expect("marker"),
+        "runrun"
+    );
+}
+
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
