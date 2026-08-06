@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONTRACT_SCHEMA: &str = "sykli-contract.v1";
 
@@ -53,12 +53,21 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RunReport {
+pub struct Receipt {
     pub schema: String,
     pub contract_hash: String,
+    pub started_at_ms: u128,
+    pub finished_at_ms: u128,
     pub levels: Vec<Vec<String>>,
-    pub tasks: Vec<TaskRun>,
+    pub tasks: Vec<TaskReceipt>,
     pub outcome: RunOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoredReceipt {
+    pub receipt_path: PathBuf,
+    pub receipt_hash: String,
+    pub receipt: Receipt,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -69,14 +78,18 @@ pub enum RunOutcome {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TaskRun {
+pub struct TaskReceipt {
     pub name: String,
     pub command: String,
     pub outcome: TaskOutcome,
     pub exit_code: Option<i32>,
+    pub started_at_ms: u128,
+    pub finished_at_ms: u128,
     pub duration_ms: u128,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
     pub missing_outputs: Vec<String>,
 }
 
@@ -197,7 +210,8 @@ pub fn plan(valid: &ValidContract) -> Plan {
     }
 }
 
-pub fn run(valid: &ValidContract, root: &Path) -> Result<RunReport> {
+pub fn run(valid: &ValidContract, root: &Path) -> Result<Receipt> {
+    let run_started_at_ms = unix_time_ms();
     let mut completed = BTreeMap::<String, TaskOutcome>::new();
     let mut task_runs = Vec::new();
     let by_name: BTreeMap<_, _> = valid
@@ -246,12 +260,33 @@ pub fn run(valid: &ValidContract, root: &Path) -> Result<RunReport> {
         RunOutcome::Failed
     };
 
-    Ok(RunReport {
-        schema: "sykli-run.v1".into(),
+    Ok(Receipt {
+        schema: "sykli-receipt.v1".into(),
         contract_hash: valid.contract_hash.clone(),
+        started_at_ms: run_started_at_ms,
+        finished_at_ms: unix_time_ms(),
         levels: valid.levels.clone(),
         tasks: task_runs,
         outcome,
+    })
+}
+
+pub fn write_receipt(receipt: Receipt, receipt_dir: &Path) -> Result<StoredReceipt> {
+    fs::create_dir_all(receipt_dir).map_err(|source| Error::Io {
+        path: receipt_dir.to_path_buf(),
+        source,
+    })?;
+    let bytes = serde_json::to_vec_pretty(&receipt).map_err(Error::Serialize)?;
+    let receipt_hash = sha256_hex(&bytes);
+    let receipt_path = receipt_dir.join(format!("rcpt_{receipt_hash}.json"));
+    fs::write(&receipt_path, &bytes).map_err(|source| Error::Io {
+        path: receipt_path.clone(),
+        source,
+    })?;
+    Ok(StoredReceipt {
+        receipt_path,
+        receipt_hash,
+        receipt,
     })
 }
 
@@ -313,8 +348,7 @@ fn validate_relative_path(task: &str, field: &str, path: &Path) -> Result<()> {
 
 fn contract_hash(contract: &Contract) -> Result<String> {
     let bytes = serde_json::to_vec(contract).map_err(Error::Serialize)?;
-    let digest = Sha256::digest(bytes);
-    Ok(hex::encode(digest))
+    Ok(sha256_hex(&bytes))
 }
 
 fn plan_levels(contract: &Contract) -> Result<Vec<Vec<String>>> {
@@ -373,7 +407,8 @@ fn plan_levels(contract: &Contract) -> Result<Vec<Vec<String>>> {
     Ok(levels)
 }
 
-fn execute_task(task: &Task, root: &Path) -> TaskRun {
+fn execute_task(task: &Task, root: &Path) -> TaskReceipt {
+    let started_at_ms = unix_time_ms();
     let started = Instant::now();
     let mut command = Command::new("sh");
     command.arg("-c").arg(&task.run);
@@ -382,11 +417,14 @@ fn execute_task(task: &Task, root: &Path) -> TaskRun {
 
     match command.output() {
         Ok(output) => {
+            let finished_at_ms = unix_time_ms();
             let missing_outputs = missing_outputs(task, root);
             let exit_code = output.status.code();
             let command_passed = output.status.success();
             let outputs_present = missing_outputs.is_empty();
-            TaskRun {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            TaskReceipt {
                 name: task.name.clone(),
                 command: task.run.clone(),
                 outcome: if command_passed && outputs_present {
@@ -395,34 +433,50 @@ fn execute_task(task: &Task, root: &Path) -> TaskRun {
                     TaskOutcome::Failed
                 },
                 exit_code,
+                started_at_ms,
+                finished_at_ms,
                 duration_ms: started.elapsed().as_millis(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout,
+                stderr,
+                stdout_sha256: sha256_hex(&output.stdout),
+                stderr_sha256: sha256_hex(&output.stderr),
                 missing_outputs,
             }
         }
-        Err(source) => TaskRun {
-            name: task.name.clone(),
-            command: task.run.clone(),
-            outcome: TaskOutcome::Errored,
-            exit_code: None,
-            duration_ms: started.elapsed().as_millis(),
-            stdout: String::new(),
-            stderr: source.to_string(),
-            missing_outputs: Vec::new(),
-        },
+        Err(source) => {
+            let stderr = source.to_string();
+            TaskReceipt {
+                name: task.name.clone(),
+                command: task.run.clone(),
+                outcome: TaskOutcome::Errored,
+                exit_code: None,
+                started_at_ms,
+                finished_at_ms: unix_time_ms(),
+                duration_ms: started.elapsed().as_millis(),
+                stdout: String::new(),
+                stderr: stderr.clone(),
+                stdout_sha256: sha256_hex(b""),
+                stderr_sha256: sha256_hex(stderr.as_bytes()),
+                missing_outputs: Vec::new(),
+            }
+        }
     }
 }
 
-fn blocked_task_run(task: &Task) -> TaskRun {
-    TaskRun {
+fn blocked_task_run(task: &Task) -> TaskReceipt {
+    let timestamp = unix_time_ms();
+    TaskReceipt {
         name: task.name.clone(),
         command: task.run.clone(),
         outcome: TaskOutcome::Blocked,
         exit_code: None,
+        started_at_ms: timestamp,
+        finished_at_ms: timestamp,
         duration_ms: 0,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_sha256: sha256_hex(b""),
+        stderr_sha256: sha256_hex(b""),
         missing_outputs: Vec::new(),
     }
 }
@@ -441,6 +495,17 @@ fn missing_outputs(task: &Task, root: &Path) -> Vec<String> {
         .filter(|path| !base.join(path).exists())
         .map(|path| path.display().to_string())
         .collect()
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_millis()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(test)]

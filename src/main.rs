@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use sykli::{Error, load_valid_contract, plan, run};
+use sykli::{Error, RunOutcome, load_valid_contract, plan, run, write_receipt};
 
 #[derive(Parser)]
 #[command(
@@ -46,6 +46,10 @@ enum Command {
         /// Path to a sykli-contract.v1 JSON file
         contract: PathBuf,
 
+        /// Directory where content-addressed receipts are written
+        #[arg(long)]
+        receipt_dir: Option<PathBuf>,
+
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -57,7 +61,11 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Validate { contract, json } => validate_cmd(contract, json),
         Command::Plan { contract, json } => plan_cmd(contract, json),
-        Command::Run { contract, json } => run_cmd(contract, json),
+        Command::Run {
+            contract,
+            receipt_dir,
+            json,
+        } => run_cmd(contract, receipt_dir, json),
     };
 
     match result {
@@ -98,20 +106,23 @@ fn plan_cmd(contract: PathBuf, json: bool) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_cmd(contract: PathBuf, json: bool) -> Result<ExitCode, Error> {
+fn run_cmd(contract: PathBuf, receipt_dir: Option<PathBuf>, json: bool) -> Result<ExitCode, Error> {
     let valid = load_valid_contract(&contract)?;
     let root = contract
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let report = run(&valid, root)?;
-    let success = report.outcome == sykli::RunOutcome::Passed;
+    let receipt = run(&valid, root)?;
+    let success = receipt.outcome == RunOutcome::Passed;
+    let receipt_dir = receipt_dir.unwrap_or_else(|| root.join(".sykli").join("receipts"));
+    let stored = write_receipt(receipt, &receipt_dir)?;
     if json {
-        print_json(&report)?;
+        print_json(&stored)?;
     } else {
-        for task in &report.tasks {
+        for task in &stored.receipt.tasks {
             println!("{} {:?} {}ms", task.name, task.outcome, task.duration_ms);
         }
-        println!("{:?}", report.outcome);
+        println!("{:?}", stored.receipt.outcome);
+        println!("receipt {}", stored.receipt_path.display());
     }
 
     Ok(if success {

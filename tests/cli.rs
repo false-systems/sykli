@@ -118,6 +118,16 @@ fn run_executes_shell_tasks_and_blocks_dependents() {
     assert!(text.contains(r#""outcome": "failed""#));
     assert!(text.contains(r#""outcome": "blocked""#));
     assert!(text.contains(r#""stdout": "ok""#));
+    assert!(text.contains(r#""schema": "sykli-receipt.v1""#));
+    assert!(text.contains(r#""stdout_sha256""#));
+    assert!(text.contains(r#""receipt_path""#));
+
+    let json: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let receipt_path = json["receipt_path"]
+        .as_str()
+        .expect("receipt path is string");
+    assert!(std::path::Path::new(receipt_path).exists());
+    assert!(receipt_path.contains(".sykli/receipts/rcpt_"));
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
