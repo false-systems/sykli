@@ -1,6 +1,10 @@
 # sykli
 
-**Sykli executes declared graphs and proves what ran.**
+**Sykli is the content-addressed evaluator for declared work graphs.**
+
+Declare work once, ask what applies to a repository change, execute it
+anywhere, and reuse results backed by receipts. CI is one client; coding agents
+and local development use the same graph.
 
 A receipt claims exactly what ran — never what it meant.
 
@@ -10,13 +14,22 @@ content-addressed caching and delta selection, producing receipts bound to
 the exact repository tree. Teko owns work. Toimija verifies repositories.
 Kisko runs workers. Ahti stores records. Sykli runs graphs.
 
+## Evaluation model
+
+The contract is the query, `sykli plan` is `EXPLAIN`, delta selection and the
+cache are the optimizer, `sykli run` evaluates the graph, and the receipt is
+the immutable result record. Equal contract, declared inputs, and runtime
+fingerprints have equal execution identity; equal command outcomes additionally
+require the declared work itself to be deterministic.
+
 ## Status
 
 **Bootstrapping.** The founding document and decision records are in
 [`docs/founding.md`](docs/founding.md) and [`docs/adr/`](docs/adr/). The v0
 engine slice — parse, validate, execute, local cache, delta plan, receipt — is
-implemented with the Rust SDK, contract locking, and release guardrails;
-distribution packaging remains.
+implemented with the Rust SDK, contract locking, and a self-hosted repository
+gate; tagged Linux and macOS packages plus the checked installer complete the
+v0 distribution path.
 
 The predecessor (Elixir implementation, five SDKs, schema v1–v5) lives at
 [false-systems/sykli-elixir](https://github.com/false-systems/sykli-elixir)
@@ -31,17 +44,72 @@ datastore. Not a server. Not an interpreter of what results mean.
 list — capabilities recorded there do not return without meeting their
 stated re-entry condition.
 
-## Build
+## Build and use locally
 
 ```bash
-cargo build
-cargo test
-cargo xtask gate
+cargo build --locked
+cargo run --quiet --locked -- validate sykli.json
+cargo run --quiet --locked -- plan sykli.json --changed src/main.rs --json
+cargo run --quiet --locked -- run sykli.json --json
 ```
 
-## Contract
+The first command builds the `sykli` binary. The next three validate, explain,
+and evaluate this repository's locked graph without installing anything.
 
-Repositories expose `sykli.rs` as an opt-in Cargo binary:
+## How it works
+
+A `sykli.json` contract declares commands, their inputs, and their dependencies:
+
+```json
+{
+  "schema": "sykli-contract.v1",
+  "tasks": [
+    {
+      "name": "fmt",
+      "run": "cargo fmt --check",
+      "inputs": ["Cargo.toml", "src/main.rs"]
+    },
+    {
+      "name": "test",
+      "run": "cargo test --workspace --locked",
+      "after": ["fmt"],
+      "inputs": ["Cargo.toml", "src/main.rs"]
+    }
+  ]
+}
+```
+
+`validate` checks the graph. `plan --changed` selects tasks whose declared
+inputs changed, plus their dependents. `run` executes independent tasks in
+parallel, reuses results with matching contract, input, and runtime hashes,
+then writes a receipt describing exactly what ran.
+
+```text
+contract -> validate -> plan -> run or cache -> receipt
+```
+
+`sykli.lock` pins the contract hash so an unexpected contract change fails
+instead of silently changing the graph.
+
+## Agent workflow
+
+Start the agent through Toimija so it receives the live repository packet:
+
+```bash
+toimija run --intent "describe the change" --task "do the work" -- codex
+```
+
+During the session the agent queries affected work with `sykli plan --json`.
+Before handoff it runs the authoritative graph:
+
+```bash
+toimija gates run sykli-full
+```
+
+## Rust contracts
+
+Repositories may generate the same contract from Rust by exposing `sykli.rs`
+as an opt-in Cargo binary:
 
 ```toml
 [features]
@@ -74,8 +142,19 @@ The CLI compiles it automatically:
 sykli lock
 sykli validate
 sykli run
+sykli run --json
 sykli plan --changed src/lib.rs
+sykli plan --changed src/lib.rs --json
 ```
+
+## Install
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
+sh install.sh v0.1.0
+```
+
+Set `SYKLI_INSTALL_DIR` to install somewhere other than `~/.local/bin`.
 
 ## License
 

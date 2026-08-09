@@ -1,4 +1,4 @@
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() != Some("gate") {
@@ -25,6 +25,24 @@ fn main() -> ExitCode {
         if !status.is_ok_and(|status| status.success()) {
             return ExitCode::FAILURE;
         }
+    }
+    if !Command::new("sh")
+        .args(["-n", "install.sh"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return ExitCode::FAILURE;
+    }
+    if Command::new("sh")
+        .args(["install.sh", "../bad"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .and_then(|status| status.code())
+        != Some(2)
+    {
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }

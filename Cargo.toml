@@ -3,7 +3,7 @@ name = "sykli"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Executes declared graphs and proves what ran"
+description = "Content-addressed evaluator for declared work graphs"
 license = "MIT"
 repository = "https://github.com/false-systems/sykli"
 

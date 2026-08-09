@@ -21,12 +21,19 @@ A receipt binds:
 
 - `contract_hash` — canonical hash of the executed contract (the lock-file
   hash when locked); the analog of teko's `gate_spec_digest`.
-- `subject` — repository identity, tree OID at execution start, and a dirty
-  marker when the working tree diverged from that OID.
+- `subject` — repository identity and the **working-tree OID**: the git tree
+  OID of the content that actually ran, computed by staging every non-ignored
+  file (minus `.sykli`) into an ephemeral index. `head_tree_oid` records what
+  HEAD said; `dirty` is derived (`tree_oid != head_tree_oid`), never
+  self-reported. `inputs_digest` separately binds every declared input so
+  ignored and out-of-tree inputs remain verifiable. See ADR-0007.
 - per-task records — task id, resolved command, runtime fingerprint,
   exit code, duration, output digests (stdout/stderr/declared outputs), and
-  **complete captured output**. A truncated record poisons only itself, and
-  is marked non-importable.
+  captured output up to 1 MiB per stream as lossy UTF-8 text; the per-stream
+  digests are always over the **raw bytes** of the full stream, so integrity
+  survives the lossy rendering. A larger stream poisons only its task record,
+  which is marked non-importable with per-stream truncation and dropped-byte
+  fields.
 - outcome — one of `passed | failed | errored | cached | skipped | blocked`
   per task, plus the run-level rollup. `skipped`/`blocked` never roll up as
   success.
@@ -47,8 +54,9 @@ ahti's vocabulary rules. Appending is fire-and-forget and never gates a run.
 
 ## Consequences
 
-- `--json` on every command is a view over the same receipt data — one shape
-  to parse, no parallel envelope format.
+- `run --json` emits the same receipt written to disk. Read-only queries such
+  as `plan --json` use explicitly versioned, non-evidence output and never
+  masquerade as receipts.
 - DSSE/SLSA attestations are dropped; the receipt's content-addressing and
   completeness rules subsume the integrity role locally. Registry-grade
   attestation, if ever needed, is a consumer built on receipts.

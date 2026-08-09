@@ -13,9 +13,18 @@ jobs:
     name: Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
           components: clippy, rustfmt
-      - run: cargo xtask gate
+      - run: cargo build --locked
+      # The receipt is written outside the workspace so it cannot perturb the
+      # tree it describes; verify recomputes the tree OID and rejects staleness.
+      - run: target/debug/sykli run sykli.json --json > "$RUNNER_TEMP/receipt.json"
+      - run: target/debug/sykli verify "$RUNNER_TEMP/receipt.json" --contract sykli.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sykli-receipt
+          path: ${{ runner.temp }}/receipt.json
