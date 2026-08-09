@@ -20,7 +20,7 @@ reintroducing one must cite this ADR and the condition it satisfies.
 | v5 `actor` / `mandate`; agent-as-task-executor | The work layer: teko specs + `false-agent-protocol`; workers run via kisko under toimija | Never. Sykli executes commands, not actors. |
 | `success_criteria`, `evidence_required`, `task_type` | Collapsed: success = exit code + declared outputs; evidence = receipts; typing = failure classes in the receipt | A family repo demonstrates a check the exit-code contract cannot express. |
 | Review nodes / review primitives | A review is a task like any other; its verdict is its exit code and output | Same as above. |
-| MCP server | Agents read `--json` (receipt-shaped); repository context is toimija's packet | An agent harness in family use that cannot shell out. |
+| MCP server | Agents use the CLI's versioned `--json` outputs; repository context is toimija's packet | An agent harness in family use that cannot shell out. |
 | GUI / Workbench | None. Receipts are files; a viewer would be a separate tool | Someone builds the separate tool. |
 | Kubernetes target | None | A family repo runs gates on k8s. Then: a runtime adapter behind the existing port, not a target subsystem. |
 | S3 / tiered cache, circuit breakers | None (ADR-0004) | Receipts from family repos show cold-cache time hurting a real workflow a shared tier would fix. |

@@ -8,10 +8,14 @@ specification. Decisions here are recorded as ADRs in `adr/`.
 
 ## Identity
 
-**Sykli executes declared graphs and proves what ran.**
+**Sykli is the content-addressed evaluator for declared work graphs.**
 
 One sentence, same as its siblings: Ahti stores structure. Teko owns work.
 Toimija verifies repositories. Kisko runs workers. Sykli runs graphs.
+
+CI is an application of this evaluator, not its identity. Humans, agents, git
+hooks, and hosted runners ask the same graph what work applies, execute the
+answer, and consume the same receipts.
 
 ## Invariant
 
@@ -44,6 +48,20 @@ graph, run anywhere, receipts as the only output that matters. A GitHub Action
 is a machine that runs `sykli` with a cold cache — not a place where truth
 lives.
 
+## Evaluation model
+
+Sykli's stable expression is:
+
+```text
+contract + declared inputs + runtime fingerprint -> plan -> result + receipt
+```
+
+The contract is the query. Planning is `EXPLAIN`. Delta selection and caching
+are optimization. Execution evaluates the graph. The receipt is the immutable
+result record. Repeating the same evaluation identity may reuse proven results;
+equal command outcomes additionally require tasks not to observe undeclared or
+nondeterministic state. Sykli never claims hermeticity it did not enforce.
+
 ## Composition
 
 ```
@@ -52,8 +70,9 @@ teko ──work.v1──▶ toimija ──gate──▶ sykli ──receipt─�
                                       └──(later)──▶ ahti append, sykli.* namespace
 ```
 
-- **toimija → sykli**: toimija materializes a snapshot and runs
-  `sykli gate <id> --json`. Sykli returns a receipt: contract hash, tree OID,
+- **toimija → sykli**: toimija materializes a snapshot and runs the trusted
+  repository gate whose command invokes `sykli run --json`. Sykli returns a
+  receipt: contract hash, tree OID,
   per-task output digests, exit codes, durations, complete output. Toimija
   seals it with its consistency token. Sykli does not know toimija exists;
   the dependency points at sykli's CLI contract, never back.
@@ -62,8 +81,9 @@ teko ──work.v1──▶ toimija ──gate──▶ sykli ──receipt─�
 - **ahti**: an optional append adapter emitting envelope + opaque payload under
   the reserved `sykli.*` namespace (ahti schema pack, currently unbuilt).
   Default is offline: receipts are files.
-- **agents**: read `--json`. Repository context comes from toimija packets,
-  not from sykli.
+- **agents**: query `plan --json` while working and read run receipts at the
+  handoff boundary. Repository context comes from toimija packets, not from
+  sykli.
 
 The keystone carried over from the reference implementation: the canonical
 **contract hash** and the **lock file**. A locked contract is a pinned gate
@@ -124,3 +144,4 @@ family's own repos run v0 daily.
 | [0003](adr/0003-contract-schema-reset.md) | Contract schema reset to v1; one SDK |
 | [0004](adr/0004-cache-model.md) | Local content-addressed cache; tiering deferred |
 | [0005](adr/0005-deletions.md) | The deletion record (normative) |
+| [0006](adr/0006-evaluation-model.md) | Content-addressed evaluation is the product model |

@@ -1,0 +1,44 @@
+repo:
+  name: sykli
+  role: content-addressed evaluator for declared work graphs
+  not:
+  - work tracker
+  - verification authority
+  - agent runner
+  - datastore
+  - server
+  - interpreter
+composition:
+  work: teko
+  default_worker: null
+  require_work: false
+context:
+  default_budget: 8000
+  important_docs:
+  - README.md
+  read_first: []
+  safe_to_ignore: []
+validation:
+  replace_inferred: false
+  fast: []
+  strict: []
+  full: []
+  privileged: []
+gates:
+  sykli-full:
+    description: Locked self-hosted Sykli repository graph
+    program: cargo
+    args: [run, --quiet, --locked, --, run, sykli.json, --json]
+    timeout_seconds: 900
+gate_groups: {}
+stewardship:
+  auto_sweep: true
+  sessions_retention_days: 7
+  runs_retention_days: 14
+  history_max_records: 500
+boundaries:
+- "Own only graph parsing, validation, planning, execution, caching, and receipts."
+- "Receipts claim what ran; Toimija verifies, Teko decides closure, Ahti stores, and Kisko runs workers."
+- "Stay a local, offline, single-run CLI: no server, network service, daemon, coordination, or agent execution."
+- "Container runtime, Toimija gate mode, and Ahti append wait until family repositories run v0 daily."
+- "Contract growth requires a named user and the re-entry conditions in docs/adr/0005-deletions.md."

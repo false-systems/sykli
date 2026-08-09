@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, process::Command};
 
 #[test]
 fn help_states_the_identity() {
@@ -8,7 +8,7 @@ fn help_states_the_identity() {
         .expect("binary runs");
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).expect("utf8");
-    assert!(text.contains("declared graphs"));
+    assert!(text.contains("declared work graphs"));
 }
 
 #[test]
@@ -20,4 +20,144 @@ fn validate_reports_invalid_contracts() {
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8(out.stderr).expect("utf8");
     assert!(err.contains("invalid nonexistent.json"));
+}
+
+#[test]
+fn run_json_prints_one_receipt() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-json-{nonce}"));
+    fs::create_dir_all(&root).unwrap();
+    let contract = root.join("contract.json");
+    let output = format!("task-output-{nonce}");
+    fs::write(&contract, format!(
+        r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"hello","run":"test -z \"$SYKLI_TEST_SECRET\" && test \"$DECLARED\" = visible && printf {output}","env":{{"DECLARED":"visible"}}}}]}}"#
+    ))
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "--json"])
+        .arg(&contract)
+        .env("SYKLI_TEST_SECRET", "must-not-leak")
+        .output()
+        .expect("binary runs");
+    fs::remove_dir_all(root).unwrap();
+
+    assert!(out.status.success());
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON value");
+    assert_eq!(receipt["schema"], "sykli-receipt.v1");
+    assert_eq!(receipt["tasks"][0]["name"], "hello");
+    assert_eq!(receipt["tasks"][0]["stdout_truncated"], false);
+    assert!(String::from_utf8(out.stderr).unwrap().contains(&output));
+}
+
+#[test]
+fn verify_accepts_fresh_receipts_and_rejects_stale_trees() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-verify-{nonce}"));
+    fs::create_dir_all(&root).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+    git(&["init", "--quiet"]);
+    fs::write(root.join("tracked.txt"), "one").unwrap();
+    fs::write(
+        root.join("contract.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"noop","run":"true"}]}"#,
+    )
+    .unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "-m", "init"]);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "contract.json", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("binary runs");
+    assert!(run.status.success());
+    // The receipt lives outside the repo so it cannot perturb the tree it
+    // describes; in-repo state written by the run (.sykli) is excluded by run.
+    let receipt = std::env::temp_dir().join(format!("sykli-verify-{nonce}.receipt.json"));
+    fs::write(&receipt, &run.stdout).unwrap();
+
+    let verify = |root: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .arg("verify")
+            .arg(&receipt)
+            .args(["--contract", "contract.json"])
+            .current_dir(root)
+            .output()
+            .expect("binary runs")
+    };
+    let fresh = verify(&root);
+    assert!(
+        fresh.status.success(),
+        "fresh verify failed: {}",
+        String::from_utf8_lossy(&fresh.stdout)
+    );
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("verified"));
+
+    // Exit codes are stages: a stale tree is 3 (re-run), a bad outcome is 1.
+    fs::write(root.join("tracked.txt"), "two").unwrap();
+    let stale = verify(&root);
+    assert_eq!(stale.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&stale.stdout).contains("mismatch: tree"));
+    fs::write(root.join("tracked.txt"), "one").unwrap();
+
+    let mut failed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    failed["outcome"] = "failed".into();
+    fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
+    assert_eq!(verify(&root).status.code(), Some(1));
+
+    fs::remove_file(receipt).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn plan_json_identifies_the_graph_and_affected_tasks() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-plan-{nonce}"));
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("input.txt");
+    fs::write(&input, "changed").unwrap();
+    let contract = root.join("contract.json");
+    fs::write(
+        &contract,
+        format!(
+            r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"build","run":"true","workdir":{},"inputs":["input.txt"]}},{{"name":"test","run":"true","after":["build"]}}]}}"#,
+            serde_json::to_string(&root).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--json"])
+        .arg(&contract)
+        .arg("--changed")
+        .arg(&input)
+        .output()
+        .expect("binary runs");
+    fs::remove_dir_all(root).unwrap();
+
+    assert!(out.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["schema"], "sykli-plan.v1");
+    assert_eq!(plan["contract_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(plan["tasks"], serde_json::json!(["build", "test"]));
 }

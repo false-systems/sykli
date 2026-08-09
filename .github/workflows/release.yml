@@ -1,20 +1,98 @@
-name: Release guard
+name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  release:
+  guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          package=$(cargo pkgid -p sykli)
+          version=${package##*#}
+          version=${version##*@}
+          test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME does not match crate version $version" >&2; exit 1; }
       - run: cargo test --workspace --release --locked
-      - run: cargo build --release --locked
       - run: cargo publish --package sykli --dry-run --locked
+
+  build:
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: arc-amd64
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: x86_64
+            file_match: x86-64
+          - runner: arc-arm64
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            arch: aarch64
+            file_match: ARM aarch64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x86_64
+            file_match: x86_64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: aarch64
+            file_match: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential file musl-tools
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify and package
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/sykli"
+          file "$binary" | grep -q "${{ matrix.file_match }}"
+          if [ "${{ matrix.platform }}" = linux ]; then
+            file "$binary" | grep -q "statically linked"
+          fi
+          "$binary" --help >/dev/null
+          tar -czf "sykli-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" -C "$(dirname "$binary")" sykli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sykli-${{ matrix.platform }}-${{ matrix.arch }}
+          path: sykli-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sykli-*
+          merge-multiple: true
+      - run: sha256sum sykli-*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: |
+            sykli-*.tar.gz
+            SHA256SUMS
