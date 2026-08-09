@@ -64,9 +64,9 @@ enum Command {
     /// Check that a receipt is consistent with the current tree and contract
     #[command(after_help = "Exit codes (first failing stage decides):\n  \
         0  verified\n  \
-        1  outcome failed — the work is bad\n  \
+        1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, unreadable input, git or contract error\n  \
-        3  tree mismatch — receipt is stale for this tree; re-run sykli\n  \
+        3  tree or input mismatch — receipt is stale; re-run sykli\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
@@ -167,22 +167,29 @@ fn main() -> ExitCode {
 
 fn load(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     let loaded = load_unlocked(path)?;
-    let lock_path = lock_path(path);
-    if lock_path.is_file() {
-        let lock: LockedContract =
-            serde_json::from_slice(&fs::read(&lock_path).map_err(|error| error.to_string())?)
-                .map_err(|error| format!("invalid {}: {error}", lock_path.display()))?;
-        if lock.schema != "sykli-lock.v1" {
-            return Err(format!("unsupported lock schema {:?}", lock.schema));
-        }
+    if let Some(lock) = read_lock(path)? {
         if lock.contract_hash != loaded.2 {
             return Err(format!(
                 "contract differs from {}; run `sykli lock` to accept it",
-                lock_path.display()
+                lock_path(path).display()
             ));
         }
     }
     Ok(loaded)
+}
+
+fn read_lock(path: &Path) -> Result<Option<LockedContract>, String> {
+    let lock_path = lock_path(path);
+    if !lock_path.is_file() {
+        return Ok(None);
+    }
+    let lock: LockedContract =
+        serde_json::from_slice(&fs::read(&lock_path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid {}: {error}", lock_path.display()))?;
+    if lock.schema != "sykli-lock.v1" {
+        return Err(format!("unsupported lock schema {:?}", lock.schema));
+    }
+    Ok(Some(lock))
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
@@ -407,6 +414,7 @@ struct Subject {
     repository: String,
     /// OID of the working tree content that actually ran, not of HEAD.
     tree_oid: String,
+    inputs_digest: String,
     head_tree_oid: String,
     dirty: bool,
 }
@@ -495,7 +503,7 @@ fn run(
     contract_hash: String,
     json: bool,
 ) -> Result<bool, String> {
-    let subject = subject()?;
+    let subject = subject(contract)?;
     let runtime = shell_runtime()?;
     let cache = LocalCache::new(Path::new(&subject.repository));
     let tasks = execute(contract, levels, &runtime, &cache, json);
@@ -915,6 +923,25 @@ fn cache_key(task: &Task, runtime: &ShellRuntime) -> Result<String, String> {
     Ok(sha256(&bytes))
 }
 
+fn declared_inputs_digest(contract: &Contract) -> Result<String, String> {
+    let inputs: BTreeMap<_, _> = contract
+        .tasks
+        .iter()
+        .map(|task| {
+            let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+            let files: BTreeMap<_, _> = task
+                .inputs
+                .iter()
+                .map(|input| (input, sha256_file(&root.join(input)).ok()))
+                .collect();
+            (&task.name, files)
+        })
+        .collect();
+    serde_json::to_vec(&inputs)
+        .map(|bytes| sha256(&bytes))
+        .map_err(|error| error.to_string())
+}
+
 impl LocalCache {
     fn new(repository: &Path) -> Self {
         Self {
@@ -1132,14 +1159,16 @@ fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
     sha256(&bytes)
 }
 
-fn subject() -> Result<Subject, String> {
+fn subject(contract: &Contract) -> Result<Subject, String> {
     let repository = git(&["rev-parse", "--show-toplevel"])?;
     let head_tree_oid = git(&["rev-parse", "HEAD^{tree}"])?;
     let tree_oid = working_tree_oid(Path::new(&repository))?;
+    let inputs_digest = declared_inputs_digest(contract)?;
     let dirty = tree_oid != head_tree_oid;
     Ok(Subject {
         repository,
         tree_oid,
+        inputs_digest,
         head_tree_oid,
         dirty,
     })
@@ -1196,12 +1225,21 @@ struct ReceiptSummary {
     schema: String,
     contract_hash: String,
     subject: SubjectSummary,
+    tasks: Vec<TaskSummary>,
     outcome: String,
 }
 
 #[derive(Deserialize)]
 struct SubjectSummary {
     tree_oid: String,
+    inputs_digest: String,
+}
+
+#[derive(Deserialize)]
+struct TaskSummary {
+    name: String,
+    outcome: String,
+    importable: bool,
 }
 
 struct Check {
@@ -1239,30 +1277,73 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
     let receipt: ReceiptSummary =
         serde_json::from_slice(&fs::read(receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", receipt_path.display()))?;
-    let (_, _, contract_hash) = load(contract_path)?;
-    let subject = subject()?;
-    Ok(vec![
-        Check::equals("schema", NOT_VERIFIABLE, "sykli-receipt.v1", receipt.schema),
-        Check::equals(
-            "contract",
+    let (contract, _, contract_hash) = load_unlocked(contract_path)?;
+    let mut checks = vec![Check::equals(
+        "schema",
+        NOT_VERIFIABLE,
+        "sykli-receipt.v1",
+        receipt.schema,
+    )];
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    if let Some(lock) = read_lock(contract_path)? {
+        checks.push(Check::equals(
+            "contract lock",
             CONTRACT_MISMATCH,
-            contract_hash,
-            receipt.contract_hash,
-        ),
+            &contract_hash,
+            lock.contract_hash,
+        ));
+    }
+    checks.push(Check::equals(
+        "contract",
+        CONTRACT_MISMATCH,
+        &contract_hash,
+        receipt.contract_hash,
+    ));
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    let subject = subject(&contract)?;
+    checks.extend([
         Check::equals(
             "tree",
             TREE_MISMATCH,
             subject.tree_oid,
             receipt.subject.tree_oid,
         ),
-        Check {
-            name: "outcome",
-            expected: "passed or cached".into(),
-            actual: receipt.outcome.clone(),
-            ok: matches!(receipt.outcome.as_str(), "passed" | "cached"),
-            failure_code: OUTCOME_FAILED,
-        },
-    ])
+        Check::equals(
+            "inputs",
+            TREE_MISMATCH,
+            subject.inputs_digest,
+            receipt.subject.inputs_digest,
+        ),
+    ]);
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    let tasks_ok = receipt.tasks.len() == contract.tasks.len()
+        && receipt
+            .tasks
+            .iter()
+            .zip(&contract.tasks)
+            .all(|(record, task)| {
+                record.name == task.name
+                    && record.importable
+                    && matches!(record.outcome.as_str(), "passed" | "cached")
+            });
+    checks.push(Check {
+        name: "outcome",
+        expected: "passed or cached with complete task records".into(),
+        actual: format!(
+            "{} with {} task records",
+            receipt.outcome,
+            receipt.tasks.len()
+        ),
+        ok: matches!(receipt.outcome.as_str(), "passed" | "cached") && tasks_ok,
+        failure_code: OUTCOME_FAILED,
+    });
+    Ok(checks)
 }
 
 /// Verify exit codes are stages, like a CI pipeline: checks run in order and
@@ -1282,7 +1363,7 @@ fn report(checks: &[Check]) -> ExitCode {
             println!("ok: {} {}", check.name, check.actual);
         } else {
             println!(
-                "mismatch: {} expected {} but receipt has {}",
+                "mismatch: {} expected {} but got {}",
                 check.name, check.expected, check.actual
             );
         }
@@ -1492,6 +1573,7 @@ mod tests {
             subject: Subject {
                 repository: root.to_string_lossy().into(),
                 tree_oid: "test".into(),
+                inputs_digest: "test".into(),
                 head_tree_oid: "test".into(),
                 dirty: false,
             },

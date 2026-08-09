@@ -25,7 +25,8 @@ A receipt binds:
   OID of the content that actually ran, computed by staging every non-ignored
   file (minus `.sykli`) into an ephemeral index. `head_tree_oid` records what
   HEAD said; `dirty` is derived (`tree_oid != head_tree_oid`), never
-  self-reported. See ADR-0007.
+  self-reported. `inputs_digest` separately binds every declared input so
+  ignored and out-of-tree inputs remain verifiable. See ADR-0007.
 - per-task records — task id, resolved command, runtime fingerprint,
   exit code, duration, output digests (stdout/stderr/declared outputs), and
   captured output up to 1 MiB per stream as lossy UTF-8 text; the per-stream

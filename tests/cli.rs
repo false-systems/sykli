@@ -72,12 +72,17 @@ fn verify_accepts_fresh_receipts_and_rejects_stale_trees() {
         assert!(out.status.success(), "git {args:?} failed");
     };
     git(&["init", "--quiet"]);
+    fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
     fs::write(root.join("tracked.txt"), "one").unwrap();
-    fs::write(
-        root.join("contract.json"),
-        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"noop","run":"true"}]}"#,
-    )
-    .unwrap();
+    fs::write(root.join("ignored.txt"), "one").unwrap();
+    let contract_text = r#"{"schema":"sykli-contract.v1","tasks":[{"name":"noop","run":"true","inputs":["ignored.txt"]}]}"#;
+    fs::write(root.join("contract.json"), contract_text).unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", "contract.json"])
+        .current_dir(&root)
+        .output()
+        .expect("binary runs");
+    assert!(lock.status.success());
     git(&["add", "--all"]);
     git(&["commit", "--quiet", "-m", "init"]);
 
@@ -109,15 +114,41 @@ fn verify_accepts_fresh_receipts_and_rejects_stale_trees() {
     );
     assert!(String::from_utf8_lossy(&fresh.stdout).contains("verified"));
 
-    // Exit codes are stages: a stale tree is 3 (re-run), a bad outcome is 1.
+    // Ignored declared inputs are still part of the execution identity.
+    fs::write(root.join("ignored.txt"), "two").unwrap();
+    let stale_input = verify(&root);
+    assert_eq!(stale_input.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&stale_input.stdout).contains("mismatch: inputs"));
+    fs::write(root.join("ignored.txt"), "one").unwrap();
+
+    // Exit codes are stages: a stale tree is 3, contract drift is 4, and a
+    // bad or incomplete outcome is 1.
     fs::write(root.join("tracked.txt"), "two").unwrap();
     let stale = verify(&root);
     assert_eq!(stale.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&stale.stdout).contains("mismatch: tree"));
     fs::write(root.join("tracked.txt"), "one").unwrap();
 
-    let mut failed: serde_json::Value =
-        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    fs::write(
+        root.join("contract.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"noop","run":"false","inputs":["ignored.txt"]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(verify(&root).status.code(), Some(4));
+    fs::write(root.join("contract.json"), contract_text).unwrap();
+
+    let receipt_bytes = fs::read(&receipt).unwrap();
+    let mut incomplete: serde_json::Value = serde_json::from_slice(&receipt_bytes).unwrap();
+    incomplete.as_object_mut().unwrap().remove("tasks");
+    fs::write(&receipt, serde_json::to_vec(&incomplete).unwrap()).unwrap();
+    assert_eq!(verify(&root).status.code(), Some(2));
+
+    let mut failed: serde_json::Value = serde_json::from_slice(&receipt_bytes).unwrap();
+    failed["tasks"][0]["importable"] = false.into();
+    fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
+    assert_eq!(verify(&root).status.code(), Some(1));
+
+    failed["tasks"][0]["importable"] = true.into();
     failed["outcome"] = "failed".into();
     fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
     assert_eq!(verify(&root).status.code(), Some(1));

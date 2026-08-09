@@ -21,17 +21,21 @@ working tree itself: every non-ignored file staged into an ephemeral index
 (`GIT_INDEX_FILE`), `.sykli` evicted so receipts never perturb the tree they
 witness, then `git write-tree`. Same content, same OID, on any machine —
 git's own addressing, not a sykli-invented hash. `head_tree_oid` is kept for
-reference and `dirty` is derived by comparison, never self-reported.
+reference and `dirty` is derived by comparison, never self-reported. An
+`inputs_digest` additionally hashes every declared input, including files Git
+ignores or files rooted outside the repository.
 
 **`sykli verify <receipt> --contract <path>` is the consuming verb.** It
-checks four facts and prints one line per check:
+checks consistency in ordered stages and prints one line per check:
 
 - schema is `sykli-receipt.v1`;
 - the receipt's `contract_hash` equals the hash of the contract as loaded
   now (which itself must agree with `sykli.lock` when present);
 - the receipt's `subject.tree_oid` equals the working-tree OID recomputed at
   verify time — a stale receipt fails here;
-- the outcome is `passed` or `cached`.
+- its declared-input digest still matches;
+- the outcome is `passed` or `cached`, and every expected task record is
+  successful and importable.
 
 **Exit codes are stages, like a CI pipeline**: checks run in order and the
 first failing stage decides, so gates branch on the code instead of parsing
@@ -40,9 +44,9 @@ text.
 | code | meaning | consumer's move |
 |------|---------|-----------------|
 | 0 | verified | proceed |
-| 1 | outcome failed | the work is bad — fix it |
+| 1 | outcome or evidence failed | the work is bad or incomplete — fix it |
 | 2 | cannot verify (not a receipt, unreadable input, git or contract error) | usage/environment problem |
-| 3 | tree mismatch | receipt is stale — re-run sykli |
+| 3 | tree or input mismatch | receipt is stale — re-run sykli |
 | 4 | contract mismatch | contract drifted — re-lock or investigate |
 
 Contract drift outranks tree staleness because re-running cannot fix it.
@@ -63,8 +67,9 @@ artifact. A run whose receipt does not verify does not pass.
 **Toimija integration contract** (for toimija to adopt, not sykli to build):
 a handoff or pre-commit gate may demand a receipt file, verify it with
 `sykli verify`, and branch on the exit code — 3 means *stale, re-run*;
-1 means *the work is bad*. The receipt path and the exit-code table are the
-whole interface; sykli never writes into toimija's stores (ADR-0002).
+1 means *the work is bad or its evidence is incomplete*. The receipt path and
+the exit-code table are the whole interface; sykli never writes into toimija's
+stores (ADR-0002).
 
 ## Consequences
 
