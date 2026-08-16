@@ -19,6 +19,17 @@
       "inputs": ["install.sh"]
     },
     {
+      "name": "action",
+      "run": "for script in action/*.sh; do sh -n \"$script\" || exit 1; grep -q \"$script\" action.yml || { echo \"unreferenced by action.yml: $script\" >&2; exit 1; }; done; missing=$(grep -o 'action/[a-z]*\\.sh' action.yml | sort -u | while read -r script; do [ -f \"$script\" ] || echo \"$script\"; done); test -z \"$missing\"",
+      "inputs": [
+        "action.yml",
+        "action/binary.sh",
+        "action/plan.sh",
+        "action/summary.sh",
+        "action/verify.sh"
+      ]
+    },
+    {
       "name": "clippy",
       "run": "cargo clippy --workspace --all-targets --locked -- -D warnings",
       "after": ["fmt"],
