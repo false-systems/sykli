@@ -118,7 +118,7 @@ runs:
 
     - name: Attach receipt
       if: always() && steps.binary.outcome == 'success' && inputs.upload-receipt == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/sykli-receipt.json
