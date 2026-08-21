@@ -11,7 +11,8 @@ specification. Decisions here are recorded as ADRs in `adr/`.
 **Sykli is the content-addressed evaluator for declared work graphs.**
 
 One sentence, same as its siblings: Ahti stores structure. Teko owns work.
-Toimija verifies repositories. Kisko runs workers. Sykli runs graphs.
+Toimija launches named workers and verifies repositories. Kisko recommends
+engineering decisions. Sykli runs graphs.
 
 CI is an application of this evaluator, not its identity. Humans, agents, git
 hooks, and hosted runners ask the same graph what work applies, execute the
@@ -94,9 +95,9 @@ definition — the same role `gate_spec_digest` plays in teko's receipts.
 - **Not a work tracker.** Specs, obligations, closure — teko.
 - **Not a verification authority.** Trusted gate catalogs, receipt sealing,
   repository truth — toimija.
-- **Not an agent runner.** Model execution and worker results — kisko, via
-  worker.v1. Sykli executes commands; who commanded them is upstream's
-  problem.
+- **Not an agent runner.** Model execution and worker results stay with the
+  external worker launched through toimija. Sykli executes commands; who
+  commanded them is upstream's problem.
 - **Not a datastore.** Ahti stores; sykli emits.
 - **Not a server.** No daemons, no network listeners, no coordinator. A
   future coordination need is met by a separate receipt-speaking tool.

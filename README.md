@@ -11,8 +11,9 @@ A receipt claims exactly what ran — never what it meant.
 Sykli is the execution engine of the False Systems stack: pipelines declared
 as real code, compiled to a typed DAG, executed in parallel with
 content-addressed caching and delta selection, producing receipts bound to
-the exact repository tree. Teko owns work. Toimija verifies repositories.
-Kisko runs workers. Ahti stores records. Sykli runs graphs.
+the exact repository tree. Teko owns work. Toimija launches named workers and
+verifies repositories. Kisko recommends engineering decisions. Ahti stores
+records. Sykli runs graphs.
 
 ## Evaluation model
 
