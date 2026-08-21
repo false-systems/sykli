@@ -17,7 +17,7 @@ reintroducing one must cite this ADR and the condition it satisfies.
 |---|---|---|
 | Team Mode: work items, gate stores, coordinator server, daemon join/heartbeat, outboxes, team tokens | teko (work contracts, closure), toimija (gate authority, receipts) | Never. Sykli does not coordinate. |
 | FALSE Protocol occurrences, enrichment (error/reasoning/history), three-tier occurrence store, PubSub event fabric | Deleted ecosystem-wide (ahti M6). Structure-only receipts replace it (ADR-0002); ahti append adapter carries facts later | Never in enriched form. Ahti adapter lands when the `sykli.*` schema pack exists on ahti's side. |
-| v5 `actor` / `mandate`; agent-as-task-executor | The work layer: teko specs + `false-agent-protocol`; workers run via kisko under toimija | Never. Sykli executes commands, not actors. |
+| v5 `actor` / `mandate`; agent-as-task-executor | The work layer: teko specs + `false-agent-protocol`; external workers launch under toimija | Never. Sykli executes commands, not actors. |
 | `success_criteria`, `evidence_required`, `task_type` | Collapsed: success = exit code + declared outputs; evidence = receipts; typing = failure classes in the receipt | A family repo demonstrates a check the exit-code contract cannot express. |
 | Review nodes / review primitives | A review is a task like any other; its verdict is its exit code and output | Same as above. |
 | MCP server | Agents use the CLI's versioned `--json` outputs; repository context is toimija's packet | An agent harness in family use that cannot shell out. |
