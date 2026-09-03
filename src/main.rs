@@ -49,7 +49,7 @@ enum Command {
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
         /// Changed file path; repeat for multiple files
-        #[arg(long, required = true)]
+        #[arg(long)]
         changed: Vec<PathBuf>,
         /// Print the plan as JSON
         #[arg(long)]
@@ -345,6 +345,13 @@ fn affected(
     levels: &[Vec<usize>],
     changed: &[PathBuf],
 ) -> Result<Vec<String>, String> {
+    if changed.is_empty() {
+        return Ok(levels
+            .iter()
+            .flatten()
+            .map(|&index| contract.tasks[index].name.clone())
+            .collect());
+    }
     let changed: HashSet<_> = changed
         .iter()
         .map(|path| absolute(path))
@@ -1178,27 +1185,103 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
 /// an ephemeral index and let git compute the tree OID. `.sykli` is always
 /// excluded so receipts and cache entries never perturb the tree they witness.
 fn working_tree_oid(repository: &Path) -> Result<String, String> {
-    let index = std::env::temp_dir().join(format!("sykli-index-{}", std::process::id()));
-    let _ = fs::remove_file(&index);
-    let staged = git_with_index(repository, &index, &["add", "--all"])
+    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    git_with_temporary_state(repository, &state, &["add", "--all"])
         .and_then(|_| {
-            git_with_index(
+            git_with_temporary_state(
                 repository,
-                &index,
+                &state,
                 &["rm", "--cached", "-r", "-q", "--ignore-unmatch", ".sykli"],
             )
         })
-        .and_then(|_| git_with_index(repository, &index, &["write-tree"]));
-    let _ = fs::remove_file(&index);
-    staged
+        .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
 }
 
-fn git_with_index(repository: &Path, index: &Path, args: &[&str]) -> Result<String, String> {
+struct TemporaryGitState {
+    directory: PathBuf,
+    index: PathBuf,
+    objects: PathBuf,
+    alternates: OsString,
+}
+
+impl TemporaryGitState {
+    fn new(alternate_objects: &Path) -> Result<Self, String> {
+        let temporary = std::env::temp_dir();
+        for attempt in 0..100 {
+            let directory = temporary.join(format!(
+                "sykli-git-{}-{}-{attempt}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| error.to_string())?
+                    .as_nanos()
+            ));
+            match fs::create_dir(&directory) {
+                Ok(()) => {
+                    let objects = directory.join("objects");
+                    if let Err(error) = fs::create_dir(&objects) {
+                        let _ = fs::remove_dir(&directory);
+                        return Err(error.to_string());
+                    }
+                    return Ok(Self {
+                        index: directory.join("index"),
+                        objects,
+                        alternates: std::env::join_paths([alternate_objects])
+                            .map_err(|error| error.to_string())?,
+                        directory,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("could not create temporary Git state".into())
+    }
+}
+
+impl Drop for TemporaryGitState {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn git_object_directory(repository: &Path) -> Result<PathBuf, String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+    let objects = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if !objects.is_dir() {
+        return Err(format!(
+            "Git object directory {} is unavailable",
+            objects.display()
+        ));
+    }
+    Ok(objects)
+}
+
+fn git_with_temporary_state(
+    repository: &Path,
+    state: &TemporaryGitState,
+    args: &[&str],
+) -> Result<String, String> {
     let output = ProcessCommand::new("git")
         .arg("-C")
         .arg(repository)
         .args(args)
-        .env("GIT_INDEX_FILE", index)
+        .env("GIT_INDEX_FILE", &state.index)
+        .env("GIT_OBJECT_DIRECTORY", &state.objects)
+        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &state.alternates)
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
@@ -1635,8 +1718,10 @@ mod tests {
         assert_eq!(working_tree_oid(&root).unwrap(), head);
 
         fs::write(root.join("tracked.txt"), "two").unwrap();
+        let objects_before = git(&["count-objects", "-v"]);
         let dirty = working_tree_oid(&root).unwrap();
         assert_ne!(dirty, head);
+        assert_eq!(git(&["count-objects", "-v"]), objects_before);
 
         // Same content, same address — regardless of when it is computed.
         assert_eq!(working_tree_oid(&root).unwrap(), dirty);
