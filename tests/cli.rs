@@ -192,3 +192,24 @@ fn plan_json_identifies_the_graph_and_affected_tasks() {
     assert_eq!(plan["contract_hash"].as_str().unwrap().len(), 64);
     assert_eq!(plan["tasks"], serde_json::json!(["build", "test"]));
 }
+
+#[test]
+fn plan_json_without_changed_selects_the_whole_graph() {
+    let contract = std::env::temp_dir().join(format!("sykli-plan-all-{}.json", std::process::id()));
+    fs::write(
+        &contract,
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"build","run":"true"},{"name":"test","run":"true","after":["build"]}]}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--json"])
+        .arg(&contract)
+        .output()
+        .expect("binary runs");
+    fs::remove_file(&contract).unwrap();
+
+    assert!(out.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["tasks"], serde_json::json!(["build", "test"]));
+}
