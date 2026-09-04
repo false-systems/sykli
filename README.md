@@ -107,6 +107,10 @@ Before handoff it runs the authoritative graph:
 toimija gates run sykli-full
 ```
 
+The proposed autonomous internal engineering composition is documented in
+[`docs/autonomous-cycle-v0.md`](docs/autonomous-cycle-v0.md). Sykli remains
+only its declared-graph evaluator and receipt producer.
+
 ## Rust contracts
 
 Repositories may generate the same contract from Rust by exposing `sykli.rs`
