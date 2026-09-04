@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# One run per ref: a superseded push cancels the run it replaced instead of
+# both finishing on hosted minutes. Pushes to main are never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   gate:
     name: Gate
