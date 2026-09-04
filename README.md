@@ -30,7 +30,8 @@ require the declared work itself to be deterministic.
 engine slice — parse, validate, execute, local cache, delta plan, receipt — is
 implemented with the Rust SDK, contract locking, and a self-hosted repository
 gate; tagged Linux and macOS packages plus the checked installer complete the
-v0 distribution path.
+v0 distribution path, and a composite Action carries the same graph onto hosted
+runners.
 
 The predecessor (Elixir implementation, five SDKs, schema v1–v5) lives at
 [false-systems/sykli-elixir](https://github.com/false-systems/sykli-elixir)
@@ -106,6 +107,28 @@ Before handoff it runs the authoritative graph:
 ```bash
 toimija gates run sykli-full
 ```
+
+## GitHub Actions
+
+CI is a client, not the product. The bundled Action is a shim that installs
+`sykli`, evaluates the same graph, and attaches the receipt:
+
+```yaml
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: false-systems/sykli@v0.1.0
+        with:
+          contract: sykli.json
+```
+
+The ref you pin is the version it installs. It reports the affected task set
+for a pull request, renders the receipt into the job summary, and gates on
+`sykli verify` — whose exit code says whether the work failed, the receipt went
+stale, or the contract drifted. A runner is a machine that runs `sykli` with a
+cold cache, not a place where truth lives.
+[`docs/github-actions.md`](docs/github-actions.md) has the inputs, outputs, and
+what the Action deliberately does not do.
 
 ## Rust contracts
 

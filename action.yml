@@ -1,0 +1,145 @@
+name: sykli
+description: Evaluate a declared sykli work graph and verify the receipt it produced.
+author: False Systems
+
+branding:
+  icon: repeat
+  color: gray-dark
+
+inputs:
+  contract:
+    description: Path to sykli.rs or a sykli-contract.v1 JSON file, relative to working-directory.
+    default: sykli.json
+  version:
+    description: >-
+      Release tag to install (vX.Y.Z), or 'source' to build the checkout with cargo.
+      Defaults to the ref this Action was called with, so `uses: org/sykli@v0.1.0`
+      installs v0.1.0.
+    default: ""
+  working-directory:
+    description: Directory to evaluate the contract in.
+    default: "."
+  plan:
+    description: On pull requests, report which tasks the changed files affect. Reporting only.
+    default: "true"
+  verify:
+    description: Check the receipt against the tree and contract that produced it.
+    default: "true"
+  upload-receipt:
+    description: Attach the receipt to the run as an artifact.
+    default: "true"
+  artifact-name:
+    description: Name of the receipt artifact.
+    default: sykli-receipt
+
+outputs:
+  receipt:
+    description: Path to the receipt JSON on the runner.
+    value: ${{ steps.run.outputs.receipt }}
+  outcome:
+    description: Receipt outcome — passed, cached, failed, or errored.
+    value: ${{ steps.summary.outputs.outcome }}
+  tree-oid:
+    description: OID of the working tree the receipt describes.
+    value: ${{ steps.summary.outputs.tree-oid }}
+  contract-hash:
+    description: Hash of the contract that was evaluated.
+    value: ${{ steps.summary.outputs.contract-hash }}
+  affected:
+    description: Tasks the pull request's changed files affect, comma-separated.
+    value: ${{ steps.plan.outputs.affected }}
+  verify-code:
+    description: Exit code from sykli verify — 0 verified, 1 work failed, 2 cannot verify, 3 stale receipt, 4 contract drift.
+    value: ${{ steps.verify.outputs.code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve sykli
+      id: binary
+      shell: sh
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SYKLI_VERSION: ${{ inputs.version || github.action_ref }}
+        SYKLI_ACTION_PATH: ${{ github.action_path }}
+      run: sh "$SYKLI_ACTION_PATH/action/binary.sh"
+
+    - name: Plan
+      id: plan
+      if: inputs.plan == 'true' && github.event_name == 'pull_request'
+      shell: sh
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SYKLI_BINARY: ${{ steps.binary.outputs.binary }}
+        SYKLI_CONTRACT: ${{ inputs.contract }}
+        SYKLI_BASE: ${{ github.event.pull_request.base.sha }}
+        SYKLI_HEAD: ${{ github.event.pull_request.head.sha }}
+      run: sh "${{ github.action_path }}/action/plan.sh"
+
+    - name: Run graph
+      id: run
+      shell: sh
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SYKLI_BINARY: ${{ steps.binary.outputs.binary }}
+        SYKLI_CONTRACT: ${{ inputs.contract }}
+        # The receipt is written outside the workspace so it cannot perturb the
+        # tree it describes; task output streams to stderr and stays in the log.
+        SYKLI_RECEIPT: ${{ runner.temp }}/sykli-receipt.json
+      run: |
+        set -u
+        set +e
+        "$SYKLI_BINARY" run "$SYKLI_CONTRACT" --json >"$SYKLI_RECEIPT"
+        code=$?
+        set -e
+        {
+          echo "code=$code"
+          echo "receipt=$SYKLI_RECEIPT"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Render receipt
+      id: summary
+      if: always() && steps.binary.outcome == 'success'
+      shell: sh
+      env:
+        SYKLI_RECEIPT: ${{ runner.temp }}/sykli-receipt.json
+      run: sh "${{ github.action_path }}/action/summary.sh"
+
+    - name: Verify receipt
+      id: verify
+      if: always() && steps.binary.outcome == 'success' && inputs.verify == 'true'
+      shell: sh
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SYKLI_BINARY: ${{ steps.binary.outputs.binary }}
+        SYKLI_CONTRACT: ${{ inputs.contract }}
+        SYKLI_RECEIPT: ${{ runner.temp }}/sykli-receipt.json
+      run: sh "${{ github.action_path }}/action/verify.sh"
+
+    - name: Attach receipt
+      if: always() && steps.binary.outcome == 'success' && inputs.upload-receipt == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/sykli-receipt.json
+        if-no-files-found: warn
+
+    - name: Gate
+      if: always() && steps.binary.outcome == 'success'
+      shell: sh
+      env:
+        RUN_CODE: ${{ steps.run.outputs.code }}
+        VERIFY_CODE: ${{ steps.verify.outputs.code }}
+      run: |
+        set -eu
+        run_code=${RUN_CODE:-2}
+        verify_code=${VERIFY_CODE:-0}
+        if [ "$run_code" != 0 ]; then
+          echo "sykli run exited $run_code" >&2
+          exit "$run_code"
+        fi
+        if [ "$verify_code" != 0 ]; then
+          echo "sykli verify exited $verify_code" >&2
+          exit "$verify_code"
+        fi
+        echo "sykli gate passed"
