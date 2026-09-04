@@ -33,12 +33,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: arc-amd64
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             platform: linux
             arch: x86_64
             file_match: x86-64
-          - runner: arc-arm64
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             platform: linux
             arch: aarch64
