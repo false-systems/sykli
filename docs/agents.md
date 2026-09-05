@@ -1,5 +1,14 @@
 # Sykli for coding agents
 
+For typed artifact production, start with `sykli targets --json` and
+`sykli plan sykli.production.json --target app --json`. Use `produce app --json`,
+then keep its production ID. A fresh worker can `status ID --json` and
+`resume ID --json` using the same local store; no chat handover is required.
+Read `assessment` and `delivery` separately. The [production contract](production.md)
+documents exact input binding, explicit retries and unresolved execution.
+
+The remainder describes the unchanged legacy graph workflow.
+
 Sykli answers two questions an agent otherwise guesses at: what work does
 this change require, and what actually ran. Both answers are versioned JSON
 (see [`spec.md`](spec.md)); neither is a claim the agent makes about itself.

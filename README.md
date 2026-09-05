@@ -1,10 +1,39 @@
 # sykli
 
-**Receipts, not logs.** Sykli is a content-addressed evaluator for declared
-work graphs: declare the checks a repository needs once, ask which of them a
-change touches, run them anywhere, and get a receipt bound to the exact tree
-that says what ran and how it ended. Local development, CI, and coding agents
-use the same graph and read the same receipt.
+**Source to artifact, across replaceable workers.** Sykli captures declared
+source inputs, executes a typed target, and returns an identified artifact
+with its required checks. A fresh worker can inspect the stored production
+and finish the remaining operations without the previous worker's session.
+
+The new production path is opt-in in this checkout. In a Cargo workspace with
+a binary, using a Sykli binary built from this source:
+
+```sh
+sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
+sykli targets --json
+sykli plan sykli.production.json --target app --json
+sykli produce app --json
+# In a new client, using the returned production ID:
+sykli status PRODUCTION_ID --json
+sykli resume PRODUCTION_ID --json
+```
+
+Choose a smoke command appropriate to your program. For multiple Cargo binaries,
+select `--package NAME --bin NAME`. Standalone Rust `main.rs` is also supported.
+
+The result names the source, collected executable, source-unit-test result and
+executable-smoke-test result. Changing source or the contract creates a different
+production. Failed or unresolved work remains visible; missing artifact bytes
+cannot count as successful delivery. See the [short walkthrough and contract](docs/production.md)
+and [reproducible demonstration](examples/production/demo.py).
+
+This is trusted local execution on Linux/macOS, with prepared input copies and
+no cross-production reuse. It is not a security sandbox. If the executor itself
+disappears without a result, its attempt remains indeterminate; Sykli does not
+blindly retry it. No other False Systems tool is needed.
+
+The existing graph interface remains supported, including its local cache and
+v1 receipts:
 
 ```bash
 sykli init                              # detect Cargo / npm / Go, write and lock sykli.json
@@ -15,7 +44,7 @@ sykli verify .sykli/receipts/rcpt_….json   # is that receipt about this tree a
 
 One static binary. No server, no account, no daemon, nothing to host.
 
-## Why
+## Existing graph workflow
 
 CI answers "did the pipeline pass" with logs nobody reads. Sykli answers two
 better questions with data:
@@ -102,7 +131,8 @@ wraps the same commands for harnesses that prefer tools to shells.
 
 ## Contracts
 
-The machine surface is versioned and documented in [`docs/spec.md`](docs/spec.md):
+The machine surface is versioned and documented in [`docs/spec.md`](docs/spec.md)
+and [`docs/production.md`](docs/production.md):
 `sykli-contract.v1`, `sykli-lock.v1`, `sykli-plan.v1`, `sykli-receipt.v1`,
 `sykli-validate.v1`, and every exit code. Rust projects can also emit the
 contract from code with the `sykli` crate's `Pipeline`, compiled on demand
@@ -114,7 +144,8 @@ from a `sykli.rs` binary; see [`docs/spec.md`](docs/spec.md).
 Not a work tracker, not a verification authority, not an agent runner, not a
 datastore, not a server, not an interpreter of what results mean.
 [`docs/adr/0005-deletions.md`](docs/adr/0005-deletions.md) is the normative
-list; nothing on it returns without meeting its stated re-entry condition.
+list; [`ADR-0009`](docs/adr/0009-local-production.md) records the user-requested
+local production extension and its boundaries.
 Everything that needs one of those things is a separate tool that consumes
 receipts.
 

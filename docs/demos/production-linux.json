@@ -1,0 +1,2043 @@
+{
+  "host": "Linux-6.17.0-23-generic-aarch64-with-glibc2.42",
+  "workspace": "/tmp/sykli-production-demo-0om07a2z",
+  "commands": [
+    {
+      "argv": [
+        "sykli",
+        "init",
+        "--production"
+      ],
+      "exit": 0,
+      "stdout": {
+        "contract": "sykli.production.json",
+        "review": "source paths, recipes and smoke assertion; production pins the reviewed contract",
+        "schema": "sykli-production-init.v1",
+        "target": "app"
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "targets",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "schema": "sykli-targets.v1",
+        "targets": {
+          "app": {
+            "inputs": {
+              "source": {
+                "paths": [
+                  "main.rs"
+                ],
+                "type": {
+                  "kind": "source-tree"
+                }
+              }
+            },
+            "operations": {
+              "build": {
+                "assertion": null,
+                "inputs": {
+                  "source": {
+                    "expects": {
+                      "kind": "source-tree"
+                    },
+                    "from": {
+                      "kind": "target-input",
+                      "port": "source"
+                    }
+                  }
+                },
+                "kind": "transform",
+                "outputs": {
+                  "executable": {
+                    "collect": "app",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    },
+                    "validator": "builtin.v1"
+                  }
+                },
+                "reuse": "never",
+                "run": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                "subject_input": null
+              },
+              "smoke_test": {
+                "assertion": "executable prints 42",
+                "inputs": {
+                  "executable": {
+                    "expects": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    },
+                    "from": {
+                      "kind": "operation-output",
+                      "operation": "build",
+                      "port": "executable"
+                    }
+                  }
+                },
+                "kind": "check",
+                "outputs": {},
+                "reuse": "never",
+                "run": "test \"$(\"$SYKLI_INPUT_executable\")\" = 42",
+                "subject_input": "executable"
+              },
+              "unit_tests": {
+                "assertion": "declared Rust unit tests pass",
+                "inputs": {
+                  "source": {
+                    "expects": {
+                      "kind": "source-tree"
+                    },
+                    "from": {
+                      "kind": "target-input",
+                      "port": "source"
+                    }
+                  }
+                },
+                "kind": "check",
+                "outputs": {},
+                "reuse": "never",
+                "run": "rustc --test \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/tests\" && \"$SYKLI_OUTPUT/tests\"",
+                "subject_input": "source"
+              }
+            },
+            "products": {
+              "app": {
+                "kind": "operation-output",
+                "operation": "build",
+                "port": "executable"
+              }
+            },
+            "profile": {
+              "kind": "local-shell.v1",
+              "tools": [
+                "rustc"
+              ]
+            },
+            "required_checks": [
+              "unit_tests",
+              "smoke_test"
+            ]
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "plan",
+        "sykli.production.json",
+        "--target",
+        "app",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "blockers": [],
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "inputs": {
+          "source": {
+            "paths": [
+              "main.rs"
+            ],
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "products": {
+          "app": {
+            "kind": "operation-output",
+            "operation": "build",
+            "port": "executable"
+          }
+        },
+        "resolved_inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "schema": "sykli-production-plan.v1",
+        "selected": [
+          {
+            "operation": "build",
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ]
+          },
+          {
+            "operation": "unit_tests",
+            "required_because": [
+              "required-check"
+            ]
+          },
+          {
+            "operation": "smoke_test",
+            "required_because": [
+              "required-check"
+            ]
+          }
+        ],
+        "target": "app"
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "produce",
+        "app",
+        "--stop-after",
+        "build",
+        "--json"
+      ],
+      "exit": 1,
+      "stdout": {
+        "assessment": {
+          "kind": "incomplete",
+          "outstanding": [
+            "smoke_test",
+            "unit_tests"
+          ]
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02"
+              ]
+            }
+          }
+        },
+        "delivery_success": false,
+        "evaluated_at": 1788650377320,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "records": [
+          {
+            "id": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650375646,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 128,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650377320,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 2,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "kind": "ready"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "kind": "ready"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "status",
+        "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "assessment": {
+          "kind": "incomplete",
+          "outstanding": [
+            "smoke_test",
+            "unit_tests"
+          ]
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02"
+              ]
+            }
+          }
+        },
+        "delivery_success": false,
+        "evaluated_at": 1788650377320,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "records": [
+          {
+            "id": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650375646,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 128,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650377320,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 2,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "kind": "ready"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "kind": "ready"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "resume",
+        "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "assessment": {
+          "kind": "complete",
+          "products": {
+            "app": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            }
+          },
+          "satisfied_checks": {
+            "smoke_test": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+            "unit_tests": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6"
+          }
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02"
+              ]
+            }
+          }
+        },
+        "delivery_success": true,
+        "evaluated_at": 1788650382712,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "records": [
+          {
+            "id": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650375646,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 128,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650377320,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          },
+          {
+            "id": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "unit_tests",
+                "recipe": "fb73c9e0434933157a02b0db38891f12c89ee7c2b17d8a27821f83e6edb187fd",
+                "supersedes": null
+              },
+              "previous": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650380071,
+              "schema": "sykli-production-record.v1",
+              "sequence": 3
+            }
+          },
+          {
+            "id": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc --test \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/tests\" && \"$SYKLI_OUTPUT/tests\"",
+                    "duration_ms": 142,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "unit_tests",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "\nrunning 1 test\ntest computes_answer ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "37d8e63972ce2f03a17de8641e4414d8434769c33d9d91e0ee520aae1ad1805d",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "declared Rust unit tests pass",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                }
+              },
+              "previous": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381131,
+              "schema": "sykli-production-record.v1",
+              "sequence": 4
+            }
+          },
+          {
+            "id": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "executable": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "smoke_test",
+                "recipe": "fd0abbe7a4e754b63a58475eec7fbca663a7aab38760af2a088d8103772560c7",
+                "supersedes": null
+              },
+              "previous": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381713,
+              "schema": "sykli-production-record.v1",
+              "sequence": 5
+            }
+          },
+          {
+            "id": "1026d60f5f001f40de7556d1994881694e22992b5c2d7364be444d57034549b0",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "test \"$(\"$SYKLI_INPUT_executable\")\" = 42",
+                    "duration_ms": 1,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "smoke_test",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "executable prints 42",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                }
+              },
+              "previous": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650382712,
+              "schema": "sykli-production-record.v1",
+              "sequence": 6
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 6,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+              "kind": "satisfied"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+              "kind": "satisfied"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "verify-production",
+        "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "assessment": {
+          "kind": "complete",
+          "products": {
+            "app": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            }
+          },
+          "satisfied_checks": {
+            "smoke_test": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+            "unit_tests": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6"
+          }
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02"
+              ]
+            }
+          }
+        },
+        "delivery_success": true,
+        "evaluated_at": 1788650382712,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "records": [
+          {
+            "id": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650375646,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 128,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650377320,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          },
+          {
+            "id": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "unit_tests",
+                "recipe": "fb73c9e0434933157a02b0db38891f12c89ee7c2b17d8a27821f83e6edb187fd",
+                "supersedes": null
+              },
+              "previous": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650380071,
+              "schema": "sykli-production-record.v1",
+              "sequence": 3
+            }
+          },
+          {
+            "id": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc --test \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/tests\" && \"$SYKLI_OUTPUT/tests\"",
+                    "duration_ms": 142,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "unit_tests",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "\nrunning 1 test\ntest computes_answer ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "37d8e63972ce2f03a17de8641e4414d8434769c33d9d91e0ee520aae1ad1805d",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "declared Rust unit tests pass",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                }
+              },
+              "previous": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381131,
+              "schema": "sykli-production-record.v1",
+              "sequence": 4
+            }
+          },
+          {
+            "id": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "executable": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "smoke_test",
+                "recipe": "fd0abbe7a4e754b63a58475eec7fbca663a7aab38760af2a088d8103772560c7",
+                "supersedes": null
+              },
+              "previous": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381713,
+              "schema": "sykli-production-record.v1",
+              "sequence": 5
+            }
+          },
+          {
+            "id": "1026d60f5f001f40de7556d1994881694e22992b5c2d7364be444d57034549b0",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "test \"$(\"$SYKLI_INPUT_executable\")\" = 42",
+                    "duration_ms": 1,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "smoke_test",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "executable prints 42",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                }
+              },
+              "previous": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650382712,
+              "schema": "sykli-production-record.v1",
+              "sequence": 6
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 6,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+              "kind": "satisfied"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+              "kind": "satisfied"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "produce",
+        "app",
+        "--json"
+      ],
+      "exit": 1,
+      "stdout": {
+        "assessment": {
+          "kind": "incomplete",
+          "outstanding": [
+            "smoke_test",
+            "unit_tests"
+          ]
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "eb2838725ad9bb2fd9600ad13da766d736a411f6b3a573858707794c84940a2c",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/eb2838725ad9bb2fd9600ad13da766d736a411f6b3a573858707794c84940a2c"
+              ]
+            }
+          }
+        },
+        "delivery_success": false,
+        "evaluated_at": 1788650388677,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "01d3f363f031aac1a2a00dc01ebd75dd76d6671f24983ca652af7dabadaf25f8",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+        "records": [
+          {
+            "id": "141861fd9166734d8621620ff800e6b8fa8f14b21e1591e320f7e5ad59f23dad",
+            "record": {
+              "fact": {
+                "attempt": "b52909f421af9b065f35b3cbdd0b17826144fcd085f223bd37c58c928e00fae8",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "01d3f363f031aac1a2a00dc01ebd75dd76d6671f24983ca652af7dabadaf25f8",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650384691,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "229e6e91c9360db3977013f234f385cfdce0675ef298b2b58afb98154d139e61",
+            "record": {
+              "fact": {
+                "attempt": "b52909f421af9b065f35b3cbdd0b17826144fcd085f223bd37c58c928e00fae8",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 64,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "eb2838725ad9bb2fd9600ad13da766d736a411f6b3a573858707794c84940a2c",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "141861fd9166734d8621620ff800e6b8fa8f14b21e1591e320f7e5ad59f23dad",
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650385912,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          },
+          {
+            "id": "b93b419842968ce96e74f9b8fecf709a5b643ee667e6cbe2f63aa111a53cfa0d",
+            "record": {
+              "fact": {
+                "attempt": "f4b6c8ae5ad48138152a2d5f95f759eec6af1b2986e10450339fff43a1c4af15",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "01d3f363f031aac1a2a00dc01ebd75dd76d6671f24983ca652af7dabadaf25f8",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "unit_tests",
+                "recipe": "fb73c9e0434933157a02b0db38891f12c89ee7c2b17d8a27821f83e6edb187fd",
+                "supersedes": null
+              },
+              "previous": "229e6e91c9360db3977013f234f385cfdce0675ef298b2b58afb98154d139e61",
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650386264,
+              "schema": "sykli-production-record.v1",
+              "sequence": 3
+            }
+          },
+          {
+            "id": "2dd8ef8ff434bcec948107477bf954be8cdf9ba8bb66a3c5c013cbc8c3386f87",
+            "record": {
+              "fact": {
+                "attempt": "f4b6c8ae5ad48138152a2d5f95f759eec6af1b2986e10450339fff43a1c4af15",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": "command_failed",
+                    "command": "rustc --test \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/tests\" && \"$SYKLI_OUTPUT/tests\"",
+                    "duration_ms": 95,
+                    "error": "exit status: 101",
+                    "exit_code": 101,
+                    "importable": true,
+                    "name": "unit_tests",
+                    "outcome": "failed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "\nrunning 1 test\ntest unit ... FAILED\n\nfailures:\n\n---- unit stdout ----\n\nthread 'unit' (254813) panicked at /tmp/sykli-production-demo-0om07a2z/.sykli/production/requests/423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0/attempts/f4b6c8ae5ad48138152a2d5f95f759eec6af1b2986e10450339fff43a1c4af15/inputs/source/main.rs:2:21:\nassertion `left == right` failed\n  left: 43\n right: 42\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    unit\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "94c7f8ff58c6d27ddb7cbeaa1022dd9dc7b125ff46554e692bd8d42afa3c9cbe",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "declared Rust unit tests pass",
+                  "kind": "checked",
+                  "outcome": "failed",
+                  "subject": {
+                    "content": "01d3f363f031aac1a2a00dc01ebd75dd76d6671f24983ca652af7dabadaf25f8",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                }
+              },
+              "previous": "b93b419842968ce96e74f9b8fecf709a5b643ee667e6cbe2f63aa111a53cfa0d",
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650387175,
+              "schema": "sykli-production-record.v1",
+              "sequence": 4
+            }
+          },
+          {
+            "id": "f2c7d0ba7634bfd5915e97f53c34f598a443d73f8d6e0ce06584b624fef27fc0",
+            "record": {
+              "fact": {
+                "attempt": "8c80d4ce3a2f6a1e2cc8d7dd0d1ebba0ca532de0129745b0e87afb1769a453bf",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "executable": {
+                    "content": "eb2838725ad9bb2fd9600ad13da766d736a411f6b3a573858707794c84940a2c",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "smoke_test",
+                "recipe": "fd0abbe7a4e754b63a58475eec7fbca663a7aab38760af2a088d8103772560c7",
+                "supersedes": null
+              },
+              "previous": "2dd8ef8ff434bcec948107477bf954be8cdf9ba8bb66a3c5c013cbc8c3386f87",
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650387700,
+              "schema": "sykli-production-record.v1",
+              "sequence": 5
+            }
+          },
+          {
+            "id": "a3144be7743e71d68672bdd5f0d6455a2eda6c23ab92f098bc5b50ee761b7482",
+            "record": {
+              "fact": {
+                "attempt": "8c80d4ce3a2f6a1e2cc8d7dd0d1ebba0ca532de0129745b0e87afb1769a453bf",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": "command_failed",
+                    "command": "test \"$(\"$SYKLI_INPUT_executable\")\" = 42",
+                    "duration_ms": 1,
+                    "error": "exit status: 1",
+                    "exit_code": 1,
+                    "importable": true,
+                    "name": "smoke_test",
+                    "outcome": "failed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "executable prints 42",
+                  "kind": "checked",
+                  "outcome": "failed",
+                  "subject": {
+                    "content": "eb2838725ad9bb2fd9600ad13da766d736a411f6b3a573858707794c84940a2c",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                }
+              },
+              "previous": "f2c7d0ba7634bfd5915e97f53c34f598a443d73f8d6e0ce06584b624fef27fc0",
+              "production": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+              "recorded_at": 1788650388677,
+              "schema": "sykli-production-record.v1",
+              "sequence": 6
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 6,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "b52909f421af9b065f35b3cbdd0b17826144fcd085f223bd37c58c928e00fae8",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "8c80d4ce3a2f6a1e2cc8d7dd0d1ebba0ca532de0129745b0e87afb1769a453bf",
+              "kind": "failed"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "f4b6c8ae5ad48138152a2d5f95f759eec6af1b2986e10450339fff43a1c4af15",
+              "kind": "failed"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sykli",
+        "status",
+        "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "--json"
+      ],
+      "exit": 0,
+      "stdout": {
+        "assessment": {
+          "kind": "complete",
+          "products": {
+            "app": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            }
+          },
+          "satisfied_checks": {
+            "smoke_test": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+            "unit_tests": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6"
+          }
+        },
+        "context": {
+          "architecture": "aarch64",
+          "os": "linux",
+          "profile": "a320fa021cb6f67a96fb3091d4c323c874dd9806d754d74bdaaacc8293277456",
+          "runtime": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+          "tool_images": {
+            "rustc": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+          },
+          "tool_versions": {
+            "rustc": "f4d034f5660bb49f22bfcba3f3445be67e25b704c193ff421b53863b4faee148"
+          },
+          "toolchain_resolution": "unknown: tool images do not identify SDKs, wrappers or external dependencies",
+          "undeclared_inputs_excluded": false
+        },
+        "contract": "a9e3a65d28a08d8f1c82c2810688759c766f8233f7a4ecc8e5182e7873f53752",
+        "delivery": {
+          "app": {
+            "artifact": {
+              "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+              "type": {
+                "architecture": "aarch64",
+                "format": "elf",
+                "kind": "executable"
+              }
+            },
+            "availability": {
+              "kind": "available",
+              "locations": [
+                "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02"
+              ]
+            }
+          }
+        },
+        "delivery_success": true,
+        "evaluated_at": 1788650382712,
+        "evaluation_inputs": {
+          "executor_lease_held": false
+        },
+        "evaluator_version": "local.v1",
+        "inputs": {
+          "source": {
+            "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+            "type": {
+              "kind": "source-tree"
+            }
+          }
+        },
+        "policy": "all-selected.v1",
+        "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+        "records": [
+          {
+            "id": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "build",
+                "recipe": "efa0a6c3a61433cbd6b9f8fe0108c19a8db27f23669d790fdba600322fccac2d",
+                "supersedes": null
+              },
+              "previous": null,
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650375646,
+              "schema": "sykli-production-record.v1",
+              "sequence": 1
+            }
+          },
+          {
+            "id": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+            "record": {
+              "fact": {
+                "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"",
+                    "duration_ms": 128,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "build",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "kind": "produced",
+                  "outputs": {
+                    "executable": {
+                      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                      "type": {
+                        "architecture": "aarch64",
+                        "format": "elf",
+                        "kind": "executable"
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": "035001d5070d4bf5cd9e3b64ec9b52e74fec82e542f475bc3d54aaeb6d208134",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650377320,
+              "schema": "sykli-production-record.v1",
+              "sequence": 2
+            }
+          },
+          {
+            "id": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "source": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "unit_tests",
+                "recipe": "fb73c9e0434933157a02b0db38891f12c89ee7c2b17d8a27821f83e6edb187fd",
+                "supersedes": null
+              },
+              "previous": "56819a317efe8df50334c384049dfd6008ac1a541ccbafd4862a01076a94d471",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650380071,
+              "schema": "sykli-production-record.v1",
+              "sequence": 3
+            }
+          },
+          {
+            "id": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+            "record": {
+              "fact": {
+                "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "rustc --test \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/tests\" && \"$SYKLI_OUTPUT/tests\"",
+                    "duration_ms": 142,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "unit_tests",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "\nrunning 1 test\ntest computes_answer ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "37d8e63972ce2f03a17de8641e4414d8434769c33d9d91e0ee520aae1ad1805d",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "declared Rust unit tests pass",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+                    "type": {
+                      "kind": "source-tree"
+                    }
+                  }
+                }
+              },
+              "previous": "e09e0993b1f468bbe9ddfc6d1c372a8aff0b57346c940b0a7e0bd47f09fa3963",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381131,
+              "schema": "sykli-production-record.v1",
+              "sequence": 4
+            }
+          },
+          {
+            "id": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "context": "92792b238b81b6eb6bcd003b896679b536ffbce4034b6e1f66d9fddbd353b117",
+                "executor": "local-shell.v1",
+                "inputs": {
+                  "executable": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                },
+                "kind": "started",
+                "operation": "smoke_test",
+                "recipe": "fd0abbe7a4e754b63a58475eec7fbca663a7aab38760af2a088d8103772560c7",
+                "supersedes": null
+              },
+              "previous": "989fc018cf57e7d3fa571def6c753d3391a4d59042dba79ff86242fe49129131",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650381713,
+              "schema": "sykli-production-record.v1",
+              "sequence": 5
+            }
+          },
+          {
+            "id": "1026d60f5f001f40de7556d1994881694e22992b5c2d7364be444d57034549b0",
+            "record": {
+              "fact": {
+                "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+                "kind": "finished",
+                "observation": {
+                  "execution": {
+                    "class": null,
+                    "command": "test \"$(\"$SYKLI_INPUT_executable\")\" = 42",
+                    "duration_ms": 1,
+                    "error": null,
+                    "exit_code": 0,
+                    "importable": true,
+                    "name": "smoke_test",
+                    "outcome": "passed",
+                    "output_digests": {},
+                    "provenance": null,
+                    "retryable": false,
+                    "runtime_fingerprint": "shell:/usr/bin/dash:sha256:142f413cf9875afce4ca2c6b1bf385e7e24ab3b0e7c0a95e04dc52c70c2d02d5:env:sha256:31a2edbcc05a8a4a7426870f16322e3688d27125d0d777b983655f9313ee6390",
+                    "source": "task",
+                    "stderr": "",
+                    "stderr_bytes_dropped": 0,
+                    "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stderr_truncated": false,
+                    "stdout": "",
+                    "stdout_bytes_dropped": 0,
+                    "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "stdout_truncated": false
+                  },
+                  "input_binding": "materialized-snapshot",
+                  "undeclared_inputs_excluded": false
+                },
+                "result": {
+                  "assertion": "executable prints 42",
+                  "kind": "checked",
+                  "outcome": "passed",
+                  "subject": {
+                    "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+                    "type": {
+                      "architecture": "aarch64",
+                      "format": "elf",
+                      "kind": "executable"
+                    }
+                  }
+                }
+              },
+              "previous": "8132cbb6068af544141399729c72e76024839d606c157a8487a27f52e24c3ac3",
+              "production": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+              "recorded_at": 1788650382712,
+              "schema": "sykli-production-record.v1",
+              "sequence": 6
+            }
+          }
+        ],
+        "schema": "sykli-production-view.v1",
+        "target": "app",
+        "through_sequence": 6,
+        "trust": "trusted-local-executor-and-store; no authenticity claim",
+        "work": {
+          "build": {
+            "required_because": [
+              "input-for:smoke_test",
+              "product:app"
+            ],
+            "state": {
+              "attempt": "09673e02518f8367976b52fe8e866fa66c3214ad0c6ede27a752ce10556d2560",
+              "kind": "satisfied"
+            }
+          },
+          "smoke_test": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+              "kind": "satisfied"
+            }
+          },
+          "unit_tests": {
+            "required_because": [
+              "required-check"
+            ],
+            "state": {
+              "attempt": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6",
+              "kind": "satisfied"
+            }
+          }
+        }
+      },
+      "stderr": ""
+    }
+  ],
+  "artifact_execution": {
+    "path": "/tmp/sykli-production-demo-0om07a2z/.sykli/production/blobs/a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+    "exit": 0,
+    "stdout": "42\n"
+  },
+  "summary": {
+    "production_a": "e06f0553f143ee17a61f106c0e427d64110e3180eeff82dd3064dbf19d7cf8a8",
+    "source_a": {
+      "content": "21a8e1223a6deb767117b05d6af969475ba5795493c151a4d0f73321c00d6f06",
+      "type": {
+        "kind": "source-tree"
+      }
+    },
+    "artifact_a": {
+      "content": "a6730d3b846cb944c6d006d4aa25ff0b6111a3c7a0a36a30816c8d5c0c59ef02",
+      "type": {
+        "architecture": "aarch64",
+        "format": "elf",
+        "kind": "executable"
+      }
+    },
+    "checks_a": {
+      "smoke_test": "ef77f3b3a43f92c60dfaeb3a28f50025c9c62f1a6a1e74d00801bfae9d9b6d36",
+      "unit_tests": "5eb3e6875ec02ff468dbb2934752872967eea16f8d5e1ec8651b62d5895da9a6"
+    },
+    "production_b": "423dec0de68330e35e12889e1c4319610d5bfa84542d6ccf89d89b346ccd12f0",
+    "source_b": {
+      "content": "01d3f363f031aac1a2a00dc01ebd75dd76d6671f24983ca652af7dabadaf25f8",
+      "type": {
+        "kind": "source-tree"
+      }
+    },
+    "b_assessment": {
+      "kind": "incomplete",
+      "outstanding": [
+        "smoke_test",
+        "unit_tests"
+      ]
+    },
+    "a_still_complete": true
+  }
+}

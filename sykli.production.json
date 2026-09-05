@@ -1,0 +1,158 @@
+{
+  "schema": "sykli-production-contract.v1",
+  "targets": {
+    "app": {
+      "inputs": {
+        "source": {
+          "paths": [
+            ".cargo/config.toml",
+            "AGENTS.md",
+            "CHANGELOG.md",
+            "CONTRIBUTING.md",
+            "Cargo.lock",
+            "Cargo.toml",
+            "Dockerfile",
+            "LICENSE",
+            "README.md",
+            "SECURITY.md",
+            "action.yml",
+            "action/binary.sh",
+            "action/plan.sh",
+            "action/summary.sh",
+            "action/verify.sh",
+            "docs/adr/0001-rust.md",
+            "docs/adr/0002-receipts.md",
+            "docs/adr/0003-contract-schema-reset.md",
+            "docs/adr/0004-cache-model.md",
+            "docs/adr/0005-deletions.md",
+            "docs/adr/0006-evaluation-model.md",
+            "docs/adr/0007-verification.md",
+            "docs/adr/0008-mcp-adapter.md",
+            "docs/adr/0009-local-production.md",
+            "docs/agents.md",
+            "docs/autonomous-cycle-v0.md",
+            "docs/demos/linux-validation.txt",
+            "docs/demos/production-linux.json",
+            "docs/demos/production.json",
+            "docs/founding.md",
+            "docs/github-actions.md",
+            "docs/install.md",
+            "docs/production.md",
+            "docs/spec.md",
+            "docs/why.md",
+            "examples/production/demo.py",
+            "examples/production/main.rs",
+            "install.sh",
+            "mcp/Cargo.toml",
+            "mcp/src/main.rs",
+            "mcp/tests/mcp.rs",
+            "src/init.rs",
+            "src/lib.rs",
+            "src/main.rs",
+            "src/production/contract.rs",
+            "src/production/discovery.rs",
+            "src/production/mod.rs",
+            "src/production/store.rs",
+            "sykli.json",
+            "sykli.lock",
+            "tests/cli.rs",
+            "tests/init.rs",
+            "tests/production.rs",
+            "tests/qa/sykli.json",
+            "xtask/Cargo.toml",
+            "xtask/src/main.rs"
+          ],
+          "type": {
+            "kind": "source-tree"
+          }
+        }
+      },
+      "operations": {
+        "build": {
+          "inputs": {
+            "source": {
+              "expects": {
+                "kind": "source-tree"
+              },
+              "from": {
+                "kind": "target-input",
+                "port": "source"
+              }
+            }
+          },
+          "kind": "transform",
+          "outputs": {
+            "executable": {
+              "collect": "app",
+              "type": {
+                "architecture": "aarch64",
+                "format": "macho",
+                "kind": "executable"
+              },
+              "validator": "builtin.v1"
+            }
+          },
+          "reuse": "never",
+          "run": "cd \"$SYKLI_INPUT_source\" && cargo build --offline --locked --package 'sykli' --target 'aarch64-apple-darwin' --target-dir \"$SYKLI_OUTPUT/target\" --release --bin 'sykli' && cp \"$SYKLI_OUTPUT/target\"/'aarch64-apple-darwin/release/sykli' \"$SYKLI_OUTPUT/app\""
+        },
+        "smoke_test": {
+          "assertion": "declared smoke command succeeds for the collected executable",
+          "inputs": {
+            "executable": {
+              "expects": {
+                "architecture": "aarch64",
+                "format": "macho",
+                "kind": "executable"
+              },
+              "from": {
+                "kind": "operation-output",
+                "operation": "build",
+                "port": "executable"
+              }
+            }
+          },
+          "kind": "check",
+          "reuse": "never",
+          "run": "\"$SYKLI_INPUT_executable\" produce --help",
+          "subject_input": "executable"
+        },
+        "unit_tests": {
+          "assertion": "selected Cargo package's binary and library unit tests pass",
+          "inputs": {
+            "source": {
+              "expects": {
+                "kind": "source-tree"
+              },
+              "from": {
+                "kind": "target-input",
+                "port": "source"
+              }
+            }
+          },
+          "kind": "check",
+          "reuse": "never",
+          "run": "cd \"$SYKLI_INPUT_source\" && cargo test --offline --locked --package 'sykli' --target 'aarch64-apple-darwin' --target-dir \"$SYKLI_OUTPUT/target\" --bins --lib",
+          "subject_input": "source"
+        }
+      },
+      "products": {
+        "app": {
+          "kind": "operation-output",
+          "operation": "build",
+          "port": "executable"
+        }
+      },
+      "profile": {
+        "kind": "local-shell.v1",
+        "tools": [
+          "cargo",
+          "rustc"
+        ]
+      },
+      "required_checks": [
+        "unit_tests",
+        "smoke_test"
+      ]
+    }
+  }
+}

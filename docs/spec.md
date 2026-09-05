@@ -1,5 +1,9 @@
 # Machine contracts
 
+The opt-in typed production contracts and their canonical encoding are specified
+in [production.md](production.md). They coexist with the legacy schemas below;
+legacy graph receipts make no typed artifact or durable-continuation claims.
+
 The versioned JSON surfaces of `sykli`, written from the code. Anything a
 tool, an agent, or a reviewer parses is here; anything not here is text for
 humans and may change without notice. Each schema string is the contract:
@@ -214,5 +218,10 @@ JSON form yet, which is why the exit code is the machine contract. Stable.
 | `run` | passed or cached | failed, errored, or could not evaluate | | | |
 | `lock` | written | error | | | |
 | `verify` | verified | outcome failed | cannot verify | stale | drifted |
+| `targets`, typed `plan --target` | inspected (may include blockers) | | invalid request / environment / internal error | | |
+| `produce`, `resume` | complete and product bytes available | incomplete / failed / indeterminate / unavailable | invalid request / busy writer / context drift / store error | | |
+| `status` | inspected (may be incomplete) | | invalid request / corrupt or unavailable records | | |
+| `verify-production` | consistent, complete and deliverable | incomplete / failed / unavailable product | invalid request / corrupt or unavailable records | | |
+| `init --production` | written | | unsupported input / existing contract / write error | | |
 | emitter binary without `--emit` | | | misuse | | |
 | `install.sh` with a bad target | | | misuse | | |

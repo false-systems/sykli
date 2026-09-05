@@ -15,7 +15,13 @@
         "xtask/src/main.rs",
         "mcp/Cargo.toml",
         "mcp/src/main.rs",
-        "mcp/tests/mcp.rs"
+        "mcp/tests/mcp.rs",
+        "src/production/contract.rs",
+        "src/production/mod.rs",
+        "src/production/store.rs",
+        "tests/production.rs",
+        "examples/production/main.rs",
+        "src/production/discovery.rs"
       ]
     },
     {
@@ -54,7 +60,13 @@
         "xtask/src/main.rs",
         "mcp/Cargo.toml",
         "mcp/src/main.rs",
-        "mcp/tests/mcp.rs"
+        "mcp/tests/mcp.rs",
+        "src/production/contract.rs",
+        "src/production/mod.rs",
+        "src/production/store.rs",
+        "tests/production.rs",
+        "examples/production/main.rs",
+        "src/production/discovery.rs"
       ]
     },
     {
@@ -75,7 +87,13 @@
         "xtask/src/main.rs",
         "mcp/Cargo.toml",
         "mcp/src/main.rs",
-        "mcp/tests/mcp.rs"
+        "mcp/tests/mcp.rs",
+        "src/production/contract.rs",
+        "src/production/mod.rs",
+        "src/production/store.rs",
+        "tests/production.rs",
+        "examples/production/main.rs",
+        "src/production/discovery.rs"
       ]
     }
   ]

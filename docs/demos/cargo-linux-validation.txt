@@ -1,0 +1,102 @@
+Linux 6.17.0-23-generic aarch64 GNU/Linux
+rustc 1.95.0 (59807616e 2026-04-14)
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+    Checking sykli v0.2.0 (/tmp/sykli-linux-validation-0ozN7X)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+   Compiling sykli v0.2.0 (/tmp/sykli-linux-validation-0ozN7X)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.72s
+     Running unittests src/lib.rs (target/debug/deps/sykli-1d0dbde511a1752a)
+
+running 1 test
+test tests::emits_v1_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sykli-28466e5161f3dd20)
+
+running 3 tests
+test tests::contract_hash_is_stable_under_key_order ... ok
+test tests::working_tree_oid_addresses_content_not_head ... ok
+capturedtest tests::contract_validation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/cli.rs (target/debug/deps/cli-5b3e3f24f1aea012)
+
+running 7 tests
+test plan_json_without_changed_selects_the_whole_graph ... ok
+test plan_json_identifies_the_graph_and_affected_tasks ... ok
+test help_states_the_identity ... ok
+test a_json_contract_is_the_default_when_there_is_no_emitter ... ok
+test validate_reports_invalid_contracts ... ok
+test run_json_prints_one_receipt ... ok
+test verify_accepts_fresh_receipts_and_rejects_stale_trees ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/init.rs (target/debug/deps/init-7ae96b7016d90f42)
+
+running 12 tests
+test a_cargo_workspace_declares_its_members ... ok
+test a_go_module_yields_vet_then_test_over_every_go_file ... ok
+test a_contract_outside_the_current_directory_is_refused_with_the_reason ... ok
+test an_npm_package_yields_only_the_scripts_it_defines_with_its_runner ... ok
+test a_package_json_without_usable_scripts_explains_the_empty_result ... ok
+test cargo_skips_only_the_root_target_directory ... ok
+test a_cargo_repository_yields_fmt_clippy_test_with_every_source_file_declared ... ok
+test nothing_detected_is_exit_one_and_names_the_manifests ... ok
+test init_refuses_to_overwrite_without_force_and_says_what_it_would_write ... ok
+test symlinks_are_never_inputs_and_a_link_cycle_does_not_hang ... ok
+test several_ecosystems_get_prefixed_task_names ... ok
+test workspace_member_globs_expand_to_crates_and_paths_are_normalized ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/production.rs (target/debug/deps/production-3b72660577bf293b)
+
+running 14 tests
+test cargo_discovery_requires_a_smoke_check_and_does_not_invent_a_library_product ... ok
+test changed_tool_image_cannot_continue_under_the_old_context ... ok
+test executor_loss_remains_indeterminate_and_cannot_retry_unknown_side_effects ... ok
+test controller_loss_live_reconciliation_writer_exclusion_and_snapshot_binding ... ok
+test cargo_workspace_discovery_uses_default_members_and_local_library_inputs ... ok
+test cargo_discovery_builds_captured_sources_and_resumes_bound_unit_and_smoke_checks ... ok
+test invalid_contracts_are_rejected_before_any_execution_and_unrelated_work_is_not_selected ... ok
+test explicit_retry_preserves_failure_and_success_lineage ... ok
+test known_signal_is_terminal_and_directory_outputs_have_canonical_manifests ... ok
+test source_paths_prerequisites_and_request_boundary_are_explicit ... ok
+test fresh_worker_continues_exact_source_and_changed_source_cannot_inherit_success ... ok
+test record_recovery_rejects_wrong_subjects_conflicts_and_torn_commits ... ok
+test rebuilding_new_bytes_invalidates_the_old_smoke_check ... ok
+test zero_exit_missing_stale_wrong_format_and_wrong_architecture_outputs_fail ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.76s
+
+     Running unittests src/main.rs (target/debug/deps/sykli_mcp-44913e2ac1918e3e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp.rs (target/debug/deps/mcp-bece57e01e994a3f)
+
+running 5 tests
+test malformed_input_is_answered_not_fatal ... ok
+test ids_are_echoed_batches_refused_and_a_bad_line_does_not_end_the_session ... ok
+test sykli_bin_is_honoured_and_an_unrunnable_binary_is_an_internal_error ... ok
+test a_session_negotiates_lists_tools_calls_them_and_exits_with_stdin ... ok
+test wrong_argument_types_are_invalid_params_never_coerced ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-7edfd16c960445d3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sykli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
