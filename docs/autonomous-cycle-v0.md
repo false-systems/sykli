@@ -185,3 +185,7 @@ work item, a signed Kisko decision, a sealed Kelpo plan, and `cycle.v1`
 sealed by the operator; `ohjaa cycle run` launched the implementation and QA
 legs through Toimija, ran `sykli-full` through `toimija verify-work`, and
 closed the work through `toimija close-work` on a passing Kelpo verdict.
+
+## Kit
+
+The composition owner's side of this cycle — sealing cycle.v1 and a scripted worker for both legs — lives in ohjaa under examples/cycle/, with the Kisko store seeder in kisko/examples and the smoke-verdict assembler in kelpo/examples.
