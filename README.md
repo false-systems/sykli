@@ -56,7 +56,26 @@ cargo run --quiet --locked -- run sykli.json --json
 ```
 
 The first command builds the `sykli` binary. The next three validate, explain,
-and evaluate this repository's locked graph without installing anything.
+and evaluate this repository's locked graph without installing anything. In
+your own repository, `sykli init` writes the first contract (see below).
+
+## Getting started
+
+```bash
+sykli init            # detects Cargo.toml, package.json, go.mod; writes and locks sykli.json
+sykli plan --changed src/lib.rs --json
+sykli run --json
+```
+
+`init` declares the tasks the ecosystem already has names for — `cargo fmt`,
+`clippy`, `test`; the npm scripts the manifest defines; `go vet` and `go test`
+— with every input listed as a real file, so delta selection is honest from
+the first run. Run it from the directory you will run `sykli` from: inputs
+and commands resolve against that directory, so `init` refuses to write a
+contract anywhere else. It refuses to overwrite an existing contract without
+`--force`, pins the result in `sykli.lock` unless `--no-lock`, and skips
+symlinks and the build directories (`target` at the root, `node_modules`,
+`vendor`). Edit the contract afterwards; it is plain JSON.
 
 ## How it works
 

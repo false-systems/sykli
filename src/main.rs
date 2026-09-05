@@ -15,6 +15,8 @@ use std::thread;
 use std::time::Instant;
 use sykli::{Contract, Task};
 
+mod init;
+
 #[derive(Parser)]
 #[command(
     name = "sykli",
@@ -57,6 +59,22 @@ enum Command {
         /// Print the plan as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Detect the repository's ecosystems and write a declared graph
+    #[command(after_help = "Exit codes:\n  \
+        0  wrote the contract\n  \
+        1  nothing to declare — no Cargo.toml, package.json, or go.mod\n  \
+        2  the contract exists; pass --force to overwrite it")]
+    Init {
+        /// Where to write the sykli-contract.v1 JSON
+        #[arg(default_value = "sykli.json")]
+        path: PathBuf,
+        /// Overwrite an existing contract
+        #[arg(long)]
+        force: bool,
+        /// Do not pin the written contract in sykli.lock
+        #[arg(long = "no-lock")]
+        no_lock: bool,
     },
     /// Pin the emitted contract in sykli.lock
     Lock {
@@ -174,6 +192,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::Init {
+            path,
+            force,
+            no_lock,
+        } => init::run(&path, force, !no_lock, &write_lock),
         Command::Lock { contract } => match write_lock(&contract) {
             Ok(path) => {
                 println!("locked: {}", path.display());
