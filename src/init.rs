@@ -13,10 +13,12 @@ use std::process::ExitCode;
 
 use sykli::{Contract, Task};
 
-/// What detection found, and where it looked so "nothing" can be explained.
+/// What detection found, where it looked so "nothing" can be explained, and
+/// anything it saw but could not turn into a task.
 pub struct Detected {
     pub tasks: Vec<Task>,
     pub looked_for: Vec<&'static str>,
+    pub notes: Vec<String>,
 }
 
 /// One ecosystem's contribution: a name to prefix with when several coexist.
@@ -27,7 +29,8 @@ struct Ecosystem {
 
 pub fn detect(root: &Path) -> Detected {
     let looked_for = vec!["Cargo.toml", "package.json", "go.mod"];
-    let found: Vec<Ecosystem> = [cargo(root), npm(root), go(root)]
+    let mut notes = Vec::new();
+    let found: Vec<Ecosystem> = [cargo(root), npm(root, &mut notes), go(root)]
         .into_iter()
         .flatten()
         .collect();
@@ -46,7 +49,11 @@ pub fn detect(root: &Path) -> Detected {
             tasks.push(task);
         }
     }
-    Detected { tasks, looked_for }
+    Detected {
+        tasks,
+        looked_for,
+        notes,
+    }
 }
 
 fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task {
@@ -71,20 +78,17 @@ fn cargo(root: &Path) -> Option<Ecosystem> {
     if root.join("Cargo.lock").is_file() {
         inputs.insert("Cargo.lock".into());
     }
+    // `target` is Cargo's build directory only at the workspace root; a
+    // module directory named `target` deeper down is source and stays.
     for dir in ["src", "tests", "benches", "examples"] {
-        inputs.extend(walk(root, Path::new(dir), &["rs"], &["target"]));
+        inputs.extend(walk(root, Path::new(dir), &["rs"], &[], &["target"]));
     }
-    for member in workspace_members(&fs::read_to_string(&manifest).unwrap_or_default()) {
+    for member in workspace_members(root, &fs::read_to_string(&manifest).unwrap_or_default()) {
         let member_root = root.join(&member);
         if member_root.join("Cargo.toml").is_file() {
             inputs.insert(format!("{member}/Cargo.toml"));
             for dir in ["src", "tests"] {
-                inputs.extend(walk(
-                    root,
-                    &Path::new(&member).join(dir),
-                    &["rs"],
-                    &["target"],
-                ));
+                inputs.extend(walk(root, &Path::new(&member).join(dir), &["rs"], &[], &[]));
             }
         }
     }
@@ -104,8 +108,10 @@ fn cargo(root: &Path) -> Option<Ecosystem> {
 }
 
 /// The `members = [...]` list of a `[workspace]` table, read line by line.
-/// Entries with globs are skipped: the contract declares files, not patterns.
-fn workspace_members(manifest: &str) -> Vec<String> {
+/// A trailing `/*` glob is expanded to the directories that hold a
+/// `Cargo.toml`; any other pattern is skipped, since the contract declares
+/// files, not patterns. Entries are normalized to plain relative paths.
+fn workspace_members(root: &Path, manifest: &str) -> Vec<String> {
     let mut members = Vec::new();
     let mut in_workspace = false;
     let mut in_members = false;
@@ -138,8 +144,23 @@ fn workspace_members(manifest: &str) -> Vec<String> {
             .map(|entry| entry.trim().trim_matches('"').trim_matches('\''))
             .filter(|entry| !entry.is_empty())
         {
-            if !entry.contains('*') {
-                members.push(entry.trim_end_matches('/').to_string());
+            let entry = entry
+                .trim_start_matches("./")
+                .trim_end_matches('/')
+                .replace('\\', "/");
+            if let Some(parent) = entry.strip_suffix("/*") {
+                let Ok(children) = fs::read_dir(root.join(parent)) else {
+                    continue;
+                };
+                let mut expanded: Vec<String> = children
+                    .flatten()
+                    .filter(|child| child.path().join("Cargo.toml").is_file())
+                    .map(|child| format!("{parent}/{}", child.file_name().to_string_lossy()))
+                    .collect();
+                expanded.sort();
+                members.extend(expanded);
+            } else if !entry.contains('*') && !entry.is_empty() {
+                members.push(entry);
             }
         }
         if list.contains(']') {
@@ -149,12 +170,21 @@ fn workspace_members(manifest: &str) -> Vec<String> {
     members
 }
 
-fn npm(root: &Path) -> Option<Ecosystem> {
+fn npm(root: &Path, notes: &mut Vec<String>) -> Option<Ecosystem> {
     let manifest = root.join("package.json");
     if !manifest.is_file() {
         return None;
     }
-    let package: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).ok()?).ok()?;
+    let package: serde_json::Value = match fs::read(&manifest)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(package) => package,
+        None => {
+            notes.push("package.json is not valid JSON; skipped".into());
+            return None;
+        }
+    };
     let scripts = package
         .get("scripts")
         .and_then(|scripts| scripts.as_object());
@@ -172,7 +202,7 @@ fn npm(root: &Path) -> Option<Ecosystem> {
         inputs.insert(lockfile.into());
     }
     for dir in ["src", "lib", "test", "tests"] {
-        inputs.extend(walk(root, Path::new(dir), &[], &["node_modules"]));
+        inputs.extend(walk(root, Path::new(dir), &[], &["node_modules"], &[]));
     }
     let tasks: Vec<Task> = ["lint", "test", "build"]
         .into_iter()
@@ -180,6 +210,7 @@ fn npm(root: &Path) -> Option<Ecosystem> {
         .map(|script| task(script, &format!("{runner} {script}"), &[], inputs.clone()))
         .collect();
     if tasks.is_empty() {
+        notes.push("package.json defines none of the scripts lint, test, build; skipped".into());
         return None;
     }
     Some(Ecosystem { name: "npm", tasks })
@@ -193,7 +224,7 @@ fn go(root: &Path) -> Option<Ecosystem> {
     if root.join("go.sum").is_file() {
         inputs.insert("go.sum".into());
     }
-    inputs.extend(walk(root, Path::new(""), &["go"], &["vendor"]));
+    inputs.extend(walk(root, Path::new(""), &["go"], &["vendor"], &[]));
     Some(Ecosystem {
         name: "go",
         tasks: vec![
@@ -204,11 +235,21 @@ fn go(root: &Path) -> Option<Ecosystem> {
 }
 
 /// Every regular file under `dir` (relative to `root`), as sorted
-/// repository-relative paths. Hidden entries and `skip` directories are
-/// left out; with an empty `extensions` list every file counts.
-fn walk(root: &Path, dir: &Path, extensions: &[&str], skip: &[&str]) -> Vec<String> {
+/// repository-relative paths. Hidden entries, symlinks (a link out of the
+/// tree or back into it is not a declared input), directories named in
+/// `skip_anywhere` at any depth, and directories named in `skip_at_root`
+/// directly under `root` are left out; with an empty `extensions` list every
+/// file counts.
+fn walk(
+    root: &Path,
+    dir: &Path,
+    extensions: &[&str],
+    skip_anywhere: &[&str],
+    skip_at_root: &[&str],
+) -> Vec<String> {
     let mut found = Vec::new();
     let mut pending = vec![root.join(dir)];
+    let root_children = |path: &Path| path.parent() == Some(root);
     while let Some(current) = pending.pop() {
         let Ok(entries) = fs::read_dir(&current) else {
             continue;
@@ -216,12 +257,19 @@ fn walk(root: &Path, dir: &Path, extensions: &[&str], skip: &[&str]) -> Vec<Stri
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || skip.contains(&name.as_str()) {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if name.starts_with('.') || kind.is_symlink() || skip_anywhere.contains(&name.as_str())
+            {
                 continue;
             }
-            if path.is_dir() {
+            if kind.is_dir() {
+                if root_children(&path) && skip_at_root.contains(&name.as_str()) {
+                    continue;
+                }
                 pending.push(path);
-            } else if path.is_file() {
+            } else if kind.is_file() {
                 let keep = extensions.is_empty()
                     || path
                         .extension()
@@ -255,19 +303,35 @@ pub fn run(
     lock: bool,
     write_lock: &dyn Fn(&Path) -> Result<PathBuf, String>,
 ) -> ExitCode {
+    // Declared inputs and task commands resolve against the directory sykli
+    // runs in, not the contract's, so a contract written elsewhere would
+    // declare paths that only work from there. Refuse rather than mislead.
     let root = path
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .filter(|parent| !parent.as_os_str().is_empty() && *parent != Path::new("."))
+        .map(Path::to_path_buf);
+    if let Some(elsewhere) = root {
+        eprintln!(
+            "{} is in {}, not the current directory; inputs are relative to where sykli runs, so run `sykli init` from there",
+            path.display(),
+            elsewhere.display()
+        );
+        return ExitCode::from(1);
+    }
+    let root = PathBuf::from(".");
     let detected = detect(&root);
     if detected.tasks.is_empty() {
         eprintln!(
-            "nothing to declare: looked for {} in {}",
-            detected.looked_for.join(", "),
-            root.display()
+            "nothing to declare: looked for {} in the current directory",
+            detected.looked_for.join(", ")
         );
+        for note in &detected.notes {
+            eprintln!("  {note}");
+        }
         return ExitCode::from(1);
+    }
+    for note in &detected.notes {
+        eprintln!("note: {note}");
     }
     let task_count = detected.tasks.len();
     let input_count = detected

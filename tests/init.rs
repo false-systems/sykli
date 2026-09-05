@@ -268,3 +268,114 @@ fn nothing_detected_is_exit_one_and_names_the_manifests() {
     assert!(!root.join("sykli.json").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn symlinks_are_never_inputs_and_a_link_cycle_does_not_hang() {
+    let root = temp_root("symlinks");
+    write(&root, "go.mod", "module example.com/x\n");
+    write(&root, "main.go", "package main\n");
+    write(&root, "pkg/a.go", "package pkg\n");
+    std::os::unix::fs::symlink(&root, root.join("pkg/loop")).unwrap();
+    std::os::unix::fs::symlink(root.join("main.go"), root.join("pkg/linked.go")).unwrap();
+    let (code, _, stderr) = sykli(&root, &["init", "--no-lock"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        inputs(task(&contract(&root), "test")),
+        vec!["go.mod", "main.go", "pkg/a.go"]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cargo_skips_only_the_root_target_directory() {
+    let root = temp_root("target");
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root,
+        "src/target/mod.rs",
+        "// a module called target is source\n",
+    );
+    write(&root, "src/lib.rs", "mod target;\n");
+    write(&root, "target/debug/build.rs", "// never\n");
+    let (code, _, stderr) = sykli(&root, &["init", "--no-lock"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        inputs(task(&contract(&root), "fmt")),
+        vec!["Cargo.toml", "src/lib.rs", "src/target/mod.rs"]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn workspace_member_globs_expand_to_crates_and_paths_are_normalized() {
+    let root = temp_root("globs");
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"./tools/xtask/\", \"crates/*\"]\n",
+    );
+    write(
+        &root,
+        "tools/xtask/Cargo.toml",
+        "[package]\nname = \"xtask\"\nversion = \"0.0.0\"\n",
+    );
+    write(&root, "tools/xtask/src/main.rs", "fn main() {}\n");
+    write(
+        &root,
+        "crates/a/Cargo.toml",
+        "[package]\nname = \"a\"\nversion = \"0.0.0\"\n",
+    );
+    write(&root, "crates/a/src/lib.rs", "");
+    write(&root, "crates/notes.md", "not a crate\n");
+    let (code, _, stderr) = sykli(&root, &["init", "--no-lock"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let fmt = inputs(task(&contract(&root), "fmt"));
+    for expected in [
+        "tools/xtask/Cargo.toml",
+        "tools/xtask/src/main.rs",
+        "crates/a/Cargo.toml",
+        "crates/a/src/lib.rs",
+    ] {
+        assert!(
+            fmt.contains(&expected.to_string()),
+            "{expected} missing from {fmt:?}"
+        );
+    }
+    assert!(!fmt.iter().any(|input| input.starts_with("./")), "{fmt:?}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_contract_outside_the_current_directory_is_refused_with_the_reason() {
+    let root = temp_root("elsewhere");
+    write(&root, "sub/go.mod", "module example.com/x\n");
+    write(&root, "sub/main.go", "package main\n");
+    let (code, _, stderr) = sykli(&root, &["init", "sub/sykli.json"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("relative to where sykli runs"), "{stderr}");
+    assert!(!root.join("sub/sykli.json").exists());
+    let (code, _, _) = sykli(&root.join("sub"), &["init", "--no-lock"]);
+    assert_eq!(code, Some(0));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_package_json_without_usable_scripts_explains_the_empty_result() {
+    let root = temp_root("noscripts");
+    write(
+        &root,
+        "package.json",
+        r#"{"name":"x","scripts":{"dev":"vite"}}"#,
+    );
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("none of the scripts lint, test, build"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
