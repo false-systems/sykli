@@ -1,0 +1,86 @@
+# Installing sykli
+
+One static binary, no service, no account. Every path below yields the same
+`sykli`; pick by where it runs.
+
+Release assets are named `sykli-<tag>-<platform>-<arch>.tar.gz` with
+`platform` in `linux`, `macos` and `arch` in `x86_64`, `aarch64`, plus a
+`SHA256SUMS` file and a Homebrew formula `sykli.rb`.
+
+## Installer script
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
+sh install.sh v0.2.0
+```
+
+`install.sh` takes exactly one argument, a tag of the form `vX.Y.Z`. It
+detects the platform and architecture, downloads that tarball and
+`SHA256SUMS` from the GitHub release, refuses to install unless the checksum
+matches, and places the binary at `~/.local/bin/sykli`. Set
+`SYKLI_INSTALL_DIR` to install somewhere else; set `SYKLI_REPOSITORY` to
+install from a fork. Make sure the install directory is on your `PATH`.
+
+## Cargo
+
+```bash
+cargo install --git https://github.com/false-systems/sykli --tag v0.2.0 --locked sykli
+```
+
+Builds from source with the pinned lockfile; needs Rust 1.85 or newer.
+
+## Docker
+
+Two images per release. The default is the binary alone on `scratch`; the
+`tools` variant adds `git`, `jq`, and CA certificates, which is what a CI
+step needs, because every receipt is bound to the Git tree it evaluated.
+
+```bash
+docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/false-systems/sykli:v0.2.0-tools run sykli.json --json
+docker run --rm ghcr.io/false-systems/sykli:v0.2.0 --help
+```
+
+`latest` and `tools` track the newest release. Images are built for
+`linux/amd64` and `linux/arm64`.
+
+## Homebrew
+
+Every release attaches `sykli.rb`. Once the tap exists it is:
+
+```bash
+brew tap false-systems/tap
+brew install sykli
+```
+
+Creating the tap is one repository: `false-systems/homebrew-tap` with the
+release's `sykli.rb` at `Formula/sykli.rb`. Until then, the formula installs
+directly: `brew install ./sykli.rb`.
+
+## GitHub Actions
+
+```yaml
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: false-systems/sykli@v0.2.0
+        with:
+          contract: sykli.json
+```
+
+The Action installs the release matching the ref it is called with, runs the
+graph, verifies the receipt against the tree, and attaches the receipt as an
+artifact. Inputs: `contract`, `version`, `working-directory`, `plan`,
+`verify`, `upload-receipt`, `artifact-name`. Outputs: `receipt`, `outcome`,
+`tree-oid`, `contract-hash`, `affected`, `verify-code`. Details and the
+verify exit codes are in [github-actions.md](github-actions.md).
+
+## Verifying an install
+
+```bash
+sykli --version
+sykli validate sykli.json --json
+```
+
+The second line prints a `sykli-validate.v1` verdict for the contract in the
+current directory; exit 1 means the contract is invalid, and the `errors`
+array says why.

@@ -1,0 +1,12 @@
+target
+.sykli
+.toimija
+.teko
+.claude
+.git
+.github
+docs
+action
+action.yml
+tests/qa
+*.md
