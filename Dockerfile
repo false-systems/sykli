@@ -22,9 +22,9 @@ RUN set -eu; \
     esac; \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY xtask ./xtask
+# The whole workspace: Cargo refuses to build with a member missing, and the
+# member list grows (xtask, mcp). .dockerignore keeps the context small.
+COPY . .
 RUN set -eu; \
     case "$TARGETARCH" in \
       amd64) target=x86_64-unknown-linux-musl ;; \

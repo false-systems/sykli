@@ -7,17 +7,16 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-05
+
 ### Added
 - Container images published on release: `ghcr.io/false-systems/sykli:<tag>`
   (the static binary on scratch) and `<tag>-tools` (Debian slim with `git`
-  and `jq`, for CI).
+  and `jq`, for CI). `latest` and `tools` move only for non-pre-release tags.
 - A Homebrew formula (`sykli.rb`) attached to every release, generated from
   the released tarballs' checksums.
 - `docs/install.md`, `CONTRIBUTING.md`, `SECURITY.md`, this changelog.
-
-## [0.2.0] - unreleased
-
-### Added
+- `sykli plan` without `--changed` selects the whole graph.
 - `sykli verify <receipt>`: checks a receipt against the current tree and
   contract with staged exit codes — 0 verified, 1 the work failed, 2 cannot
   verify, 3 stale tree or inputs, 4 contract drift.
