@@ -1,0 +1,46 @@
+{
+  "schema": "sykli-contract.v1",
+  "tasks": [
+    {
+      "name": "validate-json-valid",
+      "run": "cargo run --quiet --locked -- validate sykli.json --json | jq -e '.schema == \"sykli-validate.v1\" and .valid == true and (.contract_hash | length) == 64' >/dev/null",
+      "inputs": [
+        "Cargo.toml",
+        "src/main.rs",
+        "sykli.json"
+      ]
+    },
+    {
+      "name": "validate-json-invalid",
+      "run": "printf '{\"schema\":\"sykli-contract.v1\",\"tasks\":[{\"name\":\"a\",\"run\":\"true\",\"after\":[\"missing\"]}]}' > \"$TMPDIR/bad-contract.json\"; code=0; out=$(cargo run --quiet --locked -- validate \"$TMPDIR/bad-contract.json\" --json) || code=$?; test \"$code\" -eq 1 && echo \"$out\" | jq -e '.valid == false and (.errors | length) > 0' >/dev/null",
+      "inputs": [
+        "Cargo.toml",
+        "src/main.rs"
+      ]
+    },
+    {
+      "name": "locked-graph-validates",
+      "run": "cargo run --quiet --locked -- validate sykli.json",
+      "inputs": [
+        "Cargo.toml",
+        "src/main.rs",
+        "sykli.json",
+        "sykli.lock"
+      ]
+    },
+    {
+      "name": "last-commit-changes-src",
+      "run": "git log -1 --name-only --format= | grep -q '^src/'",
+      "inputs": [
+        "src/main.rs"
+      ]
+    },
+    {
+      "name": "last-commit-only-src",
+      "run": "files=$(git log -1 --name-only --format=); test -n \"$files\" && ! echo \"$files\" | grep -qv '^src/'",
+      "inputs": [
+        "src/main.rs"
+      ]
+    }
+  ]
+}

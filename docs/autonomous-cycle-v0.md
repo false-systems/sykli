@@ -189,3 +189,47 @@ closed the work through `toimija close-work` on a passing Kelpo verdict.
 ## Kit
 
 The composition owner's side of this cycle — sealing cycle.v1 and a scripted worker for both legs — lives in ohjaa under examples/cycle/, with the Kisko store seeder in kisko/examples and the smoke-verdict assembler in kelpo/examples.
+
+## Running one
+
+For a second person, not the author. Every tool is a fleet binary built from
+its repository; nothing here is a scratch script.
+
+1. `ohjaa cycle doctor` in the repository. It lists toimija, teko, kisko,
+   sauma, sykli, git, ssh-keygen, jq, python3, and whether a Toimija session
+   covers this repository. Nothing else runs until it prints `ready`.
+2. Commit the QA contract first: a second Sykli contract (here
+   `tests/qa/sykli.json`) whose tasks are the tests for the work. At standard
+   rigor they must fail on the current tree, because the feature does not
+   exist yet; that is the red evidence. Copy `examples/cycle/cycle.env.example`
+   from ohjaa to a directory outside the tree, fill in the paths, and map each
+   Teko obligation to its QA tasks in `CYCLE_CASES`.
+3. `teko begin … --gate sykli-full --scope src` under a Toimija session, so
+   Teko records Toimija's point. Then `seal-cycle.sh`: the work artifact, a
+   Kisko decision from Kisko's own facts and request, signed by the identity
+   the cycle allows to launch, a Kelpo plan with rigor per obligation, and
+   `cycle.json` stamped by sauma at the baseline.
+4. `ohjaa cycle run --cycle … --work … --decision … --qa-plan … --verdict …
+   <worker>`. Each step re-derives every fact from its owner and acts once.
+5. Read the last line. `{"action":"closed"}` (exit 0): Teko wrote a
+   completion witness. `{"action":"failed","reason":"qa_verdict_failed"}`
+   (exit 1): the sealed verdict at the verdict path names which obligation
+   was refuted; the work stays open. `{"action":"held","reason":…}` (exit 3):
+   a decision, artifact, effect, or observation is missing; fix it and run
+   again, the loop consumes what already happened. A spent budget is
+   terminal: re-seal with a new budget, which is a new cycle.
+
+Two runs on this repository, 2026-09-05, both on the merged tools:
+
+- `sykli validate --json`, standard rigor. Implementation leg committed the
+  feature; Toimija recorded `effects: commit`; the QA leg ran the QA contract
+  green at the final tree and red at the baseline (both feature cases failed
+  there); Kelpo judged `pass`; Teko closed. That commit is in this branch.
+- The same QA contract against a deliberately wrong implementation. Kelpo
+  judged `fail` with `obl_json refuted: cases ['validate-json-valid'] were
+  not passed at the final point`; the cycle ended `failed`; the work was
+  abandoned with the reason recorded.
+
+What Ohjaa still does not do: judge QA, run gates itself, close work itself,
+or prevent an effect. It detects undeclared effects after the fact through
+Toimija and holds; prevention is Rauha's, when it becomes the worker provider.

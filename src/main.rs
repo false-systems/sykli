@@ -33,6 +33,9 @@ enum Command {
         /// Path to sykli.rs or a sykli-contract.v1 JSON file
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
+        /// Print the verdict as JSON (`sykli-validate.v1`); exit 1 when invalid
+        #[arg(long)]
+        json: bool,
     },
     /// Execute an emitted contract
     Run {
@@ -94,13 +97,39 @@ struct PlanOutput {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Validate { contract } => match load(&contract) {
-            Ok(_) => {
-                println!("valid: {}", contract.display());
+        Command::Validate { contract, json } => match load(&contract) {
+            Ok((_, _, contract_hash)) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "schema": "sykli-validate.v1",
+                            "contract": contract.display().to_string(),
+                            "valid": true,
+                            "contract_hash": contract_hash,
+                            "errors": [],
+                        })
+                    );
+                } else {
+                    println!("valid: {}", contract.display());
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("invalid {}: {error}", contract.display());
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "schema": "sykli-validate.v1",
+                            "contract": contract.display().to_string(),
+                            "valid": false,
+                            "contract_hash": null,
+                            "errors": [error],
+                        })
+                    );
+                } else {
+                    eprintln!("invalid {}: {error}", contract.display());
+                }
                 ExitCode::FAILURE
             }
         },
