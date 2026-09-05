@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/false-systems/sykli"
 
 [workspace]
-members = ["xtask"]
+members = ["xtask", "mcp"]
 default-members = ["."]
 resolver = "3"
 

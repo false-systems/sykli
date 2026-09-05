@@ -1,0 +1,19 @@
+[package]
+name = "sykli-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "MCP shim beside sykli: the CLI's JSON surfaces as tools over stdio"
+license = "MIT"
+repository = "https://github.com/false-systems/sykli"
+publish = false
+
+[[bin]]
+name = "sykli-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"
