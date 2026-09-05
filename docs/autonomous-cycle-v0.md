@@ -177,3 +177,11 @@ The composition owner should define fixtures before implementation:
    factual input.
 5. Connect the existing Sykli, Kelpo, and Teko artifacts; do not add a Sykli
    coordination surface.
+
+## First live run
+
+The v0 chain ran end to end on 2026-09-05 against this repository: a Teko
+work item, a signed Kisko decision, a sealed Kelpo plan, and `cycle.v1`
+sealed by the operator; `ohjaa cycle run` launched the implementation and QA
+legs through Toimija, ran `sykli-full` through `toimija verify-work`, and
+closed the work through `toimija close-work` on a passing Kelpo verdict.
