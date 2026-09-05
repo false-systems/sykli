@@ -6,9 +6,11 @@
       "run": "cargo fmt --check",
       "inputs": [
         "Cargo.toml",
+        "src/init.rs",
         "src/lib.rs",
         "src/main.rs",
         "tests/cli.rs",
+        "tests/init.rs",
         "xtask/Cargo.toml",
         "xtask/src/main.rs"
       ]
@@ -16,7 +18,9 @@
     {
       "name": "installer",
       "run": "sh -n install.sh && code=0; sh install.sh ../bad >/dev/null 2>&1 || code=$?; test \"$code\" -eq 2",
-      "inputs": ["install.sh"]
+      "inputs": [
+        "install.sh"
+      ]
     },
     {
       "name": "action",
@@ -32,13 +36,17 @@
     {
       "name": "clippy",
       "run": "cargo clippy --workspace --all-targets --locked -- -D warnings",
-      "after": ["fmt"],
+      "after": [
+        "fmt"
+      ],
       "inputs": [
         "Cargo.lock",
         "Cargo.toml",
+        "src/init.rs",
         "src/lib.rs",
         "src/main.rs",
         "tests/cli.rs",
+        "tests/init.rs",
         "xtask/Cargo.toml",
         "xtask/src/main.rs"
       ]
@@ -46,13 +54,17 @@
     {
       "name": "test",
       "run": "cargo test --workspace --locked",
-      "after": ["fmt"],
+      "after": [
+        "fmt"
+      ],
       "inputs": [
         "Cargo.lock",
         "Cargo.toml",
+        "src/init.rs",
         "src/lib.rs",
         "src/main.rs",
         "tests/cli.rs",
+        "tests/init.rs",
         "xtask/Cargo.toml",
         "xtask/src/main.rs"
       ]
