@@ -213,3 +213,44 @@ fn plan_json_without_changed_selects_the_whole_graph() {
     let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(plan["tasks"], serde_json::json!(["build", "test"]));
 }
+
+#[test]
+fn a_json_contract_is_the_default_when_there_is_no_emitter() {
+    // `sykli init` writes sykli.json and no sykli.rs; every command must then
+    // work without naming the contract, as the README shows.
+    let dir = std::env::temp_dir().join(format!(
+        "sykli-default-json-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .current_dir(&dir)
+        .args(["validate", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["contract"], "sykli.json");
+    assert_eq!(verdict["valid"], true);
+    // An explicit path is never rewritten.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .current_dir(&dir)
+        .args(["validate", "missing.json", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
