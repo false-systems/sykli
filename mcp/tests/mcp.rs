@@ -34,9 +34,42 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// Send every line, close stdin, collect responses keyed by id.
 fn session(cwd: &Path, requests: &[serde_json::Value]) -> (Vec<serde_json::Value>, Option<i32>) {
+    session_with(cwd, requests, &sykli_binary())
+}
+
+/// Send raw lines (not necessarily JSON), close stdin, collect responses.
+fn session_raw(cwd: &Path, lines: &[&str]) -> (Vec<serde_json::Value>, Option<i32>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_sykli-mcp"))
         .current_dir(cwd)
         .env("SYKLI_BIN", sykli_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("shim runs");
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    let responses = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+        .collect();
+    (responses, output.status.code())
+}
+
+fn session_with(
+    cwd: &Path,
+    requests: &[serde_json::Value],
+    sykli: &Path,
+) -> (Vec<serde_json::Value>, Option<i32>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli-mcp"))
+        .current_dir(cwd)
+        .env("SYKLI_BIN", sykli)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -148,4 +181,97 @@ fn malformed_input_is_answered_not_fatal() {
     assert_eq!(code, Some(0));
     assert_eq!(by_id(&responses, 9)["error"]["code"], -32601);
     assert_eq!(by_id(&responses, 10)["error"]["code"], -32600);
+}
+
+#[test]
+fn ids_are_echoed_batches_refused_and_a_bad_line_does_not_end_the_session() {
+    let dir = temp_dir("framing");
+    let (responses, code) = session_raw(
+        &dir,
+        &[
+            r#"{"jsonrpc":"2.0","id":"str-1","method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
+            r#"[{"jsonrpc":"2.0","id":3,"method":"ping"}]"#,
+            "this is not json",
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"no_such_tool"}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"ping"}"#,
+        ],
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(code, Some(0));
+    // string id and null id echoed; batch and bad JSON answered with id null;
+    // the notification (no id) even for an unknown tool gets no response;
+    // the session kept going.
+    assert_eq!(responses.len(), 5, "{responses:?}");
+    assert_eq!(responses[0]["id"], "str-1");
+    assert!(responses[1]["id"].is_null() && responses[1]["result"].is_object());
+    assert_eq!(responses[2]["error"]["code"], -32600);
+    assert!(
+        responses[2]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("batch")
+    );
+    assert_eq!(responses[3]["error"]["code"], -32700);
+    assert_eq!(responses[4]["id"], 4);
+}
+
+#[test]
+fn wrong_argument_types_are_invalid_params_never_coerced() {
+    let dir = temp_dir("params");
+    std::fs::write(
+        dir.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true","inputs":["sykli.json"]}]}"#,
+    )
+    .unwrap();
+    let (responses, code) = session(
+        &dir,
+        &[
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sykli_validate","arguments":{"contract":7}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sykli_plan","arguments":{"changed":"src/lib.rs"}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sykli_plan","arguments":{"changed":[1]}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sykli_validate","arguments":"nope"}}),
+            serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sykli_verify","arguments":{}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"sykli_plan","arguments":{"changed":null}}}),
+        ],
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(code, Some(0));
+    for id in 1..=5 {
+        let response = by_id(&responses, id);
+        assert_eq!(response["error"]["code"], -32602, "{response:?}");
+        assert!(response.get("result").is_none());
+    }
+    // null is "absent", not a type error: the whole graph.
+    assert_eq!(
+        text(by_id(&responses, 6))["tasks"],
+        serde_json::json!(["t"])
+    );
+}
+
+#[test]
+fn sykli_bin_is_honoured_and_an_unrunnable_binary_is_an_internal_error() {
+    let dir = temp_dir("bin");
+    std::fs::write(
+        dir.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    )
+    .unwrap();
+    let (responses, code) = session_with(
+        &dir,
+        &[
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sykli_validate"}}),
+        ],
+        Path::new("/nonexistent/sykli-that-is-not-there"),
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(code, Some(0), "an unrunnable sykli is answered, not fatal");
+    let response = by_id(&responses, 1);
+    assert_eq!(response["error"]["code"], -32603, "{response:?}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sykli-that-is-not-there")
+    );
 }

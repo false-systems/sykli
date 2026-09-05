@@ -1,7 +1,8 @@
 //! `sykli-mcp`: a Model Context Protocol shim beside `sykli`.
 //!
-//! JSON-RPC 2.0, one message per line, on the stdin/stdout of the one client
-//! that spawned it. Each tool runs the `sykli` subcommand a human would run —
+//! JSON-RPC 2.0, one message per line (newline-delimited; Content-Length
+//! framing is not spoken — a client that needs it wraps the shim), on the
+//! stdin/stdout of the one client that spawned it. Batches are refused. Each tool runs the `sykli` subcommand a human would run —
 //! the binary is found through `SYKLI_BIN` or PATH, never linked — and hands
 //! back its stdout as a text block, with `isError` when it exited non-zero.
 //! No socket, no state between calls, no lifetime beyond the client's: the
@@ -20,6 +21,7 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -77,6 +79,13 @@ fn handle_line(line: &str) -> Option<Value> {
             ));
         }
     };
+    if message.is_array() {
+        return Some(error_response(
+            Value::Null,
+            INVALID_REQUEST,
+            "batch requests are not supported; send one request per line",
+        ));
+    }
     let id = message.get("id").cloned();
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return Some(error_response(
@@ -102,7 +111,7 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "sykli-mcp", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Ask sykli_plan what applies before editing; run sykli_run after; \
                              hand the receipt to the reviewer and let sykli_verify judge it. \
@@ -164,52 +173,74 @@ fn call(params: &Value) -> Result<Value, (i64, String)> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or((INVALID_PARAMS, "tools/call needs a tool name".to_string()))?;
-    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-    let contract = arguments
-        .get("contract")
-        .and_then(Value::as_str)
-        .unwrap_or("sykli.json")
-        .to_string();
+    // Arguments are validated, never coerced: a wrong type answered with a
+    // plausible default would be a wrong answer that looks right.
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => json!({}),
+        Some(Value::Object(_)) => params["arguments"].clone(),
+        Some(_) => return Err((INVALID_PARAMS, "arguments must be an object".into())),
+    };
+    let string_argument = |key: &str| -> Result<Option<String>, (i64, String)> {
+        match arguments.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(_) => Err((INVALID_PARAMS, format!("`{key}` must be a string"))),
+        }
+    };
+    let contract = string_argument("contract")?.unwrap_or_else(|| "sykli.json".into());
     let mut argv: Vec<String> = match name {
         "sykli_validate" => vec!["validate".into(), contract, "--json".into()],
         "sykli_plan" => {
             let mut argv = vec!["plan".into(), contract];
-            for path in arguments
-                .get("changed")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-            {
+            let changed = match arguments.get("changed") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| {
+                        item.as_str().map(String::from).ok_or((
+                            INVALID_PARAMS,
+                            "`changed` must be an array of strings".to_string(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => {
+                    return Err((
+                        INVALID_PARAMS,
+                        "`changed` must be an array of strings".into(),
+                    ));
+                }
+            };
+            for path in changed {
                 argv.push("--changed".into());
-                argv.push(path.into());
+                argv.push(path);
             }
             argv.push("--json".into());
             argv
         }
         "sykli_run" => vec!["run".into(), contract, "--json".into()],
         "sykli_verify" => {
-            let receipt = arguments.get("receipt").and_then(Value::as_str).ok_or((
+            let receipt = string_argument("receipt")?.ok_or((
                 INVALID_PARAMS,
                 "sykli_verify needs a receipt path".to_string(),
             ))?;
-            vec![
-                "verify".into(),
-                receipt.into(),
-                "--contract".into(),
-                contract,
-            ]
+            vec!["verify".into(), receipt, "--contract".into(), contract]
         }
         other => return Err((INVALID_PARAMS, format!("unknown tool {other:?}"))),
     };
+    // No timeout, on purpose: a hung `sykli run` hangs this call, and the
+    // client's own cancellation is the remedy. Not being able to spawn sykli
+    // at all is the shim's failure, not the caller's.
     let program = std::env::var("SYKLI_BIN").unwrap_or_else(|_| "sykli".into());
     let output = Command::new(&program)
         .args(argv.drain(..))
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| (INVALID_PARAMS, format!("cannot run {program}: {error}")))?;
+        .map_err(|error| (INTERNAL_ERROR, format!("cannot run {program}: {error}")))?;
     let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // stdout is the command's answer, verbatim but for the trailing newline.
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut content = vec![json!({ "type": "text", "text": stdout })];
     if name == "sykli_verify" {

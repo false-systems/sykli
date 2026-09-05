@@ -198,9 +198,12 @@ exits with the first failing stage:
 | 3 | tree, inputs | `subject.tree_oid` or `inputs_digest` differ from the tree now: stale, re-run |
 | 4 | contract, lock | the contract hash differs from the receipt or from `sykli.lock`: drifted, re-lock |
 
-Checks run in that order and stop at the first failure. Output is text
-(`ok: …` / `mismatch: …` / `verified: …`); there is no JSON form yet, which
-is why the exit code is the machine contract. Stable.
+The table is ordered by exit code; the checks do not run in that order. They
+run schema (2), then contract lock and contract (4), then tree and inputs (3),
+then outcome (1), and stop at the first failing stage. So a receipt that is
+both drifted and stale reports 4, and a stale receipt's outcome is never
+judged. Output is text (`ok: …` / `mismatch: …` / `verified: …`); there is no
+JSON form yet, which is why the exit code is the machine contract. Stable.
 
 ## Exit codes, all commands
 

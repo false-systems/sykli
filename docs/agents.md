@@ -81,6 +81,12 @@ not a server inside it (ADR-0008).
 { "mcpServers": { "sykli": { "command": "sykli-mcp" } } }
 ```
 
+Framing is one JSON-RPC message per line on stdio; the shim does not speak
+`Content-Length` framing, and a client that needs it wraps the shim. Wrong
+argument types are answered with `-32602`, never coerced to a default; a
+`sykli` that cannot be started is `-32603`. There is no timeout: a hung
+`sykli run` hangs the call, and the client's cancellation is the remedy.
+
 ## A snippet for your repository's AGENTS.md
 
 ```markdown
