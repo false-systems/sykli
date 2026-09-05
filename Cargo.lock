@@ -277,6 +277,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sykli-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

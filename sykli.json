@@ -12,7 +12,10 @@
         "tests/cli.rs",
         "tests/init.rs",
         "xtask/Cargo.toml",
-        "xtask/src/main.rs"
+        "xtask/src/main.rs",
+        "mcp/Cargo.toml",
+        "mcp/src/main.rs",
+        "mcp/tests/mcp.rs"
       ]
     },
     {
@@ -48,7 +51,10 @@
         "tests/cli.rs",
         "tests/init.rs",
         "xtask/Cargo.toml",
-        "xtask/src/main.rs"
+        "xtask/src/main.rs",
+        "mcp/Cargo.toml",
+        "mcp/src/main.rs",
+        "mcp/tests/mcp.rs"
       ]
     },
     {
@@ -66,7 +72,10 @@
         "tests/cli.rs",
         "tests/init.rs",
         "xtask/Cargo.toml",
-        "xtask/src/main.rs"
+        "xtask/src/main.rs",
+        "mcp/Cargo.toml",
+        "mcp/src/main.rs",
+        "mcp/tests/mcp.rs"
       ]
     }
   ]

@@ -120,8 +120,10 @@ Start the agent through Toimija so it receives the live repository packet:
 toimija run --intent "describe the change" --task "do the work" -- codex
 ```
 
-During the session the agent queries affected work with `sykli plan --json`.
-Before handoff it runs the authoritative graph:
+During the session the agent queries affected work with `sykli plan --json`;
+[`docs/agents.md`](docs/agents.md) is the full agent workflow, and `sykli-mcp`
+offers the same commands as MCP tools. Before handoff it runs the
+authoritative graph:
 
 ```bash
 toimija gates run sykli-full
