@@ -112,8 +112,30 @@ struct PlanOutput {
     tasks: Vec<String>,
 }
 
+/// The contract a command works on when none was named. Every command
+/// defaults to `sykli.rs`, the emitter; a repository set up by `sykli init`
+/// has `sykli.json` and no emitter. When the default was not overridden and
+/// only `sykli.json` exists, that is the contract. An explicit path is never
+/// touched.
+fn resolve_contract(contract: PathBuf) -> PathBuf {
+    if contract == Path::new("sykli.rs") && !contract.exists() && Path::new("sykli.json").exists() {
+        return PathBuf::from("sykli.json");
+    }
+    contract
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    match &mut cli.command {
+        Command::Validate { contract, .. }
+        | Command::Run { contract, .. }
+        | Command::Plan { contract, .. }
+        | Command::Lock { contract, .. }
+        | Command::Verify { contract, .. } => {
+            *contract = resolve_contract(std::mem::take(contract));
+        }
+        _ => {}
+    }
     match cli.command {
         Command::Validate { contract, json } => match load(&contract) {
             Ok((_, _, contract_hash)) => {
