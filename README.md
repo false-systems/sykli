@@ -26,20 +26,15 @@ Here is the executable example below. The first worker stops after building;
 the next worker runs the remaining checks against the saved source and binary.
 
 ```mermaid
-flowchart TD
-    first["Worker 1: produce"] --> source
-    next["Worker 2: resume with the saved ID"] -.-> unit
-    next -.-> smoke
+flowchart LR
+    build["Worker 1<br/>Build the executable"]
+    saved[("Saved locally<br/>Source, executable, progress")]
+    resume["Worker 2<br/>Run the remaining checks"]
+    result["Ready to use<br/>Executable + passing checks"]
 
-    subgraph saved["One production, saved locally"]
-        source["Captured source"] --> build["Build with Cargo"]
-        build --> binary["Saved executable"]
-        source --> unit["Unit tests on that source"]
-        binary --> smoke["Smoke check on that executable"]
-        binary --> delivered["Deliver the executable when both checks pass"]
-        unit --> delivered
-        smoke --> delivered
-    end
+    build -->|stops after building| saved
+    saved -->|resume with the same ID| resume
+    resume --> result
 ```
 
 Sykli records each attempt and its result in `.sykli/production`. `status`
