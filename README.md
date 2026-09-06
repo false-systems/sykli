@@ -1,160 +1,199 @@
 # sykli
 
-**Source to artifact, across replaceable workers.** Sykli captures declared
-source inputs, executes a typed target, and returns an identified artifact
-with its required checks. A fresh worker can inspect the stored production
-and finish the remaining operations without the previous worker's session.
+**Build an artifact. Keep the progress.**
 
-The new production path is opt-in in this checkout. In a Cargo workspace with
-a binary, using a Sykli binary built from this source:
+Sykli runs your build and tests, saves the resulting artifact, and records which
+source and checks belong to it. If you stop halfway through, another terminal
+or agent can finish the same work from its saved state.
+
+Your build tools still do the building. Sykli keeps track of the inputs, results,
+and unfinished work. It runs locally on Linux and macOS, with no account or server.
+
+## Why use it?
+
+A build can outlive the person or agent that started it. When someone picks up
+the work, they need to know which source was built, where the executable is,
+which checks passed, and what remains. Sykli saves those facts together so the
+next worker can inspect them and continue.
+
+A **production** is one target bound to one captured source state and its build
+instructions. Commands and workers can come and go; that saved work keeps its
+identity. Change the source or instructions and you get a different production.
+
+## How it fits together
+
+Here is the executable example below. The first worker stops after building;
+the next worker runs the remaining checks against the saved source and binary.
+
+```mermaid
+flowchart TD
+    first["Worker 1: produce"] --> source
+    next["Worker 2: resume with the saved ID"] -.-> unit
+    next -.-> smoke
+
+    subgraph saved["One production, saved locally"]
+        source["Captured source"] --> build["Build with Cargo"]
+        build --> binary["Saved executable"]
+        source --> unit["Unit tests on that source"]
+        binary --> smoke["Smoke check on that executable"]
+        binary --> delivered["Deliver the executable when both checks pass"]
+        unit --> delivered
+        smoke --> delivered
+    end
+```
+
+Sykli records each attempt and its result in `.sykli/production`. `status`
+reconstructs progress from those records; `resume` runs work still needed.
+The next worker needs the production ID and access to that store. It does not
+need a handover explanation or a running Sykli server.
+
+## Install
+
+The artifact and resume commands below require a build from this repository;
+the v0.2.0 release does not include them. With Rust and Cargo installed:
+
+```sh
+git clone https://github.com/false-systems/sykli.git
+cd sykli
+cargo install --path . --locked --bin sykli --force
+```
+
+Make sure Cargo's bin directory (normally `~/.cargo/bin`) is on your `PATH`.
+`--force` replaces an existing Cargo-installed Sykli.
+
+## Build something
+
+Start in the root of a Cargo workspace that contains a binary. Sykli's generated
+commands run offline, so fetch any missing dependencies first with `cargo fetch`.
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
-sykli targets --json
-sykli plan sykli.production.json --target app --json
-sykli produce app --json
-# In a new client, using the returned production ID:
-sykli status PRODUCTION_ID --json
-sykli resume PRODUCTION_ID --json
 ```
 
-Choose a smoke command appropriate to your program. For multiple Cargo binaries,
-select `--package NAME --bin NAME`. Standalone Rust `main.rs` is also supported.
+This writes **`sykli.production.json`**: a file describing what to build and how
+to check it. Review its source-file list and commands before running them.
+The generated target is called `app`, regardless of your binary's name.
 
-The result names the source, collected executable, source-unit-test result and
-executable-smoke-test result. Changing source or the contract creates a different
-production. Failed or unresolved work remains visible; missing artifact bytes
-cannot count as successful delivery. See the [short walkthrough and contract](docs/production.md)
-and [reproducible demonstration](examples/production/demo.py).
+The `--smoke` command is a quick check of the built executable. The example
+checks that `--help` exits successfully. Replace it with a command appropriate
+to your program. Sykli sets `$SYKLI_INPUT_executable` to the exact binary it built;
+keep the outer single quotes so your current shell does not expand it.
 
-This is trusted local execution on Linux/macOS, with prepared input copies and
-no cross-production reuse. It is not a security sandbox. If the executor itself
-disappears without a result, its attempt remains indeterminate; Sykli does not
-blindly retry it. No other False Systems tool is needed.
+Now look at the plan and build:
 
-The existing graph interface remains supported, including its local cache and
-v1 receipts:
-
-```bash
-sykli init                              # detect Cargo / npm / Go, write and lock sykli.json
-sykli plan --changed src/lib.rs --json  # which tasks does this change touch?
-sykli run --json                        # run them (in parallel, cached), write a receipt
-sykli verify .sykli/receipts/rcpt_….json   # is that receipt about this tree and this contract?
+```sh
+sykli targets --json                                # what can this repo produce?
+sykli plan sykli.production.json --target app --json # what will run?
+sykli produce app --json                            # build and check it
 ```
 
-One static binary. No server, no account, no daemon, nothing to host.
+Sykli captures the selected source files, including local edits, then runs:
+
+| Operation | What it does |
+| --- | --- |
+| `build` | Builds a release executable from the captured source and saves its bytes. |
+| `unit_tests` | Runs the selected Cargo package's binary and library unit tests against that source. |
+| `smoke_test` | Runs your smoke command against the saved executable. |
+
+Success means the artifact is available and both checks passed. Integration
+tests and doctests are not included automatically.
+
+The JSON response includes these fields:
+
+| Field | What you use it for |
+| --- | --- |
+| `production` | The ID to use when inspecting or resuming this work. |
+| `delivery.app.availability.locations[0]` | The path to the executable. Run it directly or copy it where you need it. |
+| `delivery.app.artifact.content` | The SHA-256 identity of the executable's bytes. |
+| `assessment.satisfied_checks` | The recorded attempts that passed the required checks. |
+
+If your workspace has several binaries, add `--package NAME --bin NAME` to
+`init`. A standalone Rust `main.rs` can use `sykli init --production` without
+Cargo. Other build tools can be used through an explicit contract; see the
+[production guide](docs/production.md).
+
+## Stop now, finish later
+
+For your first build, use this instead of the `produce` command above to stop
+after compilation:
+
+```sh
+sykli produce app --stop-after build --json
+```
+
+This intentionally exits **1**: the executable is saved, but checks remain.
+Copy the `production` ID from the response. In a fresh terminal, in the same
+repository, replace `PRODUCTION_ID` below with that ID:
+
+```sh
+sykli status PRODUCTION_ID --json  # see completed and unfinished work
+sykli resume PRODUCTION_ID --json  # run the remaining work
+```
+
+Sykli reuses the saved executable and runs the remaining checks. It needs the ID
+and the local store at `.sykli/production`, not the previous worker's chat.
+Keep that directory. From another directory, pass `--store /path/to/.sykli/production`.
+An already-complete production stays complete; `--stop-after` does not undo it.
+
+Editing source and running `produce` creates a new production. `resume` always
+uses the original captured source, even if your working files have changed.
+Old passing checks cannot complete work for different source or executable bytes.
+
+## When something fails
+
+- **A command failed:** inspect `status`. To retry a failed build explicitly,
+  run `sykli resume PRODUCTION_ID --retry build --json`. Earlier attempts stay recorded.
+- **You changed the code to fix it:** run `sykli produce app --json` for the new source.
+- **Execution is indeterminate:** Sykli cannot establish whether everything stopped.
+  It refuses a retry that could overlap surviving work. Continuation is between
+  operations; it does not resume a compiler halfway through an instruction.
+- **The artifact is missing or no longer executable:** historical checks stay
+  recorded, but delivery does not report success.
+
+`produce` and `resume` exit 0 only for successful delivery, 1 for unfinished or
+unsuccessful work, and 2 for an error. `status` can exit 0 while showing unfinished
+work: it successfully inspected the records.
+
+`sykli verify-production PRODUCTION_ID --json` checks record integrity, bindings,
+completion, and current artifact availability. The local executor and store are
+trusted. This is not a security sandbox or a proof that the software is correct.
+There is no automatic publication, remote execution, or reuse across productions.
+
+## Try the full example
+
+From this checkout, with Python 3 and the installed Sykli on your `PATH`:
+
+```sh
+python3 examples/production/demo.py --binary "$(command -v sykli)" --output /tmp/sykli-demo.json
+```
+
+It builds a tiny program that prints `42`, exits after compilation, finishes
+from a fresh invocation, then changes the source and shows that the old checks
+do not make the new version pass. It prints the artifact location and saves
+all commands and results in `/tmp/sykli-demo.json`.
 
 ## Existing graph workflow
 
-CI answers "did the pipeline pass" with logs nobody reads. Sykli answers two
-better questions with data:
+The original task-graph commands still work for Cargo, npm, and Go repositories:
 
-- **What does this change require?** `plan` selects the tasks whose declared
-  inputs changed, plus everything downstream, from the graph. An agent asks
-  this before touching code instead of running everything or guessing.
-- **What actually ran?** `run` writes a `sykli-receipt.v1`: every task, its
-  command, exit code, outputs, and whether it was observed or reused from an
-  earlier receipt with identical contract, inputs, and runtime fingerprints.
-  The receipt is bound to the working tree's OID and the contract's hash.
-  `verify` tells a reviewer, in one exit code, whether a receipt is good,
-  stale, drifted, or not evidence at all.
-
-A receipt claims exactly what ran. It never claims what it meant.
-
-## Getting started
-
-Install a release (Linux, macOS; x86_64 and arm64):
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
-sh install.sh v0.2.0
+```sh
+sykli init                              # write and lock sykli.json
+sykli plan --changed src/lib.rs --json  # inspect tasks affected by a change
+sykli run --json                        # run the graph and record a receipt
 ```
 
-Other paths — `cargo install`, Docker, Homebrew, the GitHub Action — are in
-[`docs/install.md`](docs/install.md).
+This path uses `sykli.json` and its existing cache and receipts. The artifact
+workflow above uses `sykli.production.json`. Existing graphs do not automatically
+gain artifact validation or continuation.
 
-In a repository:
+See [installation options](docs/install.md), the [GitHub Action](docs/github-actions.md),
+and the [graph/receipt specification](docs/spec.md) for the existing interfaces.
 
-```bash
-sykli init          # writes sykli.json from what it finds, then locks it
-sykli run           # first run is cold; the next one reuses what did not change
-```
+## Further reading
 
-`init` detects Cargo, npm, and Go manifests in the current directory, declares
-the files it finds as inputs, refuses to overwrite a contract without
-`--force`, pins the result in `sykli.lock` unless `--no-lock`, and skips
-symlinks and the build directories (`target` at the root, `node_modules`,
-`vendor`). It writes only into the current directory, because inputs are
-resolved from wherever `sykli` runs.
-
-`sykli.json` is small and yours to edit:
-
-```json
-{
-  "schema": "sykli-contract.v1",
-  "tasks": [
-    { "name": "fmt",  "run": "cargo fmt --check", "inputs": ["Cargo.toml", "src/main.rs"] },
-    { "name": "test", "run": "cargo test", "after": ["fmt"], "inputs": ["Cargo.toml", "src/main.rs"] }
-  ]
-}
-```
-
-Every command takes the contract path as its first argument and defaults to
-`sykli.json` when it exists, otherwise to `sykli.rs`, the Rust emitter.
-
-Tasks are commands. `after` orders them, `inputs` are the files whose change
-means the task must run again. `sykli.lock` pins the contract's hash so an
-unexpected edit to the graph fails instead of silently changing what CI means.
-
-## In CI
-
-The [GitHub Action](docs/github-actions.md) is a shim: it installs the tagged
-release, runs the same `sykli.json`, verifies the receipt, and attaches it to
-the run.
-
-```yaml
-- uses: false-systems/sykli@v0.2.0
-  with:
-    contract: sykli.json
-```
-
-The runner is a machine with a cold cache, not where truth lives. The receipt
-is the output.
-
-## For agents
-
-Agents get versioned JSON from every command and a reviewer gets `verify`.
-[`docs/agents.md`](docs/agents.md) is the short version: plan before editing,
-run after, hand over the receipt rather than a claim, and remember that a
-`cached` outcome is reuse, not observation. A stdio MCP shim, `sykli-mcp`,
-wraps the same commands for harnesses that prefer tools to shells.
-
-## Contracts
-
-The machine surface is versioned and documented in [`docs/spec.md`](docs/spec.md)
-and [`docs/production.md`](docs/production.md):
-`sykli-contract.v1`, `sykli-lock.v1`, `sykli-plan.v1`, `sykli-receipt.v1`,
-`sykli-validate.v1`, and every exit code. Rust projects can also emit the
-contract from code with the `sykli` crate's `Pipeline`, compiled on demand
-from a `sykli.rs` binary; see [`docs/spec.md`](docs/spec.md).
-[`docs/why.md`](docs/why.md) is the argument in one page: receipts, not logs.
-
-## What sykli is not
-
-Not a work tracker, not a verification authority, not an agent runner, not a
-datastore, not a server, not an interpreter of what results mean.
-[`docs/adr/0005-deletions.md`](docs/adr/0005-deletions.md) is the normative
-list; [`ADR-0009`](docs/adr/0009-local-production.md) records the user-requested
-local production extension and its boundaries.
-Everything that needs one of those things is a separate tool that consumes
-receipts.
-
-## Project
-
-- [`docs/founding.md`](docs/founding.md) and [`docs/adr/`](docs/adr/): why it
-  is shaped like this.
-- [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md),
-  [`SECURITY.md`](SECURITY.md).
-- Sykli's own CI is a `sykli.json`; every merge to `main` produces a receipt.
+- [Production contract, storage, and execution limits](docs/production.md)
+- [Agent interface](docs/agents.md)
+- [Design decisions](docs/adr/) and [local production scope](docs/adr/0009-local-production.md)
+- [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
 
 MIT.
