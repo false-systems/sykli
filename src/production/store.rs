@@ -366,6 +366,25 @@ impl Lease {
         }
         Ok(Self(file))
     }
+    pub fn journal(directory: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join("journal-lock"))
+            .map_err(err)?;
+        // SAFETY: a short exclusive lock serializes record reads and commits.
+        loop {
+            if unsafe { flock(file.as_raw_fd(), 2) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err(error));
+            }
+        }
+    }
     pub fn inherit(&self, command: &mut ProcessCommand) -> RawFd {
         let fd = self.0.as_raw_fd();
         // SAFETY: fcntl is async-signal-safe; no allocation in pre_exec.

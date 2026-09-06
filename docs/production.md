@@ -258,13 +258,21 @@ incompleteness cannot pass. Collection errors retain observations and a
 `collection_error`; preparation/spawn errors retain their diagnostic. These
 codes identify observations, not inferred root causes.
 
-One controller holds an OS file-description lease per production. A bounded
-executor subprocess inherits it, executes exactly one persisted attempt and
+One controller holds an OS file-description lease per production. Bounded
+executor subprocesses inherit it; each executes one persisted attempt and
 finishes its record even if the initiating client dies. No service or daemon
 is started. A second controller refuses while that lease is held. `status`
 can inspect the atomic record prefix during execution. A started attempt is
-running with a held lease, otherwise indeterminate until a terminal record
-exists. A successful subsequent `resume` reconstructs that terminal record.
+running with a held lease unless contact loss was recorded, otherwise
+indeterminate until a terminal record exists. A successful subsequent `resume` reconstructs that terminal record.
+
+`--jobs N` permits up to N independent operations in a wave (default 1).
+Starts and terminal records use a separate short-lived OS journal lock: each
+writer reloads the validated prefix under that lock before appending. Inspection
+uses the same lock to obtain a coherent prefix. Executors retain the controlling
+lease after client loss and commit their own results. No new work is started
+after an unresolved executor result. `--retry` and `--stop-after` require one job;
+parallel histories require this version of Sykli to read them.
 
 If the executor itself dies, descendants may still exist. Releasing its lease
 does not prove termination of those descendants: resume records contact loss,
@@ -332,11 +340,46 @@ All new `--json` responses are one JSON document. Logs remain in attempt logs
 and execution observations; they do not contaminate JSON stdout. Without `--json`,
 targets and typed plans show concise summaries; produce,
 status, resume and verify-production show work states, artifact locations and
-identities. Failed operations include their error and labeled tails of stdout and
-stderr, each limited to 20 lines and 240 characters per line. Full records and captures remain available with
-`--json`. Typed init retains its existing output. These presentations use the
+identities. Failed or indeterminate operations point to `sykli diagnostics
+PRODUCTION_ID ATTEMPT_ID`; captured command output is never printed implicitly
+in human summaries. Full records and captures remain available with `--json`. Typed init retains its existing output. These presentations use the
 same evaluated data and exit codes. Errors use `sykli-production-error.v1` with
 `error`. The exit-code table for both paths is in [`spec.md`](spec.md#exit-codes-all-commands).
+
+## Agent work loop
+
+`produce TARGET --prepare` publishes the captured request without starting an
+attempt (exit 0 on successful preparation, even if work is blocked).
+`resume ID --operation NAME` considers only that selected operation. Missing
+inputs stay blocked, satisfied work is left alone, and failed work requires
+`--retry NAME`. With both options they must name the same operation. Operation
+selection and `--stop-after` are mutually exclusive. Production commands still
+exit 1 until the entire production is complete and deliverable.
+
+`--summary` on produce/status/resume returns `sykli-production-state.v1` with
+the same evaluated fields except `records`, plus:
+
+- `ready`: operation names ready for a new controlling invocation; empty while
+  the controlling lease is held or any operation is indeterminate.
+- `execution_blockers`: `production-busy` or `attempt-unresolved`, when applicable.
+- `work.OP.diagnostics`: `{production, attempt}` for each selected attempt.
+- `work.OP.failure`: the recorded error/code, when one exists.
+
+State is an observation, not a reservation. The executor validates readiness,
+context, exact inputs and the controlling lease again. No worker-authored state
+or completion flag is accepted.
+
+`diagnostics ID ATTEMPT` loads validated records for that attempt, including
+historical retries. JSON uses `sykli-production-diagnostics.v1` with `production`,
+`attempt`, `operation` and matching `records`. Human output prints the saved
+stdout/stderr only in this explicit command. Captures retain the executor's
+existing size limits and truncation metadata; an unresolved attempt may have
+no terminal capture. Exit 0 means records were retrieved, not that work passed.
+
+This extends the CLI for Yair's workflow: prepare Sykli's own source, inspect
+ready work, choose a build or check, and let another invocation continue.
+It does not reintroduce the agent execution, server or SDK capabilities deleted
+by ADR-0005; workers remain external and recipes remain ordinary commands.
 
 ## Scope of this implementation
 

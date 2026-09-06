@@ -220,6 +220,8 @@ JSON form yet, which is why the exit code is the machine contract. Stable.
 | `verify` | verified | outcome failed | cannot verify | stale | drifted |
 | `targets`, typed `plan --target` | inspected (may include blockers) | | invalid request / environment / internal error | | |
 | `produce`, `resume` | complete and product bytes available | incomplete / failed / indeterminate / unavailable | invalid request / busy writer / context drift / store error | | |
+| `produce --prepare` | request captured; no execution | | invalid request / store error | | |
+| `diagnostics` | attempt records retrieved (may describe failure) | | unknown production/attempt or corrupt records | | |
 | `status` | inspected (may be incomplete) | | invalid request / corrupt or unavailable records | | |
 | `verify-production` | consistent, complete and deliverable | incomplete / failed / unavailable product | invalid request / corrupt or unavailable records | | |
 | `init --production` | written | | unsupported input / existing contract / write error | | |
