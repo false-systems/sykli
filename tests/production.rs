@@ -931,3 +931,105 @@ fn human_output_includes_rust_test_failures_from_stdout() {
             })
     );
 }
+
+#[test]
+fn go_discovery_builds_captured_module_and_fresh_worker_finishes_checks() {
+    if Command::new("go").arg("version").output().is_err() {
+        eprintln!("Go toolchain unavailable; skipping Go execution fixture");
+        return;
+    }
+    let f = Fixture::new();
+    f.write("go.mod", "module example.test/app\n\ngo 1.20\n");
+    f.write("cmd/app/main.go", "package main\nimport (\"fmt\"; \"example.test/app/message\")\nfunc main() { fmt.Print(message.Text) }\n");
+    f.write(
+        "message/message.go",
+        "package message\nimport _ \"embed\"\n//go:embed text.txt\nvar Text string\n",
+    );
+    f.write("message/text.txt", "hello");
+    f.write("message/testdata/expected.txt", "hello");
+    f.write("message/message_test.go", "package message\nimport (\"os\"; \"testing\")\nfunc TestMessage(t *testing.T) { b,e:=os.ReadFile(\"testdata/expected.txt\"); if e!=nil || Text!=string(b) { t.Fatal(\"message mismatch\",e) } }\n");
+    f.write("secret.env", "must not be selected");
+    let initialized = f.call(
+        &[
+            "init",
+            "--production",
+            "--force",
+            "--smoke",
+            "test \"$(\"$SYKLI_INPUT_executable\")\" = hello",
+        ],
+        0,
+    );
+    assert_eq!(initialized["go"]["package"], "./cmd/app");
+    let targets = f.call(&["targets", "--json"], 0);
+    let paths = targets["targets"]["app"]["inputs"]["source"]["paths"]
+        .as_array()
+        .unwrap();
+    for path in [
+        "go.mod",
+        "message/message.go",
+        "message/message_test.go",
+        "message/text.txt",
+        "message/testdata/expected.txt",
+    ] {
+        assert!(paths.contains(&json!(path)), "missing {path}");
+    }
+    assert!(!paths.contains(&json!("secret.env")));
+    let planned = f.plan();
+    let first = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
+    assert_eq!(id(&planned), id(&first));
+    assert_eq!(state(&first, "build"), "satisfied");
+    assert_eq!(state(&first, "unit_tests"), "ready");
+    f.write("message/text.txt", "changed");
+    let inspected = f.call(&["status", id(&first), "--json"], 0);
+    assert_eq!(state(&inspected, "build"), "satisfied");
+    let complete = f.call(&["resume", id(&first), "--json"], 0);
+    assert_eq!(complete["delivery_success"], true);
+    assert_eq!(complete["records"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        complete["delivery"]["app"]["artifact"],
+        first["delivery"]["app"]["artifact"]
+    );
+    let second = f.plan();
+    assert_ne!(id(&complete), id(&second));
+    assert_ne!(
+        complete["inputs"]["source"],
+        second["resolved_inputs"]["source"]
+    );
+    let failed = f.call(&["produce", "app", "--json"], 1);
+    assert_eq!(state(&failed, "unit_tests"), "failed");
+    assert_eq!(state(&failed, "smoke_test"), "failed");
+    f.call(&["verify-production", id(&complete), "--json"], 0);
+}
+
+#[test]
+fn go_discovery_requires_explicit_smoke_and_resolves_ambiguous_binaries() {
+    if Command::new("go").arg("version").output().is_err() {
+        return;
+    }
+    let f = Fixture::new();
+    f.write("go.mod", "module example.test/app\n\ngo 1.20\n");
+    f.write("main.go", "package main\nfunc main() {}\n");
+    let error = |args: &[&str]| {
+        let output = f.command(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        String::from_utf8(output.stderr).unwrap()
+    };
+    assert!(error(&["init", "--production", "--force"]).contains("--smoke"));
+    f.write("cmd/other/main.go", "package main\nfunc main() {}\n");
+    let args = [
+        "init",
+        "--production",
+        "--force",
+        "--smoke",
+        "\"$SYKLI_INPUT_executable\"",
+    ];
+    assert!(error(&args).contains("expected one Go main package"));
+    let mut selected = args.to_vec();
+    selected.extend(["--package", "./cmd/other"]);
+    assert_eq!(f.call(&selected, 0)["go"]["package"], "./cmd/other");
+    f.write(
+        "go.mod",
+        "module example.test/app\n\ngo 1.20\nreplace example.test/dep => ../dep\n",
+    );
+    assert!(error(&selected).contains("replacements"));
+}

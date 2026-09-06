@@ -243,3 +243,147 @@ pub fn cargo(
         test,
     })
 }
+
+pub struct GoTarget {
+    pub package: String,
+    pub paths: Vec<String>,
+    pub build: String,
+    pub test: String,
+}
+
+pub fn go(package: Option<&str>) -> Result<GoTarget, String> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        _ => return Err("unsupported Go executable host".into()),
+    };
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        _ => return Err("Go discovery supports arm64 and amd64 hosts".into()),
+    };
+    let environment = [
+        ("GOENV", "off"),
+        ("GOWORK", "off"),
+        ("GOTOOLCHAIN", "local"),
+        ("GOPROXY", "off"),
+        ("GOSUMDB", "off"),
+        ("CGO_ENABLED", "0"),
+        ("GOOS", os),
+        ("GOARCH", architecture),
+    ];
+    let query = |args: &[&str]| -> Result<String, String> {
+        let runtime = super::super::shell_runtime()?;
+        let result = ProcessCommand::new("go")
+            .args(args)
+            .env_clear()
+            .envs(runtime.environment)
+            .envs(environment)
+            .output()
+            .map_err(err)?;
+        if !result.status.success() {
+            return Err(format!(
+                "Go discovery (offline): {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            ));
+        }
+        String::from_utf8(result.stdout).map_err(err)
+    };
+    let root = std::env::current_dir()
+        .map_err(err)?
+        .canonicalize()
+        .map_err(err)?;
+    checked_path(&root, "go.mod")?;
+    let module: Value = serde_json::from_str(&query(&["mod", "edit", "-json"])?).map_err(err)?;
+    if module["Replace"].as_array().is_some_and(|r| !r.is_empty()) || root.join("vendor").exists() {
+        return Err("Go replacements and vendoring require an explicit production contract".into());
+    }
+    let listing = query(&["list", "-mod=readonly", "-json", "./..."])?;
+    let mut paths = BTreeSet::from(["go.mod".to_string()]);
+    if root.join("go.sum").exists() {
+        paths.insert("go.sum".into());
+    }
+    let mut candidates = Vec::new();
+    for item in serde_json::Deserializer::from_str(&listing).into_iter::<Value>() {
+        let item = item.map_err(err)?;
+        let directory = Path::new(item["Dir"].as_str().ok_or("Go package missing Dir")?);
+        let prefix = directory.strip_prefix(&root).map_err(err)?;
+        let relative_package = if prefix.as_os_str().is_empty() {
+            ".".into()
+        } else {
+            format!("./{}", prefix.to_str().ok_or("non-UTF8 Go path")?)
+        };
+        if item["Name"] == "main"
+            && package.is_none_or(|p| p == relative_package || item["ImportPath"] == p)
+        {
+            candidates.push(relative_package);
+        }
+        for field in [
+            "GoFiles",
+            "TestGoFiles",
+            "XTestGoFiles",
+            "SFiles",
+            "HFiles",
+            "SysoFiles",
+            "EmbedFiles",
+            "TestEmbedFiles",
+            "XTestEmbedFiles",
+        ] {
+            if let Some(files) = item[field].as_array() {
+                for file in files {
+                    let path = prefix.join(file.as_str().ok_or("invalid Go file name")?);
+                    paths.insert(path.to_str().ok_or("non-UTF8 Go source")?.to_string());
+                }
+            }
+        }
+        // Test fixtures are not listed by go list, but go test runs beside them.
+        let testdata = prefix.join("testdata");
+        if root.join(&testdata).exists() {
+            go_testdata(&root, &testdata, &mut paths)?;
+        }
+    }
+    if candidates.len() != 1 {
+        return Err(format!(
+            "expected one Go main package; found [{}]. Select --package ./cmd/NAME (library-only modules need an explicit contract)",
+            candidates.join(", ")
+        ));
+    }
+    for path in &paths {
+        source_path(path)?;
+        if !checked_path(&root, path)?.is_file() {
+            return Err(format!("Go source must be a regular file: {path}"));
+        }
+    }
+    let package = candidates.remove(0);
+    let environment = environment
+        .iter()
+        .map(|(k, v)| format!("{k}={}", quote(v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let command = format!(
+        "cd \"$SYKLI_INPUT_source\" && {environment} GOCACHE=\"$SYKLI_OUTPUT/go-cache\" go"
+    );
+    Ok(GoTarget {
+        build: format!(
+            "{command} build -mod=readonly -buildvcs=false -o \"$SYKLI_OUTPUT/app\" {}",
+            quote(&package)
+        ),
+        test: format!("{command} test -mod=readonly -buildvcs=false -count=1 ./..."),
+        package,
+        paths: paths.into_iter().collect(),
+    })
+}
+
+fn go_testdata(root: &Path, relative: &Path, paths: &mut BTreeSet<String>) -> Result<(), String> {
+    let name = relative.to_str().ok_or("non-UTF8 Go testdata")?;
+    source_path(name)?;
+    let path = checked_path(root, name)?;
+    if path.is_dir() {
+        for entry in fs::read_dir(path).map_err(err)? {
+            go_testdata(root, &relative.join(entry.map_err(err)?.file_name()), paths)?;
+        }
+    } else {
+        paths.insert(name.into());
+    }
+    Ok(())
+}

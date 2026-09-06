@@ -58,8 +58,9 @@ Make sure Cargo's bin directory (normally `~/.cargo/bin`) is on your `PATH`.
 
 ## Build something
 
-Start in the root of a Cargo workspace that contains a binary. Sykli's generated
-commands run offline, so fetch any missing dependencies first with `cargo fetch`.
+Start in a Cargo workspace with a binary or a Go module with a main package.
+Generated commands run offline. Prepare dependencies first with `cargo fetch`
+(Rust) or `go mod download` (Go), if needed.
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
@@ -77,7 +78,7 @@ keep the outer single quotes so your current shell does not expand it.
 Now look at the plan and build:
 
 ```sh
-sykli targets                                      # what can this repo produce?
+sykli targets                               # what can this repo produce?
 sykli plan sykli.production.json --target app # what will run?
 sykli produce app                            # build and check it
 ```
@@ -86,12 +87,12 @@ Sykli captures the selected source files, including local edits, then runs:
 
 | Operation | What it does |
 | --- | --- |
-| `build` | Builds a release executable from the captured source and saves its bytes. |
-| `unit_tests` | Runs the selected Cargo package's binary and library unit tests against that source. |
+| `build` | Builds an executable from the captured source and saves its bytes. |
+| `unit_tests` | Runs Cargo binary/library unit tests or Go module tests against that source. |
 | `smoke_test` | Runs your smoke command against the saved executable. |
 
 Success means the artifact is available and both checks passed. Integration
-tests and doctests are not included automatically.
+tests and doctests for Cargo are not included automatically.
 
 By default, Sykli prints a summary like this (IDs and paths abbreviated):
 
@@ -124,8 +125,10 @@ including execution records and captured output. It includes these fields:
 | `delivery.app.artifact.content` | The SHA-256 identity of the executable's bytes. |
 | `assessment.satisfied_checks` | The recorded attempts that passed the required checks. |
 
-If your workspace has several binaries, add `--package NAME --bin NAME` to
-`init`. A standalone Rust `main.rs` can use `sykli init --production` without
+For multiple Cargo binaries, add `--package NAME --bin NAME` to `init`.
+For multiple Go executables, select `--package ./cmd/NAME`. Go discovery builds
+a native executable with CGO disabled and runs `go test ./...`; a Go SDK is
+not required. A standalone Rust `main.rs` can use `sykli init --production` without
 Cargo. Other build tools can be used through an explicit contract; see the
 [production guide](docs/production.md).
 
