@@ -895,3 +895,39 @@ fn human_output_explains_progress_delivery_and_failure_without_dumping_records()
             .contains("Blocked: missing-tool: sykli_missing_test_tool")
     );
 }
+
+#[test]
+fn human_output_includes_rust_test_failures_from_stdout() {
+    let f = Fixture::new();
+    f.write(
+        "main.rs",
+        "fn main() { println!(\"42\"); }\n#[test] fn meaningful_failure() { assert_eq!(1, 2, \"business invariant failed\"); }\n",
+    );
+    let output = f.command(&["produce", "app"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(human.contains("unit_tests: failed"));
+    assert!(human.contains("stdout (last 20 lines):"));
+    assert!(human.contains("meaningful_failure"));
+    assert!(human.contains("business invariant failed"));
+    let production = id(&f.plan()).to_owned();
+    let status = f.command(&["status", &production]).output().unwrap();
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8(status.stdout)
+            .unwrap()
+            .contains("business invariant failed")
+    );
+    let structured = f.call(&["status", &production, "--json"], 0);
+    assert!(
+        structured["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| {
+                record["record"]["fact"]["observation"]["execution"]["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("business invariant failed"))
+            })
+    );
+}

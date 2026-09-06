@@ -1086,13 +1086,19 @@ fn human_summary(value: &Value) -> Option<String> {
                         if let Some(reason) = reason {
                             lines.push(format!("    {reason}"));
                         }
-                        if let Some(stderr) = observation["execution"]["stderr"].as_str() {
-                            let tail = stderr.lines().rev().take(8).collect::<Vec<_>>();
-                            for line in tail.into_iter().rev() {
-                                lines.push(format!(
-                                    "    {}",
-                                    line.chars().take(240).collect::<String>()
-                                ));
+                        for stream in ["stdout", "stderr"] {
+                            if let Some(capture) = observation["execution"][stream]
+                                .as_str()
+                                .filter(|capture| !capture.is_empty())
+                            {
+                                lines.push(format!("    {stream} (last 20 lines):"));
+                                let tail = capture.lines().rev().take(20).collect::<Vec<_>>();
+                                for line in tail.into_iter().rev() {
+                                    lines.push(format!(
+                                        "      {}",
+                                        line.chars().take(240).collect::<String>()
+                                    ));
+                                }
                             }
                         }
                     }

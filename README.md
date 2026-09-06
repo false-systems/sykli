@@ -110,7 +110,7 @@ Input source: 80712fc0...
 ```
 
 The actual output contains the full path and IDs, ready to copy. On failure,
-the summary shows the failed operation, its error and the last few stderr lines.
+the summary shows the failed operation, its error and labeled stdout/stderr tails.
 An available artifact can still have unfinished or failed checks; the first line
 reports whether production is complete.
 
