@@ -232,7 +232,21 @@ impl Store {
                 }
                 Ok(())
             }
-            _ => validate_bytes(&artifact.ty, &self.read_blob(&artifact.content)?),
+            _ => {
+                validate_bytes(&artifact.ty, &self.read_blob(&artifact.content)?)?;
+                if matches!(artifact.ty, ArtifactType::Executable { .. })
+                    && fs::metadata(self.blob_path(&artifact.content)?)
+                        .map_err(err)?
+                        .mode()
+                        & 0o111
+                        == 0
+                {
+                    return Err(
+                        "artifact-unavailable: executable location has no executable mode".into(),
+                    );
+                }
+                Ok(())
+            }
         }
     }
     pub fn materialize(&self, artifact: &Artifact, destination: &Path) -> Result<(), String> {

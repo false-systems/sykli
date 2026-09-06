@@ -447,6 +447,9 @@ fn view(
                 None => {
                     json!({"kind":if controlling {"running"} else {"indeterminate"},"attempt":attempt.id})
                 }
+                Some(ResultFact::Interrupted) => {
+                    json!({"kind":"indeterminate","attempt":attempt.id})
+                }
                 Some(ResultFact::Checked { outcome, .. }) if outcome == "unknown" => {
                     json!({"kind":"indeterminate","attempt":attempt.id})
                 }
@@ -751,6 +754,15 @@ fn advance(
         }
         return view(store, request, &history, false);
     }
+    // Older local executors recorded shell signals as terminal interruptions.
+    // Those records do not establish child termination either.
+    if history
+        .latest
+        .values()
+        .any(|id| matches!(history.attempts[id].result, Some(ResultFact::Interrupted)))
+    {
+        return view(store, request, &history, false);
+    }
     if let Some(retry) = retry {
         if !history.latest.contains_key(retry) {
             return Err("retry requires an earlier terminal attempt".into());
@@ -940,13 +952,14 @@ fn execute(
         true,
         super::MAX_CAPTURE_BYTES,
     );
-    if execution.class == Some("runtime_error") {
+    // Waiting for the shell does not establish that its foreground children stopped.
+    if execution.class == Some("runtime_error")
+        || (execution.exit_code.is_none() && execution.class == Some("command_failed"))
+    {
         return Ok(None);
     }
     let mut observation = json!({"execution":execution,"input_binding":"materialized-snapshot","undeclared_inputs_excluded":false});
-    let result = if execution.exit_code.is_none() && execution.class == Some("command_failed") {
-        ResultFact::Interrupted
-    } else if !execution.importable || execution.outcome == super::Outcome::Errored {
+    let result = if !execution.importable || execution.outcome == super::Outcome::Errored {
         ResultFact::ExecutionFailed {
             code: "execution-unobserved-or-capture-incomplete".into(),
         }

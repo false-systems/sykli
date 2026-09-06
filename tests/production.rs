@@ -575,14 +575,26 @@ fn rebuilding_new_bytes_invalidates_the_old_smoke_check() {
 }
 
 #[test]
-fn known_signal_is_terminal_and_directory_outputs_have_canonical_manifests() {
+fn signalled_shell_is_indeterminate_and_directory_outputs_have_canonical_manifests() {
     let f = Fixture::new();
     f.edit(|c| c["targets"]["app"]["operations"]["build"]["run"] = "kill -TERM $$".into());
     let signalled = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
     assert_eq!(
-        signalled["records"][1]["record"]["fact"]["result"]["kind"],
-        "interrupted"
+        signalled["records"][1]["record"]["fact"]["kind"],
+        "contact-lost"
     );
+    assert_eq!(state(&signalled, "build"), "indeterminate");
+    // Previously written terminal shell-signal records are not safe retry authority.
+    let terminal = f.records(id(&signalled)).join("00000000000000000002.json");
+    let mut envelope: Value = serde_json::from_slice(&fs::read(&terminal).unwrap()).unwrap();
+    let attempt = envelope["record"]["fact"]["attempt"].clone();
+    envelope["record"]["fact"] = json!({"kind":"finished", "attempt":attempt,
+        "result":{"kind":"interrupted"}, "observation":{}});
+    fs::write(&terminal, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    rehash_records(&f.records(id(&signalled)));
+    let resumed = f.call(&["resume", id(&signalled), "--retry", "build", "--json"], 1);
+    assert_eq!(state(&resumed, "build"), "indeterminate");
+    assert_eq!(resumed["through_sequence"], 2);
     f.edit(|c| {
         let t = &mut c["targets"]["app"];
         t["operations"]["build"]["run"] = "mkdir \"$SYKLI_OUTPUT/app\"; printf content > \"$SYKLI_OUTPUT/app/file\"; mkdir \"$SYKLI_OUTPUT/app/empty\"".into();
@@ -762,4 +774,77 @@ fn cargo_discovery_requires_a_smoke_check_and_does_not_invent_a_library_product(
         fs::read(f.0.join("sykli.production.json")).unwrap(),
         original
     );
+}
+
+#[test]
+fn signalled_shell_cannot_retry_while_its_foreground_child_survives() {
+    let f = Fixture::new();
+    let latch = f.0.join("latch");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&latch)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let shell_pid = f.0.join("shell.pid");
+    let child_pid = f.0.join("child.pid");
+    f.edit(|c| {
+        c["targets"]["app"]["operations"]["build"]["run"] = format!(
+            r#"echo $$ > '{}'; sh -c 'echo $$ > "{}"; read line < "{}"' >/dev/null 2>&1; :"#,
+            shell_pid.display(),
+            child_pid.display(),
+            latch.display()
+        )
+        .into();
+    });
+    let mut controller = f
+        .command(&["produce", "app", "--json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(|| fs::read_to_string(&child_pid).is_ok_and(|s| !s.trim().is_empty()));
+    let shell = fs::read_to_string(shell_pid).unwrap();
+    let child = fs::read_to_string(child_pid).unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", shell.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(controller.wait().unwrap().code(), Some(1));
+    let planned = f.plan();
+    let resumed = f.call(&["resume", id(&planned), "--retry", "build", "--json"], 1);
+    assert_eq!(state(&resumed, "build"), "indeterminate");
+    assert_eq!(resumed["through_sequence"], 2);
+    assert!(
+        Command::new("kill")
+            .args(["-0", child.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(latch, "finish\n").unwrap();
+}
+
+#[test]
+fn executable_delivery_requires_current_executable_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let complete = f.call(&["produce", "app", "--json"], 0);
+    let path = complete["delivery"]["app"]["availability"]["locations"][0]
+        .as_str()
+        .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+    let unavailable = f.call(&["verify-production", id(&complete), "--json"], 1);
+    assert_eq!(unavailable["assessment"]["kind"], "complete");
+    assert_eq!(
+        unavailable["delivery"]["app"]["availability"]["kind"],
+        "unavailable"
+    );
+    f.call(&["resume", id(&complete), "--json"], 1);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
+    f.call(&["verify-production", id(&complete), "--json"], 0);
 }

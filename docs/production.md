@@ -269,7 +269,11 @@ exists. A successful subsequent `resume` reconstructs that terminal record.
 If the executor itself dies, descendants may still exist. Releasing its lease
 does not prove termination of those descendants: resume records contact loss,
 remains incomplete and refuses retry. There is deliberately no “assume stopped”
-switch. Known signal termination observed by the executor is `interrupted`.
+switch. A signalled recipe shell also remains indeterminate: observing its termination
+does not establish termination of its foreground children. This executor does
+not emit terminal `interrupted` results without that stronger guarantee. Older
+local `interrupted` records are also projected as indeterminate and cannot
+authorize a retry.
 Foreground local recipes are the supported execution model; detached jobs and
 irreversible publishing recipes have no retry guarantee.
 
@@ -306,8 +310,8 @@ satisfied, blocked with structured reasons, failed or indeterminate.
 
 The historical assessment deterministically uses the pinned request, record
 prefix and named policy/version. Live lease observation affects unresolved work
-state and is exposed as an additional evaluation input. Current blob existence
-and digest checks affect delivery separately. No time-based freshness policy is
+state and is exposed as an additional evaluation input. Current blob existence, digest checks and executable permissions affect delivery
+separately. No time-based freshness policy is
 supported. A historically complete result with missing product bytes stays
 complete but delivery is unavailable and cannot exit successfully from produce,
 resume or verify-production. For file products, locations point to the blob;
