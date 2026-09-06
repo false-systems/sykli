@@ -16,6 +16,8 @@ use std::time::Instant;
 use sykli::{Contract, Task};
 
 mod init;
+#[cfg(unix)]
+mod production;
 
 #[derive(Parser)]
 #[command(
@@ -59,6 +61,74 @@ enum Command {
         /// Print the plan as JSON
         #[arg(long)]
         json: bool,
+        /// Select a typed production target from the positional contract
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Discover typed artifact targets without running builds
+    #[cfg(unix)]
+    Targets {
+        #[arg(long, default_value = "sykli.production.json")]
+        contract: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Produce a typed artifact from captured source
+    #[cfg(unix)]
+    Produce {
+        target: String,
+        #[arg(long, default_value = "sykli.production.json")]
+        contract: PathBuf,
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        /// Stop at a durable operation boundary (incomplete delivery exits 1)
+        #[arg(long)]
+        stop_after: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a pinned production and artifact availability
+    #[cfg(unix)]
+    Status {
+        production: String,
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Continue a pinned production; failed work requires an explicit retry
+    #[cfg(unix)]
+    Resume {
+        production: String,
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        #[arg(long)]
+        retry: Option<String>,
+        #[arg(long)]
+        stop_after: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check production record integrity, bindings, assessment and delivery
+    #[cfg(unix)]
+    VerifyProduction {
+        production: String,
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    #[cfg(unix)]
+    #[command(name = "__production_attempt", hide = true)]
+    ProductionAttempt {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        production: String,
+        #[arg(long)]
+        attempt: String,
+        #[arg(long)]
+        lease_fd: i32,
     },
     /// Detect the repository's ecosystems and write a declared graph
     #[command(after_help = "Exit codes:\n  \
@@ -75,6 +145,18 @@ enum Command {
         /// Do not pin the written contract in sykli.lock
         #[arg(long = "no-lock")]
         no_lock: bool,
+        /// Write a typed executable target for Cargo or a standalone main.rs
+        #[arg(long)]
+        production: bool,
+        /// Cargo package to select for typed production
+        #[arg(long, requires = "production")]
+        package: Option<String>,
+        /// Cargo binary to select for typed production
+        #[arg(long, requires = "production")]
+        bin: Option<String>,
+        /// Shell check of $SYKLI_INPUT_executable (required for Cargo discovery)
+        #[arg(long, requires = "production")]
+        smoke: Option<String>,
     },
     /// Pin the emitted contract in sykli.lock
     Lock {
@@ -137,6 +219,76 @@ fn main() -> ExitCode {
         _ => {}
     }
     match cli.command {
+        #[cfg(unix)]
+        Command::Targets { contract, json } => {
+            production::report(production::targets(&contract), json, false)
+        }
+        #[cfg(unix)]
+        Command::Produce {
+            target,
+            contract,
+            store,
+            stop_after,
+            json,
+        } => production::report(
+            production::produce(&store, &contract, &target, stop_after.as_deref()),
+            json,
+            true,
+        ),
+        #[cfg(unix)]
+        Command::Status {
+            production: id,
+            store,
+            json,
+        } => production::report(production::inspect(&store, &id), json, false),
+        #[cfg(unix)]
+        Command::VerifyProduction {
+            production: id,
+            store,
+            json,
+        } => production::report(production::inspect(&store, &id), json, true),
+        #[cfg(unix)]
+        Command::Resume {
+            production: id,
+            store,
+            retry,
+            stop_after,
+            json,
+        } => production::report(
+            production::resume(&store, &id, retry.as_deref(), stop_after.as_deref()),
+            json,
+            true,
+        ),
+        #[cfg(unix)]
+        Command::ProductionAttempt {
+            store,
+            production: id,
+            attempt,
+            lease_fd,
+        } => match production::executor(&store, &id, &attempt, lease_fd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("executor: {error}");
+                ExitCode::from(2)
+            }
+        },
+        #[cfg(unix)]
+        Command::Plan {
+            contract,
+            target: Some(target),
+            changed,
+            json,
+        } => {
+            production::report(
+                if changed.is_empty() {
+                    production::plan(&contract, &target)
+                } else {
+                    Err("typed planning pins all selected inputs; --changed is only for legacy graphs".into())
+                },
+                json,
+                false,
+            )
+        }
         Command::Validate { contract, json } => match load(&contract) {
             Ok((_, _, contract_hash)) => {
                 if json {
@@ -187,6 +339,7 @@ fn main() -> ExitCode {
             contract,
             changed,
             json,
+            target: _,
         } => match load(&contract).and_then(|(contract, levels, hash)| {
             affected(&contract, &levels, &changed).map(|tasks| (hash, tasks))
         }) {
@@ -218,7 +371,36 @@ fn main() -> ExitCode {
             path,
             force,
             no_lock,
-        } => init::run(&path, force, !no_lock, &write_lock),
+            production: typed,
+            package,
+            bin,
+            smoke,
+        } => {
+            #[cfg(unix)]
+            if typed {
+                let path = if path == Path::new("sykli.json") {
+                    PathBuf::from("sykli.production.json")
+                } else {
+                    path
+                };
+                return production::report(
+                    production::init(
+                        &path,
+                        force,
+                        package.as_deref(),
+                        bin.as_deref(),
+                        smoke.as_deref(),
+                    ),
+                    false,
+                    false,
+                );
+            }
+            if typed {
+                eprintln!("typed production requires Linux or macOS");
+                return ExitCode::from(2);
+            }
+            init::run(&path, force, !no_lock, &write_lock)
+        }
         Command::Lock { contract } => match write_lock(&contract) {
             Ok(path) => {
                 println!("locked: {}", path.display());
