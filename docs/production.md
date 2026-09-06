@@ -329,8 +329,12 @@ can fabricate a consistent history. No API accepts a worker's completion flag
 or an externally submitted output/terminal record as authoritative input.
 
 All new `--json` responses are one JSON document. Logs remain in attempt logs
-and execution observations; they do not contaminate JSON stdout. Human output
-uses the same data with indentation. Errors use `sykli-production-error.v1` with
+and execution observations; they do not contaminate JSON stdout. Without `--json`, targets and typed plans show concise summaries; produce,
+status, resume and verify-production show work states, artifact locations and
+identities. Failed operations include their error and up to eight trailing stderr
+lines (240 characters per line). Full records and captures remain available with
+`--json`. Typed init retains its existing output. These presentations use the
+same evaluated data and exit codes. Errors use `sykli-production-error.v1` with
 `error`. The exit-code table for both paths is in [`spec.md`](spec.md#exit-codes-all-commands).
 
 ## Scope of this implementation
