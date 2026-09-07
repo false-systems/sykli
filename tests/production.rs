@@ -848,3 +848,86 @@ fn executable_delivery_requires_current_executable_permissions() {
     fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
     f.call(&["verify-production", id(&complete), "--json"], 0);
 }
+
+#[test]
+fn human_output_explains_progress_delivery_and_failure_without_dumping_records() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let human = |args: &[&str], expected: i32| {
+        let result = f.command(args).output().unwrap();
+        assert_eq!(result.status.code(), Some(expected));
+        let output = String::from_utf8(result.stdout).unwrap();
+        assert!(!output.contains("stdout_digest"));
+        assert!(!output.contains("sykli-production-record.v1"));
+        output
+    };
+    assert!(human(&["targets"], 0).contains("app: produces app"));
+    assert!(human(&["plan", "sykli.production.json", "--target", "app"], 0).contains("Plan: app"));
+    let planned = f.plan();
+    let first = human(&["produce", "app", "--stop-after", "build"], 1);
+    assert!(first.contains("app: incomplete"));
+    assert!(first.contains("build: satisfied"));
+    assert!(first.contains("smoke_test: ready"));
+    assert!(first.contains(id(&planned)));
+    assert!(human(&["status", id(&planned)], 0).contains("app: incomplete"));
+    assert!(human(&["resume", id(&planned)], 0).contains("complete, artifact available"));
+    let complete = f.call(&["status", id(&planned), "--json"], 0);
+    assert_eq!(complete["records"].as_array().unwrap().len(), 6);
+    let path = complete["delivery"]["app"]["availability"]["locations"][0]
+        .as_str()
+        .unwrap();
+    assert!(human(&["verify-production", id(&planned)], 0).contains(path));
+    fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+    let unavailable = human(&["verify-production", id(&planned)], 1);
+    assert!(unavailable.contains("checks complete, delivery unavailable"));
+    assert!(unavailable.contains("no executable mode"));
+    fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
+    f.edit(|c| {
+        c["targets"]["app"]["operations"]["smoke_test"]["run"] =
+            "echo 'smoke regression: wrong output' >&2; exit 7".into()
+    });
+    let failed = human(&["produce", "app"], 1);
+    assert!(failed.contains("smoke_test: failed"));
+    assert!(failed.contains("smoke regression: wrong output"));
+    f.edit(|c| c["targets"]["app"]["profile"]["tools"] = json!(["sykli_missing_test_tool"]));
+    assert!(
+        human(&["plan", "sykli.production.json", "--target", "app"], 0)
+            .contains("Blocked: missing-tool: sykli_missing_test_tool")
+    );
+}
+
+#[test]
+fn human_output_includes_rust_test_failures_from_stdout() {
+    let f = Fixture::new();
+    f.write(
+        "main.rs",
+        "fn main() { println!(\"42\"); }\n#[test] fn meaningful_failure() { assert_eq!(1, 2, \"business invariant failed\"); }\n",
+    );
+    let output = f.command(&["produce", "app"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(human.contains("unit_tests: failed"));
+    assert!(human.contains("stdout (last 20 lines):"));
+    assert!(human.contains("meaningful_failure"));
+    assert!(human.contains("business invariant failed"));
+    let production = id(&f.plan()).to_owned();
+    let status = f.command(&["status", &production]).output().unwrap();
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8(status.stdout)
+            .unwrap()
+            .contains("business invariant failed")
+    );
+    let structured = f.call(&["status", &production, "--json"], 0);
+    assert!(
+        structured["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| {
+                record["record"]["fact"]["observation"]["execution"]["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("business invariant failed"))
+            })
+    );
+}

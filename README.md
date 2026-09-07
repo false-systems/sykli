@@ -77,9 +77,9 @@ keep the outer single quotes so your current shell does not expand it.
 Now look at the plan and build:
 
 ```sh
-sykli targets --json                                # what can this repo produce?
-sykli plan sykli.production.json --target app --json # what will run?
-sykli produce app --json                            # build and check it
+sykli targets                                      # what can this repo produce?
+sykli plan sykli.production.json --target app # what will run?
+sykli produce app                            # build and check it
 ```
 
 Sykli captures the selected source files, including local edits, then runs:
@@ -93,7 +93,29 @@ Sykli captures the selected source files, including local edits, then runs:
 Success means the artifact is available and both checks passed. Integration
 tests and doctests are not included automatically.
 
-The JSON response includes these fields:
+By default, Sykli prints a summary like this (IDs and paths abbreviated):
+
+```text
+app: complete, artifact available
+  build: satisfied
+  smoke_test: satisfied
+  unit_tests: satisfied
+
+Artifact app: available
+  SHA-256: 2196f82c...
+  Path: /your/repo/.sykli/production/blobs/2196f82c...
+
+Production: 7937abae...
+Input source: 80712fc0...
+```
+
+The actual output contains the full path and IDs, ready to copy. On failure,
+the summary shows the failed operation, its error and labeled stdout/stderr tails.
+An available artifact can still have unfinished or failed checks; the first line
+reports whether production is complete.
+
+For agents and scripts, add `--json` to get the complete structured response,
+including execution records and captured output. It includes these fields:
 
 | Field | What you use it for |
 | --- | --- |
@@ -113,16 +135,16 @@ For your first build, use this instead of the `produce` command above to stop
 after compilation:
 
 ```sh
-sykli produce app --stop-after build --json
+sykli produce app --stop-after build
 ```
 
 This intentionally exits **1**: the executable is saved, but checks remain.
-Copy the `production` ID from the response. In a fresh terminal, in the same
+Copy the `Production:` ID from the summary. In a fresh terminal, in the same
 repository, replace `PRODUCTION_ID` below with that ID:
 
 ```sh
-sykli status PRODUCTION_ID --json  # see completed and unfinished work
-sykli resume PRODUCTION_ID --json  # run the remaining work
+sykli status PRODUCTION_ID  # see completed and unfinished work
+sykli resume PRODUCTION_ID  # run the remaining work
 ```
 
 Sykli reuses the saved executable and runs the remaining checks. It needs the ID
@@ -137,8 +159,8 @@ Old passing checks cannot complete work for different source or executable bytes
 ## When something fails
 
 - **A command failed:** inspect `status`. To retry a failed build explicitly,
-  run `sykli resume PRODUCTION_ID --retry build --json`. Earlier attempts stay recorded.
-- **You changed the code to fix it:** run `sykli produce app --json` for the new source.
+  run `sykli resume PRODUCTION_ID --retry build`. Earlier attempts stay recorded.
+- **You changed the code to fix it:** run `sykli produce app` for the new source.
 - **Execution is indeterminate:** Sykli cannot establish whether everything stopped.
   It refuses a retry that could overlap surviving work. Continuation is between
   operations; it does not resume a compiler halfway through an instruction.
@@ -149,7 +171,7 @@ Old passing checks cannot complete work for different source or executable bytes
 unsuccessful work, and 2 for an error. `status` can exit 0 while showing unfinished
 work: it successfully inspected the records.
 
-`sykli verify-production PRODUCTION_ID --json` checks record integrity, bindings,
+`sykli verify-production PRODUCTION_ID` checks record integrity, bindings,
 completion, and current artifact availability. The local executor and store are
 trusted. This is not a security sandbox or a proof that the software is correct.
 There is no automatic publication, remote execution, or reuse across productions.

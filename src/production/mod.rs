@@ -997,6 +997,150 @@ fn execute(
     Ok(Some((result, observation)))
 }
 
+fn blocker_summary(reason: &Value) -> String {
+    if let Some(detail) = reason["reason"].as_str() {
+        return detail.into();
+    }
+    let kind = reason["kind"].as_str().unwrap_or("blocked");
+    let subject = reason["tool"]
+        .as_str()
+        .or(reason["port"].as_str())
+        .or(reason["operation"].as_str())
+        .unwrap_or("");
+    format!("{kind}: {subject}")
+}
+
+// Human presentation uses the same evaluated data as the JSON interface.
+fn human_summary(value: &Value) -> Option<String> {
+    let mut lines = Vec::new();
+    match value["schema"].as_str()? {
+        "sykli-targets.v1" => {
+            lines.push("Available targets".into());
+            for (name, target) in value["targets"].as_object()? {
+                let products = target["products"]
+                    .as_object()?
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let tools = target["profile"]["tools"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                lines.push(format!("  {name}: produces {}", products.join(", ")));
+                lines.push(format!("    Required tools: {}", tools.join(", ")));
+            }
+        }
+        "sykli-production-plan.v1" => {
+            lines.push(format!("Plan: {}", value["target"].as_str()?));
+            for operation in value["selected"].as_array()? {
+                let reasons = operation["required_because"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                lines.push(format!(
+                    "  {} ({})",
+                    operation["operation"].as_str()?,
+                    reasons.join(", ")
+                ));
+            }
+            for blocker in value["blockers"].as_array()? {
+                lines.push(format!("  Blocked: {}", blocker_summary(blocker)));
+            }
+        }
+        "sykli-production-view.v1" => {
+            let state = if value["delivery_success"] == true {
+                "complete, artifact available"
+            } else if value["assessment"]["kind"] == "complete" {
+                "checks complete, delivery unavailable"
+            } else {
+                "incomplete"
+            };
+            lines.push(format!("{}: {state}", value["target"].as_str()?));
+            for (name, work) in value["work"].as_object()? {
+                let state = &work["state"];
+                let kind = state["kind"].as_str()?;
+                lines.push(format!("  {name}: {kind}"));
+                if let Some(reasons) = state["reasons"].as_array() {
+                    for reason in reasons {
+                        lines.push(format!("    {}", blocker_summary(reason)));
+                    }
+                }
+                if kind == "failed" {
+                    if let Some(fact) = value["records"]
+                        .as_array()?
+                        .iter()
+                        .rev()
+                        .map(|record| &record["record"]["fact"])
+                        .find(|fact| {
+                            fact["kind"] == "finished" && fact["attempt"] == state["attempt"]
+                        })
+                    {
+                        let observation = &fact["observation"];
+                        let reason = observation["collection_error"]
+                            .as_str()
+                            .or(observation["error"].as_str())
+                            .or(observation["execution"]["error"].as_str())
+                            .or(fact["result"]["code"].as_str());
+                        if let Some(reason) = reason {
+                            lines.push(format!("    {reason}"));
+                        }
+                        for stream in ["stdout", "stderr"] {
+                            if let Some(capture) = observation["execution"][stream]
+                                .as_str()
+                                .filter(|capture| !capture.is_empty())
+                            {
+                                lines.push(format!("    {stream} (last 20 lines):"));
+                                let tail = capture.lines().rev().take(20).collect::<Vec<_>>();
+                                for line in tail.into_iter().rev() {
+                                    lines.push(format!(
+                                        "      {}",
+                                        line.chars().take(240).collect::<String>()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (name, product) in value["delivery"].as_object()? {
+                let availability = &product["availability"];
+                lines.push(format!(
+                    "\nArtifact {name}: {}",
+                    availability["kind"].as_str()?
+                ));
+                lines.push(format!(
+                    "  SHA-256: {}",
+                    product["artifact"]["content"].as_str()?
+                ));
+                if let Some(locations) = availability["locations"].as_array() {
+                    for location in locations {
+                        lines.push(format!("  Path: {}", location.as_str()?));
+                    }
+                }
+                if let Some(reason) = availability["reason"].as_str() {
+                    lines.push(format!("  {reason}"));
+                }
+            }
+        }
+        _ => return None,
+    }
+    if let Some(production) = value["production"].as_str() {
+        lines.push(format!("\nProduction: {production}"));
+    }
+    let inputs = value.get("resolved_inputs").or_else(|| value.get("inputs"));
+    if let Some(inputs) = inputs.and_then(Value::as_object) {
+        for (port, artifact) in inputs {
+            if let Some(content) = artifact["content"].as_str() {
+                lines.push(format!("Input {port}: {content}"));
+            }
+        }
+    }
+    lines.push("\nUse --json for full structured details.".into());
+    Some(lines.join("\n"))
+}
+
 pub fn report(
     result: Result<Value, String>,
     json_output: bool,
@@ -1008,7 +1152,11 @@ pub fn report(
             if json_output {
                 println!("{value}");
             } else {
-                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                println!(
+                    "{}",
+                    human_summary(&value)
+                        .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap())
+                );
             }
             ExitCode::from(if success { 0 } else { 1 })
         }
