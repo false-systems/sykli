@@ -1,9 +1,15 @@
 # Sykli for coding agents
 
 For typed artifact production, start with `sykli targets --json` and
-`sykli plan sykli.production.json --target app --json`. Use `produce app --json`,
-then keep its production ID. A fresh worker can `status ID --json` and
-`resume ID --json` using the same local store; no chat handover is required.
+`sykli plan sykli.production.json --target TARGET --json`. Use the discovered
+target name (`sykli` in this repository), not an assumed `app` alias.
+`sykli produce TARGET --prepare --summary --json` captures the request without
+executing it. Keep its production ID. A fresh worker can inspect
+`sykli status ID --summary --json`, then select ready work with
+`sykli resume ID --operation NAME --summary --json` or finish all remaining work
+with `sykli resume ID --jobs 2 --summary --json`.
+The same local store is sufficient; no chat handover is required. Compact state
+omits command captures; retrieve them with `sykli diagnostics ID ATTEMPT --json`.
 Read `assessment` and `delivery` separately. The [production contract](production.md)
 documents exact input binding, explicit retries and unresolved execution.
 

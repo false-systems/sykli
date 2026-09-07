@@ -1,4 +1,4 @@
-//! Ask Cargo what exists; emit ordinary production operations, not a second build model.
+//! Ask build tools what exists; emit ordinary production operations.
 use super::*;
 
 pub struct CargoTarget {
@@ -246,6 +246,7 @@ pub fn cargo(
 
 pub struct GoTarget {
     pub package: String,
+    pub binary: String,
     pub paths: Vec<String>,
     pub build: String,
     pub test: String,
@@ -316,7 +317,15 @@ pub fn go(package: Option<&str>) -> Result<GoTarget, String> {
         if item["Name"] == "main"
             && package.is_none_or(|p| p == relative_package || item["ImportPath"] == p)
         {
-            candidates.push(relative_package);
+            let binary = Path::new(
+                item["Target"]
+                    .as_str()
+                    .ok_or("Go main package missing Target")?,
+            )
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Go main package has no executable name")?;
+            candidates.push((relative_package, binary.to_owned()));
         }
         for field in [
             "GoFiles",
@@ -345,7 +354,11 @@ pub fn go(package: Option<&str>) -> Result<GoTarget, String> {
     if candidates.len() != 1 {
         return Err(format!(
             "expected one Go main package; found [{}]. Select --package ./cmd/NAME (library-only modules need an explicit contract)",
-            candidates.join(", ")
+            candidates
+                .iter()
+                .map(|(package, _)| package.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     for path in &paths {
@@ -354,7 +367,7 @@ pub fn go(package: Option<&str>) -> Result<GoTarget, String> {
             return Err(format!("Go source must be a regular file: {path}"));
         }
     }
-    let package = candidates.remove(0);
+    let (package, binary) = candidates.remove(0);
     let environment = environment
         .iter()
         .map(|(k, v)| format!("{k}={}", quote(v)))
@@ -370,6 +383,7 @@ pub fn go(package: Option<&str>) -> Result<GoTarget, String> {
         ),
         test: format!("{command} test -mod=readonly -buildvcs=false -count=1 ./..."),
         package,
+        binary,
         paths: paths.into_iter().collect(),
     })
 }

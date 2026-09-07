@@ -29,7 +29,24 @@ impl Fixture {
         )
         .unwrap();
         let fixture = Self(root);
-        fixture.call(&["init", "--production"], 0);
+        let generated = fixture.call(&["init", "--production"], 0);
+        assert_eq!(generated["target"], "main");
+        // Keep engine tests exercising legacy app contracts as well as newly
+        // named contracts covered by the discovery tests below.
+        fixture.edit(|contract| {
+            let mut target = contract["targets"]
+                .as_object_mut()
+                .unwrap()
+                .remove("main")
+                .unwrap();
+            let product = target["products"]
+                .as_object_mut()
+                .unwrap()
+                .remove("main")
+                .unwrap();
+            target["products"]["app"] = product;
+            contract["targets"]["app"] = target;
+        });
         fixture
     }
     fn command(&self, args: &[&str]) -> Command {
@@ -668,9 +685,10 @@ fn cargo_discovery_builds_captured_sources_and_resumes_bound_unit_and_smoke_chec
         0,
     );
     assert_eq!(generated["cargo"]["binary"], "tiny-cli");
+    assert_eq!(generated["target"], "tiny-cli");
     assert!(f.0.join("Cargo.lock").is_file());
     let discovered = f.call(&["targets", "--json"], 0);
-    let inputs = discovered["targets"]["app"]["inputs"]["source"]["paths"]
+    let inputs = discovered["targets"]["tiny-cli"]["inputs"]["source"]["paths"]
         .as_array()
         .unwrap();
     for path in [
@@ -684,13 +702,26 @@ fn cargo_discovery_builds_captured_sources_and_resumes_bound_unit_and_smoke_chec
     }
     assert!(!inputs.contains(&json!(".env")));
     assert!(!inputs.contains(&json!("sykli.production.json")));
-    let first = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
+    let first = f.call(
+        &["produce", "tiny-cli", "--stop-after", "build", "--json"],
+        1,
+    );
     assert_eq!(state(&first, "build"), "satisfied");
     f.write("src/message.txt", "43\n");
     let resumed = f.call(&["resume", id(&first), "--json"], 0);
     assert_eq!(state(&resumed, "unit_tests"), "satisfied");
     assert_eq!(state(&resumed, "smoke_test"), "satisfied");
-    assert_ne!(id(&f.plan()), id(&first));
+    let changed = f.call(
+        &[
+            "plan",
+            "sykli.production.json",
+            "--target",
+            "tiny-cli",
+            "--json",
+        ],
+        0,
+    );
+    assert_ne!(id(&changed), id(&first));
 }
 
 #[test]
@@ -747,6 +778,7 @@ fn cargo_workspace_discovery_uses_default_members_and_local_library_inputs() {
         0,
     );
     assert_eq!(selected["cargo"]["binary"], "second");
+    assert_eq!(selected["target"], "second");
 }
 
 #[test]
@@ -1348,4 +1380,111 @@ fn inspection_works_on_read_only_stores_with_or_without_journal_locks() {
             assert!(!directory.join("lease").exists());
         }
     }
+}
+
+#[test]
+fn named_targets_do_not_rewrite_existing_productions() {
+    let f = Fixture::new();
+    let old = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
+    let generated = f.call(&["init", "--production", "--force"], 0);
+    assert_eq!(generated["target"], "main");
+    let targets = f.call(&["targets", "--json"], 0);
+    assert!(targets["targets"].get("app").is_none());
+    assert!(targets["targets"]["main"]["products"].get("main").is_some());
+    f.call(&["produce", "app", "--json"], 2);
+    let new = f.call(&["produce", "main", "--json"], 0);
+    assert_ne!(id(&new), id(&old));
+    assert_eq!(new["delivery"]["main"]["availability"]["kind"], "available");
+    let resumed = f.call(&["resume", id(&old), "--json"], 0);
+    assert_eq!(resumed["target"], "app");
+    assert_eq!(old["work"]["build"], resumed["work"]["build"]);
+}
+
+#[test]
+fn go_target_uses_the_toolchains_binary_name_for_versioned_modules() {
+    if Command::new("go").arg("version").output().is_err() {
+        return;
+    }
+    let f = Fixture::new();
+    f.write("go.mod", "module example.test/tiny-cli/v2\n\ngo 1.20\n");
+    f.write("main.go", "package main\nfunc main() {}\n");
+    let generated = f.call(
+        &[
+            "init",
+            "--production",
+            "--force",
+            "--smoke",
+            "\"$SYKLI_INPUT_executable\"",
+        ],
+        0,
+    );
+    assert_eq!(generated["target"], "tiny-cli");
+    assert_eq!(generated["go"]["binary"], "tiny-cli");
+    let prepared = f.call(&["produce", "tiny-cli", "--prepare", "--json"], 0);
+    assert_eq!(prepared["target"], "tiny-cli");
+}
+
+#[test]
+fn tool_identity_matches_shell_search_and_rejects_relative_path_entries() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.write("shadow/tool", "not executable\n");
+    f.write("active/tool", "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(f.0.join("active/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    f.edit(|c| {
+        c["targets"]["app"]["profile"]["tools"] = json!(["tool", "rustc"]);
+        let run = c["targets"]["app"]["operations"]["build"]["run"]
+            .as_str()
+            .unwrap();
+        c["targets"]["app"]["operations"]["build"]["run"] = format!("tool && {run}").into();
+    });
+    let path = std::env::join_paths(
+        [f.0.join("shadow"), f.0.join("active")]
+            .into_iter()
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let call = |args: &[&str], path: &std::ffi::OsStr| {
+        let output = f.command(args).env("PATH", path).output().unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code().unwrap(), value)
+    };
+    let (code, prepared) = call(&["produce", "app", "--prepare", "--json"], &path);
+    assert_eq!(code, 0, "{prepared}");
+    assert_eq!(
+        prepared["context"]["tool_images"]["tool"],
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(f.0.join("active/tool")).unwrap())
+        )
+    );
+    let (code, built) = call(
+        &["resume", id(&prepared), "--operation", "build", "--json"],
+        &path,
+    );
+    assert_eq!(code, 1, "{built}");
+    assert_eq!(state(&built, "build"), "satisfied");
+    f.write("active/tool", "#!/bin/sh\nexit 1\n");
+    let (code, changed) = call(&["resume", id(&prepared), "--json"], &path);
+    assert_eq!(code, 2);
+    assert!(
+        changed["error"]
+            .as_str()
+            .unwrap()
+            .contains("context changed")
+    );
+    let relative = std::env::join_paths(
+        [PathBuf::from("active")]
+            .into_iter()
+            .chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+    let (code, rejected) = call(&["produce", "app", "--prepare", "--json"], &relative);
+    assert_eq!(code, 2);
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("absolute PATH")
+    );
 }

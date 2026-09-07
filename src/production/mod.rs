@@ -35,12 +35,24 @@ fn resolve_context(target: &Target) -> Result<Context, String> {
     }
     let runtime = super::shell_runtime()?;
     let paths = std::env::var_os("PATH").unwrap_or_default();
+    if !target.profile.tools.is_empty() && std::env::split_paths(&paths).any(|p| !p.is_absolute()) {
+        return Err("typed execution requires absolute PATH entries; relative or empty entries can resolve different tools in prepared workspaces".into());
+    }
     let mut images = BTreeMap::new();
     let mut versions = BTreeMap::new();
     for tool in &target.profile.tools {
-        let image = std::env::split_paths(&paths)
-            .map(|p| p.join(tool))
-            .find(|p| p.is_file())
+        // Let the execution shell apply its executable-search rules. Merely
+        // finding a file on PATH can fingerprint a non-executable shadow file.
+        let image = ProcessCommand::new(&runtime.path)
+            .args(["-c", "command -v \"$1\"", "sykli-tool", tool])
+            .env_clear()
+            .envs(runtime.environment.iter().cloned())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| p.is_absolute() && p.is_file())
             .and_then(|p| super::sha256_file(&p).ok());
         images.insert(tool.clone(), image);
         // Only known version probes; arbitrary declared executables are not run by plan.
@@ -638,7 +650,12 @@ pub fn init(
         json!({"kind":"executable","format":format,"architecture":std::env::consts::ARCH});
     let source_input =
         json!({"source":{"expects":source,"from":{"kind":"target-input","port":"source"}}});
-    let mut value = json!({"schema":"sykli-production-contract.v1","targets":{"app":{
+    let target_name = cargo
+        .as_ref()
+        .map(|c| c.binary.as_str())
+        .or_else(|| go.as_ref().map(|g| g.binary.as_str()))
+        .unwrap_or("main");
+    let mut value = json!({"schema":"sykli-production-contract.v1","targets":{(target_name):{
         "inputs":{"source":{"type":source,"paths":["main.rs"]}},
         "profile":{"kind":"local-shell.v1","tools":["rustc"]},
         "operations":{
@@ -648,10 +665,10 @@ pub fn init(
             "smoke_test":{"kind":"check","inputs":{"executable":{"expects":executable,"from":{"kind":"operation-output","operation":"build","port":"executable"}}},
                 "run":"\"$SYKLI_INPUT_executable\"","reuse":"never","subject_input":"executable","assertion":"executable exits successfully without arguments"}
         },
-        "products":{"app":{"kind":"operation-output","operation":"build","port":"executable"}},"required_checks":["unit_tests","smoke_test"]
+        "products":{(target_name):{"kind":"operation-output","operation":"build","port":"executable"}},"required_checks":["unit_tests","smoke_test"]
     }}});
     if let Some(cargo) = &cargo {
-        let target = &mut value["targets"]["app"];
+        let target = &mut value["targets"][target_name];
         target["inputs"]["source"]["paths"] = json!(cargo.paths);
         target["profile"]["tools"] = json!(["cargo", "rustc"]);
         target["operations"]["build"]["run"] = cargo.build.clone().into();
@@ -660,7 +677,7 @@ pub fn init(
             "selected Cargo package's binary and library unit tests pass".into();
     }
     if let Some(go) = &go {
-        let target = &mut value["targets"]["app"];
+        let target = &mut value["targets"][target_name];
         target["inputs"]["source"]["paths"] = json!(go.paths);
         target["profile"]["tools"] = json!(["go"]);
         target["operations"]["build"]["run"] = go.build.clone().into();
@@ -672,16 +689,17 @@ pub fn init(
         if command.trim().is_empty() {
             return Err("smoke command must not be empty".into());
         }
-        value["targets"]["app"]["operations"]["smoke_test"]["run"] = command.into();
-        value["targets"]["app"]["operations"]["smoke_test"]["assertion"] =
+        value["targets"][target_name]["operations"]["smoke_test"]["run"] = command.into();
+        value["targets"][target_name]["operations"]["smoke_test"]["assertion"] =
             "declared smoke command succeeds for the collected executable".into();
     }
     let contract: ProductionContract = serde_json::from_value(value.clone()).map_err(err)?;
     contract.validate()?;
     // Explicit --force authorizes replacing the authoring file, never production records.
     fs::write(path, serde_json::to_vec_pretty(&value).map_err(err)?).map_err(err)?;
+    let target_name = target_name.to_owned();
     Ok(
-        json!({"schema":"sykli-production-init.v1","contract":path,"target":"app","cargo":cargo.map(|c|json!({"package":c.package,"binary":c.binary})),"go":go.map(|g|json!({"package":g.package})),"review":"source paths, recipes and smoke assertion; production pins the reviewed contract"}),
+        json!({"schema":"sykli-production-init.v1","contract":path,"target":target_name,"cargo":cargo.map(|c|json!({"package":c.package,"binary":c.binary})),"go":go.map(|g|json!({"package":g.package,"binary":g.binary})),"review":"source paths, recipes and smoke assertion; production pins the reviewed contract"}),
     )
 }
 

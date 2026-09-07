@@ -177,6 +177,20 @@ pub fn name(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Target/product labels are not used as environment variable names or paths.
+fn label(value: &str) -> Result<(), String> {
+    if !value.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+    {
+        return Err(format!(
+            "invalid target/product name {value:?}; start with a letter, digit or underscore and use letters, digits, underscores, hyphens or dots"
+        ));
+    }
+    Ok(())
+}
+
 pub fn relative(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.contains('\\')
@@ -233,7 +247,7 @@ impl ProductionContract {
             return Err("expected sykli-production-contract.v1 with at least one target".into());
         }
         for (id, target) in &self.targets {
-            name(id)?;
+            label(id)?;
             target.validate()?;
         }
         Ok(())
@@ -362,7 +376,7 @@ impl Target {
             return Err("target has no product".into());
         }
         for (port, binding) in &self.products {
-            name(port)?;
+            label(port)?;
             self.binding_type(binding)?;
         }
         let mut checks = BTreeSet::new();

@@ -35,16 +35,17 @@ def main():
         assert result.returncode == expected, (arguments, output, result.stderr)
         return output
 
-    run(["init", "--production", "--smoke", 'test "$("$SYKLI_INPUT_executable")" = 42'])
+    initialized = run(["init", "--production", "--smoke", 'test "$("$SYKLI_INPUT_executable")" = 42'])
+    target = initialized["target"]
     contract_path = root / "sykli.production.json"
     contract = json.loads(contract_path.read_text())
-    smoke = contract["targets"]["app"]["operations"]["smoke_test"]
+    smoke = contract["targets"][target]["operations"]["smoke_test"]
     smoke["run"] = 'test "$("$SYKLI_INPUT_executable")" = 42'
     smoke["assertion"] = "executable prints 42"
     contract_path.write_text(json.dumps(contract, indent=2))
     run(["targets", "--json"])
-    planned = run(["plan", "sykli.production.json", "--target", "app", "--json"])
-    prepared = run(["produce", "app", "--prepare", "--summary", "--json"])
+    planned = run(["plan", "sykli.production.json", "--target", target, "--json"])
+    prepared = run(["produce", target, "--prepare", "--summary", "--json"])
     assert prepared["through_sequence"] == 0
     assert prepared["ready"] == ["build", "unit_tests"]
     first = run(["resume", prepared["production"], "--operation", "build", "--summary", "--json"], 1)
@@ -57,12 +58,12 @@ def main():
     run(["verify-production", production, "--json"])
     assert first["work"]["build"] == completed["work"]["build"]
     for check, subject in (("unit_tests", first["inputs"]["source"]),
-                           ("smoke_test", completed["delivery"]["app"]["artifact"])):
+                           ("smoke_test", completed["delivery"][target]["artifact"])):
         diagnostics = run(["diagnostics", production,
                            completed["assessment"]["satisfied_checks"][check], "--json"])
         result = diagnostics["records"][-1]["record"]["fact"]["result"]
         assert result["subject"] == subject and result["outcome"] == "passed"
-    location = completed["delivery"]["app"]["availability"]["locations"][0]
+    location = completed["delivery"][target]["availability"]["locations"][0]
     artifact = subprocess.run([location], capture_output=True, text=True, check=True)
     assert artifact.stdout == "42\n"
     transcript["artifact_execution"] = {"path": location, "exit": artifact.returncode, "stdout": artifact.stdout}
@@ -73,7 +74,7 @@ def main():
         source_path.write_text(source_path.read_text().replace("return 42", "return 43"))
     else:
         (root / "main.rs").write_text('fn main() { println!("43"); }\n#[test] fn unit() { assert_eq!(43, 42); }\n')
-    second = run(["produce", "app", "--jobs", "2", "--summary", "--json"], 1)
+    second = run(["produce", target, "--jobs", "2", "--summary", "--json"], 1)
     assert second["production"] != production
     assert second["inputs"] != first["inputs"]
     assert second["assessment"]["kind"] == "incomplete"
@@ -83,7 +84,7 @@ def main():
     assert old["assessment"]["kind"] == "complete"
     transcript["summary"] = {
         "production_a": production, "source_a": first["inputs"]["source"],
-        "artifact_a": completed["delivery"]["app"]["artifact"],
+        "artifact_a": completed["delivery"][target]["artifact"],
         "checks_a": completed["assessment"]["satisfied_checks"],
         "production_b": second["production"], "source_b": second["inputs"]["source"],
         "b_assessment": second["assessment"], "a_still_complete": True,
