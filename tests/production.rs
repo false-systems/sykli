@@ -1087,3 +1087,163 @@ fn parallel_operations_survive_controller_loss_and_serialize_terminal_records() 
     assert_eq!(finished["records"].as_array().unwrap().len(), 6);
     f.call(&["verify-production", production, "--json"], 0);
 }
+
+#[test]
+fn a_dead_parallel_executor_is_indeterminate_while_its_peer_is_running() {
+    let f = Fixture::new();
+    for operation in ["build", "unit_tests"] {
+        assert!(
+            Command::new("mkfifo")
+                .arg(f.0.join(format!("{operation}.release")))
+                .status()
+                .unwrap()
+                .success()
+        );
+        f.edit(|c| {
+            let run = c["targets"]["app"]["operations"][operation]["run"]
+                .as_str()
+                .unwrap();
+            c["targets"]["app"]["operations"][operation]["run"] = format!(
+                "printf '%s' \"$PPID\" > '{}'; read token < '{}'; {run}; printf done > '{}'",
+                f.0.join(format!("{operation}.executor")).display(),
+                f.0.join(format!("{operation}.release")).display(),
+                f.0.join(format!("{operation}.done")).display()
+            )
+            .into();
+        });
+    }
+    let prepared = f.call(&["produce", "app", "--prepare", "--json"], 0);
+    let production = id(&prepared);
+    let mut controller = f
+        .command(&["resume", production, "--jobs", "2", "--json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(|| {
+        ["build", "unit_tests"].iter().all(|op| {
+            fs::read_to_string(f.0.join(format!("{op}.executor"))).is_ok_and(|pid| !pid.is_empty())
+        })
+    });
+    let executor = fs::read_to_string(f.0.join("build.executor")).unwrap();
+    let children = || {
+        String::from_utf8(
+            Command::new("pgrep")
+                .args(["-P", &controller.id().to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+    assert!(children().lines().any(|pid| pid == executor));
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &executor])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_until(|| !children().lines().any(|pid| pid == executor));
+    let status = f.call(&["status", production, "--summary", "--json"], 0);
+    assert_eq!(state(&status, "build"), "indeterminate");
+    assert_eq!(state(&status, "unit_tests"), "running");
+    let dead = status["work"]["build"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    let live = status["work"]["unit_tests"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        status["evaluation_inputs"]["attempt_lease_held"][dead],
+        false
+    );
+    assert_eq!(
+        status["evaluation_inputs"]["attempt_lease_held"][live],
+        true
+    );
+    for operation in ["build", "unit_tests"] {
+        fs::write(f.0.join(format!("{operation}.release")), "go\n").unwrap();
+    }
+    controller.wait().unwrap();
+    wait_until(|| f.0.join("build.done").exists() && f.0.join("unit_tests.done").exists());
+    let retry = f.call(&["resume", production, "--retry", "build", "--json"], 1);
+    assert_eq!(state(&retry, "build"), "indeterminate");
+}
+
+#[test]
+fn inspection_works_on_read_only_stores_with_or_without_journal_locks() {
+    use std::os::unix::fs::PermissionsExt;
+    fn entries(path: &Path, paths: &mut Vec<(PathBuf, u32)>) {
+        paths.push((
+            path.to_owned(),
+            fs::metadata(path).unwrap().permissions().mode(),
+        ));
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                entries(&entry.unwrap().path(), paths);
+            }
+        }
+    }
+    let f = Fixture::new();
+    let complete = f.call(&["produce", "app", "--json"], 0);
+    let production = id(&complete);
+    let attempt = complete["work"]["build"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    let directory = f.records(production).parent().unwrap().to_owned();
+    for legacy in [false, true] {
+        if legacy {
+            fs::remove_file(directory.join("journal-lock")).unwrap();
+            fs::remove_file(directory.join("lease")).unwrap();
+        }
+        let mut paths = Vec::new();
+        entries(&f.0.join(".sykli"), &mut paths);
+        for (path, mode) in &paths {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o222)).unwrap();
+        }
+        // A concurrent inspector's shared lease must not look like a controller.
+        let reader = if !legacy {
+            use std::os::fd::AsRawFd;
+            unsafe extern "C" {
+                fn flock(fd: i32, operation: i32) -> i32;
+            }
+            let file = fs::File::open(directory.join("lease")).unwrap();
+            // SAFETY: file owns this descriptor; acquire LOCK_SH until file drops.
+            assert_eq!(unsafe { flock(file.as_raw_fd(), 1) }, 0);
+            Some(file)
+        } else {
+            None
+        };
+        let results = [
+            f.command(&["status", production, "--summary", "--json"])
+                .output()
+                .unwrap(),
+            f.command(&["diagnostics", production, attempt, "--json"])
+                .output()
+                .unwrap(),
+            f.command(&["verify-production", production, "--json"])
+                .output()
+                .unwrap(),
+        ];
+        drop(reader);
+        for (path, mode) in &paths {
+            fs::set_permissions(path, fs::Permissions::from_mode(*mode)).unwrap();
+        }
+        for result in &results {
+            assert_eq!(
+                result.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+        let status: Value = serde_json::from_slice(&results[0].stdout).unwrap();
+        assert_eq!(status["evaluation_inputs"]["executor_lease_held"], false);
+        assert_eq!(status["execution_blockers"], json!([]));
+        if legacy {
+            assert!(!directory.join("journal-lock").exists());
+            assert!(!directory.join("lease").exists());
+        }
+    }
+}

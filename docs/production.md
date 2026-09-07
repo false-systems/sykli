@@ -231,7 +231,9 @@ requests/PRODUCTION/request.json      pinned request
 requests/PRODUCTION/records/SEQ.json   immutable record envelopes
 requests/PRODUCTION/attempts/ATTEMPT/  private prepared execution locations
 requests/PRODUCTION/logs/ATTEMPT.log   supplementary diagnostic stream
-requests/PRODUCTION/lease             advisory OS lock, never a PID lock
+requests/PRODUCTION/lease             controlling-writer OS lock, never a PID lock
+requests/PRODUCTION/attempt-leases/ATTEMPT  per-executor liveness OS lock
+requests/PRODUCTION/journal-lock      short shared-reader/exclusive-writer lock
 ```
 
 Canonical files publish by fsynced temporary write and atomic hard-link creation,
@@ -262,14 +264,20 @@ One controller holds an OS file-description lease per production. Bounded
 executor subprocesses inherit it; each executes one persisted attempt and
 finishes its record even if the initiating client dies. No service or daemon
 is started. A second controller refuses while that lease is held. `status`
-can inspect the atomic record prefix during execution. A started attempt is
-running with a held lease unless contact loss was recorded, otherwise
-indeterminate until a terminal record exists. A successful subsequent `resume` reconstructs that terminal record.
+can inspect the atomic record prefix during execution. Each executor separately
+holds a per-attempt liveness lock, which is not inherited by recipe processes.
+An unfinished attempt is running only while its own lock is held and no contact
+loss was recorded. A missing or released liveness lock means indeterminate,
+even while a different executor holds the production-wide lease. Older unfinished
+attempts without per-attempt locks are conservatively indeterminate. A successful subsequent `resume` reconstructs that terminal record.
 
 `--jobs N` permits up to N independent operations in a wave (default 1).
 Starts and terminal records use a separate short-lived OS journal lock: each
 writer reloads the validated prefix under that lock before appending. Inspection
-uses the same lock to obtain a coherent prefix. Executors retain the controlling
+uses a shared read-only lock to obtain a coherent prefix; writers lock exclusively.
+Read-only queries never create locks. Older stores without a journal lock are
+read as validated atomic prefixes. Missing lease files mean no observed lease;
+permission errors are reported rather than interpreted as liveness. Executors retain the controlling
 lease after client loss and commit their own results. No new work is started
 after an unresolved executor result. `--retry` and `--stop-after` require one job;
 parallel histories require this version of Sykli to read them.
@@ -311,7 +319,8 @@ source). Planning is read-only; it may run the known version probes above.
 `sykli-production-view.v1` returns production/contract/target, inputs, context,
 `through_sequence`, `evaluator_version: "local.v1"`, `policy: "all-selected.v1"`,
 `evaluated_at` (last record timestamp or null), explicit
-`evaluation_inputs.executor_lease_held`, `work`, `assessment`, `delivery`,
+`evaluation_inputs.executor_lease_held`, `evaluation_inputs.attempt_lease_held`
+(an attempt-ID map for unresolved attempts), `work`, `assessment`, `delivery`,
 `delivery_success`, full record envelopes and the trust statement. Each work
 entry contains `state` and `required_because`. Work states are ready, running,
 satisfied, blocked with structured reasons, failed or indeterminate.

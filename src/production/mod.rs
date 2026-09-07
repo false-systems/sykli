@@ -232,7 +232,7 @@ impl History {
     }
 
     fn load(store: &Store, request: &Request) -> Result<Self, String> {
-        let _journal = Lease::journal(&store.production(&request.id()?)?)?;
+        let _journal = Lease::journal_read(&store.production(&request.id()?)?)?;
         Self::load_unlocked(store, request)
     }
 
@@ -437,6 +437,7 @@ fn view(
     let mut accepted = BTreeMap::new();
     let mut checks = BTreeMap::new();
     let mut work = BTreeMap::new();
+    let mut attempt_leases = BTreeMap::new();
     for (name, reasons) in request.target().selected()? {
         let op = &request.target().operations[&name];
         let inputs = inputs_for(op, request, &accepted);
@@ -458,7 +459,14 @@ fn view(
                     let lost = history.records.iter().any(|record| matches!(
                         &record.record.fact, Fact::ContactLost { attempt: id, .. } if id == &attempt.id
                     ));
-                    json!({"kind":if controlling && !lost {"running"} else {"indeterminate"},"attempt":attempt.id})
+                    let (live, _probe) = Lease::observe(
+                        &store
+                            .production(&request.id()?)?
+                            .join("attempt-leases")
+                            .join(&attempt.id),
+                    )?;
+                    attempt_leases.insert(attempt.id.clone(), live);
+                    json!({"kind":if live && !lost {"running"} else {"indeterminate"},"attempt":attempt.id})
                 }
                 Some(ResultFact::Interrupted) => {
                     json!({"kind":"indeterminate","attempt":attempt.id})
@@ -534,7 +542,7 @@ fn view(
         "schema":"sykli-production-view.v1", "production":request.id()?, "contract":request.contract_id,
         "target":request.target, "inputs":request.inputs, "context":request.context,
         "through_sequence":history.records.len(), "evaluator_version":"local.v1", "policy":"all-selected.v1",
-        "evaluation_inputs":{"executor_lease_held":controlling},
+        "evaluation_inputs":{"executor_lease_held":controlling,"attempt_lease_held":attempt_leases},
         "evaluated_at":history.records.last().map(|r| r.record.recorded_at),
         "work":work,"assessment":assessment,"delivery":delivery,"delivery_success":delivery_success,
         "records":history.records,"trust":"trusted-local-executor-and-store; no authenticity claim"
@@ -707,9 +715,9 @@ pub fn plan(path: &Path, target: &str) -> Result<Value, String> {
 pub fn inspect(store_path: &Path, id: &str) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = Request::load(&store, id)?;
-    let lease = Lease::acquire(&store.production(id)?);
+    let (controlling, _probe) = Lease::observe(&store.production(id)?.join("lease"))?;
     let history = History::load(&store, &request)?;
-    view(&store, &request, &history, lease.is_err())
+    view(&store, &request, &history, controlling)
 }
 
 pub fn compact(mut value: Value) -> Value {
@@ -989,6 +997,7 @@ pub fn executor(
     let store = Store::new(store_path)?;
     let directory = store.production(production)?;
     let _lease = Lease::received(&directory, fd)?;
+    let _attempt_lease = Lease::attempt(&directory, attempt_id)?;
     let request = Request::load(&store, production)?;
     let mut history = History::load(&store, &request)?;
     let attempt = history

@@ -366,17 +366,10 @@ impl Lease {
         }
         Ok(Self(file))
     }
-    pub fn journal(directory: &Path) -> Result<Self, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(directory.join("journal-lock"))
-            .map_err(err)?;
-        // SAFETY: a short exclusive lock serializes record reads and commits.
+    fn lock(file: File, mode: i32) -> Result<Self, String> {
+        // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
         loop {
-            if unsafe { flock(file.as_raw_fd(), 2) } == 0 {
+            if unsafe { flock(file.as_raw_fd(), mode) } == 0 {
                 return Ok(Self(file));
             }
             let error = std::io::Error::last_os_error();
@@ -384,6 +377,69 @@ impl Lease {
                 return Err(err(error));
             }
         }
+    }
+
+    pub fn journal(directory: &Path) -> Result<Self, String> {
+        let path = directory.join("journal-lock");
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(err)?,
+            Err(error) => return Err(err(error)),
+        };
+        Self::lock(file, 2) // LOCK_EX; the lock file's contents are never written.
+    }
+
+    pub fn journal_read(directory: &Path) -> Result<Option<Self>, String> {
+        match File::open(directory.join("journal-lock")) {
+            Ok(file) => Self::lock(file, 1).map(Some), // LOCK_SH
+            // Older stores have no journal lock. Read their validated atomic prefix.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(err(error)),
+        }
+    }
+
+    // Observe an existing lease without creating or writing any file. Retain an
+    // acquired lock until the caller finishes inspecting the corresponding state.
+    pub fn observe(path: &Path) -> Result<(bool, Option<Self>), String> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, None)),
+            Err(error) => return Err(err(error)),
+        };
+        loop {
+            // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
+            if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
+                return Ok((false, Some(Self(file))));
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok((true, None)),
+                std::io::ErrorKind::Interrupted => continue,
+                _ => return Err(err(error)),
+            }
+        }
+    }
+
+    pub fn attempt(directory: &Path, attempt: &str) -> Result<Self, String> {
+        digest(attempt)?;
+        let parent = directory.join("attempt-leases");
+        fs::create_dir_all(&parent).map_err(err)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(attempt))
+            .map_err(err)?;
+        // Wait for short-lived inspection probes before claiming this attempt.
+        // A duplicate executor checks the recorded terminal outcome after locking.
+        Self::lock(file, 2)
     }
     pub fn inherit(&self, command: &mut ProcessCommand) -> RawFd {
         let fd = self.0.as_raw_fd();
