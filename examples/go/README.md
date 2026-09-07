@@ -25,3 +25,14 @@ for machine-readable responses.
 Now change `return 42` to `return 43` in `main.go`, leaving the tests unchanged,
 and run `sykli produce app` again. The new production fails its checks. Inspect
 the original ID: its captured source, executable and passing checks remain.
+
+To reproduce this with separate agent invocations and save every command and
+result, run from the repository root:
+
+```sh
+python3 examples/production/demo.py --language go --binary "$(command -v sykli)" --output /tmp/sykli-go-demo.json
+```
+
+The script works in a temporary directory. It prepares the request, runs only
+the build, resumes both checks with fresh clients, retrieves their bound
+diagnostics, and proves changed source cannot inherit success.

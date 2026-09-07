@@ -366,6 +366,81 @@ impl Lease {
         }
         Ok(Self(file))
     }
+    fn lock(file: File, mode: i32) -> Result<Self, String> {
+        // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
+        loop {
+            if unsafe { flock(file.as_raw_fd(), mode) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err(error));
+            }
+        }
+    }
+
+    pub fn journal(directory: &Path) -> Result<Self, String> {
+        let path = directory.join("journal-lock");
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(err)?,
+            Err(error) => return Err(err(error)),
+        };
+        Self::lock(file, 2) // LOCK_EX; the lock file's contents are never written.
+    }
+
+    pub fn journal_read(directory: &Path) -> Result<Option<Self>, String> {
+        match File::open(directory.join("journal-lock")) {
+            Ok(file) => Self::lock(file, 1).map(Some), // LOCK_SH
+            // Older stores have no journal lock. Read their validated atomic prefix.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(err(error)),
+        }
+    }
+
+    // Observe an existing lease without creating or writing any file. Release
+    // the probe immediately: inspection must not reserve the controller lease.
+    pub fn observe(path: &Path) -> Result<bool, String> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(err(error)),
+        };
+        loop {
+            // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
+            if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
+                return Ok(false);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(true),
+                std::io::ErrorKind::Interrupted => continue,
+                _ => return Err(err(error)),
+            }
+        }
+    }
+
+    pub fn attempt(directory: &Path, attempt: &str) -> Result<Self, String> {
+        digest(attempt)?;
+        let parent = directory.join("attempt-leases");
+        fs::create_dir_all(&parent).map_err(err)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(attempt))
+            .map_err(err)?;
+        // Wait for short-lived inspection probes before claiming this attempt.
+        // A duplicate executor checks the recorded terminal outcome after locking.
+        Self::lock(file, 2)
+    }
     pub fn inherit(&self, command: &mut ProcessCommand) -> RawFd {
         let fd = self.0.as_raw_fd();
         // SAFETY: fcntl is async-signal-safe; no allocation in pre_exec.
@@ -426,4 +501,42 @@ pub fn snapshot(
         })?)?,
         ty: source.ty.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observing_a_lease_does_not_reserve_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-lease-{}-{}-{}",
+            std::process::id(),
+            now(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("lease");
+        assert!(!Lease::observe(&path).unwrap());
+        assert!(!path.exists(), "observation must not create a lease");
+        File::create(&path).unwrap();
+        let observed = Lease::observe(&path).unwrap();
+        // Other unit tests fork commands concurrently. A child can briefly
+        // inherit the probe's descriptor until exec closes it (CLOEXEC).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let next_controller = loop {
+            match Lease::acquire(&directory) {
+                Ok(lease) => break lease,
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "{error}");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        };
+        assert!(!observed);
+        assert!(Lease::observe(&path).unwrap());
+        assert!(Lease::acquire(&directory).is_err());
+        drop(next_controller);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

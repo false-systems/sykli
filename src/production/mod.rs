@@ -232,6 +232,11 @@ impl History {
     }
 
     fn load(store: &Store, request: &Request) -> Result<Self, String> {
+        let _journal = Lease::journal_read(&store.production(&request.id()?)?)?;
+        Self::load_unlocked(store, request)
+    }
+
+    fn load_unlocked(store: &Store, request: &Request) -> Result<Self, String> {
         let production = request.id()?;
         let directory = store.production(&production)?.join("records");
         let mut paths = Vec::new();
@@ -300,7 +305,10 @@ impl History {
                     || context != &identity("sykli-context.v1", &request.context)?
                     || executor != "local-shell.v1"
                     || supersedes.as_ref() != self.latest.get(operation)
-                    || self.attempts.values().any(|a| a.result.is_none())
+                    || self
+                        .attempts
+                        .values()
+                        .any(|a| a.operation == *operation && a.result.is_none())
                     || inputs_for(op, request, &self.accepted(request)?).as_ref() != Some(inputs)
                 {
                     return Err("invalid attempt lineage, invocation or input binding".into());
@@ -395,6 +403,8 @@ impl History {
     }
 
     fn append(&mut self, store: &Store, request: &Request, fact: Fact) -> Result<(), String> {
+        let _journal = Lease::journal(&store.production(&request.id()?)?)?;
+        *self = Self::load_unlocked(store, request)?;
         self.apply(request, &fact)?;
         let record = Record {
             schema: "sykli-production-record.v1".into(),
@@ -427,6 +437,7 @@ fn view(
     let mut accepted = BTreeMap::new();
     let mut checks = BTreeMap::new();
     let mut work = BTreeMap::new();
+    let mut attempt_leases = BTreeMap::new();
     for (name, reasons) in request.target().selected()? {
         let op = &request.target().operations[&name];
         let inputs = inputs_for(op, request, &accepted);
@@ -445,7 +456,17 @@ fn view(
                     json!({"kind":"satisfied","attempt":attempt.id})
                 }
                 None => {
-                    json!({"kind":if controlling {"running"} else {"indeterminate"},"attempt":attempt.id})
+                    let lost = history.records.iter().any(|record| matches!(
+                        &record.record.fact, Fact::ContactLost { attempt: id, .. } if id == &attempt.id
+                    ));
+                    let live = Lease::observe(
+                        &store
+                            .production(&request.id()?)?
+                            .join("attempt-leases")
+                            .join(&attempt.id),
+                    )?;
+                    attempt_leases.insert(attempt.id.clone(), live);
+                    json!({"kind":if live && !lost {"running"} else {"indeterminate"},"attempt":attempt.id})
                 }
                 Some(ResultFact::Interrupted) => {
                     json!({"kind":"indeterminate","attempt":attempt.id})
@@ -468,7 +489,14 @@ fn view(
                 json!({"kind":"blocked","reasons":missing})
             }
         } else {
-            json!({"kind":"blocked","reasons":[{"kind":"dependency-unsatisfied","operation":name}]})
+            let reasons: Vec<_> = op.inputs.values().filter_map(|input| {
+                if bound(&input.from, request, &accepted).is_some() { return None; }
+                match &input.from {
+                    Binding::OperationOutput { operation, port } => Some(json!({"kind":"dependency-unsatisfied","operation":operation,"port":port})),
+                    Binding::TargetInput { port } => Some(json!({"kind":"missing-input","port":port})),
+                }
+            }).collect();
+            json!({"kind":"blocked","reasons":reasons})
         };
         work.insert(name, json!({"state":state,"required_because":reasons}));
     }
@@ -514,7 +542,7 @@ fn view(
         "schema":"sykli-production-view.v1", "production":request.id()?, "contract":request.contract_id,
         "target":request.target, "inputs":request.inputs, "context":request.context,
         "through_sequence":history.records.len(), "evaluator_version":"local.v1", "policy":"all-selected.v1",
-        "evaluation_inputs":{"executor_lease_held":controlling},
+        "evaluation_inputs":{"executor_lease_held":controlling,"attempt_lease_held":attempt_leases},
         "evaluated_at":history.records.last().map(|r| r.record.recorded_at),
         "work":work,"assessment":assessment,"delivery":delivery,"delivery_success":delivery_success,
         "records":history.records,"trust":"trusted-local-executor-and-store; no authenticity claim"
@@ -711,9 +739,88 @@ pub fn plan(path: &Path, target: &str) -> Result<Value, String> {
 pub fn inspect(store_path: &Path, id: &str) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = Request::load(&store, id)?;
-    let lease = Lease::acquire(&store.production(id)?);
+    let controlling = Lease::observe(&store.production(id)?.join("lease"))?;
     let history = History::load(&store, &request)?;
-    view(&store, &request, &history, lease.is_err())
+    view(&store, &request, &history, controlling)
+}
+
+pub fn compact(mut value: Value) -> Value {
+    let held = value["evaluation_inputs"]["executor_lease_held"] == true;
+    let unresolved = value["work"]
+        .as_object()
+        .is_some_and(|work| work.values().any(|w| w["state"]["kind"] == "indeterminate"));
+    let ready: Vec<_> = value["work"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, w)| !held && !unresolved && w["state"]["kind"] == "ready")
+        .map(|(name, _)| name.clone())
+        .collect();
+    let records = value
+        .as_object_mut()
+        .unwrap()
+        .remove("records")
+        .unwrap_or(json!([]));
+    let production = value["production"].clone();
+    for work in value["work"].as_object_mut().unwrap().values_mut() {
+        if let Some(attempt) = work["state"]["attempt"].as_str().map(str::to_owned) {
+            work["diagnostics"] = json!({"production":production,"attempt":attempt});
+            if let Some(fact) = records
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rev()
+                .map(|r| &r["record"]["fact"])
+                .find(|f| f["kind"] == "finished" && f["attempt"] == attempt)
+            {
+                if let Some(reason) = failure_reason(fact) {
+                    work["failure"] = reason.into();
+                }
+            }
+        }
+    }
+    value["schema"] = "sykli-production-state.v1".into();
+    value["ready"] = json!(ready);
+    value["execution_blockers"] = json!(if held {
+        vec!["production-busy"]
+    } else if unresolved {
+        vec!["attempt-unresolved"]
+    } else {
+        vec![]
+    });
+    value
+}
+
+pub fn diagnostics(store_path: &Path, id: &str, attempt: &str) -> Result<Value, String> {
+    let store = Store::new(store_path)?;
+    let request = Request::load(&store, id)?;
+    let history = History::load(&store, &request)?;
+    let selected = history
+        .attempts
+        .get(attempt)
+        .ok_or("attempt not found in this production")?;
+    let records: Vec<_> = history
+        .records
+        .iter()
+        .filter(|r| match &r.record.fact {
+            Fact::Started { attempt: a, .. }
+            | Fact::Finished { attempt: a, .. }
+            | Fact::ContactLost { attempt: a, .. } => a == attempt,
+        })
+        .collect();
+    Ok(
+        json!({"schema":"sykli-production-diagnostics.v1", "production":id,
+        "attempt":attempt,"operation":selected.operation,"records":records}),
+    )
+}
+
+fn failure_reason(fact: &Value) -> Option<&str> {
+    let observation = &fact["observation"];
+    observation["collection_error"]
+        .as_str()
+        .or(observation["error"].as_str())
+        .or(observation["execution"]["error"].as_str())
+        .or(fact["result"]["code"].as_str())
 }
 
 pub fn produce(
@@ -721,13 +828,18 @@ pub fn produce(
     path: &Path,
     target: &str,
     stop_after: Option<&str>,
+    prepare: bool,
+    jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = request(&store, path, target)?;
     let directory = store.production(&request.id()?)?;
     fs::create_dir_all(&directory).map_err(err)?;
     publish(&directory.join("request.json"), &canonical(&request)?)?;
-    advance(&store, &request, None, stop_after)
+    if prepare {
+        return inspect(store_path, &request.id()?);
+    }
+    advance(&store, &request, None, stop_after, None, jobs)
 }
 
 pub fn resume(
@@ -735,10 +847,12 @@ pub fn resume(
     id: &str,
     retry: Option<&str>,
     stop_after: Option<&str>,
+    operation: Option<&str>,
+    jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = Request::load(&store, id)?;
-    advance(&store, &request, retry, stop_after)
+    advance(&store, &request, retry, stop_after, operation, jobs)
 }
 
 fn advance(
@@ -746,13 +860,21 @@ fn advance(
     request: &Request,
     retry: Option<&str>,
     stop_after: Option<&str>,
+    operation: Option<&str>,
+    jobs: usize,
 ) -> Result<Value, String> {
+    if jobs == 0 || (jobs > 1 && (stop_after.is_some() || retry.is_some())) {
+        return Err("jobs must be positive; --stop-after and --retry require --jobs 1".into());
+    }
+    if operation.is_some() && retry.is_some() && operation != retry {
+        return Err("--operation and --retry must select the same operation".into());
+    }
     let id = request.id()?;
     let directory = store.production(&id)?;
     let lease = Lease::acquire(&directory)?;
     let mut history = History::load(store, request)?;
     let selected = request.target().selected()?;
-    for option in [retry, stop_after].into_iter().flatten() {
+    for option in [retry, stop_after, operation].into_iter().flatten() {
         if !selected.iter().any(|(n, _)| n == option) {
             return Err(format!("operation {option} is not selected"));
         }
@@ -792,80 +914,97 @@ fn advance(
             return Err("retry requires an earlier terminal attempt".into());
         }
     }
-    for (name, _) in selected {
+    let mut retried = false;
+    loop {
+        history = History::load(store, request)?;
         let current = view(store, request, &history, false)?;
-        let state = current["work"][&name]["state"]["kind"]
-            .as_str()
-            .unwrap_or("blocked");
-        if state != "ready" && retry != Some(name.as_str()) {
-            continue;
-        }
-        let op = &request.target().operations[&name];
-        let Some(inputs) = inputs_for(op, request, &history.accepted(request)?) else {
-            continue;
-        };
-        if inputs.values().any(|a| store.available(a).is_err()) {
-            continue;
-        }
-        let attempt = identity(
-            "sykli-attempt.v1",
-            &json!({"production":id,"sequence":history.records.len()+1,"time":now(),"pid":std::process::id()}),
-        )?;
-        history.append(
-            store,
-            request,
-            Fact::Started {
-                attempt: attempt.clone(),
-                operation: name.clone(),
-                inputs,
-                recipe: identity("sykli-recipe.v1", op)?,
-                context: identity("sykli-context.v1", &request.context)?,
-                supersedes: history.latest.get(&name).cloned(),
-                executor: "local-shell.v1".into(),
-            },
-        )?;
-        let mut child = ProcessCommand::new(std::env::current_exe().map_err(err)?);
-        let fd = lease.inherit(&mut child);
-        child
-            .args(["__production_attempt", "--store"])
-            .arg(&store.0)
-            .args([
-                "--production",
-                &id,
-                "--attempt",
-                &attempt,
-                "--lease-fd",
-                &fd.to_string(),
-            ]);
-        fs::create_dir_all(directory.join("logs")).map_err(err)?;
-        let log =
-            fs::File::create(directory.join("logs").join(format!("{attempt}.log"))).map_err(err)?;
-        child
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().map_err(err)?)
-            .stderr(log);
-        // A started-but-unspawned attempt remains unknown after a crash; never fabricate success.
-        match child.spawn() {
-            Ok(mut child) => {
-                let _ = child.wait();
+        let candidates: Vec<_> = selected
+            .iter()
+            .filter(|(name, _)| {
+                operation.is_none_or(|op| op == name)
+                    && (current["work"][name]["state"]["kind"] == "ready"
+                        || (!retried && retry == Some(name.as_str())))
+            })
+            .take(jobs)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut children = Vec::new();
+        let mut launched = Vec::new();
+        for name in candidates {
+            let op = &request.target().operations[&name];
+            let Some(inputs) = inputs_for(op, request, &history.accepted(request)?) else {
+                continue;
+            };
+            if inputs.values().any(|a| store.available(a).is_err()) {
+                continue;
             }
-            Err(error) => {
-                history.append(
-                    store,
-                    request,
-                    Fact::Finished {
-                        attempt,
-                        result: ResultFact::ExecutionFailed {
-                            code: "spawn-failed".into(),
+            if retry == Some(name.as_str()) {
+                retried = true;
+            }
+            let attempt = identity(
+                "sykli-attempt.v1",
+                &json!({"production":id,"sequence":history.records.len()+1,"time":now(),"pid":std::process::id()}),
+            )?;
+            history.append(
+                store,
+                request,
+                Fact::Started {
+                    attempt: attempt.clone(),
+                    operation: name.clone(),
+                    inputs,
+                    recipe: identity("sykli-recipe.v1", op)?,
+                    context: identity("sykli-context.v1", &request.context)?,
+                    supersedes: history.latest.get(&name).cloned(),
+                    executor: "local-shell.v1".into(),
+                },
+            )?;
+            let mut child = ProcessCommand::new(std::env::current_exe().map_err(err)?);
+            let fd = lease.inherit(&mut child);
+            child
+                .args(["__production_attempt", "--store"])
+                .arg(&store.0)
+                .args([
+                    "--production",
+                    &id,
+                    "--attempt",
+                    &attempt,
+                    "--lease-fd",
+                    &fd.to_string(),
+                ]);
+            fs::create_dir_all(directory.join("logs")).map_err(err)?;
+            let log = fs::File::create(directory.join("logs").join(format!("{attempt}.log")))
+                .map_err(err)?;
+            child
+                .stdin(Stdio::null())
+                .stdout(log.try_clone().map_err(err)?)
+                .stderr(log);
+            // A started-but-unspawned attempt remains unknown after a crash; never fabricate success.
+            match child.spawn() {
+                Ok(child) => children.push(child),
+                Err(error) => {
+                    history.append(
+                        store,
+                        request,
+                        Fact::Finished {
+                            attempt,
+                            result: ResultFact::ExecutionFailed {
+                                code: "spawn-failed".into(),
+                            },
+                            observation: json!({"error":error.to_string()}),
                         },
-                        observation: json!({"error":error.to_string()}),
-                    },
-                )?;
+                    )?;
+                }
             }
+            launched.push(name);
+        }
+        for mut child in children {
+            let _ = child.wait();
         }
         history = History::load(store, request)?;
-        if history.attempts.values().any(|a| a.result.is_none())
-            || stop_after == Some(name.as_str())
+        if launched.is_empty()
+            || operation.is_some()
+            || history.attempts.values().any(|a| a.result.is_none())
+            || stop_after.is_some_and(|stop| launched.iter().any(|name| name == stop))
         {
             break;
         }
@@ -882,6 +1021,7 @@ pub fn executor(
     let store = Store::new(store_path)?;
     let directory = store.production(production)?;
     let _lease = Lease::received(&directory, fd)?;
+    let _attempt_lease = Lease::attempt(&directory, attempt_id)?;
     let request = Request::load(&store, production)?;
     let mut history = History::load(&store, &request)?;
     let attempt = history
@@ -1038,6 +1178,27 @@ fn blocker_summary(reason: &Value) -> String {
 fn human_summary(value: &Value) -> Option<String> {
     let mut lines = Vec::new();
     match value["schema"].as_str()? {
+        "sykli-production-diagnostics.v1" => {
+            lines.push(format!(
+                "{}: attempt {}",
+                value["operation"].as_str()?,
+                value["attempt"].as_str()?
+            ));
+            for record in value["records"].as_array()? {
+                let fact = &record["record"]["fact"];
+                if let Some(reason) = failure_reason(fact).or(fact["reason"].as_str()) {
+                    lines.push(reason.into());
+                }
+                for stream in ["stdout", "stderr"] {
+                    if let Some(capture) = fact["observation"]["execution"][stream]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                    {
+                        lines.push(format!("\n{stream}:\n{capture}"));
+                    }
+                }
+            }
+        }
         "sykli-targets.v1" => {
             lines.push("Available targets".into());
             for (name, target) in value["targets"].as_object()? {
@@ -1073,7 +1234,7 @@ fn human_summary(value: &Value) -> Option<String> {
                 lines.push(format!("  Blocked: {}", blocker_summary(blocker)));
             }
         }
-        "sykli-production-view.v1" => {
+        "sykli-production-view.v1" | "sykli-production-state.v1" => {
             let state = if value["delivery_success"] == true {
                 "complete, artifact available"
             } else if value["assessment"]["kind"] == "complete" {
@@ -1091,41 +1252,27 @@ fn human_summary(value: &Value) -> Option<String> {
                         lines.push(format!("    {}", blocker_summary(reason)));
                     }
                 }
-                if kind == "failed" {
-                    if let Some(fact) = value["records"]
-                        .as_array()?
-                        .iter()
+                if matches!(kind, "failed" | "indeterminate") {
+                    let fact = value["records"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
                         .rev()
                         .map(|record| &record["record"]["fact"])
                         .find(|fact| {
                             fact["kind"] == "finished" && fact["attempt"] == state["attempt"]
-                        })
+                        });
+                    if let Some(reason) = work["failure"]
+                        .as_str()
+                        .or_else(|| fact.and_then(failure_reason))
                     {
-                        let observation = &fact["observation"];
-                        let reason = observation["collection_error"]
-                            .as_str()
-                            .or(observation["error"].as_str())
-                            .or(observation["execution"]["error"].as_str())
-                            .or(fact["result"]["code"].as_str());
-                        if let Some(reason) = reason {
-                            lines.push(format!("    {reason}"));
-                        }
-                        for stream in ["stdout", "stderr"] {
-                            if let Some(capture) = observation["execution"][stream]
-                                .as_str()
-                                .filter(|capture| !capture.is_empty())
-                            {
-                                lines.push(format!("    {stream} (last 20 lines):"));
-                                let tail = capture.lines().rev().take(20).collect::<Vec<_>>();
-                                for line in tail.into_iter().rev() {
-                                    lines.push(format!(
-                                        "      {}",
-                                        line.chars().take(240).collect::<String>()
-                                    ));
-                                }
-                            }
-                        }
+                        lines.push(format!("    {reason}"));
                     }
+                    lines.push(format!(
+                        "    Diagnostics: sykli diagnostics {} {}",
+                        value["production"].as_str()?,
+                        state["attempt"].as_str()?
+                    ));
                 }
             }
             for (name, product) in value["delivery"].as_object()? {

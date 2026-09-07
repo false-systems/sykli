@@ -111,7 +111,8 @@ Input source: 80712fc0...
 ```
 
 The actual output contains the full path and IDs, ready to copy. On failure,
-the summary shows the failed operation, its error and labeled stdout/stderr tails.
+the summary shows the failed operation, its error and a diagnostics command.
+Command output stays recorded until you explicitly request it.
 An available artifact can still have unfinished or failed checks; the first line
 reports whether production is complete.
 
@@ -159,6 +160,45 @@ Editing source and running `produce` creates a new production. `resume` always
 uses the original captured source, even if your working files have changed.
 Old passing checks cannot complete work for different source or executable bytes.
 
+## A small loop for agents
+
+Prepare the exact source without starting a build:
+
+```sh
+sykli produce app --prepare --summary --json
+```
+
+Keep the returned production ID. Compact state includes `ready`, `work`, input
+identities and artifact delivery, with no embedded execution logs:
+
+```sh
+sykli status PRODUCTION_ID --summary --json
+sykli resume PRODUCTION_ID --operation build --summary --json
+sykli status PRODUCTION_ID --summary --json
+```
+
+`--operation` runs only the named operation when its inputs are available. It
+never builds dependencies implicitly or retries a failed attempt. It still
+exits 1 while the overall production is incomplete; inspect the operation state
+for its result. Repeating a satisfied operation does not run it again.
+
+To finish all remaining work with up to two independent operations at once:
+
+```sh
+sykli resume PRODUCTION_ID --jobs 2 --summary --json
+```
+
+A busy production or unresolved attempt leaves `ready` empty and explains why
+in `execution_blockers`. Readiness is a snapshot; execution checks it again.
+Retrieve recorded output only when needed, using the attempt ID from `work`:
+
+```sh
+sykli diagnostics PRODUCTION_ID ATTEMPT_ID --json
+```
+
+Humans can omit `--json`. Existing full JSON responses remain available by
+omitting `--summary`. No server or agent SDK is required.
+
 ## When something fails
 
 - **A command failed:** inspect `status`. To retry a failed build explicitly,
@@ -191,6 +231,9 @@ It builds a tiny program that prints `42`, exits after compilation, finishes
 from a fresh invocation, then changes the source and shows that the old checks
 do not make the new version pass. It prints the artifact location and saves
 all commands and results in `/tmp/sykli-demo.json`.
+The demonstration uses the agent loop: prepare, select the build, inspect,
+resume the remaining checks, and retrieve their diagnostics. Add `--language go`
+to run the same workflow with the dependency-free Go example.
 
 ## Existing graph workflow
 
