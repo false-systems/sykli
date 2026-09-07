@@ -1222,6 +1222,23 @@ fn empty_task_receipt(
     }
 }
 
+fn input_digest(path: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    let executable_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o111
+    };
+    #[cfg(not(unix))]
+    let executable_mode = 0_u32;
+    let bytes = serde_json::to_vec(&("sykli-input.v2", sha256_file(path)?, executable_mode))
+        .map_err(|error| error.to_string())?;
+    Ok(sha256(&bytes))
+}
+
 fn cache_key(task: &Task, runtime: &ShellRuntime) -> Result<String, String> {
     #[derive(Serialize)]
     struct Key<'a> {
@@ -1238,7 +1255,7 @@ fn cache_key(task: &Task, runtime: &ShellRuntime) -> Result<String, String> {
         if !path.is_file() {
             return Err(format!("declared input {input:?} is missing or not a file"));
         }
-        inputs.insert(input.as_str(), sha256_file(&path)?);
+        inputs.insert(input.as_str(), input_digest(&path)?);
     }
     let bytes = serde_json::to_vec(&Key {
         task,
@@ -1258,7 +1275,7 @@ fn declared_inputs_digest(contract: &Contract) -> Result<String, String> {
             let files: BTreeMap<_, _> = task
                 .inputs
                 .iter()
-                .map(|input| (input, sha256_file(&root.join(input)).ok()))
+                .map(|input| (input, input_digest(&root.join(input)).ok()))
                 .collect();
             (&task.name, files)
         })

@@ -11,6 +11,80 @@ fn help_states_the_identity() {
     assert!(text.contains("declared work graphs"));
 }
 
+#[cfg(unix)]
+#[test]
+fn executable_mode_invalidates_cache_and_receipt_inputs() {
+    use std::os::unix::fs::PermissionsExt;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-mode-{nonce}"));
+    fs::create_dir(&root).unwrap();
+    // Ignore the input so receipt verification cannot rely on Git's mode tracking.
+    fs::write(root.join(".gitignore"), "script\n").unwrap();
+    fs::write(root.join("script"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(root.join("sykli.json"), r#"{"schema":"sykli-contract.v1","tasks":[{"name":"mode","run":"./script","inputs":["script"]}]}"#).unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    fs::set_permissions(root.join("script"), fs::Permissions::from_mode(0o755)).unwrap();
+    let first = run();
+    assert!(first.status.success());
+    let cached: serde_json::Value = serde_json::from_slice(&run().stdout).unwrap();
+    assert_eq!(cached["tasks"][0]["outcome"], "cached");
+    let receipt = root.join(".sykli/mode-receipt.json");
+    fs::write(&receipt, first.stdout).unwrap();
+    fs::set_permissions(root.join("script"), fs::Permissions::from_mode(0o644)).unwrap();
+    let verified = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .arg("verify")
+        .arg(&receipt)
+        .args(["--contract", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(verified.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("mismatch: inputs"));
+    let changed = run();
+    assert_eq!(changed.status.code(), Some(1));
+    let failed: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_eq!(failed["tasks"][0]["outcome"], "failed");
+    fs::set_permissions(root.join("script"), fs::Permissions::from_mode(0o755)).unwrap();
+    let restored = run();
+    assert!(restored.status.success());
+    let restored: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["tasks"][0]["outcome"], "cached");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn validate_reports_invalid_contracts() {
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
