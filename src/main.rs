@@ -84,6 +84,15 @@ enum Command {
         /// Stop at a durable operation boundary (incomplete delivery exits 1)
         #[arg(long)]
         stop_after: Option<String>,
+        /// Capture the request without executing operations
+        #[arg(long, conflicts_with = "stop_after")]
+        prepare: bool,
+        /// Maximum independent operations per execution wave
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        /// Omit execution records and expose ready work
+        #[arg(long)]
+        summary: bool,
         #[arg(long)]
         json: bool,
     },
@@ -93,6 +102,8 @@ enum Command {
         production: String,
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        #[arg(long)]
+        summary: bool,
         #[arg(long)]
         json: bool,
     },
@@ -106,6 +117,13 @@ enum Command {
         retry: Option<String>,
         #[arg(long)]
         stop_after: Option<String>,
+        /// Execute only this operation; dependencies must already be satisfied
+        #[arg(long, conflicts_with = "stop_after")]
+        operation: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        #[arg(long)]
+        summary: bool,
         #[arg(long)]
         json: bool,
     },
@@ -113,6 +131,16 @@ enum Command {
     #[cfg(unix)]
     VerifyProduction {
         production: String,
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retrieve recorded diagnostics for one attempt, including historical attempts
+    #[cfg(unix)]
+    Diagnostics {
+        production: String,
+        attempt: String,
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
         #[arg(long)]
@@ -229,18 +257,42 @@ fn main() -> ExitCode {
             contract,
             store,
             stop_after,
+            prepare,
+            jobs,
+            summary,
             json,
         } => production::report(
-            production::produce(&store, &contract, &target, stop_after.as_deref()),
+            production::produce(
+                &store,
+                &contract,
+                &target,
+                stop_after.as_deref(),
+                prepare,
+                jobs,
+            )
+            .map(|v| if summary { production::compact(v) } else { v }),
             json,
-            true,
+            !prepare,
         ),
         #[cfg(unix)]
         Command::Status {
             production: id,
             store,
+            summary,
             json,
-        } => production::report(production::inspect(&store, &id), json, false),
+        } => production::report(
+            production::inspect(&store, &id)
+                .map(|v| if summary { production::compact(v) } else { v }),
+            json,
+            false,
+        ),
+        #[cfg(unix)]
+        Command::Diagnostics {
+            production: id,
+            attempt,
+            store,
+            json,
+        } => production::report(production::diagnostics(&store, &id, &attempt), json, false),
         #[cfg(unix)]
         Command::VerifyProduction {
             production: id,
@@ -253,9 +305,20 @@ fn main() -> ExitCode {
             store,
             retry,
             stop_after,
+            operation,
+            jobs,
+            summary,
             json,
         } => production::report(
-            production::resume(&store, &id, retry.as_deref(), stop_after.as_deref()),
+            production::resume(
+                &store,
+                &id,
+                retry.as_deref(),
+                stop_after.as_deref(),
+                operation.as_deref(),
+                jobs,
+            )
+            .map(|v| if summary { production::compact(v) } else { v }),
             json,
             true,
         ),

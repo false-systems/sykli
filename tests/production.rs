@@ -888,7 +888,8 @@ fn human_output_explains_progress_delivery_and_failure_without_dumping_records()
     });
     let failed = human(&["produce", "app"], 1);
     assert!(failed.contains("smoke_test: failed"));
-    assert!(failed.contains("smoke regression: wrong output"));
+    assert!(!failed.contains("smoke regression: wrong output"));
+    assert!(failed.contains("Diagnostics: sykli diagnostics"));
     f.edit(|c| c["targets"]["app"]["profile"]["tools"] = json!(["sykli_missing_test_tool"]));
     assert!(
         human(&["plan", "sykli.production.json", "--target", "app"], 0)
@@ -897,7 +898,7 @@ fn human_output_explains_progress_delivery_and_failure_without_dumping_records()
 }
 
 #[test]
-fn human_output_includes_rust_test_failures_from_stdout() {
+fn diagnostics_explicitly_retrieves_rust_test_failure_without_polluting_status() {
     let f = Fixture::new();
     f.write(
         "main.rs",
@@ -907,18 +908,34 @@ fn human_output_includes_rust_test_failures_from_stdout() {
     assert_eq!(output.status.code(), Some(1));
     let human = String::from_utf8(output.stdout).unwrap();
     assert!(human.contains("unit_tests: failed"));
-    assert!(human.contains("stdout (last 20 lines):"));
-    assert!(human.contains("meaningful_failure"));
-    assert!(human.contains("business invariant failed"));
+    assert!(human.contains("Diagnostics: sykli diagnostics"));
+    assert!(!human.contains("business invariant failed"));
     let production = id(&f.plan()).to_owned();
     let status = f.command(&["status", &production]).output().unwrap();
     assert!(status.status.success());
     assert!(
-        String::from_utf8(status.stdout)
+        !String::from_utf8(status.stdout)
             .unwrap()
             .contains("business invariant failed")
     );
     let structured = f.call(&["status", &production, "--json"], 0);
+    let attempt = structured["work"]["unit_tests"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    let diagnostic = f
+        .command(&["diagnostics", &production, attempt])
+        .output()
+        .unwrap();
+    assert!(diagnostic.status.success());
+    assert!(
+        String::from_utf8(diagnostic.stdout)
+            .unwrap()
+            .contains("business invariant failed")
+    );
+    let diagnostic = f.call(&["diagnostics", &production, attempt, "--json"], 0);
+    assert_eq!(diagnostic["records"].as_array().unwrap().len(), 2);
+    f.call(&["diagnostics", &production, &"0".repeat(64), "--json"], 2);
+
     assert!(
         structured["records"]
             .as_array()
@@ -930,4 +947,303 @@ fn human_output_includes_rust_test_failures_from_stdout() {
                     .is_some_and(|stdout| stdout.contains("business invariant failed"))
             })
     );
+}
+
+#[test]
+fn agent_prepares_inspects_and_executes_only_the_selected_operation() {
+    let f = Fixture::new();
+    let prepared = f.call(&["produce", "app", "--prepare", "--summary", "--json"], 0);
+    assert_eq!(prepared["schema"], "sykli-production-state.v1");
+    assert_eq!(prepared["through_sequence"], 0);
+    assert_eq!(prepared["ready"], json!(["build", "unit_tests"]));
+    assert!(prepared.get("records").is_none());
+    let production = id(&prepared);
+    let blocked = f.call(
+        &[
+            "resume",
+            production,
+            "--operation",
+            "smoke_test",
+            "--summary",
+            "--json",
+        ],
+        1,
+    );
+    assert_eq!(blocked["through_sequence"], 0);
+    f.call(
+        &["resume", production, "--operation", "absent", "--json"],
+        2,
+    );
+    let tested = f.call(
+        &[
+            "resume",
+            production,
+            "--operation",
+            "unit_tests",
+            "--summary",
+            "--json",
+        ],
+        1,
+    );
+    assert_eq!(tested["through_sequence"], 2);
+    assert_eq!(state(&tested, "build"), "ready");
+    assert_eq!(state(&tested, "unit_tests"), "satisfied");
+    let duplicate = f.call(
+        &[
+            "resume",
+            production,
+            "--operation",
+            "unit_tests",
+            "--summary",
+            "--json",
+        ],
+        1,
+    );
+    assert_eq!(duplicate["through_sequence"], 2);
+    let built = f.call(
+        &[
+            "resume",
+            production,
+            "--operation",
+            "build",
+            "--summary",
+            "--json",
+        ],
+        1,
+    );
+    assert_eq!(built["ready"], json!(["smoke_test"]));
+    let complete = f.call(
+        &[
+            "resume",
+            production,
+            "--operation",
+            "smoke_test",
+            "--summary",
+            "--json",
+        ],
+        0,
+    );
+    assert_eq!(complete["through_sequence"], 6);
+    assert_eq!(complete["delivery_success"], true);
+    assert_eq!(complete["ready"], json!([]));
+}
+
+#[test]
+fn parallel_operations_survive_controller_loss_and_serialize_terminal_records() {
+    let f = Fixture::new();
+    for operation in ["build", "unit_tests"] {
+        assert!(
+            Command::new("mkfifo")
+                .arg(f.0.join(format!("{operation}.release")))
+                .status()
+                .unwrap()
+                .success()
+        );
+        f.edit(|c| {
+            let run = c["targets"]["app"]["operations"][operation]["run"]
+                .as_str()
+                .unwrap();
+            c["targets"]["app"]["operations"][operation]["run"] = format!(
+                "printf ready > '{}'; read token < '{}'; {run}",
+                f.0.join(format!("{operation}.ready")).display(),
+                f.0.join(format!("{operation}.release")).display()
+            )
+            .into();
+        });
+    }
+    let prepared = f.call(&["produce", "app", "--prepare", "--json"], 0);
+    let production = id(&prepared);
+    let mut controller = f
+        .command(&["resume", production, "--jobs", "2", "--json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(|| f.0.join("build.ready").exists() && f.0.join("unit_tests.ready").exists());
+    let running = f.call(&["status", production, "--summary", "--json"], 0);
+    assert_eq!(state(&running, "build"), "running");
+    assert_eq!(state(&running, "unit_tests"), "running");
+    assert_eq!(running["ready"], json!([]));
+    assert_eq!(running["execution_blockers"], json!(["production-busy"]));
+    controller.kill().unwrap();
+    controller.wait().unwrap();
+    f.call(
+        &["resume", production, "--operation", "unit_tests", "--json"],
+        2,
+    );
+    for operation in ["build", "unit_tests"] {
+        fs::write(f.0.join(format!("{operation}.release")), "go\n").unwrap();
+    }
+    wait_until(|| {
+        let status = f.call(&["status", production, "--json"], 0);
+        state(&status, "build") == "satisfied"
+            && state(&status, "unit_tests") == "satisfied"
+            && status["evaluation_inputs"]["executor_lease_held"] == false
+    });
+    let stopped = f.call(&["status", production, "--summary", "--json"], 0);
+    assert_eq!(stopped["through_sequence"], 4);
+    assert_eq!(stopped["ready"], json!(["smoke_test"]));
+    let finished = f.call(&["resume", production, "--jobs", "2", "--json"], 0);
+    assert_eq!(finished["records"].as_array().unwrap().len(), 6);
+    f.call(&["verify-production", production, "--json"], 0);
+}
+
+#[test]
+fn a_dead_parallel_executor_is_indeterminate_while_its_peer_is_running() {
+    let f = Fixture::new();
+    for operation in ["build", "unit_tests"] {
+        assert!(
+            Command::new("mkfifo")
+                .arg(f.0.join(format!("{operation}.release")))
+                .status()
+                .unwrap()
+                .success()
+        );
+        f.edit(|c| {
+            let run = c["targets"]["app"]["operations"][operation]["run"]
+                .as_str()
+                .unwrap();
+            c["targets"]["app"]["operations"][operation]["run"] = format!(
+                "printf '%s' \"$PPID\" > '{}'; read token < '{}'; {run}; printf done > '{}'",
+                f.0.join(format!("{operation}.executor")).display(),
+                f.0.join(format!("{operation}.release")).display(),
+                f.0.join(format!("{operation}.done")).display()
+            )
+            .into();
+        });
+    }
+    let prepared = f.call(&["produce", "app", "--prepare", "--json"], 0);
+    let production = id(&prepared);
+    let mut controller = f
+        .command(&["resume", production, "--jobs", "2", "--json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(|| {
+        ["build", "unit_tests"].iter().all(|op| {
+            fs::read_to_string(f.0.join(format!("{op}.executor"))).is_ok_and(|pid| !pid.is_empty())
+        })
+    });
+    let executor = fs::read_to_string(f.0.join("build.executor")).unwrap();
+    let children = || {
+        String::from_utf8(
+            Command::new("pgrep")
+                .args(["-P", &controller.id().to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+    assert!(children().lines().any(|pid| pid == executor));
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &executor])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_until(|| !children().lines().any(|pid| pid == executor));
+    let status = f.call(&["status", production, "--summary", "--json"], 0);
+    assert_eq!(state(&status, "build"), "indeterminate");
+    assert_eq!(state(&status, "unit_tests"), "running");
+    let dead = status["work"]["build"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    let live = status["work"]["unit_tests"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        status["evaluation_inputs"]["attempt_lease_held"][dead],
+        false
+    );
+    assert_eq!(
+        status["evaluation_inputs"]["attempt_lease_held"][live],
+        true
+    );
+    for operation in ["build", "unit_tests"] {
+        fs::write(f.0.join(format!("{operation}.release")), "go\n").unwrap();
+    }
+    controller.wait().unwrap();
+    wait_until(|| f.0.join("build.done").exists() && f.0.join("unit_tests.done").exists());
+    let retry = f.call(&["resume", production, "--retry", "build", "--json"], 1);
+    assert_eq!(state(&retry, "build"), "indeterminate");
+}
+
+#[test]
+fn inspection_works_on_read_only_stores_with_or_without_journal_locks() {
+    use std::os::unix::fs::PermissionsExt;
+    fn entries(path: &Path, paths: &mut Vec<(PathBuf, u32)>) {
+        paths.push((
+            path.to_owned(),
+            fs::metadata(path).unwrap().permissions().mode(),
+        ));
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                entries(&entry.unwrap().path(), paths);
+            }
+        }
+    }
+    let f = Fixture::new();
+    let complete = f.call(&["produce", "app", "--json"], 0);
+    let production = id(&complete);
+    let attempt = complete["work"]["build"]["state"]["attempt"]
+        .as_str()
+        .unwrap();
+    let directory = f.records(production).parent().unwrap().to_owned();
+    for legacy in [false, true] {
+        if legacy {
+            fs::remove_file(directory.join("journal-lock")).unwrap();
+            fs::remove_file(directory.join("lease")).unwrap();
+        }
+        let mut paths = Vec::new();
+        entries(&f.0.join(".sykli"), &mut paths);
+        for (path, mode) in &paths {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o222)).unwrap();
+        }
+        // A concurrent inspector's shared lease must not look like a controller.
+        let reader = if !legacy {
+            use std::os::fd::AsRawFd;
+            unsafe extern "C" {
+                fn flock(fd: i32, operation: i32) -> i32;
+            }
+            let file = fs::File::open(directory.join("lease")).unwrap();
+            // SAFETY: file owns this descriptor; acquire LOCK_SH until file drops.
+            assert_eq!(unsafe { flock(file.as_raw_fd(), 1) }, 0);
+            Some(file)
+        } else {
+            None
+        };
+        let results = [
+            f.command(&["status", production, "--summary", "--json"])
+                .output()
+                .unwrap(),
+            f.command(&["diagnostics", production, attempt, "--json"])
+                .output()
+                .unwrap(),
+            f.command(&["verify-production", production, "--json"])
+                .output()
+                .unwrap(),
+        ];
+        drop(reader);
+        for (path, mode) in &paths {
+            fs::set_permissions(path, fs::Permissions::from_mode(*mode)).unwrap();
+        }
+        for result in &results {
+            assert_eq!(
+                result.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+        let status: Value = serde_json::from_slice(&results[0].stdout).unwrap();
+        assert_eq!(status["evaluation_inputs"]["executor_lease_held"], false);
+        assert_eq!(status["execution_blockers"], json!([]));
+        if legacy {
+            assert!(!directory.join("journal-lock").exists());
+            assert!(!directory.join("lease").exists());
+        }
+    }
 }
