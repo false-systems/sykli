@@ -404,22 +404,22 @@ impl Lease {
         }
     }
 
-    // Observe an existing lease without creating or writing any file. Retain an
-    // acquired lock until the caller finishes inspecting the corresponding state.
-    pub fn observe(path: &Path) -> Result<(bool, Option<Self>), String> {
+    // Observe an existing lease without creating or writing any file. Release
+    // the probe immediately: inspection must not reserve the controller lease.
+    pub fn observe(path: &Path) -> Result<bool, String> {
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, None)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(err(error)),
         };
         loop {
             // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
             if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
-                return Ok((false, Some(Self(file))));
+                return Ok(false);
             }
             let error = std::io::Error::last_os_error();
             match error.kind() {
-                std::io::ErrorKind::WouldBlock => return Ok((true, None)),
+                std::io::ErrorKind::WouldBlock => return Ok(true),
                 std::io::ErrorKind::Interrupted => continue,
                 _ => return Err(err(error)),
             }
@@ -501,4 +501,42 @@ pub fn snapshot(
         })?)?,
         ty: source.ty.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observing_a_lease_does_not_reserve_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-lease-{}-{}-{}",
+            std::process::id(),
+            now(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("lease");
+        assert!(!Lease::observe(&path).unwrap());
+        assert!(!path.exists(), "observation must not create a lease");
+        File::create(&path).unwrap();
+        let observed = Lease::observe(&path).unwrap();
+        // Other unit tests fork commands concurrently. A child can briefly
+        // inherit the probe's descriptor until exec closes it (CLOEXEC).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let next_controller = loop {
+            match Lease::acquire(&directory) {
+                Ok(lease) => break lease,
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "{error}");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        };
+        assert!(!observed);
+        assert!(Lease::observe(&path).unwrap());
+        assert!(Lease::acquire(&directory).is_err());
+        drop(next_controller);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

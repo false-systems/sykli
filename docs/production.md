@@ -277,7 +277,9 @@ writer reloads the validated prefix under that lock before appending. Inspection
 uses a shared read-only lock to obtain a coherent prefix; writers lock exclusively.
 Read-only queries never create locks. Older stores without a journal lock are
 read as validated atomic prefixes. Missing lease files mean no observed lease;
-permission errors are reported rather than interpreted as liveness. Executors retain the controlling
+permission errors are reported rather than interpreted as liveness. Lease probes
+release their locks immediately, before reading history or validating artifacts;
+their results are observations, not reservations. Executors retain the controlling
 lease after client loss and commit their own results. No new work is started
 after an unresolved executor result. `--retry` and `--stop-after` require one job;
 parallel histories require this version of Sykli to read them.

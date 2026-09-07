@@ -459,7 +459,7 @@ fn view(
                     let lost = history.records.iter().any(|record| matches!(
                         &record.record.fact, Fact::ContactLost { attempt: id, .. } if id == &attempt.id
                     ));
-                    let (live, _probe) = Lease::observe(
+                    let live = Lease::observe(
                         &store
                             .production(&request.id()?)?
                             .join("attempt-leases")
@@ -715,7 +715,7 @@ pub fn plan(path: &Path, target: &str) -> Result<Value, String> {
 pub fn inspect(store_path: &Path, id: &str) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = Request::load(&store, id)?;
-    let (controlling, _probe) = Lease::observe(&store.production(id)?.join("lease"))?;
+    let controlling = Lease::observe(&store.production(id)?.join("lease"))?;
     let history = History::load(&store, &request)?;
     view(&store, &request, &history, controlling)
 }
