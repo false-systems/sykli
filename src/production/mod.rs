@@ -604,13 +604,28 @@ pub fn init(
             );
         }
         Some(discovery::cargo(path, package, binary)?)
+    } else if Path::new("go.mod").is_file() {
+        None
     } else {
         if package.is_some() || binary.is_some() {
             return Err("--package and --bin require a Cargo workspace".into());
         }
         if !Path::new("main.rs").is_file() {
-            return Err("typed init requires Cargo.toml or standalone main.rs".into());
+            return Err("typed init requires Cargo.toml, go.mod or standalone main.rs".into());
         }
+        None
+    };
+    let go = if cargo.is_none() && Path::new("go.mod").is_file() {
+        if binary.is_some() {
+            return Err("--bin is for Cargo; use --package ./cmd/NAME for Go".into());
+        }
+        if smoke.is_none_or(|s| s.trim().is_empty()) {
+            return Err(
+                "Go production needs --smoke 'COMMAND', checking $SYKLI_INPUT_executable".into(),
+            );
+        }
+        Some(discovery::go(package)?)
+    } else {
         None
     };
     let format = match std::env::consts::OS {
@@ -644,6 +659,15 @@ pub fn init(
         target["operations"]["unit_tests"]["assertion"] =
             "selected Cargo package's binary and library unit tests pass".into();
     }
+    if let Some(go) = &go {
+        let target = &mut value["targets"]["app"];
+        target["inputs"]["source"]["paths"] = json!(go.paths);
+        target["profile"]["tools"] = json!(["go"]);
+        target["operations"]["build"]["run"] = go.build.clone().into();
+        target["operations"]["unit_tests"]["run"] = go.test.clone().into();
+        target["operations"]["unit_tests"]["assertion"] =
+            "Go tests pass for all packages in the captured module (CGO disabled)".into();
+    }
     if let Some(command) = smoke {
         if command.trim().is_empty() {
             return Err("smoke command must not be empty".into());
@@ -657,7 +681,7 @@ pub fn init(
     // Explicit --force authorizes replacing the authoring file, never production records.
     fs::write(path, serde_json::to_vec_pretty(&value).map_err(err)?).map_err(err)?;
     Ok(
-        json!({"schema":"sykli-production-init.v1","contract":path,"target":"app","cargo":cargo.map(|c|json!({"package":c.package,"binary":c.binary})),"review":"source paths, recipes and smoke assertion; production pins the reviewed contract"}),
+        json!({"schema":"sykli-production-init.v1","contract":path,"target":"app","cargo":cargo.map(|c|json!({"package":c.package,"binary":c.binary})),"go":go.map(|g|json!({"package":g.package})),"review":"source paths, recipes and smoke assertion; production pins the reviewed contract"}),
     )
 }
 

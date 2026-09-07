@@ -173,16 +173,16 @@ enum Command {
         /// Do not pin the written contract in sykli.lock
         #[arg(long = "no-lock")]
         no_lock: bool,
-        /// Write a typed executable target for Cargo or a standalone main.rs
+        /// Write a typed executable target for Cargo, Go, or a standalone main.rs
         #[arg(long)]
         production: bool,
-        /// Cargo package to select for typed production
+        /// Cargo package or Go main package (./cmd/NAME) to select
         #[arg(long, requires = "production")]
         package: Option<String>,
         /// Cargo binary to select for typed production
         #[arg(long, requires = "production")]
         bin: Option<String>,
-        /// Shell check of $SYKLI_INPUT_executable (required for Cargo discovery)
+        /// Shell check of $SYKLI_INPUT_executable (required for Cargo and Go discovery)
         #[arg(long, requires = "production")]
         smoke: Option<String>,
     },

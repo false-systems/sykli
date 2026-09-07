@@ -70,6 +70,40 @@ default check that the executable exits successfully without arguments, which
 can also be overridden with `--smoke`. Other build tools work through explicit
 shell recipes. Legacy `init` continues to detect Cargo/npm/Go graphs.
 
+## Go modules
+
+Try the dependency-free [Go example](../examples/go), or use the same interface
+in a module with one main package:
+
+```sh
+sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
+sykli targets
+sykli plan sykli.production.json --target app
+sykli produce app --stop-after build  # exits 1; copy the production ID
+sykli resume PRODUCTION_ID
+```
+
+Choose a smoke command your program supports. With several executables, select
+`--package ./cmd/NAME` (or the package import path). No Go SDK is needed.
+Discovery asks `go list` for the module's packages, active source and test files,
+and embedded assets. It also includes each package's `testdata` directory and
+`go.mod`/`go.sum`. Review the paths and re-run init when new inputs are added.
+Other runtime files used by tests must be added explicitly. Symlinks, excluded
+hidden paths and nested repositories are rejected rather than silently captured.
+
+Generated recipes build the selected package and run `go test -count=1 ./...`
+against the captured module. Both use the native OS/architecture, CGO disabled,
+`-mod=readonly`, no VCS stamping, and a fresh attempt-local Go build cache.
+Workspace mode, persisted Go settings and automatic toolchain downloads are
+disabled (`GOWORK=off`, `GOENV=off`, `GOTOOLCHAIN=local`). Discovery uses those
+same settings. This deliberately selects a pure-Go build; CGO, custom build
+flags, replacements and vendoring need an explicit contract. Cached external
+module dependencies are supported; prepare them with `go mod download` first.
+Go dependency network access is disabled (`GOPROXY=off`, `GOSUMDB=off`), but this
+is not a sandbox: test commands may still access host services or the network.
+The host toolchain and module cache remain trusted external inputs, not captured
+source. Cross-production reuse stays disabled.
+
 The reproducible demonstration uses the tiny repository in
 [`examples/production`](../examples/production). From the Sykli checkout:
 
