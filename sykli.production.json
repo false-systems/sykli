@@ -1,7 +1,7 @@
 {
   "schema": "sykli-production-contract.v1",
   "targets": {
-    "app": {
+    "sykli": {
       "inputs": {
         "source": {
           "paths": [
@@ -136,7 +136,7 @@
         }
       },
       "products": {
-        "app": {
+        "sykli": {
           "kind": "operation-output",
           "operation": "build",
           "port": "executable"

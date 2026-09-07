@@ -11,13 +11,14 @@ not available in previously published v0.2.0 binaries; build this checkout with
 
 ## Try it
 
-In a Cargo workspace with a binary:
+In a Cargo workspace with a binary (these commands use Sykli itself; substitute
+the target name reported by `init` for your repository):
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
 sykli targets --json
-sykli plan sykli.production.json --target app --json
-sykli produce app --stop-after build --json  # exits 1: checks remain
+sykli plan sykli.production.json --target sykli --json
+sykli produce sykli --stop-after build --json  # exits 1: checks remain
 ```
 
 The smoke command is yours: use an observable check appropriate to your program.
@@ -30,8 +31,8 @@ A standalone Rust `main.rs` also works, using:
 ```sh
 sykli init --production
 sykli targets --json
-sykli plan sykli.production.json --target app --json
-sykli produce app --stop-after build --json  # exits 1: checks remain
+sykli plan sykli.production.json --target main --json
+sykli produce main --stop-after build --json  # exits 1: checks remain
 ```
 
 Keep the returned `production` identifier. Start a new shell or worker:
@@ -42,8 +43,8 @@ sykli resume PRODUCTION_ID --json
 sykli verify-production PRODUCTION_ID --json
 ```
 
-The completed view returns `delivery.app.artifact` (identity and type),
-`delivery.app.availability.locations` and `assessment.satisfied_checks`.
+The completed view returns `delivery[TARGET].artifact` (identity and type),
+`delivery[TARGET].availability.locations` and `assessment.satisfied_checks`.
 The executable location is directly runnable. Each check's `finished` record
 identifies its subject: the source snapshot for unit tests, the collected
 executable for the smoke test.
@@ -83,6 +84,9 @@ sykli produce app --stop-after build  # exits 1; copy the production ID
 sykli resume PRODUCTION_ID
 ```
 
+The example above uses a binary named `app`; substitute the name reported by
+`init`. Root modules use Go's executable name, including its handling of version
+suffixes (a module `example.test/tiny-cli/v2` produces target `tiny-cli`).
 Choose a smoke command your program supports. With several executables, select
 `--package ./cmd/NAME` (or the package import path). No Go SDK is needed.
 Discovery asks `go list` for the module's packages, active source and test files,
@@ -101,7 +105,10 @@ flags, replacements and vendoring need an explicit contract. Cached external
 module dependencies are supported; prepare them with `go mod download` first.
 Go dependency network access is disabled (`GOPROXY=off`, `GOSUMDB=off`), but this
 is not a sandbox: test commands may still access host services or the network.
-The host toolchain and module cache remain trusted external inputs, not captured
+Typed execution requires absolute, nonempty `PATH` entries so changing into a
+prepared workspace cannot change tool lookup through relative directories. Tool
+images identify the executable selected by the execution shell, skipping
+non-executable shadow files. The host toolchain and module cache remain trusted external inputs, not captured
 source. Cross-production reuse stays disabled.
 
 The reproducible demonstration uses the tiny repository in
@@ -185,6 +192,12 @@ establish OS version, ABI compatibility, linking success or loadability. A smoke
 check establishes that the collected bytes actually ran under its recorded
 local context. PE, fat Mach-O, other architectures/media validators, remote or
 container profiles, freshness policies and `exact-invocation` reuse are rejected.
+
+Generated targets and products use the selected executable name: Cargo's binary
+name, Go's install-target basename, or `main` for standalone `main.rs`. Target and
+product labels also permit hyphens and dots after the initial letter, digit or
+underscore. Existing contracts retain their original names and pinned productions
+remain resumable after regenerating an authoring contract.
 
 Port and operation names use ASCII letters, digits and underscores. Paths are
 relative, nonempty, slash-separated and normalized: no empty, `.` or `..`

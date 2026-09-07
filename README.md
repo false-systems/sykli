@@ -68,7 +68,9 @@ sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
 
 This writes **`sykli.production.json`**: a file describing what to build and how
 to check it. Review its source-file list and commands before running them.
-The generated target is called `app`, regardless of your binary's name.
+The target and product use your binary's name: `sykli`, `tiny-cli`, or the name
+reported by `init`. The commands below use `sykli`; substitute your target.
+Existing contracts named `app` keep working; `init` does not migrate saved productions.
 
 The `--smoke` command is a quick check of the built executable. The example
 checks that `--help` exits successfully. Replace it with a command appropriate
@@ -78,9 +80,9 @@ keep the outer single quotes so your current shell does not expand it.
 Now look at the plan and build:
 
 ```sh
-sykli targets                               # what can this repo produce?
-sykli plan sykli.production.json --target app # what will run?
-sykli produce app                            # build and check it
+sykli targets                                  # what can this repo produce?
+sykli plan sykli.production.json --target sykli # what will run?
+sykli produce sykli                            # build and check it
 ```
 
 Sykli captures the selected source files, including local edits, then runs:
@@ -97,12 +99,12 @@ tests and doctests for Cargo are not included automatically.
 By default, Sykli prints a summary like this (IDs and paths abbreviated):
 
 ```text
-app: complete, artifact available
+sykli: complete, artifact available
   build: satisfied
   smoke_test: satisfied
   unit_tests: satisfied
 
-Artifact app: available
+Artifact sykli: available
   SHA-256: 2196f82c...
   Path: /your/repo/.sykli/production/blobs/2196f82c...
 
@@ -122,8 +124,8 @@ including execution records and captured output. It includes these fields:
 | Field | What you use it for |
 | --- | --- |
 | `production` | The ID to use when inspecting or resuming this work. |
-| `delivery.app.availability.locations[0]` | The path to the executable. Run it directly or copy it where you need it. |
-| `delivery.app.artifact.content` | The SHA-256 identity of the executable's bytes. |
+| `delivery.sykli.availability.locations[0]` | The path to the executable. Run it directly or copy it where you need it. |
+| `delivery.sykli.artifact.content` | The SHA-256 identity of the executable's bytes. |
 | `assessment.satisfied_checks` | The recorded attempts that passed the required checks. |
 
 For multiple Cargo binaries, add `--package NAME --bin NAME` to `init`.
@@ -139,7 +141,7 @@ For your first build, use this instead of the `produce` command above to stop
 after compilation:
 
 ```sh
-sykli produce app --stop-after build
+sykli produce sykli --stop-after build
 ```
 
 This intentionally exits **1**: the executable is saved, but checks remain.
@@ -165,7 +167,7 @@ Old passing checks cannot complete work for different source or executable bytes
 Prepare the exact source without starting a build:
 
 ```sh
-sykli produce app --prepare --summary --json
+sykli produce sykli --prepare --summary --json
 ```
 
 Keep the returned production ID. Compact state includes `ready`, `work`, input
@@ -203,7 +205,7 @@ omitting `--summary`. No server or agent SDK is required.
 
 - **A command failed:** inspect `status`. To retry a failed build explicitly,
   run `sykli resume PRODUCTION_ID --retry build`. Earlier attempts stay recorded.
-- **You changed the code to fix it:** run `sykli produce app` for the new source.
+- **You changed the code to fix it:** run `sykli produce sykli` for the new source.
 - **Execution is indeterminate:** Sykli cannot establish whether everything stopped.
   It refuses a retry that could overlap surviving work. Continuation is between
   operations; it does not resume a compiler halfway through an instruction.
