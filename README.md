@@ -254,7 +254,24 @@ gain artifact validation or continuation.
 See [installation options](docs/install.md), the [GitHub Action](docs/github-actions.md),
 and the [graph/receipt specification](docs/spec.md) for the existing interfaces.
 
+## See what a change has established
+
+Sykli can also read a pull request's CI runs and reviews through your `gh`
+login, save them as an immutable evidence bundle, and tell you which declared
+conditions are established, refuted, or still unproven, and why:
+
+```sh
+sykli inspect --repo OWNER/NAME --pr 25                      # observations, no verdict
+sykli inspect --repo OWNER/NAME --pr 25 --requirements review.json
+sykli assess .sykli/evidence/<collection-id> --requirements review.json --why review
+```
+
+It is read-only and advisory: nothing is merged, triggered, or certified, and
+every result names its trust limit. See [inspection](docs/inspect.md).
+
 ## Further reading
+
+- [Inspecting pull-request evidence](docs/inspect.md) and its [design](docs/standalone-ci-evidence.md)
 
 - [Production contract, storage, and execution limits](docs/production.md)
 - [Agent interface](docs/agents.md)

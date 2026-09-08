@@ -1,62 +1,10 @@
 use super::*;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static NONCE: AtomicU64 = AtomicU64::new(0);
-
-pub fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-pub fn digest(value: &str) -> Result<(), String> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(format!("invalid SHA-256 identity {value:?}"));
-    }
-    Ok(())
-}
-
-pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path.parent().ok_or("missing parent")?;
-    fs::create_dir_all(parent).map_err(err)?;
-    let temporary = parent.join(format!(
-        ".tmp-{}-{}-{}",
-        std::process::id(),
-        now(),
-        NONCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(err)?;
-    file.write_all(bytes).map_err(err)?;
-    file.sync_all().map_err(err)?;
-    match fs::hard_link(&temporary, path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::read(path).map_err(err)? != bytes {
-                return Err(format!("conflicting immutable record: {}", path.display()));
-            }
-        }
-        Err(e) => return Err(err(e)),
-    }
-    File::open(parent).and_then(|f| f.sync_all()).map_err(err)?;
-    fs::remove_file(temporary).map_err(err)?;
-    Ok(())
-}
+pub use crate::canonical::{digest, now, publish};
 
 pub fn checked_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
     relative(relative_path)?;
@@ -506,6 +454,8 @@ pub fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical::NONCE;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn observing_a_lease_does_not_reserve_it() {

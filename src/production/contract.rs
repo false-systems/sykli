@@ -1,6 +1,4 @@
 use super::*;
-use serde::de::{MapAccess, SeqAccess, Visitor};
-use std::fmt;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
@@ -101,68 +99,7 @@ pub struct ProductionContract {
     pub targets: BTreeMap<String, Target>,
 }
 
-// serde_json::Value normally keeps the last duplicate key. Reject duplicates
-// before deserializing any identity-bearing document, including nested maps.
-struct Unique(Value);
-impl<'de> Deserialize<'de> for Unique {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = Unique;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("JSON without duplicate keys or floating-point identities")
-            }
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Unique, M::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some((key, value)) = map.next_entry::<String, Unique>()? {
-                    if values.insert(key.clone(), value.0).is_some() {
-                        return Err(serde::de::Error::custom(format!("duplicate key {key:?}")));
-                    }
-                }
-                Ok(Unique(Value::Object(values)))
-            }
-            fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<Unique, S::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = seq.next_element::<Unique>()? {
-                    values.push(value.0);
-                }
-                Ok(Unique(Value::Array(values)))
-            }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique, E> {
-                Ok(Unique(Value::String(v.into())))
-            }
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique, E> {
-                Ok(Unique(Value::Bool(v)))
-            }
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
-                Ok(Unique(Value::Null))
-            }
-        }
-        deserializer.deserialize_any(V)
-    }
-}
-
-pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    let value: Unique = serde_json::from_slice(bytes).map_err(err)?;
-    serde_json::from_value(value.0).map_err(err)
-}
-
-pub fn canonical(value: &impl Serialize) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&serde_json::to_value(value).map_err(err)?).map_err(err)
-}
-
-pub fn identity(domain: &str, value: &impl Serialize) -> Result<String, String> {
-    let mut bytes = domain.as_bytes().to_vec();
-    bytes.push(0);
-    bytes.extend(canonical(value)?);
-    Ok(super::super::sha256(&bytes))
-}
+pub use crate::canonical::{canonical, decode, identity};
 
 pub fn name(value: &str) -> Result<(), String> {
     if value.is_empty()

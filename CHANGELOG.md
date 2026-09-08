@@ -7,6 +7,27 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Added
+- `sykli inspect --repo OWNER/NAME --pr N`: reads a pull request's workflow
+  runs and reviews through the operator's `gh`, saves an immutable evidence
+  bundle under `.sykli/evidence/<collection-id>`, and prints observations.
+  With `--requirements FILE` (`sykli-requirements.v1`) it also assesses
+  `workflow-reported-success` and `candidate-approval` obligations. Exit
+  codes: 0 established/observations saved, 1 refuted, 2 invalid input or tool
+  failure, 3 unproven, 4 conflict. See `docs/inspect.md`.
+- `sykli assess BUNDLE --requirements FILE [--at TIME] [--json | --graph mermaid] [--why ID]`:
+  deterministic offline replay of a saved bundle; evaluates at the collection
+  end unless `--at` is given, and labels stale evidence as unproven.
+- New versioned documents: `sykli-requirements.v1`, `sykli-request.v1`,
+  `sykli-collection.v1`, `sykli-assessment.v1`, `sykli-inspect.v1`,
+  `sykli-why.v1`, `sykli-error.v1`. Every assessment carries
+  `trust: trusted-local-collector-and-store`, `authenticity: not-established`,
+  `mode: advisory`. Existing receipt and production identities are unchanged.
+
+### Changed
+- AGENTS.md and ADR-0005 now own on-demand read-only acquisition of pull-request
+  evidence; servers, webhooks, coordination and provider mutations remain excluded.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added
