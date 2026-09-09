@@ -555,3 +555,106 @@ fn a_truncated_capture_still_verifies() {
     let _ = fs::remove_file(outside);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt() {
+    let root = graph_repo(
+        "inherit",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"show","run":"printf %s \"$SYKLI_INHERIT_TEST\"","inherit":["SYKLI_INHERIT_TEST","SYKLI_UNSET_TEST"]}]}"#,
+    );
+    let run = |value: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .env("SYKLI_INHERIT_TEST", value)
+            .env_remove("SYKLI_UNSET_TEST")
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let first = run("alpha");
+    assert_eq!(first["tasks"][0]["stdout"], "alpha");
+    let digests = &first["tasks"][0]["inherited_digests"];
+    assert_eq!(digests["SYKLI_UNSET_TEST"], "absent");
+    let digest = digests["SYKLI_INHERIT_TEST"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(
+        !first.to_string().contains("alpha\"") || first["tasks"][0]["stdout"] == "alpha",
+        "value appears only as task output"
+    );
+    assert!(
+        !digests.to_string().contains("alpha"),
+        "receipt records the digest, never the value"
+    );
+    assert_eq!(run("alpha")["tasks"][0]["outcome"], "cached");
+    let changed = run("beta");
+    assert_eq!(
+        changed["tasks"][0]["outcome"], "passed",
+        "a different inherited value is a different task"
+    );
+    assert_eq!(changed["tasks"][0]["stdout"], "beta");
+    // A name cannot be both declared and inherited.
+    fs::write(
+        root.join("bad.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"x","run":"true","env":{"A":"1"},"inherit":["A"]}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["validate", "bad.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inherits"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn one_lock_file_pins_every_contract_in_its_directory() {
+    let root = graph_repo(
+        "locks",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"a","run":"true"}]}"#,
+    );
+    fs::write(
+        root.join("release.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"b","run":"true"}]}"#,
+    )
+    .unwrap();
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(sykli(&["lock", "sykli.json"]).status.code(), Some(0));
+    assert_eq!(sykli(&["lock", "release.json"]).status.code(), Some(0));
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("sykli.lock")).unwrap()).unwrap();
+    assert_eq!(lock["schema"], "sykli-lock.v2");
+    assert!(lock["contracts"]["sykli.json"].is_string());
+    assert!(lock["contracts"]["release.json"].is_string());
+    assert_eq!(sykli(&["validate", "sykli.json"]).status.code(), Some(0));
+    assert_eq!(sykli(&["validate", "release.json"]).status.code(), Some(0));
+    // Drift in one contract is caught for that contract only.
+    fs::write(
+        root.join("release.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"b","run":"false"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(sykli(&["validate", "release.json"]).status.code(), Some(1));
+    assert_eq!(sykli(&["validate", "sykli.json"]).status.code(), Some(0));
+    // A v1 lock is still honoured and upgraded on the next lock.
+    let hash = lock["contracts"]["sykli.json"].as_str().unwrap();
+    fs::write(
+        root.join("sykli.lock"),
+        format!(r#"{{"schema":"sykli-lock.v1","contract_hash":"{hash}"}}"#),
+    )
+    .unwrap();
+    assert_eq!(sykli(&["validate", "sykli.json"]).status.code(), Some(0));
+    assert_eq!(sykli(&["lock", "sykli.json"]).status.code(), Some(0));
+    let upgraded: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("sykli.lock")).unwrap()).unwrap();
+    assert_eq!(upgraded["schema"], "sykli-lock.v2");
+    fs::remove_dir_all(root).unwrap();
+}

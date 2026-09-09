@@ -596,11 +596,17 @@ fn signalled_shell_is_indeterminate_and_directory_outputs_have_canonical_manifes
     let f = Fixture::new();
     f.edit(|c| c["targets"]["app"]["operations"]["build"]["run"] = "kill -TERM $$".into());
     let signalled = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
+    // The shell ran in its own process group and the group was killed after
+    // it died, so termination is established: a failed attempt, retryable.
     assert_eq!(
         signalled["records"][1]["record"]["fact"]["kind"],
-        "contact-lost"
+        "finished"
     );
-    assert_eq!(state(&signalled, "build"), "indeterminate");
+    assert_eq!(
+        signalled["records"][1]["record"]["fact"]["result"]["code"],
+        "interrupted"
+    );
+    assert_eq!(state(&signalled, "build"), "failed");
     // Previously written terminal shell-signal records are not safe retry authority.
     let terminal = f.records(id(&signalled)).join("00000000000000000002.json");
     let mut envelope: Value = serde_json::from_slice(&fs::read(&terminal).unwrap()).unwrap();
@@ -809,7 +815,7 @@ fn cargo_discovery_requires_a_smoke_check_and_does_not_invent_a_library_product(
 }
 
 #[test]
-fn signalled_shell_cannot_retry_while_its_foreground_child_survives() {
+fn signalled_shell_takes_its_foreground_child_with_it_and_is_a_failed_attempt() {
     let f = Fixture::new();
     let latch = f.0.join("latch");
     assert!(
@@ -847,18 +853,24 @@ fn signalled_shell_cannot_retry_while_its_foreground_child_survives() {
             .success()
     );
     assert_eq!(controller.wait().unwrap().code(), Some(1));
-    let planned = f.plan();
-    let resumed = f.call(&["resume", id(&planned), "--retry", "build", "--json"], 1);
-    assert_eq!(state(&resumed, "build"), "indeterminate");
-    assert_eq!(resumed["through_sequence"], 2);
-    assert!(
-        Command::new("kill")
+    // The shell ran in its own process group, which the executor killed once
+    // the shell was gone: the foreground child did not survive, so the
+    // attempt is a recorded failure, not lost contact.
+    wait_until(|| {
+        !Command::new("kill")
             .args(["-0", child.trim()])
             .status()
             .unwrap()
             .success()
+    });
+    let planned = f.plan();
+    let status = f.call(&["status", id(&planned), "--json"], 0);
+    assert_eq!(state(&status, "build"), "failed");
+    assert_eq!(
+        status["records"][1]["record"]["fact"]["result"]["code"],
+        "interrupted"
     );
-    fs::write(latch, "finish\n").unwrap();
+    let _ = fs::remove_file(latch);
 }
 
 #[test]
@@ -1486,5 +1498,106 @@ fn tool_identity_matches_shell_search_and_rejects_relative_path_entries() {
             .as_str()
             .unwrap()
             .contains("absolute PATH")
+    );
+}
+
+#[test]
+fn the_executor_lives_in_its_own_session_and_a_lost_attempt_can_be_abandoned() {
+    let f = Fixture::new();
+    let (plan, mut controller) = latched(&f);
+    let out = Command::new("pgrep")
+        .args(["-P", &controller.id().to_string()])
+        .output()
+        .unwrap();
+    let executor = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let pgid = |pid: &str| {
+        String::from_utf8(
+            Command::new("ps")
+                .args(["-o", "pgid=", "-p", pid])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    };
+    assert_eq!(
+        pgid(&executor),
+        executor,
+        "the executor leads its own group (own session)"
+    );
+    assert_ne!(pgid(&executor), pgid(&controller.id().to_string()));
+    let attempt = f.call(&["status", id(&plan), "--json"], 0)["work"]["build"]["state"]["attempt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Abandon is refused while the executor is alive (the production is busy).
+    assert_eq!(
+        f.command(&["resume", id(&plan), "--abandon", &attempt, "--json"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &executor])
+            .status()
+            .unwrap()
+            .success()
+    );
+    controller.wait().unwrap();
+    fs::write(f.0.join("latch"), "continue\n").unwrap();
+    wait_until(|| f.0.join("done").exists());
+    let lost = f.call(&["resume", id(&plan), "--json"], 1);
+    assert_eq!(state(&lost, "build"), "indeterminate");
+    // Abandoning the lost attempt records the fact and reopens the operation.
+    // The retried build runs the latched recipe again, so feed the latch once
+    // the new shell is waiting on it.
+    fs::remove_file(f.0.join("ready")).unwrap();
+    let retry = f
+        .command(&[
+            "resume",
+            id(&plan),
+            "--abandon",
+            &attempt,
+            "--retry",
+            "build",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(|| f.0.join("ready").exists());
+    fs::write(f.0.join("latch"), "continue\n").unwrap();
+    let out = retry.wait_with_output().unwrap();
+    let abandoned: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the retried build and the remaining checks complete delivery: {}",
+        state(&abandoned, "build")
+    );
+    assert!(
+        abandoned["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["record"]["fact"]["kind"] == "abandoned"),
+        "{}",
+        abandoned["records"]
+    );
+    assert_eq!(state(&abandoned, "build"), "satisfied");
+    // Abandoning twice, or a resolved attempt, is refused.
+    assert_eq!(
+        f.command(&["resume", id(&plan), "--abandon", &attempt, "--json"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
     );
 }

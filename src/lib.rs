@@ -28,6 +28,10 @@ pub struct Task {
     pub outputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Environment variables passed through from the invoking environment.
+    /// Values reach the command; only their digests reach the receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit: Vec<String>,
 }
 
 pub struct Pipeline {
@@ -54,6 +58,7 @@ impl Pipeline {
             inputs: Vec::new(),
             outputs: Vec::new(),
             runtime: None,
+            inherit: Vec::new(),
         });
         TaskBuilder {
             task: self.contract.tasks.last_mut().unwrap(),
@@ -116,6 +121,12 @@ impl TaskBuilder<'_> {
 
     pub fn runtime(self, runtime: impl Into<String>) -> Self {
         self.task.runtime = Some(runtime.into());
+        self
+    }
+
+    /// Pass these environment variables through from the invoking environment.
+    pub fn inherit(self, names: &[&str]) -> Self {
+        self.task.inherit = names.iter().map(|name| (*name).into()).collect();
         self
     }
 }
