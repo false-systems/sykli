@@ -1,0 +1,20 @@
+{
+  "schema": "sykli-requirements.v1",
+  "purpose": "review-readiness",
+  "repository": {"host": "github.com", "id": 1323443147},
+  "max_observation_age_seconds": 300,
+  "requirements": {
+    "ci": {
+      "kind": "workflow-reported-success",
+      "source": {"provider": "github", "workflow_id": 327406134, "event": "pull_request"},
+      "selection": "latest-run-latest-attempt"
+    },
+    "review": {
+      "kind": "candidate-approval",
+      "source": {"provider": "github"},
+      "allowed_user_ids": [42],
+      "minimum": 1,
+      "exclude_pr_author": true
+    }
+  }
+}

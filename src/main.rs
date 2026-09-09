@@ -512,6 +512,8 @@ fn main() -> ExitCode {
                     false,
                 );
             }
+            #[cfg(not(unix))]
+            let _ = (&package, &bin, &smoke);
             if typed {
                 eprintln!("typed production requires Linux or macOS");
                 return ExitCode::from(2);
@@ -1533,7 +1535,9 @@ impl Cache for LocalCache {
     }
 }
 
-fn shell_runtime() -> Result<ShellRuntime, String> {
+/// The `sh` that tasks run under, as the shell itself resolves it.
+#[cfg(not(windows))]
+fn resolve_shell() -> Result<PathBuf, String> {
     let output = ProcessCommand::new("sh")
         .args(["-c", "command -v sh"])
         .output()
@@ -1541,8 +1545,24 @@ fn shell_runtime() -> Result<ShellRuntime, String> {
     if !output.status.success() {
         return Err("cannot resolve shell runtime".into());
     }
-    let path = fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|error| error.to_string())?;
+    fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|error| error.to_string())
+}
+
+/// On Windows a POSIX `sh` (Git for Windows, MSYS2, Busybox) reports its own
+/// location as a POSIX path, so search `PATH` the way process creation does.
+#[cfg(windows)]
+fn resolve_shell() -> Result<PathBuf, String> {
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&paths)
+        .map(|directory| directory.join("sh.exe"))
+        .find(|candidate| candidate.is_file())
+        .ok_or("cannot resolve shell runtime: no sh.exe on PATH; install Git for Windows or another POSIX sh")?;
+    fs::canonicalize(found).map_err(|error| error.to_string())
+}
+
+fn shell_runtime() -> Result<ShellRuntime, String> {
+    let path = resolve_shell()?;
     let environment = inherited_environment(std::env::vars_os());
     let fingerprint = format!(
         "shell:{}:sha256:{}:env:sha256:{environment}",
@@ -1560,9 +1580,37 @@ fn shell_runtime() -> Result<ShellRuntime, String> {
 fn inherited_environment(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(OsString, OsString)> {
+    // Windows spells PATH as `Path` and needs SystemRoot and friends for any
+    // process to start; names there are case-insensitive.
+    #[cfg(windows)]
+    const INHERITED: &[&str] = &[
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "PATHEXT",
+        "COMSPEC",
+    ];
+    #[cfg(not(windows))]
+    const INHERITED: &[&str] = &["PATH", "HOME", "TMPDIR"];
     environment
         .into_iter()
-        .filter(|(name, _)| matches!(name.to_str(), Some("PATH" | "HOME" | "TMPDIR")))
+        .filter(|(name, _)| {
+            name.to_str().is_some_and(|name| {
+                INHERITED.iter().any(|inherited| {
+                    if cfg!(windows) {
+                        name.eq_ignore_ascii_case(inherited)
+                    } else {
+                        name == *inherited
+                    }
+                })
+            })
+        })
         .collect()
 }
 

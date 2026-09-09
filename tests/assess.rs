@@ -1,5 +1,9 @@
 //! End-to-end `inspect`/`assess` scenarios against a fake `gh` on PATH that
 //! serves saved GitHub responses for false-systems/sykli#25. No network.
+//!
+//! The fake is a POSIX shell script, so these run on Unix hosts only;
+//! `tests/assess_portable.rs` covers what every platform must do.
+#![cfg(unix)]
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};

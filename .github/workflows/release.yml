@@ -53,6 +53,16 @@ jobs:
             platform: macos
             arch: aarch64
             file_match: arm64
+          # Windows on ARM hosted runners are public-repository only; x86_64
+          # covers Windows until that changes.
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x86_64
+            file_match: PE32+
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - if: matrix.platform == 'linux'
@@ -65,17 +75,29 @@ jobs:
       - name: Verify and package
         run: |
           set -euo pipefail
-          binary="target/${{ matrix.target }}/release/sykli"
-          file "$binary" | grep -q "${{ matrix.file_match }}"
-          if [ "${{ matrix.platform }}" = linux ]; then
-            file "$binary" | grep -q "statically linked"
+          name="sykli-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
+          if [ "${{ matrix.platform }}" = windows ]; then
+            binary="target/${{ matrix.target }}/release/sykli.exe"
+            "$binary" --help >/dev/null
+            # Git for Windows' file(1) reads PE headers; the archive is a zip
+            # holding sykli.exe at its root, like the tarballs hold sykli.
+            file "$binary" | grep -q "${{ matrix.file_match }}"
+            (cd "$(dirname "$binary")" && 7z a -tzip "$GITHUB_WORKSPACE/$name.zip" sykli.exe >/dev/null)
+          else
+            binary="target/${{ matrix.target }}/release/sykli"
+            file "$binary" | grep -q "${{ matrix.file_match }}"
+            if [ "${{ matrix.platform }}" = linux ]; then
+              file "$binary" | grep -q "statically linked"
+            fi
+            "$binary" --help >/dev/null
+            tar -czf "$name.tar.gz" -C "$(dirname "$binary")" sykli
           fi
-          "$binary" --help >/dev/null
-          tar -czf "sykli-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" -C "$(dirname "$binary")" sykli
       - uses: actions/upload-artifact@v7
         with:
           name: sykli-${{ matrix.platform }}-${{ matrix.arch }}
-          path: sykli-*.tar.gz
+          path: |
+            sykli-*.tar.gz
+            sykli-*.zip
           if-no-files-found: error
 
   release:
@@ -88,7 +110,7 @@ jobs:
         with:
           pattern: sykli-*
           merge-multiple: true
-      - run: sha256sum sykli-*.tar.gz > SHA256SUMS
+      - run: sha256sum sykli-*.tar.gz sykli-*.zip > SHA256SUMS
       # A Homebrew formula over the same tarballs, so a tap is one file away:
       # `false-systems/homebrew-tap` holding Formula/sykli.rb copied from this
       # release. The tap is an org decision; the formula ships regardless.
@@ -145,6 +167,7 @@ jobs:
           generate_release_notes: true
           files: |
             sykli-*.tar.gz
+            sykli-*.zip
             SHA256SUMS
             sykli.rb
 

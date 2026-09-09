@@ -13,6 +13,7 @@ esac
 case "$(uname -s)" in
   Linux) platform=linux ;;
   Darwin) platform=macos ;;
+  MINGW*|MSYS*|CYGWIN*) platform=windows ;;
   *) echo "unsupported platform: $(uname -s)" >&2; exit 2 ;;
 esac
 case "$(uname -m)" in
@@ -23,7 +24,13 @@ esac
 
 repository=${SYKLI_REPOSITORY:-false-systems/sykli}
 install_dir=${SYKLI_INSTALL_DIR:-"$HOME/.local/bin"}
-archive="sykli-$tag-$platform-$arch.tar.gz"
+binary=sykli
+extension=tar.gz
+if [ "$platform" = windows ]; then
+  binary=sykli.exe
+  extension=zip
+fi
+archive="sykli-$tag-$platform-$arch.$extension"
 url="https://github.com/$repository/releases/download/$tag"
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
@@ -38,8 +45,13 @@ curl -fsSLo "$temporary/SHA256SUMS" "$url/SHA256SUMS"
   else
     sha256sum -c "$archive.sha256"
   fi
-  tar -xzf "$archive"
+  if [ "$platform" = windows ]; then
+    # Git for Windows' sh has no unzip; Windows itself has one.
+    powershell.exe -NoProfile -Command "Expand-Archive -Force -LiteralPath '$(cygpath -w "$temporary/$archive")' -DestinationPath '$(cygpath -w "$temporary")'"
+  else
+    tar -xzf "$archive"
+  fi
 )
 install -d "$install_dir"
-install -m 0755 "$temporary/sykli" "$install_dir/sykli"
-echo "installed sykli $tag to $install_dir/sykli"
+install -m 0755 "$temporary/$binary" "$install_dir/$binary"
+echo "installed sykli $tag to $install_dir/$binary"

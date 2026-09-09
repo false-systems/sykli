@@ -27,6 +27,7 @@ if [ "$version" = source ]; then
   target=${CARGO_TARGET_DIR:-$install_dir/target}
   CARGO_TARGET_DIR="$target" cargo build --locked --quiet
   binary=$target/debug/sykli
+  [ -f "$binary.exe" ] && binary=$binary.exe
 else
   case "$version" in
     v[0-9]*) ;;
@@ -34,6 +35,9 @@ else
   esac
   SYKLI_INSTALL_DIR="$install_dir" sh "$action_path/install.sh" "$version"
   binary=$install_dir/sykli
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) binary=$install_dir/sykli.exe ;;
+  esac
 fi
 
 [ -x "$binary" ] || fail "no executable sykli at $binary"

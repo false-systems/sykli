@@ -7,7 +7,8 @@ computed from, and writes that down in versioned JSON. A receipt claims exactly
 what ran, never what it meant. Humans and agents read the same records; nothing
 is inferred from a chat, and there is no server or account.
 
-It runs locally on Linux and macOS. One binary, three surfaces:
+It runs locally on Linux, macOS and Windows; typed production is Linux and
+macOS only for now. One binary, three surfaces:
 
 | Surface | You declare | Sykli records |
 | --- | --- | --- |

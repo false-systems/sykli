@@ -6,7 +6,8 @@ using its stored facts and artifacts. No agent session or external service is
 required.
 
 This is an **opt-in local path**, alongside the existing graph commands,
-available from v0.6.0. Linux and macOS are supported hosts.
+available from v0.6.0. Linux and macOS are supported hosts; the Windows
+binary does not include the production commands.
 
 ## Try it
 
