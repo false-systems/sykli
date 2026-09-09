@@ -65,8 +65,10 @@ impl Pipeline {
             eprintln!("this binary is a Sykli emitter; invoke it through `sykli run`");
             std::process::exit(2);
         }
-        serde_json::to_writer(std::io::stdout().lock(), &self.contract)
-            .expect("write Sykli contract");
+        if serde_json::to_writer(std::io::stdout().lock(), &self.contract).is_err() {
+            eprintln!("could not write the Sykli contract to stdout");
+            std::process::exit(2);
+        }
         println!();
     }
 }
