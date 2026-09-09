@@ -2,31 +2,120 @@
 
 **Know what actually ran. Not what someone says ran.**
 
-Sykli is a small command-line tool that runs the work you declare, ties every
-result to the exact files it was computed from, and writes that down in plain
-JSON anyone can check. When someone, or some agent, says "tests passed" or "the
-build is done" or "this PR is ready", sykli is how you know.
+## What it is
 
-Runs locally on Linux, macOS and Windows. One binary. No server, no account.
+Sykli is a small command-line tool you point at a repository. In one JSON file
+you name the commands that matter (`cargo test`, `npm run lint`, `go build`)
+and the files each one depends on. Sykli runs them and writes a **receipt**: a
+plain JSON record of exactly what ran, on exactly which files, with exactly
+which result. Later, anyone, human or agent, can ask `sykli verify` whether
+that receipt is still true for the code in front of them.
 
-## The problem
+That is the whole idea. Your build tools still do the building and testing.
+Sykli only remembers, precisely, and lets others check. Everything else in this
+repository is that one idea applied to three situations.
 
-- A green check tells you a workflow finished. It does not tell you which
-  commit, which tests, or whether the code changed since.
-- A build that stops halfway leaves the next person guessing what was built,
-  where it is, and what remains. The chat log is not evidence.
-- Agents report success. Some of it is true. You have no cheap way to tell.
+## Thirty seconds, end to end
 
-Sykli's answer is a **receipt**: a record of exactly what ran, on exactly which
-inputs, with exactly which outcome. Change one input and the receipt no longer
-applies. Nothing inherits a pass it did not earn.
+A repository with two checks. The file is `sykli.json`; `sykli init` writes one
+like it for Cargo, npm and Go projects.
+
+```json
+{"schema":"sykli-contract.v1","tasks":[
+  {"name":"lint","run":"grep -qv TODO src.txt","inputs":["src.txt"]},
+  {"name":"test","run":"sh test.sh","inputs":["src.txt","test.sh"],"after":["lint"]}]}
+```
+
+```sh
+$ sykli run --json > .sykli/receipt.json
+running: lint
+passed: lint
+running: test
+passed: test
+```
+
+The receipt, trimmed:
+
+```json
+{
+  "schema": "sykli-receipt.v1",
+  "contract_hash": "c5a2bbbde46a…",
+  "subject": { "tree_oid": "596e8c346e48…", "inputs_digest": "9daed25e15ee…", "dirty": false },
+  "tasks": [
+    { "name": "lint", "command": "grep -qv TODO src.txt", "outcome": "passed", "exit_code": 0, "stdout_digest": "e3b0c44298fc…" },
+    { "name": "test", "command": "sh test.sh",            "outcome": "passed", "exit_code": 0, "stdout_digest": "e3b0c44298fc…" }
+  ],
+  "outcome": "passed"
+}
+```
+
+Every field is a fact, not a summary: which tree (`tree_oid`), which declared
+inputs (`inputs_digest`), which contract (`contract_hash`), which command,
+which exit code, a digest of what it printed. Now check it, then change a file
+and check again:
+
+```sh
+$ sykli verify .sykli/receipt.json
+verified: receipt matches this tree and contract        # exit 0
+$ echo "// TODO" >> src.txt
+$ sykli verify .sykli/receipt.json
+mismatch: tree expected 596e8c34… but got 21fa0d9e…     # exit 3: the code moved on
+```
+
+Run again and only what the change touched runs; the rest is served from a
+content-addressed cache and marked `cached` in the new receipt.
+
+## Three words
+
+- **Contract.** The JSON file: tasks, their commands, the files they read,
+  and `after` for ordering. Nothing else. No plugins, no DSL, no interpretation
+  of what a command means.
+- **Receipt.** What one run established, bound by hashes to the exact tree,
+  inputs and contract. Change any of them and the receipt no longer applies.
+- **Verify.** The question "is this receipt still true here?", answered with
+  an exit code: 0 yes, 1 the work failed, 3 the code changed, 4 the contract
+  changed, 2 that is not a valid receipt.
+
+## Where it sits
+
+- **Under your tools.** Sykli runs the commands you already have. It does not
+  replace cargo, npm, go, or your CI runner.
+- **Beside your CI.** The GitHub Action in this repository just calls `sykli`
+  and attaches the receipt. Any CI can do the same; so can a laptop.
+- **In front of agents.** An agent gets the same exit codes and the same JSON
+  a script does. It does not need to trust its own memory of what it ran, and
+  you do not need to trust its summary.
+- **On your machine.** Files in `.sykli/` inside the repository. No server,
+  no account, no network for the graph and production surfaces; the
+  pull-request surface reads GitHub through the `gh` login you already have.
+
+## The one rule
+
+Everything is named by its content. A contract, a receipt, an input, a built
+artifact, a saved GitHub response: each has an identity that is a hash of its
+bytes. Same bytes, same identity; one byte different, a different identity and
+a different result. There is no "latest", no timestamp to trust, no name that
+can quietly point at something else. That is what makes a receipt worth more
+than a green check or a chat message saying "done".
+
+## Why this exists
+
+- A green check says a workflow finished. It does not say which commit, which
+  tests, or whether the code changed since.
+- Work that stops halfway leaves the next person guessing what was built, where
+  it is, and what remains. A chat log is not evidence.
+- Agents report success. Some of it is true. You need a cheap way to tell.
+
+Runs on Linux, macOS and Windows. One binary. The rest of this page is the
+three situations the idea applies to.
 
 ## Three things you can do today
 
 ### 1. Run your checks and get a receipt
 
-Declare the tasks a change needs and the files they depend on. Sykli runs only
-what the change affects, caches by content, and records the result.
+The walkthrough above, for real projects. `init` detects the ecosystem and
+writes the contract; `run` executes only what a change affects and records the
+result; `verify` checks a receipt against the code in front of you.
 
 ```sh
 sykli init                                   # detects Cargo, npm or Go; writes sykli.json, ignores .sykli/
@@ -89,17 +178,12 @@ Replay the saved bundle later, offline, and get the same answer.
 
 ## Why it is different
 
-- **Content-addressed.** Inputs, contracts, artifacts and evidence are named by
-  what they contain. Same bytes, same identity; different bytes, different
-  result. There is no "latest" to point at the wrong thing.
 - **Exit codes and versioned JSON.** Every command answers a human on the
   screen and an agent on stdout with the same facts. Scripts branch on exit
   codes; agents read `sykli-*.v1` documents with stable fields.
 - **Honest about its limits.** A receipt says what ran, never what it meant.
   Every assessment prints its trust boundary. Sykli never merges, deploys,
   triggers or certifies anything.
-- **Local.** Files in your repository, your `gh` login, your machine. Nothing
-  to host, nothing to sign up for.
 
 ## Try it in a minute
 
