@@ -13,6 +13,14 @@ omits command captures; retrieve them with `sykli diagnostics ID ATTEMPT --json`
 Read `assessment` and `delivery` separately. The [production contract](production.md)
 documents exact input binding, explicit retries and unresolved execution.
 
+To learn what a pull request has established before acting on it, run
+`sykli inspect --repo OWNER/NAME --pr N --requirements FILE --json` and read the
+embedded `sykli-assessment.v1`: each unresolved obligation carries a reason code,
+the evidence it would need (`missing`), and source references into the saved
+bundle. Replay or explain it offline with `sykli assess BUNDLE --requirements FILE
+--why ID`. The result is advisory and never a merge authorization; see
+[inspect.md](inspect.md).
+
 The remainder describes the unchanged legacy graph workflow.
 
 Sykli answers two questions an agent otherwise guesses at: what work does

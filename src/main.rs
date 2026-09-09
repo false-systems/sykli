@@ -15,7 +15,12 @@ use std::thread;
 use std::time::Instant;
 use sykli::{Contract, Task};
 
+mod assessment;
+mod canonical;
+mod evidence;
+mod github;
 mod init;
+mod inspect;
 #[cfg(unix)]
 mod production;
 
@@ -191,6 +196,55 @@ enum Command {
         /// Path to sykli.rs or a sykli-contract.v1 JSON file
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
+    },
+    /// Read a pull request's runs and reviews through `gh`, save an evidence bundle, and show what is established
+    #[command(after_help = "Exit codes:\n  \
+        0  observations saved; with --requirements, every requirement established\n  \
+        1  a requirement is refuted\n  \
+        2  invalid input, unreadable candidate, or tool failure\n  \
+        3  a requirement is unproven\n  \
+        4  admitted evidence about one subject conflicts\n\n\
+        Read-only and advisory: nothing is merged, triggered, or certified. See docs/inspect.md.")]
+    Inspect {
+        /// Repository as OWNER/NAME on github.com
+        #[arg(long)]
+        repo: String,
+        /// Pull request number
+        #[arg(long)]
+        pr: u64,
+        /// sykli-requirements.v1 file; without it only observations are shown
+        #[arg(long)]
+        requirements: Option<PathBuf>,
+        /// Where evidence bundles are appended
+        #[arg(long, default_value = ".sykli/evidence")]
+        store: PathBuf,
+        /// Print one sykli-inspect.v1 document; errors become sykli-error.v1 on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Assess a saved evidence bundle against requirements, offline and deterministically
+    #[command(after_help = "Exit codes:\n  \
+        0  established   1  refuted   2  invalid input or tool failure\n  \
+        3  unproven      4  conflict\n\n\
+        Evaluates at the collection's end unless --at names another UTC time.")]
+    Assess {
+        /// Evidence bundle directory written by `sykli inspect`
+        bundle: PathBuf,
+        /// sykli-requirements.v1 file
+        #[arg(long)]
+        requirements: PathBuf,
+        /// Evaluation time, YYYY-MM-DDTHH:MM:SSZ; later times can make evidence stale
+        #[arg(long)]
+        at: Option<String>,
+        /// Print the sykli-assessment.v1 document
+        #[arg(long)]
+        json: bool,
+        /// Print a Mermaid graph of the assessment instead of rows
+        #[arg(long, conflicts_with = "json", value_parser = ["mermaid"])]
+        graph: Option<String>,
+        /// Explain one obligation: support, counterevidence, exclusions, missing evidence
+        #[arg(long, conflicts_with = "graph")]
+        why: Option<String>,
     },
     /// Check that a receipt is consistent with the current tree and contract
     #[command(after_help = "Exit codes (first failing stage decides):\n  \
@@ -474,6 +528,28 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::Inspect {
+            repo,
+            pr,
+            requirements,
+            store,
+            json,
+        } => inspect::inspect(&repo, pr, requirements.as_deref(), &store, json),
+        Command::Assess {
+            bundle,
+            requirements,
+            at,
+            json,
+            graph,
+            why,
+        } => inspect::assess(
+            &bundle,
+            &requirements,
+            at.as_deref(),
+            graph.as_deref(),
+            why.as_deref(),
+            json,
+        ),
         Command::Verify { receipt, contract } => match verify(&receipt, &contract) {
             Ok(checks) => report(&checks),
             Err(error) => {

@@ -21,7 +21,13 @@
         "src/production/store.rs",
         "tests/production.rs",
         "examples/production/main.rs",
-        "src/production/discovery.rs"
+        "src/production/discovery.rs",
+        "src/assessment.rs",
+        "src/canonical.rs",
+        "src/evidence.rs",
+        "src/github.rs",
+        "src/inspect.rs",
+        "tests/assess.rs"
       ]
     },
     {
@@ -66,7 +72,13 @@
         "src/production/store.rs",
         "tests/production.rs",
         "examples/production/main.rs",
-        "src/production/discovery.rs"
+        "src/production/discovery.rs",
+        "src/assessment.rs",
+        "src/canonical.rs",
+        "src/evidence.rs",
+        "src/github.rs",
+        "src/inspect.rs",
+        "tests/assess.rs"
       ]
     },
     {
@@ -93,7 +105,19 @@
         "src/production/store.rs",
         "tests/production.rs",
         "examples/production/main.rs",
-        "src/production/discovery.rs"
+        "src/production/discovery.rs",
+        "src/assessment.rs",
+        "src/canonical.rs",
+        "src/evidence.rs",
+        "src/github.rs",
+        "src/inspect.rs",
+        "tests/assess.rs",
+        "tests/fixtures/github/pr25/commit.json",
+        "tests/fixtures/github/pr25/pull.json",
+        "tests/fixtures/github/pr25/repository.json",
+        "tests/fixtures/github/pr25/reviews.json",
+        "tests/fixtures/github/pr25/runs.json",
+        "tests/fixtures/github/pr25/workflows.json"
       ]
     }
   ]

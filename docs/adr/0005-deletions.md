@@ -29,6 +29,21 @@ reintroducing one must cite this ADR and the condition it satisfies.
 | Webhook receiver, GitHub App, Checks API, SCM status | Triggers are external shims; a dumb Action invokes `sykli` | Never inside sykli. Shims live beside it. |
 | Watch mode, matrix expansion, simulate, notifications/webhooks | None at v1 | A family repo asks, with the workflow written down first. |
 
+## Amendment 2026-09-09: read-only evidence acquisition
+
+`sykli inspect` reads one pull request's workflow runs and reviews through the
+operator's `gh`, saves them as an immutable evidence bundle, and `sykli assess`
+evaluates declared review-readiness requirements against it
+([design](../standalone-ci-evidence.md), [surface](../inspect.md)). Named user
+and workflow: the maintainer inspecting a sykli pull request and handing its
+unresolved requirements to another worker.
+
+This is acquisition, not a trigger or publisher. The "webhook receiver, GitHub
+App, Checks API, SCM status" row stands: nothing is received, posted, or
+mutated. Servers, webhooks, coordination, model execution and provider
+mutations remain excluded. The offline boundary in AGENTS.md is narrowed to
+exactly this: explicit, bounded, read-only GETs to github.com, no other host.
+
 ## Consequences
 
 - The successor's surface is: parse, validate, plan (delta), execute, cache,
