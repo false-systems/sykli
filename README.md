@@ -1,136 +1,69 @@
 # sykli
 
-**A content-addressed evaluator for declared work graphs.**
+**Know what actually ran. Not what someone says ran.**
 
-Sykli runs the work you declare, binds every result to the exact inputs it was
-computed from, and writes that down in versioned JSON. A receipt claims exactly
-what ran, never what it meant. Humans and agents read the same records; nothing
-is inferred from a chat, and there is no server or account.
+Sykli is a small command-line tool that runs the work you declare, ties every
+result to the exact files it was computed from, and writes that down in plain
+JSON anyone can check. When someone, or some agent, says "tests passed" or "the
+build is done" or "this PR is ready", sykli is how you know.
 
-It runs locally on Linux, macOS and Windows; typed production is Linux and
-macOS only for now. One binary, three surfaces:
+Runs locally on Linux, macOS and Windows. One binary. No server, no account.
 
-| Surface | You declare | Sykli records |
-| --- | --- | --- |
-| [Graph runs](#graph-runs-and-receipts) | Tasks, their commands and input files (`sykli.json`) | A receipt: which tasks ran on which tree, outcome and outputs |
-| [Typed production](#typed-production) | A target: source files, a build, required checks (`sykli.production.json`) | The artifact, the checks that passed, and unfinished work another worker can resume |
-| [Pull-request evidence](#see-what-a-change-has-established) | Review-readiness requirements for a repository | A bundle of what GitHub reported and which requirements are established, refuted or unproven |
+## The problem
 
-The common rule: change an input and you get a different identity. Old passing
-results never complete work for different bytes.
+- A green check tells you a workflow finished. It does not tell you which
+  commit, which tests, or whether the code changed since.
+- A build that stops halfway leaves the next person guessing what was built,
+  where it is, and what remains. The chat log is not evidence.
+- Agents report success. Some of it is true. You have no cheap way to tell.
 
-```mermaid
-flowchart LR
-    tasks["sykli.json<br/>declared tasks"] --> run["sykli run"] --> receipt["receipt<br/>what ran, on which tree"]
-    target["sykli.production.json<br/>declared target"] --> produce["sykli produce / resume"] --> artifact["artifact + checks<br/>resumable by ID"]
-    candidate["pull request<br/>+ requirements"] --> inspect["sykli inspect / assess"] --> verdict["evidence bundle<br/>established / unproven"]
-```
+Sykli's answer is a **receipt**: a record of exactly what ran, on exactly which
+inputs, with exactly which outcome. Change one input and the receipt no longer
+applies. Nothing inherits a pass it did not earn.
 
-## Install
+## Three things you can do today
 
-Releases from v0.6.0 include all three surfaces. The installer script verifies
-the tarball's checksum and places the binary at `~/.local/bin/sykli`:
+### 1. Run your checks and get a receipt
+
+Declare the tasks a change needs and the files they depend on. Sykli runs only
+what the change affects, caches by content, and records the result.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
-sh install.sh v0.6.0
+sykli init                  # detects Cargo, npm or Go and writes sykli.json
+sykli run --json            # runs the graph, prints a receipt
+sykli verify receipt.json   # is this receipt still true for the tree in front of me?
 ```
 
-Or build from source with Rust 1.85 or newer:
+`verify` answers with an exit code you can trust: 0 verified, 1 the work
+failed, 3 the tree changed since, 4 the declared tasks changed since. A stale
+receipt cannot pass as a fresh one.
 
-```sh
-cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli
-```
+### 2. Build something, stop, let someone else finish
 
-Release tarballs, Homebrew, containers and the GitHub Action are in
-[installation options](docs/install.md).
-
-## Graph runs and receipts
-
-Declare the tasks a change requires and their input files. Sykli selects the
-tasks a change affects, runs them, caches by content, and writes a receipt.
-
-```sh
-sykli init                              # detect Cargo, npm or Go; write and lock sykli.json
-sykli plan --changed src/lib.rs --json  # which tasks does this change require?
-sykli run --json                        # run the graph and record a receipt
-sykli verify receipt.json               # is this receipt about the current tree and contract?
-```
-
-`run` exits 0 when every task passed and 1 otherwise. `verify` distinguishes a
-failed run (1) from a receipt that no longer matches the tree (3) or the
-contract (4). The receipt's subject includes a digest of the declared inputs, so
-an undeclared input change cannot pass as the same evaluation.
-
-This repository gates itself this way through the
-[GitHub Action](docs/github-actions.md): a dumb Action invokes `sykli`, and the
-receipt is attached to the run. The schema is in [spec.md](docs/spec.md).
-
-## Typed production
-
-A **production** is one target bound to one captured source state and its build
-instructions. Workers can come and go; the saved work keeps its identity.
-
-Start in a Cargo workspace with a binary or a Go module with a main package:
+Declare a target: the source files, the build, the checks that must pass.
+Sykli captures the source, builds, runs the checks, and saves the artifact with
+its identity. If you stop early, another terminal or another agent resumes
+from the saved state with one ID.
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
-sykli targets                                    # what can this repo produce?
-sykli plan sykli.production.json --target sykli  # what will run?
-sykli produce sykli                              # build and check it
+sykli produce sykli --stop-after build    # exits 1: built, checks remain
+sykli resume PRODUCTION_ID                # someone else finishes the checks
 ```
 
-`init --production` writes `sykli.production.json`: the source files to
-capture, a `build` operation, `unit_tests`, and your `--smoke` check of the
-built executable. Review its file list and commands before running them. The
-target is named after your binary; substitute it for `sykli` below. Add
-`--package NAME --bin NAME` for several Cargo binaries or `--package ./cmd/NAME`
-for Go. Generated commands run offline, so fetch dependencies first.
+The next worker needs the ID and the local store, not the previous worker's
+conversation. Edit the source and you get a new production; old passing checks
+never count for new bytes. Linux and macOS.
 
-`produce` captures the selected files, including local edits, builds, runs the
-checks, and prints where the artifact is and which checks passed. `--json`
-returns the full structured record: `production` is the ID to resume with,
-`delivery.<target>.availability.locations[0]` the executable's path,
-`delivery.<target>.artifact.content` its SHA-256.
+### 3. Ask whether a pull request is actually ready
 
-### Stop now, finish later
+Point sykli at a pull request. It reads the CI runs and reviews through your
+existing `gh` login, saves what GitHub said as an immutable bundle, and tells
+you which of *your* requirements are established, which are refuted, and which
+are still unproven, and why.
 
 ```sh
-sykli produce sykli --stop-after build   # exits 1: artifact saved, checks remain
-sykli status PRODUCTION_ID               # completed and unfinished work
-sykli resume PRODUCTION_ID               # run what remains, reusing the saved executable
-```
-
-The next worker needs the production ID and the store at `.sykli/production`
-(or `--store DIR`), not the previous worker's chat. `resume` always uses the
-captured source, even if your files changed since. Editing source and running
-`produce` again creates a new production.
-
-For agents, `--summary --json` on `produce`, `status` and `resume` gives compact
-state with `ready` work and no embedded logs; `--operation NAME` runs one
-operation whose inputs are satisfied; `--retry NAME` re-runs a failed one
-explicitly; `sykli diagnostics PRODUCTION_ID ATTEMPT_ID` fetches recorded output
-on demand. The loop is written out in the [agent interface](docs/agents.md).
-
-`produce` and `resume` exit 0 only for successful delivery, 1 for unfinished or
-failed work, 2 for an error. `sykli verify-production PRODUCTION_ID` checks record
-integrity, bindings, completion and current artifact availability. The local
-executor and store are trusted: this is not a sandbox or a proof of correctness.
-Details and limits: the [production guide](docs/production.md).
-
-Try it end to end with `python3 examples/production/demo.py --binary "$(command -v sykli)"`
-(add `--language go` for the Go example).
-
-## See what a change has established
-
-Read a pull request's workflow runs and reviews through your existing `gh`
-login, save them as an immutable evidence bundle, and see which declared
-conditions are established, refuted or still unproven, and why.
-
-```sh
-sykli inspect --repo OWNER/NAME --pr 25                              # observations, no verdict
-sykli inspect --repo OWNER/NAME --pr 25 --requirements review.json   # assess declared requirements
-sykli assess .sykli/evidence/COLLECTION_ID --requirements review.json --why review
+sykli inspect --repo false-systems/sykli --pr 25 --requirements review.json
 ```
 
 ```text
@@ -143,31 +76,51 @@ Scope: declared review-readiness conditions; advisory
 Trust: local collector and store; receipt is not authenticated
 ```
 
-Requirements are a small content-addressed file naming exact workflow and
-account IDs; two predicates exist today, provider-reported workflow success and
-approval of the exact head commit. Exit codes: 0 established, 1 refuted,
-3 unproven, 4 conflict, 2 invalid input or tool failure. `assess` replays a
-saved bundle offline and gives the same answer for the same bundle, requirements
-and time.
+Requirements are a small file naming exact workflow and reviewer IDs. An
+approval on an older commit does not count. A newer failing run hides an older
+green one. A run from a fork or a different workflow is excluded and says so.
+Replay the saved bundle later, offline, and get the same answer.
 
-It is read-only and advisory. Nothing is merged, triggered, posted or certified,
-and every result names its trust limit. Read [inspection](docs/inspect.md) first;
-the design and its trust argument are in
-[standalone-ci-evidence.md](docs/standalone-ci-evidence.md).
+## Why it is different
 
-## What sykli will not do
+- **Content-addressed.** Inputs, contracts, artifacts and evidence are named by
+  what they contain. Same bytes, same identity; different bytes, different
+  result. There is no "latest" to point at the wrong thing.
+- **Exit codes and versioned JSON.** Every command answers a human on the
+  screen and an agent on stdout with the same facts. Scripts branch on exit
+  codes; agents read `sykli-*.v1` documents with stable fields.
+- **Honest about its limits.** A receipt says what ran, never what it meant.
+  Every assessment prints its trust boundary. Sykli never merges, deploys,
+  triggers or certifies anything.
+- **Local.** Files in your repository, your `gh` login, your machine. Nothing
+  to host, nothing to sign up for.
 
-No server, daemon, webhook or coordination. No agent execution. No claim about
-what a result means beyond the declared predicate. The
-[deletion record](docs/adr/0005-deletions.md) lists what was removed and the
-condition for bringing anything back.
+## Try it in a minute
 
-## Further reading
+```sh
+curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
+sh install.sh v0.6.0
+cd your-repo && sykli init && sykli run
+```
+
+Or `cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli`
+with Rust 1.85 or newer. Windows zips, containers, Homebrew and the GitHub
+Action are in [installation options](docs/install.md).
+
+## What sykli is not
+
+Not a CI service, a work tracker, an agent runner or a merge bot. It does not
+run in the cloud, does not watch anything, and does not interpret results
+beyond the condition you declared. Those jobs belong to other tools; sykli
+gives them evidence. The [deletion record](docs/adr/0005-deletions.md) lists
+what was removed on purpose and what it would take to bring anything back.
+
+## Go deeper
 
 - [Graph and receipt specification](docs/spec.md), [GitHub Action](docs/github-actions.md)
-- [Production contract, storage and execution limits](docs/production.md)
-- [Inspecting pull-request evidence](docs/inspect.md)
-- [Agent interface](docs/agents.md)
+- [Typed production: contract, storage, resume, limits](docs/production.md)
+- [Pull-request evidence: requirements, predicates, trust](docs/inspect.md) and its [design](docs/standalone-ci-evidence.md)
+- [Working with agents](docs/agents.md)
 - [Design decisions](docs/adr/)
 - [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
 
