@@ -23,10 +23,18 @@ fn fixture(name: &str) -> Vec<u8> {
     .expect("fixture")
 }
 
+/// Fake-gh lookup key: lowercase so a case variant of the repository resolves
+/// on case-sensitive file systems the way GitHub itself resolves it.
 fn key(endpoint: &str) -> String {
     endpoint
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -35,7 +43,7 @@ const GH: &str = r#"#!/bin/sh
 dir="$SYKLI_FAKE_GH"
 printf '%s\n' "$*" >> "$dir/args.log"
 for a in "$@"; do ep="$a"; done
-key=$(printf '%s' "$ep" | tr -c 'A-Za-z0-9' '_')
+key=$(printf '%s' "$ep" | tr -c 'A-Za-z0-9' '_' | tr 'A-Z' 'a-z')
 printf '%s\n' "$ep" >> "$dir/calls.log"
 n=$(grep -c -F -x -- "$ep" "$dir/calls.log")
 body="$dir/$key.body"
