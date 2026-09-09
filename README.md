@@ -104,24 +104,22 @@ cd your-repo && sykli init && sykli run
 ```
 
 Or `cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli`
-with Rust 1.85 or newer. Windows zips, containers, Homebrew and the GitHub
-Action are in [installation options](docs/install.md).
+with Rust 1.85 or newer. Each release also carries a Windows zip, a Homebrew
+formula and `SHA256SUMS`; `action.yml` is a GitHub Action that installs the
+release matching its ref and runs the graph.
 
 ## What sykli is not
 
 Not a CI service, a work tracker, an agent runner or a merge bot. It does not
 run in the cloud, does not watch anything, and does not interpret results
 beyond the condition you declared. Those jobs belong to other tools; sykli
-gives them evidence. The [deletion record](docs/adr/0005-deletions.md) lists
-what was removed on purpose and what it would take to bring anything back.
+gives them evidence. `AGENTS.md` states the boundaries and what does not come
+back without a named user.
 
 ## Go deeper
 
-- [Graph and receipt specification](docs/spec.md), [GitHub Action](docs/github-actions.md)
-- [Typed production: contract, storage, resume, limits](docs/production.md)
-- [Pull-request evidence: requirements, predicates, trust](docs/inspect.md) and its [design](docs/standalone-ci-evidence.md)
 - [Working with agents](docs/agents.md)
-- [Design decisions](docs/adr/)
+- `sykli <command> --help` for every flag and exit code
 - [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
 
 MIT.
