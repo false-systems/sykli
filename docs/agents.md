@@ -1,5 +1,14 @@
 # Sykli for coding agents
 
+For a declared graph (`sykli.json`), the loop is `sykli plan --changed PATH
+--json` to learn which tasks a change requires, `sykli run --json` to run them
+and receive a `sykli-receipt.v1`, and `sykli verify RECEIPT` to check that a
+receipt still describes the tree in front of you. Exit codes are the answer:
+`run` 0 all passed or cached, 1 a task failed, 2 could not evaluate; `verify`
+0 verified, 1 the work failed, 2 cannot verify, 3 the tree or inputs changed,
+4 the contract changed. Write receipts under `.sykli/` or outside the tree;
+a receipt inside the tree changes the tree it describes.
+
 For typed artifact production, start with `sykli targets --json` and
 `sykli plan sykli.production.json --target TARGET --json`. Use the discovered
 target name (`sykli` in this repository), not an assumed `app` alias.

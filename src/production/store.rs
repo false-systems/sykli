@@ -307,10 +307,14 @@ impl Lease {
             .map_err(err)?;
         // SAFETY: the descriptor is owned by file; LOCK_EX | LOCK_NB on Unix.
         if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
-            return Err(format!(
-                "production-busy: {}",
-                std::io::Error::last_os_error()
-            ));
+            let error = std::io::Error::last_os_error();
+            // Only a held lock means another controller; ENOLCK/EOPNOTSUPP
+            // (network file systems) are a store problem, not a busy peer.
+            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                format!("production-busy: {error}")
+            } else {
+                format!("lease unavailable on this file system: {error}")
+            });
         }
         Ok(Self(file))
     }

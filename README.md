@@ -29,9 +29,9 @@ Declare the tasks a change needs and the files they depend on. Sykli runs only
 what the change affects, caches by content, and records the result.
 
 ```sh
-sykli init                  # detects Cargo, npm or Go and writes sykli.json
-sykli run --json            # runs the graph, prints a receipt
-sykli verify receipt.json   # is this receipt still true for the tree in front of me?
+sykli init                                   # detects Cargo, npm or Go; writes sykli.json, ignores .sykli/
+sykli run --json > .sykli/receipt.json       # runs the graph; the receipt lives outside the tree it describes
+sykli verify .sykli/receipt.json             # is this receipt still true for the tree in front of me?
 ```
 
 `verify` answers with an exit code you can trust: 0 verified, 1 the work

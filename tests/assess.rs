@@ -373,7 +373,7 @@ fn inspect_saves_observations_and_assess_replays_them_for_a_fresh_worker() {
     assert_eq!(graph.status.code(), Some(3));
     let graph = stdout(&graph);
     assert!(graph.starts_with("flowchart BT\n"));
-    assert!(graph.contains("|supports| O_ci"));
+    assert!(graph.contains("|supports| O0"), "{graph}");
     let why = fake.sykli(&[
         "assess",
         &bundle_arg,
@@ -809,16 +809,25 @@ fn non_json_success_body_is_a_gap_and_the_bundle_stays_replayable() {
         doc["assessment"]["obligations"]["ci"]["result"],
         "satisfied"
     );
+    // The first listing was fine; the confirmation pass answered with HTML,
+    // so change during acquisition is unknown and the raw gap says which pass.
     assert_eq!(
         doc["assessment"]["obligations"]["review"]["reason"],
-        "unsupported-response"
+        "confirmation-missing"
     );
+    let scopes: Vec<&str> = doc["assessment"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["scope"].as_str().unwrap())
+        .collect();
+    assert!(scopes.contains(&"reviews-confirm"), "{scopes:?}");
     let bundle = fake.bundle_path().display().to_string();
     let replay = fake.sykli(&["assess", &bundle, "--requirements", &requirements, "--json"]);
     assert_eq!(replay.status.code(), Some(3));
     assert_eq!(
         json_out(&replay)["obligations"]["review"]["reason"],
-        "unsupported-response"
+        "confirmation-missing"
     );
     assert!(!stdout(&replay).contains("Unproven:"));
 }

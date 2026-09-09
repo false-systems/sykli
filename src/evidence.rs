@@ -73,6 +73,18 @@ pub struct Store {
     root: PathBuf,
 }
 
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    fs::create_dir_all(path.parent().ok_or("missing parent")?).map_err(err)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(err)?;
+    file.write_all(bytes).map_err(err)?;
+    file.sync_all().map_err(err)
+}
+
 /// A loaded, reference-checked collection.
 pub struct Bundle {
     pub id: String,
@@ -117,12 +129,15 @@ impl Store {
         ));
         let result = (|| -> Result<(), String> {
             fs::create_dir(&temporary).map_err(err)?;
+            // The temporary directory is private until the rename, so plain
+            // durable writes suffice here; hard links are only needed for
+            // records added to a published bundle.
             for (object, bytes) in objects {
                 digest(object)?;
-                publish(&temporary.join("objects").join(object), bytes)?;
+                write_new(&temporary.join("objects").join(object), bytes)?;
             }
-            publish(&temporary.join("manifest.json"), &canonical(manifest)?)?;
-            publish(
+            write_new(&temporary.join("manifest.json"), &canonical(manifest)?)?;
+            write_new(
                 &temporary.join("diagnostics.json"),
                 &serde_json::to_vec_pretty(diagnostics).map_err(err)?,
             )?;

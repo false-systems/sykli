@@ -83,18 +83,29 @@ enum Command {
     },
     /// Discover typed artifact targets without running builds
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  0  targets listed\n  2  invalid or unreadable contract")]
     Targets {
+        /// sykli-production-contract.v1 file
         #[arg(long, default_value = "sykli.production.json")]
         contract: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
-    /// Produce a typed artifact from captured source
+    /// Produce a typed artifact from captured source (Linux and macOS)
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the artifact is available and every required check passed\n  \
+        1  unfinished or failed work (also after --stop-after or --prepare)\n  \
+        2  invalid contract, unavailable tool, or store failure\n\n\
+        The production ID printed is what `status` and `resume` take.")]
     Produce {
+        /// Target name from the contract (see `sykli targets`)
         target: String,
+        /// sykli-production-contract.v1 file
         #[arg(long, default_value = "sykli.production.json")]
         contract: PathBuf,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
         /// Stop at a durable operation boundary (incomplete delivery exits 1)
@@ -109,56 +120,88 @@ enum Command {
         /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Inspect a pinned production and artifact availability
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  records inspected (work may be unfinished)\n  2  unknown production or unreadable store"
+    )]
     Status {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Continue a pinned production; failed work requires an explicit retry
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the artifact is available and every required check passed\n  \
+        1  unfinished or failed work\n  \
+        2  unknown production, busy production, or store failure")]
     Resume {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Run this failed operation again (requires --jobs 1)
         #[arg(long)]
         retry: Option<String>,
+        /// Stop after this operation completes (requires --jobs 1)
         #[arg(long)]
         stop_after: Option<String>,
         /// Execute only this operation; dependencies must already be satisfied
         #[arg(long, conflicts_with = "stop_after")]
         operation: Option<String>,
+        /// Maximum independent operations per execution wave
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Check production record integrity, bindings, assessment and delivery
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  verified and delivered\n  1  records are consistent but delivery is incomplete\n  2  inconsistent records or unreadable store"
+    )]
     VerifyProduction {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Retrieve recorded diagnostics for one attempt, including historical attempts
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  diagnostics printed\n  2  unknown production or attempt"
+    )]
     Diagnostics {
+        /// Production ID printed by `produce`
         production: String,
+        /// Attempt ID from `status` or `resume` output
         attempt: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
@@ -1156,7 +1199,7 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
                 runtime,
                 Outcome::Errored,
                 &error.to_string(),
-                "runtime_error",
+                "spawn_error",
                 false,
             );
         }

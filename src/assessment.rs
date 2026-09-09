@@ -360,8 +360,42 @@ impl Request {
         })
     }
 
+    /// The request identity binds purpose, requirements and the candidate's
+    /// stable coordinates. The head tree and repository name are descriptive
+    /// and can differ between collections of the same candidate, so they are
+    /// carried in the assessment but do not enter this identity.
     pub fn id(&self) -> Result<String, String> {
-        identity(REQUEST_SCHEMA, self)
+        #[derive(Serialize)]
+        struct Bound<'a> {
+            schema: &'a str,
+            purpose: &'a str,
+            requirements: &'a str,
+            host: &'a str,
+            repository_id: u64,
+            number: u64,
+            head_repository_id: u64,
+            head_commit: &'a str,
+            base_repository_id: u64,
+            base_commit: &'a str,
+            author_user_id: u64,
+        }
+        let c = &self.candidate;
+        identity(
+            REQUEST_SCHEMA,
+            &Bound {
+                schema: &self.schema,
+                purpose: &self.purpose,
+                requirements: &self.requirements,
+                host: &c.repository.host,
+                repository_id: c.repository.id,
+                number: c.number,
+                head_repository_id: c.head.repository_id,
+                head_commit: &c.head.commit,
+                base_repository_id: c.base.repository_id,
+                base_commit: &c.base.commit,
+                author_user_id: c.author_user_id,
+            },
+        )
     }
 }
 
@@ -625,14 +659,15 @@ fn workflow_obligation(
             None => applicable.push(run),
         }
     }
-    // Contradiction: the same run and attempt reported with incompatible
-    // terminal outcomes. Distinct attempts are history, not conflict.
+    // The same run attempt listed twice (a listing that shifted between
+    // pages) is one record when the copies agree and a contradiction when
+    // they do not. Distinct attempts are history, not conflict.
     let mut by_identity: BTreeMap<(u64, u64), &Run> = BTreeMap::new();
     for run in &applicable {
         let previous = by_identity.insert((run.id, run.run_attempt), run);
-        if let Some(previous) = previous.filter(|p| {
-            p.status == "completed" && run.status == "completed" && p.conclusion != run.conclusion
-        }) {
+        if let Some(previous) =
+            previous.filter(|p| p.status != run.status || p.conclusion != run.conclusion)
+        {
             obligation.result = Verdict::Conflict;
             obligation.reason = "contradictory-run-reports".into();
             obligation.counterevidence = vec![
@@ -650,6 +685,7 @@ fn workflow_obligation(
             return obligation;
         }
     }
+    let applicable: Vec<&Run> = by_identity.into_values().collect();
     let coverage = observations.coverage.get(scope);
     if !coverage.is_some_and(|c| c.complete) {
         obligation.reason = "selection-incomplete".into();
@@ -660,6 +696,20 @@ fn workflow_obligation(
         return obligation;
     }
     if applicable.is_empty() {
+        if obligation
+            .excluded
+            .iter()
+            .any(|e| e.reason == "association-missing")
+        {
+            // GitHub records no pull-request association for runs triggered
+            // from forks; the run exists but cannot be bound to this candidate.
+            obligation.reason = "association-missing".into();
+            obligation.missing = Some(format!(
+                "a matching run exists but the provider associates it with no pull request; runs triggered from forks cannot satisfy this requirement for #{}",
+                candidate.number
+            ));
+            return obligation;
+        }
         obligation.missing = Some(format!(
             "no {} run of workflow {} for commit {} associated with pull request #{}",
             source.event, source.workflow_id, candidate.head.commit, candidate.number
@@ -1068,6 +1118,9 @@ pub fn describe(obligation: &Obligation) -> String {
         "provider-reported-success" => "GitHub reports success for the required workflow".into(),
         "provider-reported-failure" => "GitHub reports failure for the latest run attempt".into(),
         "run-missing" => "No run of the required workflow is associated with this candidate".into(),
+        "association-missing" => {
+            "A matching run exists but GitHub associates it with no pull request (fork runs)".into()
+        }
         "selection-incomplete" => {
             "The provider listing is incomplete; the latest run or review cannot be selected".into()
         }
@@ -1135,11 +1188,21 @@ pub fn render(assessment: &Assessment, bundle: &str, requirements_path: &str) ->
         parse_time(&assessment.collection_interval.start).unwrap_or(0),
         parse_time(&assessment.collection_interval.end).unwrap_or(0),
     );
+    let day = |text: &str| text.get(..10).unwrap_or(text).to_string();
+    let (start_day, end_day) = (
+        day(&assessment.collection_interval.start),
+        day(&assessment.collection_interval.end),
+    );
     out.push_str(&format!(
-        "\nEvidence window: {}–{} UTC ({})\n",
+        "\nEvidence window: {} {}–{} {} UTC\n",
+        start_day,
         clock(start),
-        clock(end),
-        &assessment.collection_interval.start[..10]
+        if end_day == start_day {
+            String::new()
+        } else {
+            format!("{end_day} ")
+        },
+        clock(end)
     ));
     if assessment.evaluation_basis == "explicit" {
         out.push_str(&format!(
@@ -1261,7 +1324,16 @@ pub fn mermaid(assessment: &Assessment) -> String {
     ));
     let mut evidence_index = 0;
     for (id, obligation) in &assessment.obligations {
-        let node = format!("O_{}", mermaid_id(id));
+        // Positional ids: `ci-lint` and `ci_lint` must not share a node.
+        let node = format!(
+            "O{}",
+            assessment
+                .obligations
+                .keys()
+                .position(|k| k == id)
+                .unwrap_or(0)
+        );
+        let _ = mermaid_id;
         let verdict = serde_json::to_value(obligation.result)
             .ok()
             .and_then(|v| v.as_str().map(String::from))
@@ -1534,7 +1606,11 @@ mod tests {
         );
         let ci = &assessment.obligations["ci"];
         assert_eq!(ci.result, Verdict::Unproven);
-        assert_eq!(ci.reason, "run-missing");
+        assert_eq!(
+            ci.reason, "association-missing",
+            "an unassociated fork run is named, not reported as absent"
+        );
+        assert!(describe(ci).contains("fork"));
         let reasons: Vec<&str> = ci.excluded.iter().map(|e| e.reason.as_str()).collect();
         assert_eq!(
             reasons,
@@ -1872,9 +1948,14 @@ mod tests {
         );
         let graph = mermaid(&assessment);
         assert!(graph.starts_with("flowchart BT\n"));
-        assert!(graph.contains("|supports| O_ci"));
+        assert!(graph.contains("|supports| O0"));
         assert!(graph.contains("review-readiness: UNPROVEN"));
         assert_eq!(mermaid_label("a\"b<c>#d;"), "a#quot;b#lt;c#gt;#35;d#59;");
+        assert_eq!(
+            mermaid_id("ci-lint"),
+            mermaid_id("ci_lint"),
+            "why ids are positional"
+        );
         let why = explain(&assessment, "review").unwrap();
         assert!(why.contains("approval-missing"));
         assert!(why.contains("Missing: 1 more approval"));
