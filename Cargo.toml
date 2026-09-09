@@ -6,6 +6,10 @@ rust-version = "1.85"
 description = "Content-addressed evaluator for declared work graphs"
 license = "MIT"
 repository = "https://github.com/false-systems/sykli"
+readme = "README.md"
+keywords = ["ci", "build", "receipts", "content-addressed", "evidence"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "CHANGELOG.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

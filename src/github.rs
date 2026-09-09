@@ -319,13 +319,20 @@ fn http_gap_code(status: u16) -> &'static str {
     }
 }
 
+/// Gap scope for a role. Confirmation roles get their own scopes: their
+/// failure means "change during acquisition is unknown", which `normalize`
+/// states as `confirmation-missing`/`candidate-unconfirmed`, not that the
+/// first listing failed.
 fn scope_of(role: &str) -> &'static str {
-    match role.trim_end_matches("-confirm") {
+    match role {
         "repository" | "pull" => "candidate",
         "commit" => "tree",
         "workflows" => "workflows",
         "runs" => "runs",
         "reviews" => "reviews",
+        "pull-confirm" => "candidate-confirm",
+        "runs-confirm" => "runs-confirm",
+        "reviews-confirm" => "reviews-confirm",
         _ => "candidate",
     }
 }
@@ -493,9 +500,19 @@ pub fn collect(
         return Err(unreadable(&collector));
     };
     let head_sha = pull_value["head"]["sha"].as_str().unwrap_or("").to_string();
-    if head_sha.len() != 40 {
+    // Interpolated into request paths: exactly forty lowercase hex digits or nothing.
+    if head_sha.len() != 40
+        || !head_sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(CollectError::Unreadable(
             "pull request has no readable head commit".into(),
+        ));
+    }
+    if pull_value["head"]["repo"]["id"].as_u64().is_none() {
+        return Err(CollectError::Unreadable(
+            "pull request head repository is unavailable (deleted fork?); the candidate cannot be described".into(),
         ));
     }
     collector.call("commit", 1, &format!("{repo}/git/commits/{head_sha}"));

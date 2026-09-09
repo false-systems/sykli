@@ -37,27 +37,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate an emitted contract without executing it
+    /// Validate a declared contract without executing it
+    #[command(after_help = "Exit codes:\n  \
+        0  valid\n  \
+        1  invalid, unreadable, or drifted from sykli.lock")]
     Validate {
-        /// Path to sykli.rs or a sykli-contract.v1 JSON file
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
         /// Print the verdict as JSON (`sykli-validate.v1`); exit 1 when invalid
         #[arg(long)]
         json: bool,
     },
-    /// Execute an emitted contract
+    /// Execute a declared contract and record a receipt
+    #[command(after_help = "Exit codes:\n  \
+        0  every task passed or was cached\n  \
+        1  a task failed, errored, or was blocked\n  \
+        2  could not evaluate: unreadable contract, lock drift, no git or sh\n\n\
+        The receipt is written to .sykli/receipts/<hash>.json; --json also prints it.")]
     Run {
-        /// Path to sykli.rs or a sykli-contract.v1 JSON file
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
-        /// Print the run receipt as JSON; progress and task output go to stderr
+        /// Print the run receipt as JSON on stdout; progress and task output go to stderr
         #[arg(long)]
         json: bool,
     },
-    /// Select tasks affected by changed files
+    /// Select the tasks a change requires
+    #[command(after_help = "Exit codes:\n  \
+        0  plan printed (all tasks when no --changed is given)\n  \
+        2  could not evaluate the contract")]
     Plan {
-        /// Path to sykli.rs or a sykli-contract.v1 JSON file
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
         /// Changed file path; repeat for multiple files
@@ -72,18 +83,29 @@ enum Command {
     },
     /// Discover typed artifact targets without running builds
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  0  targets listed\n  2  invalid or unreadable contract")]
     Targets {
+        /// sykli-production-contract.v1 file
         #[arg(long, default_value = "sykli.production.json")]
         contract: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
-    /// Produce a typed artifact from captured source
+    /// Produce a typed artifact from captured source (Linux and macOS)
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the artifact is available and every required check passed\n  \
+        1  unfinished or failed work (also after --stop-after or --prepare)\n  \
+        2  invalid contract, unavailable tool, or store failure\n\n\
+        The production ID printed is what `status` and `resume` take.")]
     Produce {
+        /// Target name from the contract (see `sykli targets`)
         target: String,
+        /// sykli-production-contract.v1 file
         #[arg(long, default_value = "sykli.production.json")]
         contract: PathBuf,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
         /// Stop at a durable operation boundary (incomplete delivery exits 1)
@@ -98,56 +120,88 @@ enum Command {
         /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Inspect a pinned production and artifact availability
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  records inspected (work may be unfinished)\n  2  unknown production or unreadable store"
+    )]
     Status {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Continue a pinned production; failed work requires an explicit retry
     #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the artifact is available and every required check passed\n  \
+        1  unfinished or failed work\n  \
+        2  unknown production, busy production, or store failure")]
     Resume {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Run this failed operation again (requires --jobs 1)
         #[arg(long)]
         retry: Option<String>,
+        /// Stop after this operation completes (requires --jobs 1)
         #[arg(long)]
         stop_after: Option<String>,
         /// Execute only this operation; dependencies must already be satisfied
         #[arg(long, conflicts_with = "stop_after")]
         operation: Option<String>,
+        /// Maximum independent operations per execution wave
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Omit execution records and expose ready work
         #[arg(long)]
         summary: bool,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Check production record integrity, bindings, assessment and delivery
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  verified and delivered\n  1  records are consistent but delivery is incomplete\n  2  inconsistent records or unreadable store"
+    )]
     VerifyProduction {
+        /// Production ID printed by `produce`
         production: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
     /// Retrieve recorded diagnostics for one attempt, including historical attempts
     #[cfg(unix)]
+    #[command(
+        after_help = "Exit codes:\n  0  diagnostics printed\n  2  unknown production or attempt"
+    )]
     Diagnostics {
+        /// Production ID printed by `produce`
         production: String,
+        /// Attempt ID from `status` or `resume` output
         attempt: String,
+        /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
+        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
         #[arg(long)]
         json: bool,
     },
@@ -191,9 +245,10 @@ enum Command {
         #[arg(long, requires = "production")]
         smoke: Option<String>,
     },
-    /// Pin the emitted contract in sykli.lock
+    /// Pin the contract's hash in sykli.lock beside it
+    #[command(after_help = "Exit codes:\n  0  locked\n  2  could not read or hash the contract")]
     Lock {
-        /// Path to sykli.rs or a sykli-contract.v1 JSON file
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
     },
@@ -288,7 +343,20 @@ fn resolve_contract(contract: PathBuf) -> PathBuf {
     contract
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn signal(signal: i32, handler: usize) -> usize;
+}
+
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE, which turns `sykli plan --json | head` into a
+    // panic on the first write after the reader leaves. Restore the default
+    // so a closed pipe ends the process quietly, as it does for other tools.
+    #[cfg(unix)]
+    // SAFETY: SIGPIPE (13) with SIG_DFL (0); no handler code runs.
+    unsafe {
+        signal(13, 0);
+    }
     let mut cli = Cli::parse();
     match &mut cli.command {
         Command::Validate { contract, .. }
@@ -395,17 +463,15 @@ fn main() -> ExitCode {
             target: Some(target),
             changed,
             json,
-        } => {
-            production::report(
-                if changed.is_empty() {
-                    production::plan(&contract, &target)
-                } else {
-                    Err("typed planning pins all selected inputs; --changed is only for legacy graphs".into())
-                },
-                json,
-                false,
-            )
-        }
+        } => production::report(
+            if changed.is_empty() {
+                production::plan(&contract, &target)
+            } else {
+                Err("typed planning pins all selected inputs; --changed applies to declared graphs (sykli-contract.v1)".into())
+            },
+            json,
+            false,
+        ),
         Command::Validate { contract, json } => match load(&contract) {
             Ok((_, _, contract_hash)) => {
                 if json {
@@ -449,41 +515,49 @@ fn main() -> ExitCode {
             Ok(false) => ExitCode::FAILURE,
             Err(error) => {
                 eprintln!("error: {error}");
-                ExitCode::FAILURE
+                ExitCode::from(2)
             }
         },
         Command::Plan {
             contract,
             changed,
             json,
-            target: _,
-        } => match load(&contract).and_then(|(contract, levels, hash)| {
-            affected(&contract, &levels, &changed).map(|tasks| (hash, tasks))
-        }) {
-            Ok((contract_hash, tasks)) => {
-                if json {
-                    serde_json::to_writer(
-                        io::stdout().lock(),
-                        &PlanOutput {
-                            schema: "sykli-plan.v1",
-                            contract_hash,
-                            tasks,
-                        },
-                    )
-                    .expect("write Sykli plan");
-                    println!();
-                } else {
-                    for task in tasks {
-                        println!("{task}");
+            target,
+        } => {
+            if target.is_some() {
+                eprintln!("typed production requires Linux or macOS");
+                return ExitCode::from(2);
+            }
+            match load(&contract).and_then(|(contract, levels, hash)| {
+                affected(&contract, &levels, &changed).map(|tasks| (hash, tasks))
+            }) {
+                Ok((contract_hash, tasks)) => {
+                    if json {
+                        let written = serde_json::to_writer(
+                            io::stdout().lock(),
+                            &PlanOutput {
+                                schema: "sykli-plan.v1",
+                                contract_hash,
+                                tasks,
+                            },
+                        );
+                        if written.is_err() {
+                            return ExitCode::from(2);
+                        }
+                        println!();
+                    } else {
+                        for task in tasks {
+                            println!("{task}");
+                        }
                     }
+                    ExitCode::SUCCESS
                 }
-                ExitCode::SUCCESS
+                Err(error) => {
+                    eprintln!("invalid {}: {error}", contract.display());
+                    ExitCode::from(2)
+                }
             }
-            Err(error) => {
-                eprintln!("invalid {}: {error}", contract.display());
-                ExitCode::FAILURE
-            }
-        },
+        }
         Command::Init {
             path,
             force,
@@ -527,7 +601,7 @@ fn main() -> ExitCode {
             }
             Err(error) => {
                 eprintln!("error: {error}");
-                ExitCode::FAILURE
+                ExitCode::from(2)
             }
         },
         Command::Inspect {
@@ -590,13 +664,19 @@ fn read_lock(path: &Path) -> Result<Option<LockedContract>, String> {
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
-    let bytes = if path
+    let extension = path
         .extension()
-        .is_some_and(|extension| extension == "json")
-    {
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    let bytes = if extension.eq_ignore_ascii_case("json") {
         fs::read(path).map_err(|error| error.to_string())?
-    } else {
+    } else if extension == "rs" {
         emit_contract(path)?
+    } else {
+        return Err(format!(
+            "{} is neither a .json contract nor a .rs emitter",
+            path.display()
+        ));
     };
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
@@ -659,6 +739,7 @@ fn emit_contract(path: &Path) -> Result<Vec<u8>, String> {
             "--emit",
         ])
         .current_dir(directory)
+        .stdin(Stdio::null())
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
@@ -982,12 +1063,25 @@ fn execute(
                     Outcome::Blocked,
                     "dependency failed",
                     "dependency_failed",
+                    false,
                 ));
             } else {
-                match cache_key(task, runtime) {
+                let after: BTreeMap<&str, &str> = task
+                    .after
+                    .iter()
+                    .map(|name| {
+                        let key = receipts[names[name.as_str()]]
+                            .as_ref()
+                            .and_then(|record| record.cache_key.as_deref())
+                            .unwrap_or("");
+                        (name.as_str(), key)
+                    })
+                    .collect();
+                match cache_key(task, runtime, &after) {
                     Ok(key) => {
-                        if let Some(record) = cache.restore(task, &key, runtime) {
+                        if let Some(mut record) = cache.restore(task, &key, runtime) {
                             progress(json, "cached", &task.name);
+                            record.cache_key = Some(key);
                             receipts[index] = Some(record);
                         } else {
                             runnable.push((index, key));
@@ -1001,6 +1095,7 @@ fn execute(
                             Outcome::Errored,
                             &error,
                             "input_error",
+                            false,
                         ));
                     }
                 }
@@ -1028,6 +1123,7 @@ fn execute(
                             Outcome::Errored,
                             "task thread panicked",
                             "runtime_error",
+                            false,
                         )
                     });
                     record.cache_key = Some(key);
@@ -1073,10 +1169,15 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
     progress(json, "running", &task.name);
     let started = Instant::now();
     let mut command = ProcessCommand::new(&runtime.path);
+    // `--` keeps a command that starts with `-` from being read as a shell
+    // option; a null stdin keeps tasks from prompting or racing for the
+    // terminal, and out of the receipt as an undeclared input.
     command
         .arg("-c")
+        .arg("--")
         .arg(&task.run)
         .env_clear()
+        .stdin(Stdio::null())
         .envs(
             runtime
                 .environment
@@ -1098,7 +1199,8 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
                 runtime,
                 Outcome::Errored,
                 &error.to_string(),
-                "runtime_error",
+                "spawn_error",
+                false,
             );
         }
     };
@@ -1144,7 +1246,9 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut output_digests = BTreeMap::new();
     let mut outcome = Outcome::Passed;
-    let mut importable = stdout_bytes_dropped == 0 && stderr_bytes_dropped == 0;
+    // Truncated captures stay importable: `stdout_digest`/`stderr_digest`
+    // cover the full raw streams, and `*_truncated` says what the text omits.
+    let mut importable = true;
     let mut class = None;
     let mut retryable = false;
     let capture_error = stdout_error.or(stderr_error);
@@ -1273,6 +1377,7 @@ fn empty_task_receipt(
     outcome: Outcome,
     error: &str,
     class: &'static str,
+    retryable: bool,
 ) -> TaskReceipt {
     TaskReceipt {
         name: task.name.clone(),
@@ -1292,7 +1397,7 @@ fn empty_task_receipt(
         outcome,
         importable: outcome != Outcome::Errored,
         class: Some(class),
-        retryable: outcome == Outcome::Errored,
+        retryable,
         source: "task",
         error: Some(error.into()),
         provenance: None,
@@ -1317,12 +1422,22 @@ fn input_digest(path: &Path) -> Result<String, String> {
     Ok(sha256(&bytes))
 }
 
-fn cache_key(task: &Task, runtime: &ShellRuntime) -> Result<String, String> {
+/// A task's content address: its declaration, its declared inputs' digests,
+/// the runtime, and the keys of the tasks it runs `after`. The last term makes
+/// an `after` edge carry identity: when an upstream task re-runs for new
+/// inputs, everything downstream misses the cache instead of reusing a pass
+/// recorded against outputs it never saw.
+fn cache_key(
+    task: &Task,
+    runtime: &ShellRuntime,
+    after: &BTreeMap<&str, &str>,
+) -> Result<String, String> {
     #[derive(Serialize)]
     struct Key<'a> {
         task: &'a Task,
         inputs: BTreeMap<&'a str, String>,
         runtime: &'a str,
+        after: &'a BTreeMap<&'a str, &'a str>,
     }
 
     let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -1339,6 +1454,7 @@ fn cache_key(task: &Task, runtime: &ShellRuntime) -> Result<String, String> {
         task,
         inputs,
         runtime: &runtime.fingerprint,
+        after,
     })
     .map_err(|error| error.to_string())?;
     Ok(sha256(&bytes))
@@ -1628,7 +1744,7 @@ fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
 
 fn subject(contract: &Contract) -> Result<Subject, String> {
     let repository = git(&["rev-parse", "--show-toplevel"])?;
-    let head_tree_oid = git(&["rev-parse", "HEAD^{tree}"])?;
+    let head_tree_oid = head_tree_oid(Path::new(&repository))?;
     let tree_oid = working_tree_oid(Path::new(&repository))?;
     let inputs_digest = declared_inputs_digest(contract)?;
     let dirty = tree_oid != head_tree_oid;
@@ -1646,15 +1762,31 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
 /// excluded so receipts and cache entries never perturb the tree they witness.
 fn working_tree_oid(repository: &Path) -> Result<String, String> {
     let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    // Seed from HEAD so tracked files that also match .gitignore stay in the
+    // tree, as they do in HEAD; `add --all` then stages every change and
+    // deletion. A repository without commits starts from an empty index.
+    let _ = git_with_temporary_state(repository, &state, &["read-tree", "HEAD"]);
     git_with_temporary_state(repository, &state, &["add", "--all"])
-        .and_then(|_| {
-            git_with_temporary_state(
-                repository,
-                &state,
-                &["rm", "--cached", "-r", "-q", "--ignore-unmatch", ".sykli"],
-            )
-        })
+        .and_then(|_| exclude_sykli(repository, &state))
         .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
+}
+
+/// HEAD's tree with the same `.sykli` exclusion as the working tree, so a
+/// checkout that tracks its own receipts or evidence is not reported dirty.
+fn head_tree_oid(repository: &Path) -> Result<String, String> {
+    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    git_with_temporary_state(repository, &state, &["read-tree", "HEAD"])
+        .map_err(|_| "repository has no commits; commit once before running sykli".to_string())
+        .and_then(|_| exclude_sykli(repository, &state))
+        .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
+}
+
+fn exclude_sykli(repository: &Path, state: &TemporaryGitState) -> Result<String, String> {
+    git_with_temporary_state(
+        repository,
+        state,
+        &["rm", "--cached", "-r", "-q", "--ignore-unmatch", ".sykli"],
+    )
 }
 
 struct TemporaryGitState {
@@ -2062,8 +2194,11 @@ mod tests {
         let truncated = run_task(&truncates.tasks[0], &shell_runtime().unwrap(), true, 4);
         assert!(truncated.stdout_truncated);
         assert_eq!(truncated.stdout_bytes_dropped, 4);
-        assert!(!truncated.importable);
-        assert!(!cacheable(&truncated));
+        // The digest covers the whole stream, so a truncated capture is
+        // still complete evidence: importable and cacheable.
+        assert_eq!(truncated.stdout_digest, sha256(b"captured"));
+        assert!(truncated.importable);
+        assert!(cacheable(&truncated));
 
         let root = std::env::temp_dir().join(format!(
             "sykli-cache-test-{}-{}",

@@ -63,10 +63,12 @@ contract_hash=$(jq -r '.contract_hash' "$receipt")
 } >>"$summary"
 
 # One annotation per task that did not pass, so failures surface in the run
-# view without opening the summary. Newlines are percent-encoded because a
+# view without opening the summary. A blocked task is a consequence, not a
+# second failure, so it is a notice. Newlines are percent-encoded because a
 # workflow command is a single line.
 jq -r '
   .tasks[]
   | select(.outcome != "passed" and .outcome != "cached")
-  | "::error title=sykli " + .name + "::" + ((.error // .outcome) | gsub("%";"%25") | gsub("\r";"%0D") | gsub("\n";"%0A"))
+  | (if .outcome == "blocked" then "::notice" else "::error" end)
+    + " title=sykli " + .name + "::" + ((.error // .outcome) | gsub("%";"%25") | gsub("\r";"%0D") | gsub("\n";"%0A"))
 ' "$receipt"

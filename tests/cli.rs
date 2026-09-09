@@ -328,3 +328,230 @@ fn a_json_contract_is_the_default_when_there_is_no_emitter() {
     assert!(!output.status.success());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A git repository with one committed contract, ready for `sykli run`.
+fn graph_repo(name: &str, contract: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-{name}-{nonce}"));
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("sykli.json"), contract).unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    root
+}
+
+fn run_json(root: &std::path::Path) -> (Option<i32>, serde_json::Value) {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json", "--json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let receipt = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    (out.status.code(), receipt)
+}
+
+#[test]
+fn a_downstream_task_is_not_cached_against_outputs_it_never_saw() {
+    let root = graph_repo(
+        "after",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"a","run":"cp seed a.txt","inputs":["seed"],"outputs":["a.txt"]},
+            {"name":"b","run":"cat a.txt","after":["a"]}]}"#,
+    );
+    fs::write(root.join("seed"), "v1").unwrap();
+    fs::write(root.join(".gitignore"), "a.txt\n").unwrap();
+    let (code, first) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(first["tasks"][1]["stdout"], "v1");
+    let (_, second) = run_json(&root);
+    assert_eq!(second["tasks"][1]["outcome"], "cached");
+    fs::write(root.join("seed"), "v2").unwrap();
+    let (code, third) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(third["tasks"][0]["outcome"], "passed", "upstream re-ran");
+    assert_eq!(
+        third["tasks"][1]["outcome"], "passed",
+        "downstream must not be served from cache"
+    );
+    assert_eq!(third["tasks"][1]["stdout"], "v2");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tasks_get_no_stdin_and_dash_commands_are_commands() {
+    let root = graph_repo(
+        "stdin",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"reads","run":"cat; echo done"},
+            {"name":"dash","run":"-n 2>/dev/null || echo ran-as-command"}]}"#,
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json", "--json"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"secret input\n")
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(receipt["tasks"][0]["outcome"], "passed");
+    assert_eq!(
+        receipt["tasks"][0]["stdout"], "done\n",
+        "stdin must be empty for tasks"
+    );
+    assert_eq!(receipt["tasks"][1]["outcome"], "passed");
+    assert!(
+        receipt["tasks"][1]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("ran-as-command")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn run_and_plan_exit_2_when_they_cannot_evaluate() {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "missing.json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "missing.json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let root = graph_repo(
+        "notes",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    );
+    fs::write(root.join("notes.txt"), "not a contract").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "notes.txt"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("neither a .json contract nor a .rs emitter")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_clean_checkout_is_not_dirty_when_tracked_files_are_ignored_or_under_sykli() {
+    let root = graph_repo(
+        "dirty",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    );
+    fs::write(root.join("gen.txt"), "generated").unwrap();
+    fs::write(root.join(".gitignore"), "gen.txt\n").unwrap();
+    fs::create_dir_all(root.join(".sykli/evidence")).unwrap();
+    fs::write(root.join(".sykli/evidence/bundle.json"), "{}").unwrap();
+    for args in [
+        vec![
+            "add",
+            "-f",
+            "gen.txt",
+            ".gitignore",
+            ".sykli/evidence/bundle.json",
+        ],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "tracked",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let (code, receipt) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(receipt["subject"]["dirty"], false, "{}", receipt["subject"]);
+    fs::write(root.join("gen.txt"), "changed").unwrap();
+    let (_, receipt) = run_json(&root);
+    assert_eq!(
+        receipt["subject"]["dirty"], true,
+        "a modified tracked file is dirty even if ignored"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_truncated_capture_still_verifies() {
+    let root = graph_repo(
+        "truncate",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"loud","run":"head -c 1200000 /dev/zero | tr '\\0' x"}]}"#,
+    );
+    let (code, receipt) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(receipt["tasks"][0]["stdout_truncated"], true);
+    assert_eq!(receipt["tasks"][0]["importable"], true);
+    let path = root.join("receipt.json");
+    fs::write(&path, receipt.to_string()).unwrap();
+    // The receipt lives outside the tree it describes.
+    let outside = std::env::temp_dir().join(format!("sykli-receipt-{}.json", std::process::id()));
+    fs::rename(&path, &outside).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .arg("verify")
+        .arg(&outside)
+        .args(["--contract", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = fs::remove_file(outside);
+    fs::remove_dir_all(root).unwrap();
+}

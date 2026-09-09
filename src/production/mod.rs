@@ -255,10 +255,12 @@ impl History {
         if directory.exists() {
             for entry in fs::read_dir(&directory).map_err(err)? {
                 let path = entry.map_err(err)?.path();
+                // Temporaries and anything a file browser drops (.DS_Store)
+                // are not records; a real foreign record still fails loudly.
                 if path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.starts_with(".tmp-"))
+                    .is_some_and(|s| s.starts_with('.'))
                 {
                     continue;
                 }
@@ -946,6 +948,18 @@ fn advance(
             .take(jobs)
             .map(|(name, _)| name.clone())
             .collect();
+        // `--stop-after X` where X is already terminal has nothing left to
+        // do; running everything else would be the opposite of stopping.
+        if let Some(stop) = stop_after {
+            let terminal = history
+                .latest
+                .get(stop)
+                .and_then(|attempt| history.attempts.get(attempt))
+                .is_some_and(|attempt| attempt.result.is_some());
+            if terminal && retry != Some(stop) {
+                break;
+            }
+        }
         let mut children = Vec::new();
         let mut launched = Vec::new();
         for name in candidates {
@@ -1135,6 +1149,8 @@ fn execute(
         super::MAX_CAPTURE_BYTES,
     );
     // Waiting for the shell does not establish that its foreground children stopped.
+    // A shell that never started (`spawn_error`) leaves no children behind,
+    // so that failure is recorded, not treated as lost contact.
     if execution.class == Some("runtime_error")
         || (execution.exit_code.is_none() && execution.class == Some("command_failed"))
     {

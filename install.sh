@@ -21,6 +21,10 @@ case "$(uname -m)" in
   aarch64|arm64) arch=aarch64 ;;
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 2 ;;
 esac
+if [ "$platform" = windows ] && [ "$arch" = aarch64 ]; then
+  echo "no Windows ARM release is built; install the x86_64 zip (it runs under emulation) or use cargo install" >&2
+  exit 2
+fi
 
 repository=${SYKLI_REPOSITORY:-false-systems/sykli}
 install_dir=${SYKLI_INSTALL_DIR:-"$HOME/.local/bin"}

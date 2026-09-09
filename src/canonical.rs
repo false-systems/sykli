@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -120,19 +120,27 @@ pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .create_new(true)
         .open(&temporary)
         .map_err(err)?;
-    file.write_all(bytes).map_err(err)?;
-    file.sync_all().map_err(err)?;
-    match fs::hard_link(&temporary, path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::read(path).map_err(err)? != bytes {
-                let _ = fs::remove_file(&temporary);
-                return Err(format!("conflicting immutable record: {}", path.display()));
-            }
-        }
-        Err(e) => return Err(err(e)),
-    }
-    File::open(parent).and_then(|f| f.sync_all()).map_err(err)?;
-    fs::remove_file(temporary).map_err(err)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(err);
+    let linked = written.and_then(|()| match fs::hard_link(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match fs::read(path) {
+            Ok(existing) if existing == bytes => Ok(()),
+            Ok(_) => Err(format!("conflicting immutable record: {}", path.display())),
+            Err(e) => Err(err(e)),
+        },
+        Err(e) => Err(err(e)),
+    });
+    // The temporary never outlives this call, whatever happened.
+    let _ = fs::remove_file(&temporary);
+    linked?;
+    // Make the directory entry durable. Windows cannot open a directory for
+    // flushing without backup semantics, and NTFS journals the metadata.
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|f| f.sync_all())
+        .map_err(err)?;
     Ok(())
 }

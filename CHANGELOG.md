@@ -57,7 +57,7 @@ belong to the retired reference implementation, so a future publish is possible.
   `mode: advisory`. Existing receipt and production identities are unchanged.
 
 ### Changed
-- Legacy graph cache keys and receipt `inputs_digest` now include each input's
+- Graph cache keys and receipt `inputs_digest` now include each input's
   Unix execute bits with its content hash. Removing a script's executable
   permission no longer returns a cached success; old content-only cache
   entries miss, and older receipts with declared inputs must be regenerated.
@@ -66,6 +66,36 @@ belong to the retired reference implementation, so a future publish is possible.
   `PATH` entries, so the recorded tool is the one that ran.
 - The README presents sykli as one evaluator with three surfaces: graph runs
   and receipts, typed production, pull-request evidence.
+
+### Fixed
+- A graph task's cache key includes the keys of the tasks it runs `after`,
+  so a downstream task is never reported `cached` against upstream outputs it
+  did not see.
+- Tasks run with an empty stdin and as `sh -c -- CMD`; a command that starts
+  with `-` is a command, and no task can prompt or read the terminal.
+- `run`, `plan` and `lock` exit 2 when they cannot evaluate (1 stays for a
+  failed task); every graph command lists its exit codes in `--help`.
+- `subject.dirty` no longer flags a clean checkout whose tracked files match
+  `.gitignore` or whose `.sykli/` is tracked; both trees exclude `.sykli/`.
+- Truncated captures remain importable and cacheable: the digests cover the
+  full streams, and `*_truncated` says what the text omits.
+- Deterministic failures (missing inputs, blocked dependencies, spawn
+  errors) are not marked `retryable`; a shell that fails to start is recorded
+  as `spawn_error` and, in production, as a failed attempt rather than lost
+  contact.
+- `sykli init` declares `build.rs`, toolchain and lint configuration files,
+  and all test fixtures; workspace members outside the repository are
+  skipped; `sykli init --production` refuses a source it cannot capture
+  instead of dropping it, requires a committed `Cargo.lock` instead of
+  writing one, and never declares the contract as its own input.
+- Evidence bundles publish on Windows (no directory fsync there); the same
+  run attempt listed twice is one record, and disagreeing copies conflict;
+  request identities bind only stable candidate coordinates; fork runs are
+  reported as `association-missing`, not as absent; confirmation-pass
+  failures are described as such; Mermaid node ids are positional.
+- `sykli produce --stop-after X` stops when X is already terminal; a
+  `.DS_Store` in a production's records is ignored; lease errors from network
+  file systems are not reported as a busy peer.
 
 ### Removed
 - Never shipped in a release, removed before the first one: the `Dockerfile`

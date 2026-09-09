@@ -80,16 +80,51 @@ fn cargo(root: &Path) -> Option<Ecosystem> {
     }
     // `target` is Cargo's build directory only at the workspace root; a
     // module directory named `target` deeper down is source and stays.
-    for dir in ["src", "tests", "benches", "examples"] {
+    for dir in ["src", "benches", "examples"] {
         inputs.extend(walk(root, Path::new(dir), &["rs"], &[], &["target"]));
     }
+    // Test fixtures of any kind change test outcomes.
+    inputs.extend(walk(root, Path::new("tests"), &[], &[], &[]));
+    // Root files that change what cargo builds or how the checks judge it.
+    for file in [
+        "build.rs",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        ".rustfmt.toml",
+        "clippy.toml",
+        ".clippy.toml",
+        ".cargo/config.toml",
+        ".cargo/config",
+    ] {
+        if root.join(file).is_file() {
+            inputs.insert(file.into());
+        }
+    }
     for member in workspace_members(root, &fs::read_to_string(&manifest).unwrap_or_default()) {
+        // A member outside the repository cannot be a declared input.
+        if Path::new(&member).components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
+            continue;
+        }
         let member_root = root.join(&member);
         if member_root.join("Cargo.toml").is_file() {
             inputs.insert(format!("{member}/Cargo.toml"));
-            for dir in ["src", "tests"] {
-                inputs.extend(walk(root, &Path::new(&member).join(dir), &["rs"], &[], &[]));
+            if member_root.join("build.rs").is_file() {
+                inputs.insert(format!("{member}/build.rs"));
             }
+            inputs.extend(walk(
+                root,
+                &Path::new(&member).join("src"),
+                &["rs"],
+                &[],
+                &[],
+            ));
+            inputs.extend(walk(root, &Path::new(&member).join("tests"), &[], &[], &[]));
         }
     }
     Some(Ecosystem {
@@ -306,9 +341,13 @@ pub fn run(
     // Declared inputs and task commands resolve against the directory sykli
     // runs in, not the contract's, so a contract written elsewhere would
     // declare paths that only work from there. Refuse rather than mislead.
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|d| fs::canonicalize(d).ok());
     let root = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty() && *parent != Path::new("."))
+        .filter(|parent| fs::canonicalize(parent).ok() != here)
         .map(Path::to_path_buf);
     if let Some(elsewhere) = root {
         eprintln!(
@@ -358,6 +397,24 @@ pub fn run(
     if let Err(error) = fs::write(path, &text) {
         eprintln!("error: cannot write {}: {error}", path.display());
         return ExitCode::from(1);
+    }
+    // Receipts and caches live under .sykli/, which never counts as part of
+    // the tree a receipt describes; make the directory and keep it out of git
+    // so `sykli run --json > .sykli/receipt.json` verifies clean.
+    let _ = fs::create_dir_all(".sykli");
+    let ignore = fs::read_to_string(".gitignore").unwrap_or_default();
+    if !ignore
+        .lines()
+        .any(|line| matches!(line.trim(), ".sykli" | ".sykli/" | "/.sykli" | "/.sykli/"))
+    {
+        let mut ignore = ignore;
+        if !ignore.is_empty() && !ignore.ends_with('\n') {
+            ignore.push('\n');
+        }
+        ignore.push_str(".sykli/\n");
+        if let Err(error) = fs::write(".gitignore", ignore) {
+            eprintln!("note: could not add .sykli/ to .gitignore: {error}");
+        }
     }
     if lock {
         match write_lock(path) {

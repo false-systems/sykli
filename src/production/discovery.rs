@@ -141,7 +141,12 @@ pub fn cargo(
         }
     }
     if !root.join("Cargo.lock").is_file() {
+        // The captured source must resolve dependencies identically for every
+        // worker, so a lockfile is required; say so when one is written.
         output("cargo", &["generate-lockfile", "--offline"])?;
+        eprintln!(
+            "note: wrote Cargo.lock because none existed; commit it so every worker captures the same dependencies"
+        );
     }
     let mut paths = BTreeSet::from(["Cargo.toml".to_string(), "Cargo.lock".to_string()]);
     for p in packages {
@@ -171,8 +176,24 @@ pub fn cargo(
             relative(file)?;
             let path = prefix.join(file);
             let path = path.to_str().ok_or("non-UTF8 Cargo source path")?;
-            if Path::new(path) == authoring_path || source_path(path).is_err() {
+            // The contract being written is not its own source, however it was named.
+            if Path::new(path).file_name() == authoring_path.file_name()
+                && Path::new(path)
+                    .parent()
+                    .is_none_or(|p| p.as_os_str().is_empty())
+            {
                 continue;
+            }
+            // Hidden files (VCS, CI, editor) are not captured. A real source
+            // under a directory sykli never captures is an error, not a
+            // silent omission that leaves the snapshot unbuildable.
+            if path.split('/').any(|part| part.starts_with('.')) {
+                continue;
+            }
+            if let Err(reason) = source_path(path) {
+                return Err(format!(
+                    "Cargo source {path} cannot be captured ({reason}); declare an explicit contract"
+                ));
             }
             // Cargo lists a generated lockfile for members even when only the workspace lock exists.
             if file == "Cargo.lock" && !root.join(path).exists() {
