@@ -51,6 +51,8 @@ pub struct Manifest {
     pub pull_request: u64,
     pub interval: Window,
     pub selectors: BTreeMap<String, String>,
+    /// Why each listing stopped: exhausted, page-cap, http STATUS, transport, not-json.
+    pub terminations: BTreeMap<String, String>,
     pub responses: Vec<Response>,
     pub gaps: Vec<Gap>,
     pub requirements: Option<String>,
@@ -152,18 +154,32 @@ impl Store {
     }
 
     /// The most recent published collection for the same pull request, if any.
+    /// Only digest-named directories whose manifest matches their name count;
+    /// temporary directories left by an interrupted publish are ignored. Reads
+    /// manifests only, never objects.
     pub fn latest(&self, repository: &str, pull_request: u64) -> Option<String> {
         let mut best: Option<(String, String)> = None;
         for entry in fs::read_dir(&self.root).ok()?.flatten() {
-            let Ok(bundle) = Bundle::load(&entry.path()) else {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
                 continue;
             };
-            if bundle.manifest.repository != repository
-                || bundle.manifest.pull_request != pull_request
+            if digest(name).is_err() {
+                continue;
+            }
+            let Ok(bytes) = fs::read(entry.path().join("manifest.json")) else {
+                continue;
+            };
+            let Ok(manifest) = decode::<Manifest>(&bytes) else {
+                continue;
+            };
+            if manifest.id().ok().as_deref() != Some(name)
+                || !manifest.repository.eq_ignore_ascii_case(repository)
+                || manifest.pull_request != pull_request
             {
                 continue;
             }
-            let key = (bundle.manifest.interval.end.clone(), bundle.id.clone());
+            let key = (manifest.interval.end.clone(), name.to_string());
             if best.as_ref().is_none_or(|b| *b < key) {
                 best = Some(key);
             }

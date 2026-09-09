@@ -506,7 +506,7 @@ fn provider_failures_and_caps_are_explicit_gaps_not_empty_success() {
     );
     assert_eq!(
         doc["assessment"]["obligations"]["review"]["reason"],
-        "provider-unavailable"
+        "provider-denied"
     );
     let bundle = fake.bundle_path();
     let diagnostics = fs::read_to_string(bundle.join("diagnostics.json")).unwrap();
@@ -533,7 +533,14 @@ fn provider_failures_and_caps_are_explicit_gaps_not_empty_success() {
     assert_eq!(out.status.code(), Some(3));
     let ci = &json_out(&out)["assessment"]["obligations"]["ci"];
     assert_eq!(ci["reason"], "selection-incomplete");
-    assert!(ci["missing"].as_str().unwrap().contains("1000"));
+    assert!(
+        ci["missing"]
+            .as_str()
+            .unwrap()
+            .contains("stops at 10 pages"),
+        "{}",
+        ci["missing"]
+    );
     let calls = fs::read_to_string(fake.responses.join("calls.log")).unwrap();
     assert!(
         calls.lines().filter(|l| l.contains("actions/runs")).count() <= 20,
@@ -743,4 +750,194 @@ fn missing_gh_and_bad_inputs_are_tool_errors() {
     ]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(json_out(&out)["code"], "invalid-requirements");
+}
+
+#[test]
+fn read_only_bundle_still_yields_a_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = Fake::new("readonly");
+    assert_eq!(fake.inspect(&[]).status.code(), Some(0));
+    let bundle = fake.bundle_path();
+    let requirements = fake.requirements(&[42]).display().to_string();
+    let bundle_arg = bundle.display().to_string();
+    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = fake.sykli(&[
+        "assess",
+        &bundle_arg,
+        "--requirements",
+        &requirements,
+        "--json",
+    ]);
+    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(json_out(&out)["result"], "unproven");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: assessment not saved"));
+    assert!(!bundle.join("assessments").exists());
+}
+
+#[test]
+fn non_json_success_body_is_a_gap_and_the_bundle_stays_replayable() {
+    let fake = Fake::new("html");
+    fake.respond_on_call(&fake.reviews_endpoint(1), 2, b"<html>maintenance</html>");
+    let requirements = fake.requirements(&[42]).display().to_string();
+    let out = fake.inspect(&["--requirements", &requirements, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc = json_out(&out);
+    assert_eq!(
+        doc["assessment"]["obligations"]["ci"]["result"],
+        "satisfied"
+    );
+    assert_eq!(
+        doc["assessment"]["obligations"]["review"]["reason"],
+        "unsupported-response"
+    );
+    let bundle = fake.bundle_path().display().to_string();
+    let replay = fake.sykli(&["assess", &bundle, "--requirements", &requirements, "--json"]);
+    assert_eq!(replay.status.code(), Some(3));
+    assert_eq!(
+        json_out(&replay)["obligations"]["review"]["reason"],
+        "unsupported-response"
+    );
+    assert!(!stdout(&replay).contains("Unproven:"));
+}
+
+#[test]
+fn orphaned_temporary_directories_and_case_variants_do_not_fork_lineage() {
+    let fake = Fake::new("lineage");
+    assert_eq!(fake.inspect(&[]).status.code(), Some(0));
+    let first = fake.bundle_path();
+    // An interrupted publish leaves a fully written temporary directory behind.
+    let orphan = fake.root.join("evidence").join(".tmp-1-9999999999999-0");
+    let status = Command::new("cp")
+        .arg("-R")
+        .arg(&first)
+        .arg(&orphan)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(orphan.join("manifest.json")).unwrap()).unwrap();
+    manifest["interval"]["end"] = json!("2099-01-01T00:00:00Z");
+    fs::write(orphan.join("manifest.json"), manifest.to_string()).unwrap();
+    let store = fake.store();
+    let out = fake.sykli(&[
+        "inspect",
+        "--repo",
+        "False-Systems/sykli",
+        "--pr",
+        "25",
+        "--store",
+        &store,
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc = json_out(&out);
+    let second = Path::new(doc["bundle"].as_str().unwrap()).to_path_buf();
+    let second = if second.is_absolute() {
+        second
+    } else {
+        fake.root.join(second)
+    };
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(second.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["previous_collection"],
+        json!(first.file_name().unwrap().to_str().unwrap())
+    );
+    assert_eq!(
+        manifest["repository"], "false-systems/sykli",
+        "canonical name, not the typed spelling"
+    );
+}
+
+#[test]
+fn incomplete_first_listing_never_becomes_a_race() {
+    let fake = Fake::new("norace");
+    for page in 1..=2 {
+        fake.respond(&fake.runs_endpoint(page), &fixture("runs.json"));
+    }
+    fake.headers(
+        &fake.runs_endpoint(1),
+        "Link: <https://api.github.com/x?page=2>; rel=\"next\"\r\n",
+    );
+    // First pass: page 2 fails; confirmation pass: page 2 succeeds.
+    fs::write(
+        fake.responses
+            .join(format!("{}.1.status", key(&fake.runs_endpoint(2)))),
+        "502 Bad Gateway",
+    )
+    .unwrap();
+    let requirements = fake.requirements(&[42]).display().to_string();
+    let out = fake.inspect(&["--requirements", &requirements, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let assessment = &json_out(&out)["assessment"];
+    let codes: Vec<&str> = assessment["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["code"].as_str().unwrap())
+        .collect();
+    assert!(!codes.contains(&"race"), "{codes:?}");
+    assert!(!codes.contains(&"confirmation-missing"), "{codes:?}");
+    assert_eq!(
+        assessment["obligations"]["ci"]["reason"],
+        "provider-unavailable"
+    );
+    let note = assessment["coverage"]["runs"]["note"].as_str().unwrap();
+    assert!(note.contains("HTTP 502"), "{note}");
+    assert!(!note.contains("1000"), "{note}");
+
+    // A denied endpoint says so, and a page cap names the cap rather than a transport fault.
+    let fake = Fake::new("denied-code");
+    fake.status(&fake.reviews_endpoint(1), "403 Forbidden");
+    let requirements = fake.requirements(&[42]).display().to_string();
+    let out = fake.inspect(&["--requirements", &requirements]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stdout(&out).contains("GitHub refused the query"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn requirements_for_another_repository_stop_before_anything_is_saved() {
+    let fake = Fake::new("foreign");
+    let requirements = fake.requirements(&[42]);
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(&requirements).unwrap()).unwrap();
+    doc["repository"]["id"] = json!(1);
+    fs::write(&requirements, doc.to_string()).unwrap();
+    let out = fake.inspect(&["--requirements", requirements.to_str().unwrap(), "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json_out(&out)["code"], "repository-mismatch");
+    let calls = fs::read_to_string(fake.responses.join("calls.log")).unwrap();
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "only the repository was read: {calls}"
+    );
+    assert!(
+        !fake.root.join("evidence").exists()
+            || fs::read_dir(fake.root.join("evidence")).unwrap().count() == 0
+    );
 }

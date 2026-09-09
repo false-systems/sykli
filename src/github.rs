@@ -88,17 +88,41 @@ fn sanitize(text: &[u8]) -> String {
             continue;
         }
         let mut cleaned = String::new();
-        for word in line.split(' ') {
-            let token = word.len() >= 30
-                && (word.starts_with("gh") && word.as_bytes().get(3) == Some(&b'_')
-                    || word.starts_with("github_pat_"));
-            cleaned.push_str(if token { "[redacted]" } else { word });
+        for word in line.split_whitespace() {
+            cleaned.push_str(if holds_token(word) {
+                "[redacted]"
+            } else {
+                word
+            });
             cleaned.push(' ');
         }
         out.push_str(cleaned.trim_end());
         out.push('\n');
     }
     out
+}
+
+/// A GitHub token shape (`gh?_…`, `github_pat_…`) anywhere inside one word,
+/// so `GH_TOKEN=ghp_…`, `"ghp_…"` and `token:ghp_…` are all caught.
+fn holds_token(word: &str) -> bool {
+    word.char_indices().any(|(i, _)| {
+        let rest = &word[i..];
+        let body = if let Some(body) = rest.strip_prefix("github_pat_") {
+            body
+        } else if rest.len() > 4
+            && rest.starts_with("gh")
+            && rest.as_bytes()[2].is_ascii_lowercase()
+            && rest.as_bytes()[3] == b'_'
+        {
+            &rest[4..]
+        } else {
+            return false;
+        };
+        body.bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count()
+            >= 20
+    })
 }
 
 fn parse_http(output: &[u8]) -> Result<Http, String> {
@@ -268,6 +292,31 @@ struct Collector {
     gaps: Vec<Gap>,
     diagnostics: Vec<Value>,
     selectors: BTreeMap<String, String>,
+    terminations: BTreeMap<String, String>,
+}
+
+enum Called {
+    Body(Value),
+    Http(u16),
+    Transport(String),
+    NotJson,
+}
+
+impl Called {
+    fn body(self) -> Option<Value> {
+        match self {
+            Called::Body(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+/// Gap code for a provider response that is not a 200.
+fn http_gap_code(status: u16) -> &'static str {
+    match status {
+        401 | 403 => "provider-denied",
+        _ => "provider-unavailable",
+    }
 }
 
 fn scope_of(role: &str) -> &'static str {
@@ -286,8 +335,8 @@ impl Collector {
         format!("repos/{}/{}", self.owner, self.name)
     }
 
-    /// Record one request. Returns the parsed body for 200 responses.
-    fn call(&mut self, role: &str, page: u64, endpoint: &str) -> Option<Value> {
+    /// Record one request and say how it ended.
+    fn call(&mut self, role: &str, page: u64, endpoint: &str) -> Called {
         let requested_at = format_time(seconds());
         let outcome = gh(endpoint);
         let mut entry = json!({
@@ -305,7 +354,7 @@ impl Collector {
                 code: "provider-unavailable".into(),
                 detail: format!("{role}: {detail}"),
             });
-            return None;
+            return Called::Transport(detail);
         };
         let object = crate::sha256(&http.body);
         let next = http
@@ -332,52 +381,70 @@ impl Collector {
         if http.status != 200 {
             self.gaps.push(Gap {
                 scope: scope_of(role).into(),
-                code: "provider-unavailable".into(),
+                code: http_gap_code(http.status).into(),
                 detail: format!("{role}: HTTP {}", http.status),
             });
-            return None;
+            return Called::Http(http.status);
         }
         match serde_json::from_slice(&body) {
-            Ok(value) => Some(value),
+            Ok(value) => Called::Body(value),
             Err(error) => {
                 self.gaps.push(Gap {
                     scope: scope_of(role).into(),
                     code: "unsupported-response".into(),
                     detail: format!("{role}: body is not JSON: {error}"),
                 });
-                None
+                Called::NotJson
             }
         }
     }
 
-    /// Paginate a listing up to the page cap. Coverage is derived later from
-    /// the retained responses, so a cap simply stops here.
+    /// Paginate a listing up to the page cap and record why it stopped, so
+    /// coverage notes name the real cause instead of guessing.
     fn list(&mut self, role: &str, selector: &str) {
         let endpoint = format!("{}/{selector}", self.repo());
         self.selectors.insert(role.into(), selector.into());
         for page in 1..=MAX_PAGES {
             let separator = if endpoint.contains('?') { '&' } else { '?' };
             let paged = format!("{endpoint}{separator}per_page={PER_PAGE}&page={page}");
-            if self.call(role, page, &paged).is_none() {
-                return;
-            }
-            let last = self.responses.last().expect("recorded");
-            if !last.next {
-                return;
-            }
+            let termination = match self.call(role, page, &paged) {
+                Called::Body(_) => {
+                    if self.responses.last().is_some_and(|r| r.next) {
+                        continue;
+                    }
+                    "exhausted".to_string()
+                }
+                Called::Http(status) => format!("http {status}"),
+                Called::Transport(detail) => format!("transport: {detail}"),
+                Called::NotJson => "not-json".into(),
+            };
+            self.terminations.insert(role.into(), termination);
+            return;
         }
+        self.terminations.insert(role.into(), "page-cap".into());
     }
 }
 
+/// Why live acquisition produced no bundle.
+pub enum CollectError {
+    /// The candidate itself could not be read.
+    Unreadable(String),
+    /// The requirements are bound to a different repository than the one read.
+    RepositoryMismatch(String),
+}
+
 /// Live read-only acquisition for one pull request. Fails only when the
-/// candidate itself cannot be read; every other problem is a recorded gap.
+/// candidate itself cannot be read or the requirements do not apply to it;
+/// every other problem is a recorded gap. `bound_repository` is the
+/// repository ID the requirements name, checked before anything is listed.
 pub fn collect(
     repository: &str,
     pull: u64,
     requirements: Option<String>,
+    bound_repository: Option<u64>,
     previous_collection: Option<String>,
-) -> Result<Draft, String> {
-    let (owner, name) = super::github::repository(repository)?;
+) -> Result<Draft, CollectError> {
+    let (owner, name) = super::github::repository(repository).map_err(CollectError::Unreadable)?;
     let mut collector = Collector {
         owner,
         name,
@@ -386,29 +453,50 @@ pub fn collect(
         gaps: vec![],
         diagnostics: vec![],
         selectors: BTreeMap::new(),
+        terminations: BTreeMap::new(),
     };
     let start = seconds();
     let repo = collector.repo();
-    let repository_value = collector.call("repository", 1, &repo);
-    let pull_value = collector.call("pull", 1, &format!("{repo}/pulls/{pull}"));
-    let (Some(repository_value), Some(pull_value)) = (repository_value, pull_value) else {
+    let unreadable = |collector: &Collector| {
         let detail = collector
             .gaps
             .iter()
             .map(|g| g.detail.clone())
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(format!("cannot read {repository}#{pull}: {detail}"));
+        CollectError::Unreadable(format!("cannot read {repository}#{pull}: {detail}"))
     };
-    let observed_name = repository_value["full_name"].as_str().unwrap_or("");
+    let Some(repository_value) = collector.call("repository", 1, &repo).body() else {
+        return Err(unreadable(&collector));
+    };
+    let observed_name = repository_value["full_name"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     if !observed_name.eq_ignore_ascii_case(repository) {
-        return Err(format!(
+        return Err(CollectError::Unreadable(format!(
             "requested {repository} but GitHub resolved it to {observed_name:?}; use the canonical name"
-        ));
+        )));
     }
+    let observed_id = repository_value["id"].as_u64();
+    if bound_repository.is_some_and(|bound| observed_id != Some(bound)) {
+        let bound = bound_repository.unwrap_or_default();
+        return Err(CollectError::RepositoryMismatch(format!(
+            "requirements are bound to github.com repository {bound} but {observed_name} is repository {}",
+            observed_id.map_or("unknown".to_string(), |id| id.to_string())
+        )));
+    }
+    let Some(pull_value) = collector
+        .call("pull", 1, &format!("{repo}/pulls/{pull}"))
+        .body()
+    else {
+        return Err(unreadable(&collector));
+    };
     let head_sha = pull_value["head"]["sha"].as_str().unwrap_or("").to_string();
     if head_sha.len() != 40 {
-        return Err("pull request has no readable head commit".into());
+        return Err(CollectError::Unreadable(
+            "pull request has no readable head commit".into(),
+        ));
     }
     collector.call("commit", 1, &format!("{repo}/git/commits/{head_sha}"));
     collector.list("workflows", "actions/workflows");
@@ -423,13 +511,14 @@ pub fn collect(
         schema: COLLECTION_SCHEMA.into(),
         reader: READER.into(),
         host: HOST.into(),
-        repository: repository.into(),
+        repository: observed_name,
         pull_request: pull,
         interval: Window {
             start: format_time(start),
             end: format_time(end),
         },
         selectors: collector.selectors,
+        terminations: collector.terminations,
         responses: collector.responses,
         gaps: collector.gaps,
         requirements,
@@ -498,8 +587,14 @@ fn pages(bundle: &Bundle, role: &str, key: Option<&str>) -> Result<(Vec<Page>, C
             ));
             break;
         }
-        let value: Value = serde_json::from_slice(bundle.object(&response.object)?)
-            .map_err(|e| format!("{role} object {} is not JSON: {e}", response.object))?;
+        let Ok(value) = serde_json::from_slice::<Value>(bundle.object(&response.object)?) else {
+            coverage.complete = false;
+            coverage.note = Some(format!(
+                "{role} page {} is not JSON; the provider answered 200 with an unreadable body",
+                response.page
+            ));
+            break;
+        };
         if let Some(key) = key {
             if let Some(total) = u64_at(&value, "/total_count") {
                 coverage.total = Some(total);
@@ -514,10 +609,21 @@ fn pages(bundle: &Bundle, role: &str, key: Option<&str>) -> Result<(Vec<Page>, C
         });
         if response.next && index + 1 == responses.len() {
             coverage.complete = false;
-            coverage.note = Some(format!(
-                "{role} listing continues beyond the {} retained page(s); GitHub caps filtered listings at 1000 results",
-                responses.len()
-            ));
+            let retained = responses.len();
+            coverage.note = Some(
+                match bundle.manifest.terminations.get(role).map(String::as_str) {
+                    Some("page-cap") => format!(
+                        "{role} listing continues beyond the {retained} retained page(s); sykli stops at {MAX_PAGES} pages ({} results) and GitHub caps filtered listings at 1000",
+                        MAX_PAGES * PER_PAGE
+                    ),
+                    Some(cause) => format!(
+                        "{role} listing continues beyond the {retained} retained page(s); the next page was not retrieved ({cause})"
+                    ),
+                    None => {
+                        format!("{role} listing continues beyond the {retained} retained page(s)")
+                    }
+                },
+            );
         }
     }
     if coverage.complete
@@ -750,9 +856,11 @@ pub fn normalize(bundle: &Bundle) -> Result<(Candidate, Observations), String> {
     }
     let (confirm_runs, confirm_runs_coverage) =
         pages(bundle, "runs-confirm", Some("workflow_runs"))?;
-    // A confirmation pass matters only when the first listing was complete;
-    // an incomplete first listing is already its own gap.
-    if !confirm_runs_coverage.complete && coverage["runs"].complete {
+    // Passes are comparable only when both are complete. An incomplete first
+    // listing is already its own gap; an incomplete confirmation of a complete
+    // listing means the change check could not be made.
+    if !coverage["runs"].complete {
+    } else if !confirm_runs_coverage.complete {
         gaps.push(Gap {
             scope: "runs".into(),
             code: "confirmation-missing".into(),
@@ -783,7 +891,8 @@ pub fn normalize(bundle: &Bundle) -> Result<(Candidate, Observations), String> {
         }
     }
     let (confirm_reviews, confirm_reviews_coverage) = pages(bundle, "reviews-confirm", None)?;
-    if !confirm_reviews_coverage.complete && coverage["reviews"].complete {
+    if !coverage["reviews"].complete {
+    } else if !confirm_reviews_coverage.complete {
         gaps.push(Gap {
             scope: "reviews".into(),
             code: "confirmation-missing".into(),
@@ -864,8 +973,12 @@ mod tests {
 
     #[test]
     fn diagnostics_drop_credentials() {
-        let text = sanitize(b"error: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab rejected\nAuthorization: Bearer x\nplain\n");
+        let text = sanitize(b"error: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab rejected\nAuthorization: Bearer x\nplain\nGH_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab\ttoken:\"github_pat_11AAAAAAA0bbbbbbbbbbbbbbbbbbbbbbbbb\"\n");
         assert!(!text.contains("ghp_A"));
+        assert!(!text.contains("github_pat_1"));
+        assert!(!text.contains("GH_TOKEN=ghp"), "{text}");
+        assert!(!holds_token("github"));
+        assert!(!holds_token("ghost_stories_are_short"));
         assert!(text.contains("[redacted]"));
         assert!(text.contains("[redacted header]"));
         assert!(text.contains("plain"));

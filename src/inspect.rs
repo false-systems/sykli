@@ -48,15 +48,15 @@ fn load_requirements(path: &Path) -> Result<(Requirements, String), Fault> {
     Ok((requirements, id))
 }
 
-/// Evaluate a loaded bundle and persist requirements, request and assessment
-/// beside it. The same path serves live inspection and offline replay.
+/// Evaluate a loaded bundle. The same path serves live inspection and offline
+/// replay; persistence is separate so a read-only bundle still yields a verdict.
 fn assess_bundle(
     bundle: &Bundle,
     requirements: &Requirements,
     candidate: Candidate,
     observations: &Observations,
     at: Option<u64>,
-) -> Result<Assessment, Fault> {
+) -> Result<(Request, Assessment), Fault> {
     let request = Request::new(candidate, requirements).map_err(fault("repository-mismatch"))?;
     let assessment = assessment::evaluate(
         requirements,
@@ -66,38 +66,43 @@ fn assess_bundle(
         at,
     )
     .map_err(fault("invalid-time"))?;
-    save(
-        bundle,
-        "requirements",
-        &requirements.id().map_err(fault("invalid-requirements"))?,
-        requirements,
-    )?;
-    save(
-        bundle,
-        "requests",
-        &request.id().map_err(fault("invalid-bundle"))?,
-        &request,
-    )?;
-    save(
-        bundle,
-        "assessments",
-        &assessment.id().map_err(fault("invalid-bundle"))?,
-        &assessment,
-    )?;
-    Ok(assessment)
+    Ok((request, assessment))
 }
 
-fn save<T: serde::Serialize>(
+/// Save requirements, request and assessment beside the collection. Best
+/// effort after the verdict is printed: an archived or read-only bundle is
+/// still assessable, and the failure is reported on stderr, never as a verdict.
+fn persist(
     bundle: &Bundle,
-    kind: &str,
-    id: &str,
-    value: &T,
-) -> Result<(), Fault> {
-    let bytes = canonical(value).map_err(fault("store-failure"))?;
-    bundle
-        .save(kind, id, &bytes)
-        .map(|_| ())
-        .map_err(fault("store-failure"))
+    requirements: &Requirements,
+    request: &Request,
+    assessment: &Assessment,
+) -> Result<(), String> {
+    fn save<T: serde::Serialize>(
+        bundle: &Bundle,
+        kind: &str,
+        id: &str,
+        value: &T,
+    ) -> Result<(), String> {
+        bundle.save(kind, id, &canonical(value)?).map(|_| ())
+    }
+    save(bundle, "requirements", &requirements.id()?, requirements)?;
+    save(bundle, "requests", &request.id()?, request)?;
+    save(bundle, "assessments", &assessment.id()?, assessment)
+}
+
+fn persist_or_warn(
+    bundle: &Bundle,
+    requirements: &Requirements,
+    request: &Request,
+    assessment: &Assessment,
+) {
+    if let Err(error) = persist(bundle, requirements, request, assessment) {
+        eprintln!(
+            "warning: assessment not saved beside {}: {error}",
+            bundle.path.display()
+        );
+    }
 }
 
 fn observations_text(candidate: &Candidate, observations: &Observations, saved: &Path) -> String {
@@ -218,15 +223,25 @@ pub fn inspect(
         repository,
         pull,
         requirements.as_ref().map(|(_, id)| format!("sha256:{id}")),
+        requirements.as_ref().map(|(r, _)| r.repository.id),
         previous,
     ) {
         Ok(draft) => draft,
-        Err(error) => {
+        Err(github::CollectError::Unreadable(message)) => {
             return fail(
                 json,
                 Fault {
                     code: "provider-unavailable",
-                    message: error,
+                    message,
+                },
+            );
+        }
+        Err(github::CollectError::RepositoryMismatch(message)) => {
+            return fail(
+                json,
+                Fault {
+                    code: "repository-mismatch",
+                    message,
                 },
             );
         }
@@ -277,10 +292,11 @@ pub fn inspect(
         }
         return ExitCode::SUCCESS;
     };
-    let assessment = match assess_bundle(&bundle, &requirements, candidate, &observations, None) {
-        Ok(assessment) => assessment,
-        Err(fault) => return fail(json, fault),
-    };
+    let (request, assessment) =
+        match assess_bundle(&bundle, &requirements, candidate, &observations, None) {
+            Ok(assessed) => assessed,
+            Err(fault) => return fail(json, fault),
+        };
     if json {
         println!(
             "{}",
@@ -303,6 +319,7 @@ pub fn inspect(
         );
         println!("Saved observations: {}", shown.display());
     }
+    persist_or_warn(&bundle, &requirements, &request, &assessment);
     ExitCode::from(assessment.result.exit_code())
 }
 
@@ -368,10 +385,11 @@ pub fn assess(
             );
         }
     };
-    let assessment = match assess_bundle(&loaded, &requirements, candidate, &observations, at) {
-        Ok(assessment) => assessment,
-        Err(fault) => return fail(json, fault),
-    };
+    let (request, assessment) =
+        match assess_bundle(&loaded, &requirements, candidate, &observations, at) {
+            Ok(assessed) => assessed,
+            Err(fault) => return fail(json, fault),
+        };
     let assessment = &assessment;
     if let Some(id) = why {
         let Some(obligation) = assessment.obligations.get(id) else {
@@ -418,5 +436,6 @@ pub fn assess(
         );
         println!("Replaying supplied evidence from {}", bundle.display());
     }
+    persist_or_warn(&loaded, &requirements, &request, assessment);
     ExitCode::from(assessment.result.exit_code())
 }

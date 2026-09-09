@@ -15,6 +15,9 @@ pub const EVALUATOR: &str = "review-readiness.v1";
 pub const TRUST: &str = "trusted-local-collector-and-store";
 pub const AUTHENTICITY: &str = "not-established";
 pub const MODE: &str = "advisory";
+/// Upper bound for a freshness allowance: ten years, so the sum with a
+/// collection end can never overflow and "never stale" is spelled explicitly.
+pub const MAX_OBSERVATION_AGE: u64 = 315_360_000;
 
 // ---------------------------------------------------------------- time
 
@@ -228,8 +231,12 @@ impl Requirements {
         if self.repository.id == 0 {
             return Err("repository id must be positive".into());
         }
-        if self.max_observation_age_seconds == 0 {
-            return Err("max_observation_age_seconds must be positive".into());
+        if self.max_observation_age_seconds == 0
+            || self.max_observation_age_seconds > MAX_OBSERVATION_AGE
+        {
+            return Err(format!(
+                "max_observation_age_seconds must be between 1 and {MAX_OBSERVATION_AGE} (ten years)"
+            ));
         }
         if self.requirements.is_empty() {
             return Err("requirements must not be empty".into());
@@ -771,10 +778,13 @@ fn approval_obligation(
     let mut decisive: BTreeMap<u64, Vec<&Review>> = BTreeMap::new();
     let mut seen: BTreeMap<u64, &Review> = BTreeMap::new();
     for review in &observations.reviews {
+        // The same review listed twice (a listing that shifted between pages)
+        // is one record, not two; differing copies are a contradiction.
         let previous = seen.insert(review.id, review);
-        if let Some(previous) =
-            previous.filter(|p| p.state != review.state || p.commit_id != review.commit_id)
-        {
+        if let Some(previous) = previous {
+            if previous.state == review.state && previous.commit_id == review.commit_id {
+                continue;
+            }
             obligation.result = Verdict::Conflict;
             obligation.reason = "contradictory-review-reports".into();
             obligation.counterevidence = vec![
@@ -953,7 +963,12 @@ pub fn evaluate(
         .iter()
         .find(|g| g.scope == "candidate")
         .cloned();
-    if blocker.is_none() && evaluated_at > interval.end + requirements.max_observation_age_seconds {
+    if blocker.is_none()
+        && evaluated_at
+            > interval
+                .end
+                .saturating_add(requirements.max_observation_age_seconds)
+    {
         blocker = Some(Gap {
             scope: "candidate".into(),
             code: "stale".into(),
@@ -1069,7 +1084,21 @@ pub fn describe(obligation: &Obligation) -> String {
         "candidate-moved" => "The pull request changed while it was being read".into(),
         "race" => "Runs or reviews changed while they were being read".into(),
         "stale" => "Observations are older than the configured allowance".into(),
-        "provider-unavailable" => "GitHub did not answer the query".into(),
+        "provider-unavailable" => format!(
+            "GitHub did not answer the query ({})",
+            obligation.missing.as_deref().unwrap_or("no detail")
+        ),
+        "provider-denied" => format!(
+            "GitHub refused the query; check the gh login's access ({})",
+            obligation.missing.as_deref().unwrap_or("no detail")
+        ),
+        "unsupported-response" => "GitHub answered with a body this reader cannot interpret".into(),
+        "confirmation-missing" => {
+            "Runs or reviews could not be re-read, so change during acquisition is unknown".into()
+        }
+        "candidate-unconfirmed" => {
+            "The pull request could not be re-read, so change during acquisition is unknown".into()
+        }
         reason if reason.starts_with("provider-outcome:") => format!(
             "The latest run attempt is {}; not a completed success",
             reason.trim_start_matches("provider-outcome:")
@@ -1398,7 +1427,11 @@ mod tests {
             ),
             (
                 r#"{"schema":"sykli-requirements.v1","purpose":"review-readiness","repository":{"host":"github.com","id":1},"max_observation_age_seconds":0,"requirements":{"ci":{"kind":"workflow-reported-success","source":{"provider":"github","workflow_id":1,"event":"pull_request"},"selection":"latest-run-latest-attempt"}}}"#,
-                "positive",
+                "between 1 and",
+            ),
+            (
+                r#"{"schema":"sykli-requirements.v1","purpose":"review-readiness","repository":{"host":"github.com","id":1},"max_observation_age_seconds":18446744073709551615,"requirements":{"ci":{"kind":"workflow-reported-success","source":{"provider":"github","workflow_id":1,"event":"pull_request"},"selection":"latest-run-latest-attempt"}}}"#,
+                "between 1 and",
             ),
             (
                 r#"{"schema":"sykli-requirements.v1","purpose":"review-readiness","repository":{"host":"github.com","id":1},"max_observation_age_seconds":300,"requirements":{"ci":{"kind":"tests-passed","source":{"provider":"github"}}}}"#,
@@ -1679,6 +1712,59 @@ mod tests {
     }
 
     #[test]
+    fn identical_duplicate_review_is_one_record() {
+        let green = run(1, 65, 1, "completed", Some("success"));
+        let twice = vec![
+            review(1, 42, "APPROVED", HEAD, 10),
+            review(1, 42, "APPROVED", HEAD, 10),
+        ];
+        let assessment = assess(&observations(vec![green.clone()], twice), None);
+        assert_eq!(assessment.obligations["review"].reason, "approval-present");
+        assert_eq!(assessment.result, Aggregate::Established);
+        let differing = vec![
+            review(1, 42, "APPROVED", HEAD, 10),
+            review(1, 42, "DISMISSED", HEAD, 10),
+        ];
+        let assessment = assess(&observations(vec![green], differing), None);
+        assert_eq!(assessment.obligations["review"].result, Verdict::Conflict);
+    }
+
+    #[test]
+    fn maximum_allowance_never_overflows() {
+        let mut requirements = requirements();
+        requirements.max_observation_age_seconds = MAX_OBSERVATION_AGE;
+        assert!(requirements.validate().is_ok());
+        let request = Request::new(candidate(), &requirements).unwrap();
+        let observations = observations(
+            vec![run(1, 65, 1, "completed", Some("success"))],
+            vec![review(1, 42, "APPROVED", HEAD, 10)],
+        );
+        let fresh = evaluate(
+            &requirements,
+            &request,
+            "sha256:c",
+            &observations,
+            Some(u64::MAX / 2),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh.result,
+            Aggregate::Unproven,
+            "far future is stale, not a panic"
+        );
+        let mut huge = observations.clone();
+        huge.interval.end = u64::MAX - 1;
+        huge.interval.start = u64::MAX - 2;
+        let saturated =
+            evaluate(&requirements, &request, "sha256:c", &huge, Some(u64::MAX)).unwrap();
+        assert_eq!(
+            saturated.result,
+            Aggregate::Established,
+            "saturating add, no wrap to stale"
+        );
+    }
+
+    #[test]
     fn gaps_block_without_inventing() {
         let mut moved = observations(vec![run(1, 65, 1, "completed", Some("success"))], vec![]);
         moved.gaps.push(Gap {
@@ -1705,6 +1791,24 @@ mod tests {
             assessment.obligations["review"].reason,
             "provider-unavailable"
         );
+        assert!(describe(&assessment.obligations["review"]).contains("HTTP 403"));
+        let mut forbidden = denied.clone();
+        forbidden.gaps[0].code = "provider-denied".into();
+        let assessment = assess(&forbidden, None);
+        assert!(describe(&assessment.obligations["review"]).contains("refused"));
+        for code in [
+            "unsupported-response",
+            "confirmation-missing",
+            "candidate-unconfirmed",
+        ] {
+            let mut gapped = denied.clone();
+            gapped.gaps[0].code = code.into();
+            let assessment = assess(&gapped, None);
+            assert!(
+                !describe(&assessment.obligations["review"]).starts_with("Unproven:"),
+                "{code}"
+            );
+        }
     }
 
     #[test]

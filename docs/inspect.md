@@ -53,7 +53,9 @@ about tests, coverage, or safety. The numbers shown are the exact workflow and
 account IDs a requirements file needs.
 
 Exit code 0 means a valid snapshot of observations was saved, even if it records
-provider gaps. Exit code 2 means the candidate itself could not be read.
+provider gaps. Exit code 2 means the candidate itself could not be read, or the
+requirements are bound to a different repository; that binding is checked
+against the first response, before anything is listed or saved.
 
 ## Requirements
 
@@ -90,7 +92,7 @@ new request, so nothing is approved by accident.
 - `allowed_user_ids` are account IDs (`gh api users/LOGIN --jq .id`), never
   logins. IDs establish account identity, not independence from the author.
 - Duplicate keys, empty requirement sets, unknown kinds or fields, zero or
-  negative IDs, a zero age, and any selection other than
+  negative IDs, an age outside 1 second to ten years, and any selection other than
   `latest-run-latest-attempt` are rejected. Only `pull_request` events are
   supported for the workflow predicate; `pull_request_target`, merge queues, and
   dispatch events are not.
@@ -192,7 +194,9 @@ diagnostics.json     per-request status, request IDs, sanitized stderr; opened e
 requirements/<id>.json, requests/<id>.json, assessments/<id>.json   saved by assess
 ```
 
-The collection ID is the manifest's domain-separated SHA-256. Publication writes
+`assess` saves its records after printing the verdict and only warns on stderr
+if the bundle is read-only, so an archived bundle is still assessable. The
+collection ID is the manifest's domain-separated SHA-256. Publication writes
 into a private directory and renames it into place, so a torn write is never a
 bundle. Loading verifies every object digest; a tampered object or a missing one
 is a tool error, never completion. Raw responses may contain private repository
