@@ -104,8 +104,8 @@ cd your-repo && sykli init && sykli run
 ```
 
 Or `cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli`
-with Rust 1.85 or newer. Windows zips, containers, Homebrew and the GitHub
-Action are in [installation options](docs/install.md).
+with Rust 1.85 or newer. Windows zips, Homebrew and the GitHub Action are in
+[installation options](docs/install.md).
 
 ## What sykli is not
 
