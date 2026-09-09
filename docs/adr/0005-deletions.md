@@ -34,7 +34,7 @@ reintroducing one must cite this ADR and the condition it satisfies.
 `sykli inspect` reads one pull request's workflow runs and reviews through the
 operator's `gh`, saves them as an immutable evidence bundle, and `sykli assess`
 evaluates declared review-readiness requirements against it
-([design](../standalone-ci-evidence.md), [surface](../inspect.md)). Named user
+([surface](../inspect.md)). Named user
 and workflow: the maintainer inspecting a sykli pull request and handing its
 unresolved requirements to another worker.
 

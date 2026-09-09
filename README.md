@@ -62,9 +62,8 @@ failed run (1) from a receipt that no longer matches the tree (3) or the
 contract (4). The receipt's subject includes a digest of the declared inputs, so
 an undeclared input change cannot pass as the same evaluation.
 
-This repository gates itself this way through the
-[GitHub Action](docs/github-actions.md): a dumb Action invokes `sykli`, and the
-receipt is attached to the run. The schema is in [spec.md](docs/spec.md).
+This repository gates itself this way: a dumb GitHub Action (`action.yml`)
+invokes `sykli` and attaches the receipt to the run.
 
 ## Typed production
 
@@ -118,9 +117,6 @@ integrity, bindings, completion and current artifact availability. The local
 executor and store are trusted: this is not a sandbox or a proof of correctness.
 Details and limits: the [production guide](docs/production.md).
 
-Try it end to end with `python3 examples/production/demo.py --binary "$(command -v sykli)"`
-(add `--language go` for the Go example).
-
 ## See what a change has established
 
 Read a pull request's workflow runs and reviews through your existing `gh`
@@ -151,9 +147,7 @@ saved bundle offline and gives the same answer for the same bundle, requirements
 and time.
 
 It is read-only and advisory. Nothing is merged, triggered, posted or certified,
-and every result names its trust limit. Read [inspection](docs/inspect.md) first;
-the design and its trust argument are in
-[standalone-ci-evidence.md](docs/standalone-ci-evidence.md).
+and every result names its trust limit. Read [inspection](docs/inspect.md) first.
 
 ## What sykli will not do
 
@@ -164,7 +158,6 @@ condition for bringing anything back.
 
 ## Further reading
 
-- [Graph and receipt specification](docs/spec.md), [GitHub Action](docs/github-actions.md)
 - [Production contract, storage and execution limits](docs/production.md)
 - [Inspecting pull-request evidence](docs/inspect.md)
 - [Agent interface](docs/agents.md)

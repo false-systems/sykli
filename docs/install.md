@@ -74,8 +74,9 @@ The Action installs the release matching the ref it is called with, runs the
 graph, verifies the receipt against the tree, and attaches the receipt as an
 artifact. Inputs: `contract`, `version`, `working-directory`, `plan`,
 `verify`, `upload-receipt`, `artifact-name`. Outputs: `receipt`, `outcome`,
-`tree-oid`, `contract-hash`, `affected`, `verify-code`. Details and the
-verify exit codes are in [github-actions.md](github-actions.md).
+`tree-oid`, `contract-hash`, `affected`, `verify-code`. `verify-code` is
+`sykli verify`'s exit code: 0 verified, 1 the work failed, 2 cannot verify,
+3 the tree or inputs changed, 4 the contract drifted.
 
 ## Verifying an install
 

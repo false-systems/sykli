@@ -73,8 +73,14 @@ belong to the retired reference implementation, so a future publish is possible.
   and `ghcr.io` container images, the `cargo xtask gate` helper (the
   repository's own `sykli run sykli.json` is the gate), the `sykli-mcp` shim
   (ADR-0008 retired; ADR-0005's re-entry condition still applies), and the
-  recorded demo outputs under `docs/demos` (`examples/production/demo.py`
-  reproduces them).
+  recorded demo outputs under `docs/demos`.
+- Documents that described history or design rather than the shipped tool:
+  `docs/founding.md`, `docs/why.md`, `docs/autonomous-cycle-v0.md`,
+  `docs/obligation-acceptance-design.md`, `docs/standalone-ci-evidence.md`,
+  `docs/spec.md`, `docs/github-actions.md` and the retired ADR-0008; and the
+  `examples/` directory (the production fixture moved to `tests/fixtures/`).
+  The ADRs, `docs/install.md`, `docs/production.md`, `docs/inspect.md` and
+  `docs/agents.md` remain.
 - AGENTS.md and ADR-0005 now own on-demand read-only acquisition of pull-request
   evidence; servers, webhooks, coordination and provider mutations remain excluded.
 

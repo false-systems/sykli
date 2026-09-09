@@ -73,8 +73,7 @@ shell recipes. Legacy `init` continues to detect Cargo/npm/Go graphs.
 
 ## Go modules
 
-Try the dependency-free [Go example](../examples/go), or use the same interface
-in a module with one main package:
+In a module with one main package:
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
@@ -111,21 +110,10 @@ images identify the executable selected by the execution shell, skipping
 non-executable shadow files. The host toolchain and module cache remain trusted external inputs, not captured
 source. Cross-production reuse stays disabled.
 
-The reproducible demonstration uses the tiny repository in
-[`examples/production`](../examples/production). From the Sykli checkout:
-
-```sh
-cargo build --locked
-# Use the binary in cargo metadata's target_directory if CARGO_TARGET_DIR is set.
-python3 examples/production/demo.py --binary target/debug/sykli --output /tmp/sykli-demo.json
-```
-
-It saves the actual commands, JSON responses, executable output, identities and
-check bindings. It leaves the artifacts and store in the printed temporary
-directory. A first client stops after compilation; a separate client finishes
-the checks. Candidate B compiles but fails its checks while A remains complete.
-Re-run the script to obtain your own artifact
-and transcript. Tests separately kill a client and an executor during a
+The integration tests in `tests/production.rs` exercise the same walkthrough
+against a tiny fixture (`tests/fixtures/production/main.rs`): a first client
+stops after compilation, a separate client finishes the checks, and a changed
+candidate compiles but fails its checks while the first remains complete. Tests separately kill a client and an executor during a
 FIFO-latched compilation; no timing assumption stages the interruption.
 
 Sykli also builds itself with the generated Cargo target: `sykli produce sykli`
@@ -393,7 +381,9 @@ identities. Failed or indeterminate operations point to `sykli diagnostics
 PRODUCTION_ID ATTEMPT_ID`; captured command output is never printed implicitly
 in human summaries. Full records and captures remain available with `--json`. Typed init retains its existing output. These presentations use the
 same evaluated data and exit codes. Errors use `sykli-production-error.v1` with
-`error`. The exit-code table for both paths is in [`spec.md`](spec.md#exit-codes-all-commands).
+`error`. Exit codes: `produce`/`resume` 0 only for successful delivery, 1 for
+unfinished or failed work, 2 for an error; read-only commands 0 when the records
+were inspected, 2 for an error.
 
 ## Agent work loop
 

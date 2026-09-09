@@ -231,6 +231,3 @@ adversarially secure acceptance. No other hosts or CI providers. No job- or
 test-level inference from workflow names. No servers, webhooks, polling, or
 provider mutations. A local production receipt remains local execution evidence
 and is never treated as independent CI evidence.
-
-The design and its trust argument are in
-[standalone-ci-evidence.md](standalone-ci-evidence.md).
