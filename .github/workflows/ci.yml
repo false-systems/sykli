@@ -1,9 +1,12 @@
 name: CI
 
+# Minutes are scarce until self-hosted runners exist: pull requests are
+# validated locally with `sykli run sykli.json` and `toimija verify`, the
+# Linux gate runs on main only, and the Windows job runs on demand.
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,16 +38,14 @@ jobs:
           contract: sykli.json
           version: source
 
-  # The gate above runs on Linux through the Action. These runners prove the
-  # crate builds and its tests pass on the other supported hosts; typed
-  # production tests are Unix-only and skip themselves on Windows.
-  hosts:
-    name: Tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  # The gate above runs on Linux through the Action. This job proves the
+  # crate builds and its tests pass on Windows; typed production tests are
+  # Unix-only and skip themselves. macOS is the development host and is not
+  # spent on hosted minutes (billed at 10x). Manual only until runners are cheap.
+  windows:
+    name: Tests (windows-latest)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
