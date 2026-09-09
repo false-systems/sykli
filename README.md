@@ -36,7 +36,10 @@ sykli verify .sykli/receipt.json             # is this receipt still true for th
 
 `verify` answers with an exit code you can trust: 0 verified, 1 the work
 failed, 3 the tree changed since, 4 the declared tasks changed since. A stale
-receipt cannot pass as a fresh one. Tasks see only `PATH`, `HOME` and `TMPDIR`
+receipt cannot pass as a fresh one. What `verify` proves is that a receipt
+matches the tree and contract in front of you and agrees with itself; it does
+not prove who wrote the receipt. Run it where the receipt was produced, as the
+GitHub Action does, or sign receipts before trusting them across a boundary. Tasks see only `PATH`, `HOME` and `TMPDIR`
 unless they declare `env` values or `inherit` named variables from your
 environment; inherited values reach the command, and only their digests reach
 the receipt.

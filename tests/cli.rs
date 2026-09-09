@@ -222,8 +222,15 @@ fn verify_accepts_fresh_receipts_and_rejects_stale_trees() {
     fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
     assert_eq!(verify(&root).status.code(), Some(1));
 
+    // An honest failed record (outcome, exit code and error agree) is exit 1;
+    // an outcome that disagrees with its own records is not a receipt (exit 2).
     failed["tasks"][0]["importable"] = true.into();
     failed["outcome"] = "failed".into();
+    fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
+    assert_eq!(verify(&root).status.code(), Some(2));
+    failed["tasks"][0]["outcome"] = "failed".into();
+    failed["tasks"][0]["exit_code"] = 1.into();
+    failed["tasks"][0]["error"] = "exit status: 1".into();
     fs::write(&receipt, serde_json::to_vec(&failed).unwrap()).unwrap();
     assert_eq!(verify(&root).status.code(), Some(1));
 
@@ -656,5 +663,67 @@ fn one_lock_file_pins_every_contract_in_its_directory() {
     let upgraded: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("sykli.lock")).unwrap()).unwrap();
     assert_eq!(upgraded["schema"], "sykli-lock.v2");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_receipt_that_contradicts_itself_cannot_verify() {
+    let root = graph_repo(
+        "forge",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"test -f present"}]}"#,
+    );
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    let out = sykli(&["run", "sykli.json", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the file is absent, so the task fails"
+    );
+    let mut receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let outside = std::env::temp_dir().join(format!("sykli-forged-{}.json", std::process::id()));
+    fs::write(&outside, receipt.to_string()).unwrap();
+    let honest = sykli(&[
+        "verify",
+        outside.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+    ]);
+    assert_eq!(honest.status.code(), Some(1));
+    // Relabel the failure as a pass without touching anything else.
+    receipt["tasks"][0]["outcome"] = serde_json::json!("passed");
+    receipt["outcome"] = serde_json::json!("passed");
+    fs::write(&outside, receipt.to_string()).unwrap();
+    let forged = sykli(&[
+        "verify",
+        outside.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+    ]);
+    assert_eq!(
+        forged.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&forged.stdout)
+    );
+    assert!(String::from_utf8_lossy(&forged.stdout).contains("records"));
+    // A record whose command differs from the contract is not this contract's receipt.
+    receipt["tasks"][0]["outcome"] = serde_json::json!("failed");
+    receipt["outcome"] = serde_json::json!("failed");
+    receipt["tasks"][0]["command"] = serde_json::json!("true");
+    fs::write(&outside, receipt.to_string()).unwrap();
+    let swapped = sykli(&[
+        "verify",
+        outside.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+    ]);
+    assert_eq!(swapped.status.code(), Some(2));
+    let _ = fs::remove_file(outside);
     fs::remove_dir_all(root).unwrap();
 }
