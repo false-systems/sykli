@@ -27,7 +27,8 @@
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
-        "tests/assess.rs"
+        "tests/assess.rs",
+        "tests/assess_portable.rs"
       ]
     },
     {
@@ -78,7 +79,8 @@
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
-        "tests/assess.rs"
+        "tests/assess.rs",
+        "tests/assess_portable.rs"
       ]
     },
     {
@@ -117,7 +119,17 @@
         "tests/fixtures/github/pr25/repository.json",
         "tests/fixtures/github/pr25/reviews.json",
         "tests/fixtures/github/pr25/runs.json",
-        "tests/fixtures/github/pr25/workflows.json"
+        "tests/fixtures/github/pr25/workflows.json",
+        "tests/assess_portable.rs",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/diagnostics.json",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/manifest.json",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/5537a2689f866ac92e9c44c03f5d2a365c7dbafad822031116868ba94f9cf733",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/8173fa564136c7e8e02b43409cd309feae2936196dda66b8e6861126008c3baa",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/b570edc3b7e92741dbfb4d07a381860fd45a6d951b1a96e8eb3d33ef52ad8d44",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/c2cbe80e9f109f6ad2ef6d22561f444608b0cff1a897919f5528a184dbca3aac",
+        "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/fe13a45c4a4753a6d5040b22e4e21a309f02870bb6da68619ac6d09b16092b4f",
+        "tests/fixtures/requirements/review-readiness.json"
       ]
     }
   ]

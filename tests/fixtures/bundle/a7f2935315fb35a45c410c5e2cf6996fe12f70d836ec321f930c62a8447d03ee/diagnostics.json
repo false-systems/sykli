@@ -1,0 +1,86 @@
+{
+  "entries": [
+    {
+      "endpoint": "repos/false-systems/sykli",
+      "exit": 0,
+      "rate_limit_remaining": "4995",
+      "request_id": "FDD0:1CE369:9D81F3:9B6EA4:6AA0A2DF",
+      "role": "repository",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/pulls/25",
+      "exit": 0,
+      "rate_limit_remaining": "4994",
+      "request_id": "E94F:130CFB:A55157:A339C3:6AA0A2E0",
+      "role": "pull",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/git/commits/0e1982a239a0bd02299ab17de29bd52d17842763",
+      "exit": 0,
+      "rate_limit_remaining": "4993",
+      "request_id": "F73C:93AF5:B274B8:B0565D:6AA0A2E0",
+      "role": "commit",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/actions/workflows?per_page=100&page=1",
+      "exit": 0,
+      "rate_limit_remaining": "4978",
+      "request_id": "FD7B:2446E3:9F3582:9CFFB9:6AA0A2E1",
+      "role": "workflows",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/actions/runs?head_sha=0e1982a239a0bd02299ab17de29bd52d17842763&per_page=100&page=1",
+      "exit": 0,
+      "rate_limit_remaining": "4992",
+      "request_id": "FDE9:1A4D07:9A87FB:98805A:6AA0A2E1",
+      "role": "runs",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/pulls/25/reviews?per_page=100&page=1",
+      "exit": 0,
+      "rate_limit_remaining": "4991",
+      "request_id": "E846:2446E3:9F3C2C:9D0650:6AA0A2E2",
+      "role": "reviews",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/pulls/25",
+      "exit": 0,
+      "rate_limit_remaining": "4990",
+      "request_id": "E80C:93AF5:B2837D:B064DF:6AA0A2E2",
+      "role": "pull-confirm",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/actions/runs?head_sha=0e1982a239a0bd02299ab17de29bd52d17842763&per_page=100&page=1",
+      "exit": 0,
+      "rate_limit_remaining": "4989",
+      "request_id": "EFB4:B0AE5:8CB899:8A9E60:6AA0A2E3",
+      "role": "runs-confirm",
+      "status": 200,
+      "stderr": ""
+    },
+    {
+      "endpoint": "repos/false-systems/sykli/pulls/25/reviews?per_page=100&page=1",
+      "exit": 0,
+      "rate_limit_remaining": "4988",
+      "request_id": "F6AD:BA806:AD1D9D:AAD9FA:6AA0A2E3",
+      "role": "reviews-confirm",
+      "status": 200,
+      "stderr": ""
+    }
+  ],
+  "schema": "sykli-collection-diagnostics.v1"
+}

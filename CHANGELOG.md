@@ -33,6 +33,11 @@ belong to the retired reference implementation, so a future publish is possible.
   See `docs/agents.md`.
 - Readable default output for all production commands: operation states,
   artifact availability and path, identities, and labeled failure tails.
+- Windows x86_64 release binaries (`sykli-vX.Y.Z-windows-x86_64.zip`). Graph
+  runs, `verify`, `init`, `inspect` and `assess` build for Windows; tasks
+  execute under a POSIX `sh` found on `PATH` (Git for Windows ships one).
+  Typed production remains Linux and macOS. Windows test coverage runs on
+  demand in CI, not on every change.
 - Generated production targets and products carry the executable's name
   (`sykli produce tiny-cli`), not a fixed `app` alias; existing contracts and
   pinned productions keep their names.

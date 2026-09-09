@@ -21,6 +21,23 @@ matches, and places the binary at `~/.local/bin/sykli`. Set
 `SYKLI_INSTALL_DIR` to install somewhere else; set `SYKLI_REPOSITORY` to
 install from a fork. Make sure the install directory is on your `PATH`.
 
+## Windows
+
+Releases include `sykli-vX.Y.Z-windows-x86_64.zip` holding `sykli.exe`, listed
+in `SHA256SUMS`. In PowerShell:
+
+```powershell
+$tag = "v0.6.0"
+Invoke-WebRequest "https://github.com/false-systems/sykli/releases/download/$tag/sykli-$tag-windows-x86_64.zip" -OutFile sykli.zip
+Expand-Archive sykli.zip -DestinationPath "$env:LOCALAPPDATA\sykli"
+```
+
+Add that directory to `PATH`. In Git Bash the installer script above also works
+and places `sykli.exe` in `~/.local/bin`. Graph tasks run under a POSIX `sh`
+found on `PATH`; Git for Windows provides one. Typed production (`targets`,
+`produce`, `status`, `resume`, `diagnostics`, `verify-production`) is not
+included in the Windows binary.
+
 ## Cargo
 
 ```bash

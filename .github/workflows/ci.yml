@@ -1,9 +1,12 @@
 name: CI
 
+# Minutes are scarce until self-hosted runners exist: pull requests are
+# validated locally with `sykli run sykli.json` and `toimija verify`, the
+# Linux gate runs on main only, and the Windows job runs on demand.
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,3 +37,22 @@ jobs:
         with:
           contract: sykli.json
           version: source
+
+  # The gate above runs on Linux through the Action. This job proves the
+  # crate builds and its tests pass on Windows; typed production tests are
+  # Unix-only and skip themselves. macOS is the development host and is not
+  # spent on hosted minutes (billed at 10x). Manual only until runners are cheap.
+  windows:
+    name: Tests (windows-latest)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          components: clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked

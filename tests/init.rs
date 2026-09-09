@@ -269,6 +269,7 @@ fn nothing_detected_is_exit_one_and_names_the_manifests() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinks_are_never_inputs_and_a_link_cycle_does_not_hang() {
     let root = temp_root("symlinks");
