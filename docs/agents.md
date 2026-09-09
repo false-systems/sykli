@@ -10,94 +10,12 @@ executing it. Keep its production ID. A fresh worker can inspect
 with `sykli resume ID --jobs 2 --summary --json`.
 The same local store is sufficient; no chat handover is required. Compact state
 omits command captures; retrieve them with `sykli diagnostics ID ATTEMPT --json`.
-Read `assessment` and `delivery` separately. The [production contract](production.md)
-documents exact input binding, explicit retries and unresolved execution.
+Read `assessment` and `delivery` separately: an available artifact can still
+have unfinished checks, and a failed operation needs an explicit `--retry`.
 
 To learn what a pull request has established before acting on it, run
 `sykli inspect --repo OWNER/NAME --pr N --requirements FILE --json` and read the
 embedded `sykli-assessment.v1`: each unresolved obligation carries a reason code,
 the evidence it would need (`missing`), and source references into the saved
 bundle. Replay or explain it offline with `sykli assess BUNDLE --requirements FILE
---why ID`. The result is advisory and never a merge authorization; see
-[inspect.md](inspect.md).
-
-The remainder describes the unchanged legacy graph workflow.
-
-Sykli answers two questions an agent otherwise guesses at: what work does
-this change require, and what actually ran. Both answers are versioned JSON
-(see [`spec.md`](spec.md)); neither is a claim the agent makes about itself.
-
-## The order things happen
-
-1. **Before editing, ask what applies.**
-
-   ```bash
-   sykli plan sykli.json --changed src/parser.rs --changed src/lexer.rs --json
-   ```
-
-   The plan lists the tasks whose declared inputs you are about to touch,
-   plus everything downstream of them, in execution order. Run those, not the
-   whole graph, while you work. No `--changed` means the whole graph.
-
-2. **After editing, evaluate the graph.**
-
-   ```bash
-   sykli run sykli.json --json > receipt.json
-   ```
-
-   Progress and task output go to stderr; stdout is the receipt, also written
-   under `.sykli/receipts/`. The exit code is 0 only for `passed` or
-   `cached`. Read `tasks[].outcome`, `class`, and `retryable` before deciding
-   anything: `errored` with `retryable: true` is the runtime, not your code.
-
-3. **Hand over the receipt, not a sentence.** "Tests pass" is a claim. The
-   receipt names the tree OID that ran, the contract hash, every command,
-   every exit code, and the digest of every output. A reviewer who has never
-   seen your session can check it.
-
-4. **The reviewer verifies.**
-
-   ```bash
-   sykli verify receipt.json --contract sykli.json
-   ```
-
-   Exit 0 means the receipt matches this exact tree and this pinned contract.
-   3 means the tree moved since the receipt: the work is not necessarily
-   wrong, the evidence is stale, run again. 4 means the contract drifted:
-   re-lock or ask why. 1 means the work is bad or incomplete. 2 means the
-   reviewer could not verify at all. Branch on the code, never on the text.
-
-## Cached is not observed
-
-A task outcome of `cached` means sykli reused a record from an earlier
-receipt whose inputs and runtime matched; nothing executed. That is correct
-for a gate and wrong for evidence that something *was observed to happen*.
-When a judge needs an observed outcome, run in a fresh worktree of the exact
-tree so there is no `.sykli/cache` to hit:
-
-```bash
-git worktree add --detach /tmp/observe HEAD
-(cd /tmp/observe && sykli run sykli.json --json) > receipt.json
-git worktree remove --force /tmp/observe
-```
-
-The receipt's `subject.tree_oid` is the same as in the repository, because
-it addresses content, not location.
-
-## What sykli will not do for you
-
-It does not know what the tasks mean, does not retry, does not decide whether
-a failure matters, and does not talk to a server. Interpretation is the
-reader's job; sykli's job is that the reader can trust what it reads.
-
-## A snippet for your repository's AGENTS.md
-
-```markdown
-## Verification
-This repository declares its work graph in `sykli.json`.
-- Before editing: `sykli plan sykli.json --changed <files> --json` tells you which tasks your change affects; run those.
-- After editing: `sykli run sykli.json --json` and keep the receipt it prints.
-- Report the receipt (its `subject.tree_oid` and `outcome`), never "tests pass".
-- Reviewers run `sykli verify <receipt> --contract sykli.json`; exit 3 means stale, re-run; exit 4 means the contract drifted.
-- A `cached` task was not observed; when evidence must be observed, run in a fresh `git worktree`.
-```
+--why ID`. The result is advisory and never a merge authorization.

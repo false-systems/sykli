@@ -204,7 +204,7 @@ enum Command {
         2  invalid input, unreadable candidate, or tool failure\n  \
         3  a requirement is unproven\n  \
         4  admitted evidence about one subject conflicts\n\n\
-        Read-only and advisory: nothing is merged, triggered, or certified. See docs/inspect.md.")]
+        Read-only and advisory: nothing is merged, triggered, or certified. See docs/agents.md.")]
     Inspect {
         /// Repository as OWNER/NAME on github.com
         #[arg(long)]

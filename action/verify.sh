@@ -23,7 +23,7 @@ code=$?
 set -e
 echo "code=$code" >>"$output"
 
-# Exit-code policy. Sykli's verify codes are stages (ADR-0007): checks run in
+# Exit-code policy. Sykli's verify codes are stages: checks run in
 # order and the first failing stage decides. This block is the only place the
 # Action interprets them for a CI consumer — every non-zero code withholds the
 # gate, and the hint names the action that clears it.

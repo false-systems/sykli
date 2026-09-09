@@ -25,7 +25,7 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         fs::write(
             root.join("main.rs"),
-            include_str!("../examples/production/main.rs"),
+            include_str!("fixtures/production/main.rs"),
         )
         .unwrap();
         let fixture = Self(root);

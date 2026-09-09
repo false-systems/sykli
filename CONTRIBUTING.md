@@ -1,11 +1,9 @@
 # Contributing
 
-Sykli is small on purpose. Before proposing a change, read
-[`docs/adr/0005-deletions.md`](docs/adr/0005-deletions.md): it is the
-normative list of what sykli is not, and capabilities recorded there do not
-return without meeting their stated re-entry condition. A feature that makes
-sykli a server, a scheduler, a datastore, or an interpreter of what results
-mean belongs in another tool.
+Sykli is small on purpose. Before proposing a change, read the product
+boundaries in [`AGENTS.md`](AGENTS.md): they are the normative list of what
+sykli is not. A feature that makes sykli a server, a scheduler, a datastore, or
+an interpreter of what results mean belongs in another tool.
 
 ## The gate
 
@@ -29,8 +27,8 @@ and passes after.
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
   and `cargo test --workspace --locked` are part of the gate; a red gate does
   not merge.
-- A contract or receipt schema change needs a new schema version and an ADR
-  under `docs/adr/`.
+- A contract or receipt schema change needs a new schema version; existing
+  identities never change meaning.
 - Commit messages: conventional prefixes (`feat:`, `fix:`, `docs:`, `ci:`),
   the body says why.
 
