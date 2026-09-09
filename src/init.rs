@@ -66,6 +66,7 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
         inputs: inputs.into_iter().collect(),
         outputs: Vec::new(),
         runtime: None,
+        inherit: Vec::new(),
     }
 }
 

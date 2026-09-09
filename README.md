@@ -36,7 +36,10 @@ sykli verify .sykli/receipt.json             # is this receipt still true for th
 
 `verify` answers with an exit code you can trust: 0 verified, 1 the work
 failed, 3 the tree changed since, 4 the declared tasks changed since. A stale
-receipt cannot pass as a fresh one.
+receipt cannot pass as a fresh one. Tasks see only `PATH`, `HOME` and `TMPDIR`
+unless they declare `env` values or `inherit` named variables from your
+environment; inherited values reach the command, and only their digests reach
+the receipt.
 
 ### 2. Build something, stop, let someone else finish
 

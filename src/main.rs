@@ -157,6 +157,9 @@ enum Command {
         /// Run this failed operation again (requires --jobs 1)
         #[arg(long)]
         retry: Option<String>,
+        /// Record a contact-lost attempt as abandoned so its operation can be retried
+        #[arg(long)]
+        abandon: Option<String>,
         /// Stop after this operation completes (requires --jobs 1)
         #[arg(long)]
         stop_after: Option<String>,
@@ -245,7 +248,7 @@ enum Command {
         #[arg(long, requires = "production")]
         smoke: Option<String>,
     },
-    /// Pin the contract's hash in sykli.lock beside it
+    /// Pin the contract's hash in sykli.lock beside it (one entry per contract file)
     #[command(after_help = "Exit codes:\n  0  locked\n  2  could not read or hash the contract")]
     Lock {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
@@ -317,11 +320,25 @@ enum Command {
     },
 }
 
+/// `sykli-lock.v2`: one lock file per directory, one entry per contract file
+/// in it. `sykli-lock.v1` (a single hash) is still read and applies to
+/// whichever contract is loaded, as it always did.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct LockedContract {
+struct LockFile {
     schema: String,
-    contract_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contract_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    contracts: BTreeMap<String, String>,
+}
+
+fn lock_key(contract: &Path) -> String {
+    contract
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sykli.json")
+        .to_string()
 }
 
 #[derive(Serialize)]
@@ -426,6 +443,7 @@ fn main() -> ExitCode {
             production: id,
             store,
             retry,
+            abandon,
             stop_after,
             operation,
             jobs,
@@ -435,6 +453,7 @@ fn main() -> ExitCode {
             production::resume(
                 &store,
                 &id,
+                abandon.as_deref(),
                 retry.as_deref(),
                 stop_after.as_deref(),
                 operation.as_deref(),
@@ -639,7 +658,7 @@ fn main() -> ExitCode {
 fn load(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     let loaded = load_unlocked(path)?;
     if let Some(lock) = read_lock(path)? {
-        if lock.contract_hash != loaded.2 {
+        if lock != loaded.2 {
             return Err(format!(
                 "contract differs from {}; run `sykli lock` to accept it",
                 lock_path(path).display()
@@ -649,18 +668,30 @@ fn load(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     Ok(loaded)
 }
 
-fn read_lock(path: &Path) -> Result<Option<LockedContract>, String> {
-    let lock_path = lock_path(path);
+fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>, String> {
     if !lock_path.is_file() {
         return Ok(None);
     }
-    let lock: LockedContract =
-        serde_json::from_slice(&fs::read(&lock_path).map_err(|error| error.to_string())?)
+    let lock: LockFile =
+        serde_json::from_slice(&fs::read(lock_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", lock_path.display()))?;
-    if lock.schema != "sykli-lock.v1" {
-        return Err(format!("unsupported lock schema {:?}", lock.schema));
+    match lock.schema.as_str() {
+        "sykli-lock.v1" if lock.contract_hash.is_some() && lock.contracts.is_empty() => {}
+        "sykli-lock.v2" if lock.contract_hash.is_none() => {}
+        _ => return Err(format!("unsupported lock file {}", lock_path.display())),
     }
     Ok(Some(lock))
+}
+
+/// The pinned hash for this contract, if its directory's lock file has one.
+fn read_lock(path: &Path) -> Result<Option<String>, String> {
+    let Some(lock) = read_lock_file(&lock_path(path))? else {
+        return Ok(None);
+    };
+    Ok(match lock.contract_hash {
+        Some(hash) => Some(hash),
+        None => lock.contracts.get(&lock_key(path)).cloned(),
+    })
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
@@ -697,9 +728,16 @@ fn lock_path(contract: &Path) -> PathBuf {
 fn write_lock(contract: &Path) -> Result<PathBuf, String> {
     let (_, _, contract_hash) = load_unlocked(contract)?;
     let path = lock_path(contract);
-    let mut bytes = serde_json::to_vec_pretty(&LockedContract {
-        schema: "sykli-lock.v1".into(),
-        contract_hash,
+    // A v1 lock could only ever pin one contract; migrating keeps that pin
+    // under this contract's name and upgrades the file to v2.
+    let mut contracts = read_lock_file(&path)?
+        .map(|lock| lock.contracts)
+        .unwrap_or_default();
+    contracts.insert(lock_key(contract), contract_hash);
+    let mut bytes = serde_json::to_vec_pretty(&LockFile {
+        schema: "sykli-lock.v2".into(),
+        contract_hash: None,
+        contracts,
     })
     .map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -773,6 +811,23 @@ fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
         }
         if names.insert(task.name.as_str(), index).is_some() {
             return Err(format!("duplicate task name {:?}", task.name));
+        }
+        let mut inherited = HashSet::new();
+        for name in &task.inherit {
+            let valid = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !valid {
+                return Err(format!(
+                    "task {:?} inherits an invalid variable name {name:?}",
+                    task.name
+                ));
+            }
+            if !inherited.insert(name.as_str()) || task.env.contains_key(name) {
+                return Err(format!(
+                    "task {:?} inherits {name:?} twice or alongside a declared env value",
+                    task.name
+                ));
+            }
         }
     }
 
@@ -921,6 +976,9 @@ struct TaskReceipt {
     stdout_digest: String,
     stderr_digest: String,
     output_digests: BTreeMap<String, String>,
+    /// Digests of inherited environment values, by name; `absent` when unset.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    inherited_digests: BTreeMap<String, String>,
     outcome: Outcome,
     importable: bool,
     class: Option<&'static str>,
@@ -1110,7 +1168,9 @@ fn execute(
                     (
                         index,
                         key,
-                        scope.spawn(move || run_task(task, runtime, json, MAX_CAPTURE_BYTES)),
+                        scope.spawn(move || {
+                            run_task(task, runtime, json, MAX_CAPTURE_BYTES, Isolation::Shared)
+                        }),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1165,10 +1225,47 @@ fn cacheable(record: &TaskReceipt) -> bool {
     record.outcome == Outcome::Passed && record.importable
 }
 
-fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usize) -> TaskReceipt {
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+    fn killpg(pgid: i32, signal: i32) -> i32;
+}
+
+/// How a task's shell relates to the caller's process group.
+#[derive(Clone, Copy, PartialEq)]
+enum Isolation {
+    /// Share the caller's group: Ctrl-C reaches the task, as a user expects.
+    Shared,
+    /// Own group: after the shell exits, the whole group is killed, so
+    /// termination of every descendant is established, not assumed.
+    OwnGroup,
+}
+
+fn run_task(
+    task: &Task,
+    runtime: &ShellRuntime,
+    json: bool,
+    capture_limit: usize,
+    isolation: Isolation,
+) -> TaskReceipt {
     progress(json, "running", &task.name);
     let started = Instant::now();
     let mut command = ProcessCommand::new(&runtime.path);
+    #[cfg(unix)]
+    if isolation == Isolation::OwnGroup {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpgid is async-signal-safe and allocates nothing.
+        unsafe {
+            command.pre_exec(|| {
+                if setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = isolation;
     // `--` keeps a command that starts with `-` from being read as a shell
     // option; a null stdin keeps tasks from prompting or racing for the
     // terminal, and out of the receipt as an undeclared input.
@@ -1185,6 +1282,11 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
                 .map(|(name, value)| (name, value)),
         )
         .envs(&task.env)
+        .envs(
+            task.inherit
+                .iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(workdir) = &task.workdir {
@@ -1206,6 +1308,8 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
     };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
+    #[cfg(unix)]
+    let group = child.id() as i32;
     let (status, stdout, stderr) = thread::scope(|scope| {
         let stdout_writer: Box<dyn Write + Send> = if json {
             Box::new(io::stderr())
@@ -1229,6 +1333,14 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
         });
         (status, stdout, stderr)
     });
+    #[cfg(unix)]
+    if isolation == Isolation::OwnGroup {
+        // The leader has exited; anything left in its group is a straggler.
+        // SAFETY: killpg on a group id we created; ESRCH when already empty.
+        unsafe {
+            killpg(group, 9);
+        }
+    }
 
     let CapturedOutput {
         bytes: stdout,
@@ -1309,6 +1421,7 @@ fn run_task(task: &Task, runtime: &ShellRuntime, json: bool, capture_limit: usiz
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
         output_digests,
+        inherited_digests: inherited_digests(task),
         outcome,
         importable,
         class,
@@ -1394,6 +1507,7 @@ fn empty_task_receipt(
         stdout_digest: sha256(&[]),
         stderr_digest: sha256(&[]),
         output_digests: BTreeMap::new(),
+        inherited_digests: inherited_digests(task),
         outcome,
         importable: outcome != Outcome::Errored,
         class: Some(class),
@@ -1438,6 +1552,7 @@ fn cache_key(
         inputs: BTreeMap<&'a str, String>,
         runtime: &'a str,
         after: &'a BTreeMap<&'a str, &'a str>,
+        inherited: BTreeMap<&'a str, String>,
     }
 
     let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -1455,9 +1570,28 @@ fn cache_key(
         inputs,
         runtime: &runtime.fingerprint,
         after,
+        inherited: inherited_digests(task)
+            .iter()
+            .map(|(name, digest)| (name.as_str(), digest.clone()))
+            .collect(),
     })
     .map_err(|error| error.to_string())?;
     Ok(sha256(&bytes))
+}
+
+/// Digests of the inherited variables' current values, never the values.
+/// An unset variable digests as `absent`, which is not any value's digest.
+fn inherited_digests(task: &Task) -> BTreeMap<String, String> {
+    task.inherit
+        .iter()
+        .map(|name| {
+            let digest = match std::env::var_os(name) {
+                Some(value) => sha256(value.as_encoded_bytes()),
+                None => "absent".to_string(),
+            };
+            (name.clone(), digest)
+        })
+        .collect()
 }
 
 fn declared_inputs_digest(contract: &Contract) -> Result<String, String> {
@@ -1595,6 +1729,7 @@ impl Cache for LocalCache {
             stdout_digest: sha256(&[]),
             stderr_digest: sha256(&[]),
             output_digests,
+            inherited_digests: BTreeMap::new(),
             outcome: Outcome::Cached,
             importable: true,
             class: None,
@@ -1967,7 +2102,7 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
             "contract lock",
             CONTRACT_MISMATCH,
             &contract_hash,
-            lock.contract_hash,
+            lock,
         ));
     }
     checks.push(Check::equals(
@@ -2191,7 +2326,13 @@ mod tests {
             r#"{"schema":"sykli-contract.v1","tasks":[{"name":"chatty","run":"printf captured"}]}"#,
         )
         .unwrap();
-        let truncated = run_task(&truncates.tasks[0], &shell_runtime().unwrap(), true, 4);
+        let truncated = run_task(
+            &truncates.tasks[0],
+            &shell_runtime().unwrap(),
+            true,
+            4,
+            Isolation::Shared,
+        );
         assert!(truncated.stdout_truncated);
         assert_eq!(truncated.stdout_bytes_dropped, 4);
         // The digest covers the whole stream, so a truncated capture is
@@ -2240,6 +2381,7 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec!["result".into()],
                 runtime: None,
+                inherit: vec![],
             }],
         };
         let runtime = shell_runtime().unwrap();

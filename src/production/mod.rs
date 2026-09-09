@@ -10,7 +10,12 @@ mod contract;
 mod discovery;
 mod store;
 use contract::*;
+use std::os::unix::process::CommandExt;
 use store::*;
+
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -165,6 +170,12 @@ enum Fact {
         observation: Value,
     },
     ContactLost {
+        attempt: String,
+        reason: String,
+    },
+    /// An operator gave up on a contact-lost attempt. The attempt becomes a
+    /// failed one, so the operation can be retried; the record stays.
+    Abandoned {
         attempt: String,
         reason: String,
     },
@@ -411,6 +422,18 @@ impl History {
                 {
                     return Err("contact-lost must refer to an unresolved attempt".into());
                 }
+            }
+            Fact::Abandoned { attempt, .. } => {
+                let start = self
+                    .attempts
+                    .get_mut(attempt)
+                    .ok_or("abandon record without start")?;
+                if start.result.is_some() {
+                    return Err("abandon must refer to an unresolved attempt".into());
+                }
+                start.result = Some(ResultFact::ExecutionFailed {
+                    code: "abandoned".into(),
+                });
             }
         }
         Ok(())
@@ -825,7 +848,8 @@ pub fn diagnostics(store_path: &Path, id: &str, attempt: &str) -> Result<Value, 
         .filter(|r| match &r.record.fact {
             Fact::Started { attempt: a, .. }
             | Fact::Finished { attempt: a, .. }
-            | Fact::ContactLost { attempt: a, .. } => a == attempt,
+            | Fact::ContactLost { attempt: a, .. }
+            | Fact::Abandoned { attempt: a, .. } => a == attempt,
         })
         .collect();
     Ok(
@@ -865,6 +889,7 @@ pub fn produce(
 pub fn resume(
     store_path: &Path,
     id: &str,
+    abandon: Option<&str>,
     retry: Option<&str>,
     stop_after: Option<&str>,
     operation: Option<&str>,
@@ -872,7 +897,37 @@ pub fn resume(
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
     let request = Request::load(&store, id)?;
+    if let Some(attempt) = abandon {
+        abandon_attempt(&store, &request, attempt)?;
+    }
     advance(&store, &request, retry, stop_after, operation, jobs)
+}
+
+/// Give up on an attempt whose executor is gone without a terminal record.
+/// Refused while the attempt's executor is still alive, and never for an
+/// attempt that already has a result.
+fn abandon_attempt(store: &Store, request: &Request, attempt: &str) -> Result<(), String> {
+    let directory = store.production(&request.id()?)?;
+    let _lease = Lease::acquire(&directory)?;
+    let mut history = History::load(store, request)?;
+    let known = history
+        .attempts
+        .get(attempt)
+        .ok_or_else(|| format!("unknown attempt {attempt}"))?;
+    if known.result.is_some() {
+        return Err("attempt already has a result; nothing to abandon".into());
+    }
+    if Lease::observe(&directory.join("attempt-leases").join(attempt))? {
+        return Err("attempt's executor is still running; abandon refused".into());
+    }
+    history.append(
+        store,
+        request,
+        Fact::Abandoned {
+            attempt: attempt.into(),
+            reason: "operator abandoned a contact-lost attempt".into(),
+        },
+    )
 }
 
 fn advance(
@@ -992,6 +1047,17 @@ fn advance(
             )?;
             let mut child = ProcessCommand::new(std::env::current_exe().map_err(err)?);
             let fd = lease.inherit(&mut child);
+            // Its own session: the client's Ctrl-C or hangup never reaches the
+            // executor, which is what lets it outlive the client at all.
+            // SAFETY: setsid is async-signal-safe and allocates nothing.
+            unsafe {
+                child.pre_exec(|| {
+                    if setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
             child
                 .args(["__production_attempt", "--store"])
                 .arg(&store.0)
@@ -1141,20 +1207,28 @@ fn execute(
         inputs: vec![],
         outputs: vec![],
         runtime: None,
+        inherit: vec![],
     };
     let execution = super::run_task(
         &task,
         &super::shell_runtime()?,
         true,
         super::MAX_CAPTURE_BYTES,
+        super::Isolation::OwnGroup,
     );
-    // Waiting for the shell does not establish that its foreground children stopped.
-    // A shell that never started (`spawn_error`) leaves no children behind,
-    // so that failure is recorded, not treated as lost contact.
-    if execution.class == Some("runtime_error")
-        || (execution.exit_code.is_none() && execution.class == Some("command_failed"))
-    {
+    // Only a failed wait leaves termination unknown. The shell ran in its own
+    // process group and the group was killed after it exited, so a shell that
+    // died by signal is an interrupted attempt with nothing left running.
+    if execution.class == Some("runtime_error") {
         return Ok(None);
+    }
+    if execution.exit_code.is_none() && execution.class == Some("command_failed") {
+        return Ok(Some((
+            ResultFact::ExecutionFailed {
+                code: "interrupted".into(),
+            },
+            json!({"execution":execution,"input_binding":"materialized-snapshot","undeclared_inputs_excluded":false}),
+        )));
     }
     let mut observation = json!({"execution":execution,"input_binding":"materialized-snapshot","undeclared_inputs_excluded":false});
     let result = if !execution.importable || execution.outcome == super::Outcome::Errored {

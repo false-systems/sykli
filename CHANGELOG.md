@@ -67,7 +67,22 @@ belong to the retired reference implementation, so a future publish is possible.
 - The README presents sykli as one evaluator with three surfaces: graph runs
   and receipts, typed production, pull-request evidence.
 
+- Tasks may `inherit` named environment variables from the invoking
+  environment. Values reach the command; only their digests enter the cache
+  key and the receipt (`inherited_digests`, `absent` when unset). A name
+  cannot also appear in `env`.
+- `sykli-lock.v2`: one `sykli.lock` per directory pins every contract file in
+  it by name, so two contracts side by side can both be locked. v1 locks are
+  still read and are upgraded on the next `sykli lock`.
+- `sykli resume ID --abandon ATTEMPT` records a contact-lost attempt as
+  abandoned (refused while its executor is alive), so its operation can be
+  retried instead of freezing the production.
+
 ### Fixed
+- The production executor runs in its own session and each recipe shell in
+  its own process group: a client's Ctrl-C no longer kills the executor, and
+  a shell that dies by signal is recorded as `interrupted` after its group is
+  killed, rather than as lost contact.
 - A graph task's cache key includes the keys of the tasks it runs `after`,
   so a downstream task is never reported `cached` against upstream outputs it
   did not see.

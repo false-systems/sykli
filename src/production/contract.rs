@@ -232,6 +232,7 @@ impl Target {
                     inputs: vec![],
                     outputs: vec![],
                     runtime: None,
+                    inherit: vec![],
                 })
                 .collect(),
         }
