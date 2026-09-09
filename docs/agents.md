@@ -90,26 +90,6 @@ It does not know what the tasks mean, does not retry, does not decide whether
 a failure matters, and does not talk to a server. Interpretation is the
 reader's job; sykli's job is that the reader can trust what it reads.
 
-## MCP
-
-`sykli-mcp` exposes the same four commands as tools over stdio for clients
-that prefer tool calls to a shell: `sykli_validate`, `sykli_plan`,
-`sykli_run`, `sykli_verify`. Each tool returns the command's stdout as a text
-block and sets `isError` when the command exited non-zero; `sykli_verify`
-adds the exit code's meaning. It finds `sykli` through `SYKLI_BIN` or PATH
-and runs in the directory it was spawned in. It is a shim beside the binary,
-not a server inside it (ADR-0008).
-
-```json
-{ "mcpServers": { "sykli": { "command": "sykli-mcp" } } }
-```
-
-Framing is one JSON-RPC message per line on stdio; the shim does not speak
-`Content-Length` framing, and a client that needs it wraps the shim. Wrong
-argument types are answered with `-32602`, never coerced to a default; a
-`sykli` that cannot be started is `-32603`. There is no timeout: a hung
-`sykli run` hangs the call, and the client's cancellation is the remedy.
-
 ## A snippet for your repository's AGENTS.md
 
 ```markdown

@@ -38,5 +38,4 @@ and passes after.
 
 Bump `version` in `Cargo.toml`, add the section to `CHANGELOG.md`, and push a
 tag `vX.Y.Z` that matches the crate version; the release workflow refuses a
-mismatch. It builds the tarballs, the container images, and the Homebrew
-formula.
+mismatch. It builds the tarballs and the Homebrew formula.

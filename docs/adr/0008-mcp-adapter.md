@@ -1,6 +1,8 @@
 # ADR-0008: The MCP shim lives beside the binary
 
-Status: accepted, 2026-09-05.
+Status: accepted 2026-09-05; retired 2026-09-09. The shim was removed before
+the first release (0.6.0). ADR-0005's re-entry condition for anything MCP-shaped
+still applies; this record stays as the design if that condition is ever met.
 
 ## Context
 
