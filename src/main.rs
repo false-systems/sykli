@@ -308,7 +308,7 @@ enum Command {
     #[command(after_help = "Exit codes (first failing stage decides):\n  \
         0  verified\n  \
         1  outcome or evidence failed — the work is bad or incomplete\n  \
-        2  cannot verify — not a receipt, unreadable input, git or contract error\n  \
+        2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
         3  tree or input mismatch — receipt is stale; re-run sykli\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock")]
     Verify {
@@ -2049,8 +2049,40 @@ struct SubjectSummary {
 #[derive(Deserialize)]
 struct TaskSummary {
     name: String,
+    command: String,
     outcome: String,
     importable: bool,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
+/// A receipt's records must agree with themselves and with the contract they
+/// name: a `passed` task exited 0 without error, a `failed` one did not, and
+/// each recorded command is the contract's. This catches corruption and
+/// careless forgery; it cannot establish who wrote the receipt.
+fn record_contradiction(record: &TaskSummary, task: &Task) -> Option<String> {
+    if record.name != task.name {
+        return Some(format!("task {} recorded as {}", task.name, record.name));
+    }
+    if record.command != task.run {
+        return Some(format!(
+            "task {} ran a different command than the contract declares",
+            task.name
+        ));
+    }
+    match record.outcome.as_str() {
+        "passed" | "cached" if record.exit_code != Some(0) || record.error.is_some() => {
+            Some(format!(
+                "task {} is {} but recorded exit code {:?} and error {:?}",
+                task.name, record.outcome, record.exit_code, record.error
+            ))
+        }
+        "failed" if record.exit_code == Some(0) => {
+            Some(format!("task {} failed with exit code 0", task.name))
+        }
+        "passed" | "cached" | "failed" | "errored" | "blocked" => None,
+        other => Some(format!("task {} has unknown outcome {other:?}", task.name)),
+    }
 }
 
 struct Check {
@@ -2133,16 +2165,46 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
-    let tasks_ok = receipt.tasks.len() == contract.tasks.len()
-        && receipt
+    let contradiction = if receipt.tasks.len() != contract.tasks.len() {
+        Some(format!(
+            "{} task records for {} declared tasks",
+            receipt.tasks.len(),
+            contract.tasks.len()
+        ))
+    } else {
+        receipt
             .tasks
             .iter()
             .zip(&contract.tasks)
-            .all(|(record, task)| {
-                record.name == task.name
-                    && record.importable
-                    && matches!(record.outcome.as_str(), "passed" | "cached")
-            });
+            .find_map(|(record, task)| record_contradiction(record, task))
+            .or_else(|| {
+                let all_good = receipt
+                    .tasks
+                    .iter()
+                    .all(|r| matches!(r.outcome.as_str(), "passed" | "cached"));
+                let claims_good = matches!(receipt.outcome.as_str(), "passed" | "cached");
+                (all_good != claims_good).then(|| {
+                    format!(
+                        "receipt outcome {} disagrees with its task records",
+                        receipt.outcome
+                    )
+                })
+            })
+    };
+    checks.push(Check {
+        name: "records",
+        expected: "task records consistent with each other and the contract".into(),
+        actual: contradiction.clone().unwrap_or_else(|| "consistent".into()),
+        ok: contradiction.is_none(),
+        failure_code: NOT_VERIFIABLE,
+    });
+    if contradiction.is_some() {
+        return Ok(checks);
+    }
+    let tasks_ok = receipt
+        .tasks
+        .iter()
+        .all(|record| record.importable && matches!(record.outcome.as_str(), "passed" | "cached"));
     checks.push(Check {
         name: "outcome",
         expected: "passed or cached with complete task records".into(),

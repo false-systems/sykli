@@ -79,6 +79,12 @@ belong to the retired reference implementation, so a future publish is possible.
   retried instead of freezing the production.
 
 ### Fixed
+- `sykli verify` rejects a receipt that contradicts itself or its contract
+  (a `passed` task with a non-zero exit code or an error, a recorded command
+  that differs from the contract's, or a receipt outcome that disagrees with
+  its task records) with exit 2 before judging the outcome. This catches
+  corruption and careless forgery; the README states that `verify` does not
+  establish who wrote a receipt.
 - The production executor runs in its own session and each recipe shell in
   its own process group: a client's Ctrl-C no longer kills the executor, and
   a shell that dies by signal is recorded as `interrupted` after its group is
