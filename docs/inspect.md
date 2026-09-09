@@ -21,7 +21,7 @@ protected environment is a later deployment of the same evaluator, not this one.
 
 ## Prerequisites
 
-- A `sykli` build that includes `inspect` (unreleased after 0.2.0; [install](install.md)).
+- `sykli` v0.3.0 or later ([install](install.md)).
 - [GitHub CLI](https://cli.github.com/) on `PATH`, logged in (`gh auth login`).
   Sykli uses its authentication and never stores credentials. Private
   repositories need read access to pull requests and Actions.

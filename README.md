@@ -27,16 +27,20 @@ flowchart LR
 
 ## Install
 
-The v0.2.0 release ships the graph commands. Typed production and pull-request
-inspection need a build from this repository. With Rust and Cargo installed:
+Releases from v0.3.0 include all three surfaces. The installer script verifies
+the tarball's checksum and places the binary at `~/.local/bin/sykli`:
 
 ```sh
-git clone https://github.com/false-systems/sykli.git
-cd sykli
-cargo install --path . --locked --bin sykli --force
+curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
+sh install.sh v0.3.0
 ```
 
-Make sure Cargo's bin directory (normally `~/.cargo/bin`) is on your `PATH`.
+Or build from source with Rust 1.85 or newer:
+
+```sh
+cargo install --git https://github.com/false-systems/sykli --tag v0.3.0 --locked sykli
+```
+
 Release tarballs, Homebrew, containers and the GitHub Action are in
 [installation options](docs/install.md).
 

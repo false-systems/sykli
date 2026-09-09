@@ -5,9 +5,8 @@ or reports the work still needed. Another invocation can finish the same request
 using its stored facts and artifacts. No agent session or external service is
 required.
 
-This is an **opt-in local path**, alongside the existing graph commands. It is
-not available in previously published v0.2.0 binaries; build this checkout with
-`cargo build --release --locked` first. Linux and macOS are supported hosts.
+This is an **opt-in local path**, alongside the existing graph commands,
+available from v0.3.0. Linux and macOS are supported hosts.
 
 ## Try it
 
