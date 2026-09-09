@@ -7,7 +7,35 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-09
+
+The first published release of this implementation. Version 0.2.0 was bumped
+in the crate and described below but never tagged or published; everything
+listed under it first ships here, together with the additions below. The
+number continues the `sykli` crate on crates.io, whose 0.3.0 through 0.5.3
+belong to the retired reference implementation, so a future publish is possible.
+
 ### Added
+- Typed artifact production, opt-in beside the graph commands (ADR-0009):
+  `sykli init --production --smoke CMD` discovers a Cargo binary, a Go main
+  package (`--package ./cmd/NAME`) or a standalone `main.rs` and writes
+  `sykli.production.json`; `targets`, `plan --target`, `produce`, `status`,
+  `resume`, `diagnostics` and `verify-production` operate on it. A production
+  binds one captured source state to one target; `produce --stop-after` and
+  `resume PRODUCTION_ID` let another worker finish from the store at
+  `.sykli/production` without a handover. `produce`/`resume` exit 0 only for
+  successful delivery, 1 for unfinished or failed work, 2 for an error.
+  See `docs/production.md`.
+- Agent loop on production: `produce --prepare`, `--summary --json` compact
+  state with `ready` work and no embedded logs, `resume --operation NAME`,
+  explicit `--retry NAME`, `--jobs N` bounded parallel waves, and
+  `diagnostics PRODUCTION_ID ATTEMPT_ID` for recorded command output.
+  See `docs/agents.md`.
+- Readable default output for all production commands: operation states,
+  artifact availability and path, identities, and labeled failure tails.
+- Generated production targets and products carry the executable's name
+  (`sykli produce tiny-cli`), not a fixed `app` alias; existing contracts and
+  pinned productions keep their names.
 - `sykli inspect --repo OWNER/NAME --pr N`: reads a pull request's workflow
   runs and reviews through the operator's `gh`, saves an immutable evidence
   bundle under `.sykli/evidence/<collection-id>`, and prints observations.
@@ -25,10 +53,21 @@ contract consumer can observe; internal refactors are not listed.
   `mode: advisory`. Existing receipt and production identities are unchanged.
 
 ### Changed
+- Legacy graph cache keys and receipt `inputs_digest` now include each input's
+  Unix execute bits with its content hash. Removing a script's executable
+  permission no longer returns a cached success; old content-only cache
+  entries miss, and older receipts with declared inputs must be regenerated.
+- Typed execution resolves each declared tool through the selected shell's own
+  executable search before fingerprinting it, and rejects relative or empty
+  `PATH` entries, so the recorded tool is the one that ran.
+- The README presents sykli as one evaluator with three surfaces: graph runs
+  and receipts, typed production, pull-request evidence.
 - AGENTS.md and ADR-0005 now own on-demand read-only acquisition of pull-request
   evidence; servers, webhooks, coordination and provider mutations remain excluded.
 
 ## [0.2.0] - 2026-09-05
+
+Bumped in `Cargo.toml` but never tagged or published; first shipped in 0.6.0.
 
 ### Added
 - Container images published on release: `ghcr.io/false-systems/sykli:<tag>`
@@ -78,6 +117,7 @@ commit `f536224`, the bootstrap of the Rust rewrite.
 - A self-hosted repository gate and `install.sh`, which fetches a tagged
   tarball and checks it against the release's `SHA256SUMS`.
 
-[Unreleased]: https://github.com/false-systems/sykli/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/false-systems/sykli/releases/tag/v0.2.0
+[Unreleased]: https://github.com/false-systems/sykli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/false-systems/sykli/releases/tag/v0.6.0
+[0.2.0]: https://github.com/false-systems/sykli/commit/1c4e247
 [0.1.0]: https://github.com/false-systems/sykli/commit/f536224

@@ -11,7 +11,7 @@ Release assets are named `sykli-<tag>-<platform>-<arch>.tar.gz` with
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
-sh install.sh v0.2.0
+sh install.sh v0.6.0
 ```
 
 `install.sh` takes exactly one argument, a tag of the form `vX.Y.Z`. It
@@ -24,7 +24,7 @@ install from a fork. Make sure the install directory is on your `PATH`.
 ## Cargo
 
 ```bash
-cargo install --git https://github.com/false-systems/sykli --tag v0.2.0 --locked sykli
+cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli
 ```
 
 Builds from source with the pinned lockfile; needs Rust 1.85 or newer.
@@ -36,8 +36,8 @@ Two images per release. The default is the binary alone on `scratch`; the
 step needs, because every receipt is bound to the Git tree it evaluated.
 
 ```bash
-docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/false-systems/sykli:v0.2.0-tools run sykli.json --json
-docker run --rm ghcr.io/false-systems/sykli:v0.2.0 --help
+docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/false-systems/sykli:v0.6.0-tools run sykli.json --json
+docker run --rm ghcr.io/false-systems/sykli:v0.6.0 --help
 ```
 
 `latest` and `tools` track the newest release. Images are built for
@@ -62,7 +62,7 @@ directly: `brew install ./sykli.rb`.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: false-systems/sykli@v0.2.0
+      - uses: false-systems/sykli@v0.6.0
         with:
           contract: sykli.json
 ```
