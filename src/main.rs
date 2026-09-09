@@ -1233,6 +1233,7 @@ unsafe extern "C" {
 
 /// How a task's shell relates to the caller's process group.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))] // only typed production, Unix-only, isolates
 enum Isolation {
     /// Share the caller's group: Ctrl-C reaches the task, as a user expects.
     Shared,
