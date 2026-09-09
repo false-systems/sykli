@@ -16,9 +16,13 @@ Actions runner re-executing is acceptable and honest.
 
 ## Decision
 
-- Cache key: SHA256 over (canonical task definition ⊕ content hashes of
+- Cache key: SHA256 over (canonical task definition ⊕ input identities of
   declared `inputs` ⊕ runtime fingerprint). Undeclared inputs are the user's
   contract violation — no filesystem tracing at v1.
+  Input identities use `sykli-input.v2`, file content SHA256 and Unix execute
+  permission bits (`mode & 0111`; zero on non-Unix). Cache lookup and receipt
+  input verification share this identity. Older content-only cache entries
+  miss; older receipts with declared inputs must be regenerated.
 - Store: local content-addressed directory (`.sykli/cache` or XDG,
   repo-scoped by default), storing declared `outputs` plus the producing
   receipt ref. Eviction by size/age, receipt refs never dangle silently — an

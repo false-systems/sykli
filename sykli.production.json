@@ -131,8 +131,8 @@
           "run": "\"$SYKLI_INPUT_executable\" produce --help",
           "subject_input": "executable"
         },
-        "unit_tests": {
-          "assertion": "selected Cargo package's binary and library unit tests pass",
+        "workspace_tests": {
+          "assertion": "Cargo workspace unit, integration and doc tests pass, with Go available for Go production tests",
           "inputs": {
             "source": {
               "expects": {
@@ -146,7 +146,7 @@
           },
           "kind": "check",
           "reuse": "never",
-          "run": "cd \"$SYKLI_INPUT_source\" && cargo test --offline --locked --package 'sykli' --target 'aarch64-apple-darwin' --target-dir \"$SYKLI_OUTPUT/target\" --bins --lib",
+          "run": "cd \"$SYKLI_INPUT_source\" && cargo test --offline --locked --workspace --target 'aarch64-apple-darwin' --target-dir \"$SYKLI_OUTPUT/target\"",
           "subject_input": "source"
         }
       },
@@ -161,11 +161,12 @@
         "kind": "local-shell.v1",
         "tools": [
           "cargo",
-          "rustc"
+          "rustc",
+          "go"
         ]
       },
       "required_checks": [
-        "unit_tests",
+        "workspace_tests",
         "smoke_test"
       ]
     }
