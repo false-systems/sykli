@@ -117,9 +117,8 @@ what was removed on purpose and what it would take to bring anything back.
 
 ## Go deeper
 
-- [Graph and receipt specification](docs/spec.md), [GitHub Action](docs/github-actions.md)
 - [Typed production: contract, storage, resume, limits](docs/production.md)
-- [Pull-request evidence: requirements, predicates, trust](docs/inspect.md) and its [design](docs/standalone-ci-evidence.md)
+- [Pull-request evidence: requirements, predicates, trust](docs/inspect.md)
 - [Working with agents](docs/agents.md)
 - [Design decisions](docs/adr/)
 - [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
