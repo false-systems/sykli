@@ -140,7 +140,7 @@ family's own repos run v0 daily.
 
 | ADR | Decision |
 |---|---|
-| [0001](adr/0001-rust.md) | Rust; single crate + xtask; family guardrails |
+| [0001](adr/0001-rust.md) | Rust; single crate; family guardrails |
 | [0002](adr/0002-receipts.md) | Receipts as the sole evidence output |
 | [0003](adr/0003-contract-schema-reset.md) | Contract schema reset to v1; one SDK |
 | [0004](adr/0004-cache-model.md) | Local content-addressed cache; tiering deferred |

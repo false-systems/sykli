@@ -67,6 +67,14 @@ belong to the retired reference implementation, so a future publish is possible.
   `PATH` entries, so the recorded tool is the one that ran.
 - The README presents sykli as one evaluator with three surfaces: graph runs
   and receipts, typed production, pull-request evidence.
+
+### Removed
+- Never shipped in a release, removed before the first one: the `Dockerfile`
+  and `ghcr.io` container images, the `cargo xtask gate` helper (the
+  repository's own `sykli run sykli.json` is the gate), the `sykli-mcp` shim
+  (ADR-0008 retired; ADR-0005's re-entry condition still applies), and the
+  recorded demo outputs under `docs/demos` (`examples/production/demo.py`
+  reproduces them).
 - AGENTS.md and ADR-0005 now own on-demand read-only acquisition of pull-request
   evidence; servers, webhooks, coordination and provider mutations remain excluded.
 

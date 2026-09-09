@@ -46,20 +46,6 @@ cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked
 
 Builds from source with the pinned lockfile; needs Rust 1.85 or newer.
 
-## Docker
-
-Two images per release. The default is the binary alone on `scratch`; the
-`tools` variant adds `git`, `jq`, and CA certificates, which is what a CI
-step needs, because every receipt is bound to the Git tree it evaluated.
-
-```bash
-docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/false-systems/sykli:v0.6.0-tools run sykli.json --json
-docker run --rm ghcr.io/false-systems/sykli:v0.6.0 --help
-```
-
-`latest` and `tools` track the newest release. Images are built for
-`linux/amd64` and `linux/arm64`.
-
 ## Homebrew
 
 Every release attaches `sykli.rb`. Once the tap exists it is:

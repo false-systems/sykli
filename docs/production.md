@@ -124,23 +124,14 @@ It saves the actual commands, JSON responses, executable output, identities and
 check bindings. It leaves the artifacts and store in the printed temporary
 directory. A first client stops after compilation; a separate client finishes
 the checks. Candidate B compiles but fails its checks while A remains complete.
-Native runs captured for this change are in
-[`demos/production.json`](demos/production.json) (macOS arm64) and
-[`demos/production-linux.json`](demos/production-linux.json) (Linux arm64,
-Lima `linux1`). The [Linux gate log](demos/linux-validation.txt) records passing
-formatting, Clippy, all workspace tests and the installer checks through
-`cargo xtask gate`; all 11 production tests passed. Machine-specific paths there
-are historical locations, not permanent downloads. Re-run the script to obtain
-your own artifact. Tests separately kill a client and an executor during a
+Re-run the script to obtain your own artifact
+and transcript. Tests separately kill a client and an executor during a
 FIFO-latched compilation; no timing assumption stages the interruption.
 
-Sykli also builds itself with the generated Cargo target. The
-[self-production transcript](demos/cargo-self-production.json) records compilation,
-client exit, a fresh status/resume, source-bound unit tests and a smoke check of
-the collected `sykli produce --help` command. This is the ordinary Cargo path;
-no Sykli-specific build adapter is involved. Its
-[Linux Cargo-discovery gate](demos/cargo-linux-validation.txt) covers the same
-generation and execution behavior on Linux arm64.
+Sykli also builds itself with the generated Cargo target: `sykli produce sykli`
+in this repository records compilation, client exit, a fresh status/resume, the
+workspace tests and a smoke check of the collected executable. This is the
+ordinary Cargo path; no Sykli-specific build adapter is involved.
 
 ## Authoring contract: `sykli-production-contract.v1`
 
