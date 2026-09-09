@@ -20,9 +20,9 @@ results never complete work for different bytes.
 
 ```mermaid
 flowchart LR
-    graph["sykli.json<br/>declared tasks"] --> run["sykli run"] --> receipt["receipt<br/>what ran, on which tree"]
+    tasks["sykli.json<br/>declared tasks"] --> run["sykli run"] --> receipt["receipt<br/>what ran, on which tree"]
     target["sykli.production.json<br/>declared target"] --> produce["sykli produce / resume"] --> artifact["artifact + checks<br/>resumable by ID"]
-    pr["pull request<br/>+ requirements"] --> inspect["sykli inspect / assess"] --> verdict["evidence bundle<br/>established / unproven"]
+    candidate["pull request<br/>+ requirements"] --> inspect["sykli inspect / assess"] --> verdict["evidence bundle<br/>established / unproven"]
 ```
 
 ## Install
