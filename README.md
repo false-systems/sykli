@@ -42,8 +42,9 @@ Or build from source with Rust 1.85 or newer:
 cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli
 ```
 
-Release tarballs, Homebrew, containers and the GitHub Action are in
-[installation options](docs/install.md).
+Each release also carries a Windows zip, a Homebrew formula (`sykli.rb`) and
+`SHA256SUMS`. The repository's `action.yml` is a GitHub Action that installs the
+release matching its ref and runs the graph.
 
 ## Graph runs and receipts
 
@@ -115,7 +116,6 @@ on demand. The loop is written out in the [agent interface](docs/agents.md).
 failed work, 2 for an error. `sykli verify-production PRODUCTION_ID` checks record
 integrity, bindings, completion and current artifact availability. The local
 executor and store are trusted: this is not a sandbox or a proof of correctness.
-Details and limits: the [production guide](docs/production.md).
 
 ## See what a change has established
 
@@ -147,21 +147,17 @@ saved bundle offline and gives the same answer for the same bundle, requirements
 and time.
 
 It is read-only and advisory. Nothing is merged, triggered, posted or certified,
-and every result names its trust limit. Read [inspection](docs/inspect.md) first.
+and every result names its trust limit; `sykli inspect --help` lists the exit codes.
 
 ## What sykli will not do
 
 No server, daemon, webhook or coordination. No agent execution. No claim about
-what a result means beyond the declared predicate. The
-[deletion record](docs/adr/0005-deletions.md) lists what was removed and the
-condition for bringing anything back.
+what a result means beyond the declared predicate. `AGENTS.md` states the
+boundaries and what does not come back without a named user.
 
 ## Further reading
 
-- [Production contract, storage and execution limits](docs/production.md)
-- [Inspecting pull-request evidence](docs/inspect.md)
 - [Agent interface](docs/agents.md)
-- [Design decisions](docs/adr/)
 - [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
 
 MIT.

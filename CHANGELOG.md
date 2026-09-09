@@ -16,7 +16,7 @@ number continues the `sykli` crate on crates.io, whose 0.3.0 through 0.5.3
 belong to the retired reference implementation, so a future publish is possible.
 
 ### Added
-- Typed artifact production, opt-in beside the graph commands (ADR-0009):
+- Typed artifact production, opt-in beside the graph commands:
   `sykli init --production --smoke CMD` discovers a Cargo binary, a Go main
   package (`--package ./cmd/NAME`) or a standalone `main.rs` and writes
   `sykli.production.json`; `targets`, `plan --target`, `produce`, `status`,
@@ -25,7 +25,6 @@ belong to the retired reference implementation, so a future publish is possible.
   `resume PRODUCTION_ID` let another worker finish from the store at
   `.sykli/production` without a handover. `produce`/`resume` exit 0 only for
   successful delivery, 1 for unfinished or failed work, 2 for an error.
-  See `docs/production.md`.
 - Agent loop on production: `produce --prepare`, `--summary --json` compact
   state with `ready` work and no embedded logs, `resume --operation NAME`,
   explicit `--retry NAME`, `--jobs N` bounded parallel waves, and
@@ -47,7 +46,7 @@ belong to the retired reference implementation, so a future publish is possible.
   With `--requirements FILE` (`sykli-requirements.v1`) it also assesses
   `workflow-reported-success` and `candidate-approval` obligations. Exit
   codes: 0 established/observations saved, 1 refuted, 2 invalid input or tool
-  failure, 3 unproven, 4 conflict. See `docs/inspect.md`.
+  failure, 3 unproven, 4 conflict.
 - `sykli assess BUNDLE --requirements FILE [--at TIME] [--json | --graph mermaid] [--why ID]`:
   deterministic offline replay of a saved bundle; evaluates at the collection
   end unless `--at` is given, and labels stale evidence as unproven.
@@ -71,18 +70,14 @@ belong to the retired reference implementation, so a future publish is possible.
 ### Removed
 - Never shipped in a release, removed before the first one: the `Dockerfile`
   and `ghcr.io` container images, the `cargo xtask gate` helper (the
-  repository's own `sykli run sykli.json` is the gate), the `sykli-mcp` shim
-  (ADR-0008 retired; ADR-0005's re-entry condition still applies), and the
-  recorded demo outputs under `docs/demos`.
-- Documents that described history or design rather than the shipped tool:
-  `docs/founding.md`, `docs/why.md`, `docs/autonomous-cycle-v0.md`,
-  `docs/obligation-acceptance-design.md`, `docs/standalone-ci-evidence.md`,
-  `docs/spec.md`, `docs/github-actions.md` and the retired ADR-0008; and the
-  `examples/` directory (the production fixture moved to `tests/fixtures/`).
-  The ADRs, `docs/install.md`, `docs/production.md`, `docs/inspect.md` and
-  `docs/agents.md` remain.
-- AGENTS.md and ADR-0005 now own on-demand read-only acquisition of pull-request
-  evidence; servers, webhooks, coordination and provider mutations remain excluded.
+  repository's own `sykli run sykli.json` is the gate), the `sykli-mcp` shim,
+  and the recorded demo outputs under `docs/demos`.
+- All documentation under `docs/` except `docs/agents.md`, including the
+  architecture decision records, and the `examples/` directory (the production
+  fixture moved to `tests/fixtures/`). The README and `--help` are the
+  documentation; AGENTS.md states the product boundaries.
+- AGENTS.md now owns on-demand read-only acquisition of pull-request evidence;
+  servers, webhooks, coordination and provider mutations remain excluded.
 
 ## [0.2.0] - 2026-09-05
 
