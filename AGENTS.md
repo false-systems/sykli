@@ -135,9 +135,11 @@ latched operation must feed the latch again.
 - Never push to `main`; branch, push, open a PR. Never merge without the
   owner's explicit approval of that PR. Push a branch only when it is complete
   and say so: merges here have repeatedly caught branches mid-push.
-- Validate locally, not in CI. Hosted Actions minutes are a hard budget:
-  `ci.yml` runs only on pushes to `main` and a manual Windows job; do not add
-  `pull_request` triggers or macOS jobs. Do not push a release tag
-  (`release.yml` builds five targets) unless told to.
+- Validate locally before pushing (`sykli run sykli.json`, `toimija verify`);
+  CI then runs the Linux gate and the Windows tests on every pull request and
+  on `main`. The repository is public, so standard hosted runners are free;
+  keep to `ubuntu-latest` and `windows-latest` (macOS is the development host
+  and is covered locally). Do not push a release tag (`release.yml` builds
+  five targets) unless told to.
 - `.sykli/`, `.toimija/`, `.teko/` and `.claude/` are local state and ignored;
   the production store and toimija packets live there.

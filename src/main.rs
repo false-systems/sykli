@@ -2073,10 +2073,16 @@ fn record_contradiction(record: &TaskSummary, task: &Task) -> Option<String> {
         ));
     }
     match record.outcome.as_str() {
-        "passed" | "cached" if record.exit_code != Some(0) || record.error.is_some() => {
+        // A cache-restored record carries no exit code of its own; the pass
+        // it restores was recorded with exit code 0 at the time.
+        "passed" if record.exit_code != Some(0) || record.error.is_some() => Some(format!(
+            "task {} is passed but recorded exit code {:?} and error {:?}",
+            task.name, record.exit_code, record.error
+        )),
+        "cached" if !matches!(record.exit_code, None | Some(0)) || record.error.is_some() => {
             Some(format!(
-                "task {} is {} but recorded exit code {:?} and error {:?}",
-                task.name, record.outcome, record.exit_code, record.error
+                "task {} is cached but recorded exit code {:?} and error {:?}",
+                task.name, record.exit_code, record.error
             ))
         }
         "failed" if record.exit_code == Some(0) => {
