@@ -727,3 +727,26 @@ fn a_receipt_that_contradicts_itself_cannot_verify() {
     let _ = fs::remove_file(outside);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn running_outside_a_repository_says_so() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-nogit-{nonce}"));
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not inside a git repository"));
+    fs::remove_dir_all(root).unwrap();
+}

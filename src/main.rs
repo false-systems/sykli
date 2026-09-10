@@ -1879,7 +1879,9 @@ fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
 }
 
 fn subject(contract: &Contract) -> Result<Subject, String> {
-    let repository = git(&["rev-parse", "--show-toplevel"])?;
+    let repository = git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
+        "not inside a git repository; sykli binds every receipt to a git tree".to_string()
+    })?;
     let head_tree_oid = head_tree_oid(Path::new(&repository))?;
     let tree_oid = working_tree_oid(Path::new(&repository))?;
     let inputs_digest = declared_inputs_digest(contract)?;

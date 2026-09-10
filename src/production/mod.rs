@@ -106,8 +106,15 @@ impl Request {
         &self.contract.targets[&self.target]
     }
     fn load(store: &Store, id: &str) -> Result<Self, String> {
-        let request: Self =
-            decode(&fs::read(store.production(id)?.join("request.json")).map_err(err)?)?;
+        let path = store.production(id)?.join("request.json");
+        let bytes = fs::read(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!("unknown production {id} in {}", store.0.display())
+            } else {
+                error.to_string()
+            }
+        })?;
+        let request: Self = decode(&bytes)?;
         request.contract.validate()?;
         if request.schema != "sykli-production-request.v1"
             || request.id()? != id
