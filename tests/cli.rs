@@ -727,3 +727,38 @@ fn a_receipt_that_contradicts_itself_cannot_verify() {
     let _ = fs::remove_file(outside);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_fully_cached_receipt_verifies() {
+    let root = graph_repo(
+        "cachedverify",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true","inputs":["sykli.json"]}]}"#,
+    );
+    let (code, first) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(first["tasks"][0]["outcome"], "passed");
+    let (code, cached) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(cached["tasks"][0]["outcome"], "cached");
+    assert!(
+        cached["tasks"][0]["exit_code"].is_null(),
+        "restored records carry no exit code"
+    );
+    let outside = std::env::temp_dir().join(format!("sykli-cached-{}.json", std::process::id()));
+    fs::write(&outside, cached.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .arg("verify")
+        .arg(&outside)
+        .args(["--contract", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = fs::remove_file(outside);
+    fs::remove_dir_all(root).unwrap();
+}
