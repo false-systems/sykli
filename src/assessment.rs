@@ -1193,16 +1193,14 @@ pub fn render(assessment: &Assessment, bundle: &str, requirements_path: &str) ->
         day(&assessment.collection_interval.start),
         day(&assessment.collection_interval.end),
     );
-    out.push_str(&format!(
-        "\nEvidence window: {} {}–{} {} UTC\n",
-        start_day,
-        clock(start),
-        if end_day == start_day {
-            String::new()
-        } else {
-            format!("{end_day} ")
-        },
+    let end_text = if end_day == start_day {
         clock(end)
+    } else {
+        format!("{end_day} {}", clock(end))
+    };
+    out.push_str(&format!(
+        "\nEvidence window: {start_day} {}–{end_text} UTC\n",
+        clock(start)
     ));
     if assessment.evaluation_basis == "explicit" {
         out.push_str(&format!(
@@ -1962,6 +1960,10 @@ mod tests {
         assert!(explain(&assessment, "nope").is_err());
         let text = render(&assessment, "bundle", "req.json");
         assert!(text.starts_with("0e1982a… — UNPROVEN\n"));
+        assert!(
+            text.contains("Evidence window: 2026-09-08 22:53:20–22:53:24 UTC"),
+            "{text}"
+        );
         assert!(text.contains("✓ ci      GitHub reports success"));
         assert!(text.contains("--why review"));
     }
