@@ -1601,3 +1601,18 @@ fn the_executor_lives_in_its_own_session_and_a_lost_attempt_can_be_abandoned() {
         Some(2)
     );
 }
+
+#[test]
+fn an_unknown_production_is_named_not_a_missing_file() {
+    let f = Fixture::new();
+    let id = "0000000000000000000000000000000000000000000000000000000000000000";
+    for args in [
+        vec!["resume", id, "--json"],
+        vec!["status", id, "--json"],
+        vec!["verify-production", id, "--json"],
+    ] {
+        let error = f.call(&args, 2)["error"].as_str().unwrap().to_string();
+        assert!(error.contains("unknown production"), "{args:?}: {error}");
+        assert!(!error.contains("No such file"), "{args:?}: {error}");
+    }
+}
