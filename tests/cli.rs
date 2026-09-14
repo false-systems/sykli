@@ -61,9 +61,17 @@ fn executable_mode_invalidates_cache_and_receipt_inputs() {
     assert!(first.status.success());
     let cached: serde_json::Value = serde_json::from_slice(&run().stdout).unwrap();
     assert_eq!(cached["tasks"][0]["outcome"], "cached");
+    assert_eq!(
+        explain_json(&root, &[]).1["explanations"][0]["cache"]["status"],
+        "available"
+    );
     let receipt = root.join(".sykli/mode-receipt.json");
     fs::write(&receipt, first.stdout).unwrap();
     fs::set_permissions(root.join("script"), fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        explain_json(&root, &[]).1["explanations"][0]["cache"]["status"],
+        "missing"
+    );
     let verified = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .arg("verify")
         .arg(&receipt)
@@ -272,6 +280,7 @@ fn plan_json_identifies_the_graph_and_affected_tasks() {
     assert_eq!(plan["schema"], "sykli-plan.v1");
     assert_eq!(plan["contract_hash"].as_str().unwrap().len(), 64);
     assert_eq!(plan["tasks"], serde_json::json!(["build", "test"]));
+    assert_eq!(plan.as_object().unwrap().len(), 3);
 }
 
 #[test]
@@ -785,5 +794,218 @@ fn running_outside_a_repository_says_so() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not inside a git repository"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn explain_json(root: &std::path::Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain", "--json"])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    (out.status.code(), value)
+}
+
+#[test]
+fn explain_inspects_cache_without_executing_or_restoring_outputs() {
+    let root = graph_repo(
+        "explain-cache",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"build","run":"cp seed artifact","inputs":["seed"],"outputs":["artifact"]},
+            {"name":"check","run":"cat artifact","inputs":["artifact"],"after":["build"]}
+        ]}"#,
+    );
+    fs::write(root.join("seed"), "one").unwrap();
+    // An emitter must never be selected, even when it exists beside JSON.
+    fs::write(root.join("sykli.rs"), "this emitter must not execute").unwrap();
+    let (code, plan) = explain_json(&root, &[]);
+    assert_eq!(code, Some(0));
+    assert_eq!(plan["explanations"][0]["selection"][0]["code"], "all_tasks");
+    assert_eq!(plan["explanations"][0]["cache"]["code"], "entry_missing");
+    assert_eq!(plan["explanations"][1]["cache"]["status"], "deferred");
+    assert!(!root.join("artifact").exists());
+    assert!(!root.join(".sykli").exists());
+
+    assert_eq!(run_json(&root).0, Some(0));
+    fs::remove_file(root.join("artifact")).unwrap();
+    let (code, plan) = explain_json(&root, &[]);
+    assert_eq!(code, Some(0));
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "available");
+    assert!(
+        plan["explanations"][0]["cache"]["receipt"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(plan["explanations"][1]["cache"]["status"], "deferred");
+    assert!(
+        !root.join("artifact").exists(),
+        "inspection must not restore"
+    );
+    assert_eq!(plan, explain_json(&root, &[]).1, "deterministic output");
+
+    // A display filter must not hide the dependency's pending restoration.
+    let (_, selected) = explain_json(&root, &["--changed", "./artifact"]);
+    assert_eq!(selected["tasks"], serde_json::json!(["check"]));
+    assert_eq!(
+        selected["explanations"][0]["cache"]["dependencies"],
+        serde_json::json!(["build"])
+    );
+    let (_, selected) = explain_json(&root, &["--changed", "./seed"]);
+    assert_eq!(selected["explanations"][0]["selection"][0]["path"], "seed");
+    assert_eq!(
+        selected["explanations"][1]["selection"][0]["code"],
+        "affected_dependency"
+    );
+
+    let human = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("restoration not attempted"));
+    assert!(!root.join("artifact").exists());
+    let (code, receipt) = run_json(&root);
+    assert_eq!(code, Some(0));
+    assert_eq!(receipt["tasks"][0]["outcome"], "cached");
+    assert_eq!(receipt["tasks"][1]["outcome"], "cached");
+
+    fs::write(root.join("seed"), "two").unwrap();
+    assert_eq!(
+        explain_json(&root, &[]).1["explanations"][0]["cache"]["status"],
+        "missing"
+    );
+    assert_eq!(run_json(&root).1["tasks"][0]["outcome"], "passed");
+    fs::remove_file(root.join("seed")).unwrap();
+    let (code, plan) = explain_json(&root, &[]);
+    assert_eq!(code, Some(2));
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "input_error");
+    assert_eq!(plan["explanations"][1]["cache"]["status"], "deferred");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explain_and_execution_reject_the_same_damaged_cache_evidence() {
+    let root = graph_repo(
+        "explain-invalid",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"build","run":"printf ok > artifact","outputs":["artifact"]}]}"#,
+    );
+    assert_eq!(run_json(&root).0, Some(0));
+    let directory = fs::read_dir(root.join(".sykli/cache"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let entry_path = directory.join("entry.json");
+    let entry_bytes = fs::read(&entry_path).unwrap();
+    let entry: serde_json::Value = serde_json::from_slice(&entry_bytes).unwrap();
+    let receipt_path = root
+        .join(".sykli/receipts")
+        .join(entry["receipt"].as_str().unwrap());
+    let receipt_bytes = fs::read(&receipt_path).unwrap();
+    let artifact = directory.join("outputs/0");
+    for (path, bytes, expected) in [
+        (&entry_path, b"{}".as_slice(), "entry_invalid"),
+        (&receipt_path, b"{}".as_slice(), "provenance_invalid"),
+        (&artifact, b"bad".as_slice(), "artifact_invalid"),
+    ] {
+        fs::write(path, bytes).unwrap();
+        let (code, plan) = explain_json(&root, &[]);
+        assert_eq!(
+            code,
+            Some(0),
+            "invalid cache is a fallback, not a tool error"
+        );
+        assert_eq!(plan["explanations"][0]["cache"]["status"], "invalid");
+        assert_eq!(plan["explanations"][0]["cache"]["code"], expected);
+        assert_eq!(run_json(&root).1["tasks"][0]["outcome"], "passed");
+        // Restore the original evidence for the next independent corruption.
+        fs::write(&entry_path, &entry_bytes).unwrap();
+        fs::write(&receipt_path, &receipt_bytes).unwrap();
+    }
+    fs::remove_file(&artifact).unwrap();
+    assert_eq!(
+        explain_json(&root, &[]).1["explanations"][0]["cache"]["code"],
+        "artifact_missing"
+    );
+    assert_eq!(run_json(&root).1["tasks"][0]["outcome"], "passed");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explain_rejects_emitters_and_defaults_to_json_without_creating_it() {
+    let root = graph_repo(
+        "explain-json",
+        r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
+    );
+    fs::write(root.join("sykli.rs"), "must not execute").unwrap();
+    for args in [
+        vec!["plan", "sykli.rs", "--explain"],
+        vec!["plan", "--explain", "--target", "build"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+    }
+    fs::remove_file(root.join("sykli.json")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("sykli init"));
+    assert!(!root.join("sykli.json").exists());
+    assert!(!root.join(".sykli").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explain_tracks_inherited_values_and_cached_dependencies_without_outputs() {
+    let root = graph_repo(
+        "explain-env",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"a","run":"true","inherit":["SYKLI_EXPLAIN_VALUE"]},
+            {"name":"b","run":"true","after":["a"]}
+        ]}"#,
+    );
+    let invoke = |command: &str, value: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sykli"));
+        cmd.args([command, "--json"])
+            .current_dir(&root)
+            .env_remove("SYKLI_EXPLAIN_VALUE");
+        if command == "plan" {
+            cmd.arg("--explain");
+        }
+        if let Some(value) = value {
+            cmd.env("SYKLI_EXPLAIN_VALUE", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    invoke("run", None);
+    let plan = invoke("plan", None);
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "available");
+    assert_eq!(plan["explanations"][1]["cache"]["status"], "available");
+    assert_eq!(invoke("run", None)["tasks"][1]["outcome"], "cached");
+    for value in ["", "private-value"] {
+        let plan = invoke("plan", Some(value));
+        assert_eq!(plan["explanations"][0]["cache"]["status"], "missing");
+        assert_eq!(plan["explanations"][1]["cache"]["status"], "deferred");
+        assert!(!plan.to_string().contains("private-value"));
+        assert_eq!(invoke("run", Some(value))["tasks"][0]["outcome"], "passed");
+    }
     fs::remove_dir_all(root).unwrap();
 }
