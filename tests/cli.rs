@@ -593,7 +593,9 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
         !digests.to_string().contains("alpha"),
         "receipt records the digest, never the value"
     );
-    assert_eq!(run("alpha")["tasks"][0]["outcome"], "cached");
+    let cached = run("alpha");
+    assert_eq!(cached["tasks"][0]["outcome"], "cached");
+    assert_eq!(cached["tasks"][0]["inherited_digests"], *digests);
     let changed = run("beta");
     assert_eq!(
         changed["tasks"][0]["outcome"], "passed",
