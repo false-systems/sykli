@@ -1730,7 +1730,7 @@ impl Cache for LocalCache {
             stdout_digest: sha256(&[]),
             stderr_digest: sha256(&[]),
             output_digests,
-            inherited_digests: BTreeMap::new(),
+            inherited_digests: inherited_digests(task),
             outcome: Outcome::Cached,
             importable: true,
             class: None,
