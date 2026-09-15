@@ -46,6 +46,26 @@ def read_json(output, name):
     return json.loads((output / (name + ".json")).read_bytes())
 
 
+def change_coverage(changes, inputs, root):
+    exempted, unresolved = [], []
+    for change in changes:
+        path = change["path"]
+        if path in inputs:
+            continue
+        # Repository policy: only edits to the existing regular README are
+        # exempt. New docs, deletions, renames and symlinks need review too.
+        if (path == "README.md" and change["status"] == "M"
+                and (root / path).is_file() and not (root / path).is_symlink()):
+            exempted.append({"path": path, "reason": "repository-readme-only"})
+        else:
+            unresolved.append(path)
+    return {
+        "status": "unresolved" if unresolved else "accounted",
+        "exempted_paths": exempted,
+        "unresolved_paths": unresolved,
+    }
+
+
 def compare(plan, receipt, affected, baseline_receipts):
     records = {record["name"]: record for record in receipt["tasks"]}
     rows = []
@@ -171,6 +191,7 @@ def experiment(args, output):
             report["unmapped_paths"] = [
                 change["path"] for change in changed if change["path"] not in inputs
             ]
+            report["coverage"] = change_coverage(changed, inputs, candidate_dir)
             report["tasks"] = compare(
                 plan, receipt, set(affected), candidate_dir / ".sykli/receipts",
             )
@@ -188,6 +209,10 @@ def experiment(args, output):
             report["potential_reused_task_ms"] = sum(
                 row["full_duration_ms"] for row in report["tasks"] if row["comparison"] == "agrees"
             )
+            report["coverage_qualified_reused_task_ms"] = (
+                report["potential_reused_task_ms"]
+                if report["coverage"]["status"] == "accounted" else 0
+            )
             report["full_task_ms"] = sum(row["full_duration_ms"] for row in report["tasks"])
         finally:
             for path in reversed(worktrees):
@@ -203,6 +228,19 @@ def summary(report):
     lines += [
         "Compared base <code>" + report["base_commit"] + "</code> with tested candidate <code>"
         + report["candidate_commit"] + "</code>.", "",
+    ]
+    coverage = report["coverage"]
+    if coverage["status"] == "unresolved":
+        lines += ["**Full execution required: changed paths lack input coverage.**",
+                  "Declare their dependencies or review an explicit repository exception.", ""]
+        for path in coverage["unresolved_paths"]:
+            lines.append("- <code>" + html.escape(path).replace("\n", "&#10;") + "</code>")
+    else:
+        lines += ["Changed paths are accounted for; this is not proof that reuse is safe."]
+    for exemption in coverage["exempted_paths"]:
+        lines.append("Explicit exception: <code>" + exemption["path"] + "</code> (existing README edit).")
+    lines += [
+        "",
         "| task | affected | cache evidence | full result | comparison |",
         "|---|---|---|---|---|",
     ]
@@ -213,9 +251,11 @@ def summary(report):
                      + " | " + row["comparison"] + " |")
     lines += [
         "",
-        "Potential reuse: **" + str(report["potential_reused_task_ms"])
+        "Matching results before coverage review: **" + str(report["potential_reused_task_ms"])
         + " ms of task duration**, from " + str(report["full_task_ms"])
         + " ms observed. Task durations overlap; this is not job wall time saved.",
+        "After changed-path coverage: **" + str(report["coverage_qualified_reused_task_ms"])
+        + " ms**. This measurement does not authorize skipping checks.",
         "Baseline cost: " + str(report["baseline_run_ms"]) + " ms; inspection: "
         + str(report["inspection_ms"]) + " ms.",
         "Reuse disagreements: **" + str(len(report["disagreements"])) + "**.",

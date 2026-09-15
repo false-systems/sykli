@@ -88,6 +88,7 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     fs::write(root.join("hidden"), "ok").unwrap();
     fs::write(root.join("old name"), "renamed").unwrap();
     fs::write(root.join("line\nbreak"), "before").unwrap();
+    fs::write(root.join("README.md"), "before").unwrap();
     fs::write(
         root.join("sykli.json"),
         json!({
@@ -108,6 +109,8 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     fs::write(root.join("hidden"), "bad").unwrap();
     fs::write(root.join("line\nbreak"), "after").unwrap();
     fs::rename(root.join("old name"), root.join("new name")).unwrap();
+    fs::create_dir(root.join(".cargo")).unwrap();
+    fs::write(root.join(".cargo/config.toml"), "[build]\n").unwrap();
     let candidate = commit(&root);
     let full = full_run(&root);
     assert_eq!(full["tasks"][3]["source"], "task");
@@ -127,6 +130,19 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     assert_eq!(row("declared")["cache"]["status"], "missing");
     assert_eq!(row("downstream")["cache"]["status"], "deferred");
     assert_eq!(row("stable")["comparison"], "agrees");
+    assert_eq!(report["coverage"]["status"], "unresolved");
+    assert_eq!(report["coverage_qualified_reused_task_ms"], 0);
+    let unresolved = report["coverage"]["unresolved_paths"].as_array().unwrap();
+    for path in [
+        ".cargo/config.toml",
+        "hidden",
+        "old name",
+        "new name",
+        "line\nbreak",
+    ] {
+        assert!(unresolved.contains(&json!(path)));
+    }
+    assert!(!unresolved.contains(&json!("input")));
     assert_eq!(
         report["potential_reused_task_ms"],
         row("stable")["full_duration_ms"]
@@ -171,6 +187,36 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
             .matches("worktree ")
             .count(),
         1
+    );
+
+    // A reviewed README edit is exempt; other Markdown files are not.
+    let docs_base = git(&root, &["rev-parse", "HEAD"]);
+    fs::write(root.join("README.md"), "after").unwrap();
+    commit(&root);
+    fs::remove_dir_all(root.join(".sykli/cache")).unwrap();
+    full_run(&root);
+    let docs = shadow(&root, &docs_base, "readme-only", 0);
+    assert_eq!(docs["coverage"]["status"], "accounted");
+    assert_eq!(docs["coverage"]["unresolved_paths"], json!([]));
+    assert_eq!(
+        docs["coverage"]["exempted_paths"],
+        json!([
+            {"path": "README.md", "reason": "repository-readme-only"}
+        ])
+    );
+    assert_eq!(
+        docs["coverage_qualified_reused_task_ms"],
+        docs["potential_reused_task_ms"]
+    );
+    let rename_base = git(&root, &["rev-parse", "HEAD"]);
+    fs::rename(root.join("README.md"), root.join("other.md")).unwrap();
+    commit(&root);
+    full_run(&root);
+    let renamed = shadow(&root, &rename_base, "renamed-readme", 0);
+    assert_eq!(renamed["coverage"]["exempted_paths"], json!([]));
+    assert_eq!(
+        renamed["coverage"]["unresolved_paths"],
+        json!(["README.md", "other.md"])
     );
     fs::remove_dir_all(root).unwrap();
 }
