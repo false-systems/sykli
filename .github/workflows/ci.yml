@@ -35,9 +35,37 @@ jobs:
       # to this repository exercises the shim. `version: source` builds this
       # checkout instead of installing a release.
       - uses: ./
+        id: full
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/sykli-bin/target
         with:
           contract: sykli.json
           version: source
+
+      # Shadow only: the required graph above runs cold, without imported
+      # Sykli cache. Baseline evidence stays in disposable worktrees.
+      - name: Compare changed paths and baseline reuse with the full run
+        if: always() && github.event_name == 'pull_request' && steps.full.outputs.receipt != ''
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          SHADOW_BASE: ${{ github.event.pull_request.base.sha }}
+          SHADOW_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          FULL_RECEIPT: ${{ steps.full.outputs.receipt }}
+        run: |
+          python3 scripts/ci_shadow.py \
+            --base "$SHADOW_BASE" --pr-head "$SHADOW_PR_HEAD" \
+            --binary "$RUNNER_TEMP/sykli-bin/target/debug/sykli" \
+            --receipt "$FULL_RECEIPT" --output "$RUNNER_TEMP/sykli-shadow"
+
+      - name: Attach shadow observation
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sykli-ci-shadow
+          path: ${{ runner.temp }}/sykli-shadow
+          if-no-files-found: warn
 
   # The gate above runs on Linux through the Action. This job proves the
   # crate builds and its tests pass on Windows; typed production tests are
