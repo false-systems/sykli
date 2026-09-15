@@ -25,6 +25,39 @@ and `affected_dependency` (with a `task`). Multiple reasons may apply.
 `--changed` is a caller-supplied hint, not a Git diff or cache invalidation;
 it filters the displayed tasks and does not restrict what `run` executes.
 
+Explain also checks **input coverage**, independently of that display filter.
+Requested by Yair after the remote-workers trial: an undeclared source file
+must remain visible even when another changed input selects every task.
+It compares the working tree with HEAD (including staged changes), adds
+untracked non-ignored files, and includes every supplied `--changed` hint.
+Use `sykli plan --explain --base origin/main --json` to include committed
+branch changes relative to that exact ref. `--base` requires `--explain` and
+does not filter task selection; it is not an implicit merge-base calculation.
+With unborn HEAD, tracked/index paths and untracked files are considered.
+Discovered `.sykli/` state is excluded; explicit hints can name ignored paths.
+
+The optional `input_coverage` object on `sykli-plan.v1` contains the resolved
+`base_commit` (null for unborn HEAD) and a sorted `paths` array. Each entry has
+a repository-relative `path` (absolute for external hints), `kind`, and `tasks`:
+
+- `declared_input`: names every task with that exact input, respecting workdir.
+- `evaluation_metadata`: the selected JSON contract or its sibling sykli.lock,
+  unless it is itself a declared input.
+- `unmapped`: no task declares this path. Text output prints a warning even
+  when another changed file selected every task or valid cache entries exist.
+
+For an unmapped source/configuration file, inspect which tasks read it, update
+their inputs, and run `sykli lock sykli.json`. Documentation is not automatically
+exempt in this CLI diagnostic. An unmapped path requires investigation, not
+proof that the file affects a task. Likewise, mapping a path to one task does
+not prove all consumers are covered. External tools and unchanged missing
+dependencies are outside this changed-path check.
+
+Coverage warnings keep exit 0 and do not alter cache eligibility or `run`.
+Git discovery errors, invalid base refs and unsupported non-UTF-8 paths return
+exit 2, never an empty successful coverage result. Commands without `--explain`
+keep their existing output. This diagnostic does not modify the graph.
+
 Cache states:
 
 - `available`: source `receipt` and cached artifacts validate. Restoration

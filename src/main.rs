@@ -5,7 +5,7 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -79,6 +79,9 @@ enum Command {
         /// Explain selection and current cache evidence without running tasks (JSON contracts only)
         #[arg(long, conflicts_with = "target")]
         explain: bool,
+        /// Coverage comparison base (default HEAD); does not filter task selection
+        #[arg(long, requires = "explain")]
+        base: Option<String>,
         /// Select a typed production target from the positional contract
         #[arg(long)]
         target: Option<String>,
@@ -350,6 +353,126 @@ struct PlanOutput {
     tasks: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     explanations: Option<Vec<TaskExplanation>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_coverage: Option<InputCoverage>,
+}
+
+#[derive(Serialize)]
+struct InputCoverage {
+    base_commit: Option<String>,
+    paths: Vec<CoveragePath>,
+}
+
+#[derive(Serialize)]
+struct CoveragePath {
+    path: String,
+    kind: &'static str,
+    tasks: Vec<String>,
+}
+
+fn input_coverage(
+    contract: &Contract,
+    contract_path: &Path,
+    changed: &[PathBuf],
+    base: Option<&str>,
+) -> Result<InputCoverage, String> {
+    let repository = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+    let base_commit = match base {
+        Some(base) => Some(git(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ])?),
+        None => match git(&["rev-parse", "--verify", "HEAD^{commit}"]) {
+            Ok(commit) => Some(commit),
+            Err(error) => {
+                let branch = git(&["symbolic-ref", "--quiet", "HEAD"])?;
+                let exists = ProcessCommand::new("git")
+                    .args(["show-ref", "--verify", "--quiet", &branch])
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if exists.status.code() != Some(1) {
+                    return Err(error);
+                }
+                None
+            }
+        },
+    };
+    let git_paths = |args: &[&str]| -> Result<Vec<PathBuf>, String> {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into());
+        }
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let path = std::str::from_utf8(path)
+                    .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
+                absolute(&repository.join(path))
+            })
+            .collect()
+    };
+    let mut paths: BTreeSet<_> = match &base_commit {
+        Some(base) => git_paths(&["diff", "--name-only", "--no-renames", "-z", base, "--"]),
+        None => git_paths(&["ls-files", "--cached", "-z"]),
+    }?
+    .into_iter()
+    .collect();
+    paths.extend(git_paths(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ])?);
+    // Local receipts and cache are excluded from tree identity too. Explicit
+    // hints below remain visible, including ignored files named by the caller.
+    paths.retain(|path| !path.starts_with(repository.join(".sykli")));
+    for path in changed {
+        paths.insert(absolute(path)?);
+    }
+    let mut declared: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for task in &contract.tasks {
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        for input in &task.inputs {
+            let tasks = declared.entry(absolute(&root.join(input))?).or_default();
+            if !tasks.contains(&task.name) {
+                tasks.push(task.name.clone());
+            }
+        }
+    }
+    let contract_path = absolute(contract_path)?;
+    let lock_path = contract_path.with_file_name("sykli.lock");
+    let paths = paths
+        .into_iter()
+        .map(|path| {
+            let tasks = declared.remove(&path).unwrap_or_default();
+            let kind = if !tasks.is_empty() {
+                "declared_input"
+            } else if path == contract_path || path == lock_path {
+                "evaluation_metadata"
+            } else {
+                "unmapped"
+            };
+            let display = path.strip_prefix(&repository).unwrap_or(&path);
+            Ok(CoveragePath {
+                path: display
+                    .to_str()
+                    .ok_or("input coverage requires UTF-8 paths")?
+                    .to_string(),
+                kind,
+                tasks,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(InputCoverage { base_commit, paths })
 }
 
 #[derive(Serialize)]
@@ -745,6 +868,7 @@ fn main() -> ExitCode {
             json,
             target,
             explain,
+            base,
         } => {
             let contract = contract.unwrap();
             if target.is_some() {
@@ -768,10 +892,20 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            match load(&contract).and_then(|(contract, levels, hash)| {
-                let tasks = affected(&contract, &levels, &changed)?;
+            match load(&contract).and_then(|(loaded, levels, hash)| {
+                let tasks = affected(&loaded, &levels, &changed)?;
                 let explanations = if explain {
-                    Some(explain_plan(&contract, &levels, &changed, &tasks)?)
+                    Some(explain_plan(&loaded, &levels, &changed, &tasks)?)
+                } else {
+                    None
+                };
+                let input_coverage = if explain {
+                    Some(input_coverage(
+                        &loaded,
+                        &contract,
+                        &changed,
+                        base.as_deref(),
+                    )?)
                 } else {
                     None
                 };
@@ -780,6 +914,7 @@ fn main() -> ExitCode {
                     contract_hash: hash,
                     tasks,
                     explanations,
+                    input_coverage,
                 })
             }) {
                 Ok(plan) => {
@@ -814,6 +949,31 @@ fn main() -> ExitCode {
                                 }
                             }
                             println!("  cache: {}", item.cache);
+                        }
+                        if let Some(coverage) = &plan.input_coverage {
+                            println!(
+                                "Input coverage against {} (plus --changed hints):",
+                                coverage.base_commit.as_deref().unwrap_or("unborn HEAD")
+                            );
+                            for path in &coverage.paths {
+                                match path.kind {
+                                    "unmapped" => println!(
+                                        "  warning: no task declares input {:?}; review dependencies before relying on cached results",
+                                        path.path
+                                    ),
+                                    "evaluation_metadata" => {
+                                        println!("  evaluation metadata: {:?}", path.path)
+                                    }
+                                    _ => println!(
+                                        "  declared input: {:?} -> {}",
+                                        path.path,
+                                        path.tasks.join(", ")
+                                    ),
+                                }
+                            }
+                            println!(
+                                "Coverage is advisory; task selection and cache eligibility are unchanged."
+                            );
                         }
                     } else {
                         for task in plan.tasks {

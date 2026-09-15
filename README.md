@@ -115,11 +115,19 @@ the tree they describe.
 sykli plan --explain
 sykli plan --changed test.sh --explain
 sykli plan --changed test.sh --explain --json
+sykli plan --explain --base origin/main --json
 ```
 
 `--explain` reads `sykli.json` by default. It runs no task or Rust emitter,
 restores no outputs, and writes no cache entries or receipts. An explicit
 JSON contract path selects another graph.
+
+Explain also warns about changed files that no task declares as an input,
+even when the selected tasks already cover the whole graph. It checks staged,
+unstaged and untracked non-ignored files; `--base origin/main` also includes
+committed changes relative to that ref. Contract and lock changes are labeled
+as evaluation metadata. Coverage is diagnostic: a warning does not disable
+cache reuse, and selecting every task does not prove their inputs are complete.
 
 | Cache state | What it tells you |
 |---|---|
