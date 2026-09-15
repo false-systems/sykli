@@ -370,11 +370,23 @@ enum SelectionReason {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum CacheExplanation {
-    Available { receipt: String },
-    Missing { code: CacheMiss },
-    Invalid { code: CacheMiss },
-    Deferred { dependencies: Vec<String> },
-    InputError { message: String },
+    Available {
+        receipt: String,
+    },
+    Missing {
+        code: CacheMiss,
+    },
+    Invalid {
+        code: CacheMiss,
+    },
+    Deferred {
+        dependencies: Vec<String>,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        input_errors: BTreeMap<String, String>,
+    },
+    InputError {
+        message: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -411,11 +423,20 @@ impl std::fmt::Display for CacheExplanation {
                 "available; receipt {receipt} (restoration not attempted)"
             ),
             Self::Missing { code } | Self::Invalid { code } => write!(f, "{code}"),
-            Self::Deferred { dependencies } => write!(
-                f,
-                "deferred until dependencies complete: {}",
-                dependencies.join(", ")
-            ),
+            Self::Deferred {
+                dependencies,
+                input_errors,
+            } => {
+                write!(
+                    f,
+                    "deferred until dependencies complete: {}",
+                    dependencies.join(", ")
+                )?;
+                for (task, message) in input_errors {
+                    write!(f, "; input error in {task}: {message}")?;
+                }
+                Ok(())
+            }
             Self::InputError { message } => write!(f, "input error: {message}"),
         }
     }
@@ -438,6 +459,7 @@ fn explain_plan(
     let selected: HashSet<_> = selected.iter().map(String::as_str).collect();
     let mut stable_keys: BTreeMap<&str, String> = BTreeMap::new();
     let mut explanations = Vec::new();
+    let mut errors_by_task: HashMap<&str, BTreeMap<String, String>> = HashMap::new();
     for &index in levels.iter().flatten() {
         let task = &contract.tasks[index];
         // Inspect omitted ancestors too: --changed filters the display, not execution.
@@ -447,8 +469,17 @@ fn explain_plan(
             .filter(|name| !stable_keys.contains_key(name.as_str()))
             .cloned()
             .collect();
+        let mut input_errors: BTreeMap<String, String> = task
+            .after
+            .iter()
+            .flat_map(|name| errors_by_task[name.as_str()].iter())
+            .map(|(name, message)| (name.clone(), message.clone()))
+            .collect();
         let state = if !dependencies.is_empty() {
-            CacheExplanation::Deferred { dependencies }
+            CacheExplanation::Deferred {
+                dependencies,
+                input_errors: input_errors.clone(),
+            }
         } else {
             let after = task
                 .after
@@ -472,6 +503,10 @@ fn explain_plan(
                 },
             }
         };
+        if let CacheExplanation::InputError { message } = &state {
+            input_errors.insert(task.name.clone(), message.clone());
+        }
+        errors_by_task.insert(task.name.as_str(), input_errors);
         if !selected.contains(task.name.as_str()) {
             continue;
         }
@@ -749,9 +784,13 @@ fn main() -> ExitCode {
             }) {
                 Ok(plan) => {
                     let input_error = plan.explanations.as_ref().is_some_and(|items| {
-                        items
-                            .iter()
-                            .any(|item| matches!(item.cache, CacheExplanation::InputError { .. }))
+                        items.iter().any(|item| match &item.cache {
+                            CacheExplanation::InputError { .. } => true,
+                            CacheExplanation::Deferred { input_errors, .. } => {
+                                !input_errors.is_empty()
+                            }
+                            _ => false,
+                        })
                     });
                     if json {
                         if serde_json::to_writer(io::stdout().lock(), &plan).is_err() {

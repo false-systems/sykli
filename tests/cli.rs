@@ -1009,3 +1009,57 @@ fn explain_tracks_inherited_values_and_cached_dependencies_without_outputs() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn explain_preserves_filtered_ancestor_input_errors() {
+    let root = graph_repo(
+        "explain-ancestor-errors",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"build","run":"true","inputs":["missing-source"]},
+            {"name":"other","run":"true","inputs":["missing-config"]},
+            {"name":"middle","run":"true","inputs":["middle.txt"],"after":["build"]},
+            {"name":"test","run":"true","inputs":["test.txt"],"after":["middle","other"]},
+            {"name":"independent","run":"true","inputs":["independent.txt"]}
+        ]}"#,
+    );
+    for path in ["middle.txt", "test.txt", "independent.txt"] {
+        fs::write(root.join(path), "input").unwrap();
+    }
+    let (code, plan) = explain_json(&root, &["--changed", "test.txt"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(plan["tasks"], serde_json::json!(["test"]));
+    let cache = &plan["explanations"][0]["cache"];
+    assert_eq!(cache["status"], "deferred");
+    assert_eq!(
+        cache["input_errors"]["build"],
+        "declared input \"missing-source\" is missing or not a file"
+    );
+    assert_eq!(
+        cache["input_errors"]["other"],
+        "declared input \"missing-config\" is missing or not a file"
+    );
+    assert_eq!(cache["input_errors"].as_object().unwrap().len(), 2);
+
+    let (code, direct) = explain_json(&root, &["--changed", "middle.txt"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(
+        direct["explanations"][0]["cache"]["input_errors"]["build"],
+        cache["input_errors"]["build"]
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain", "--changed", "test.txt"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("missing-source"));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("missing-config"));
+
+    // Errors in unrelated tasks must not poison a selected independent task.
+    let (code, independent) = explain_json(&root, &["--changed", "independent.txt"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(independent["tasks"], serde_json::json!(["independent"]));
+    assert_eq!(independent["explanations"][0]["cache"]["status"], "missing");
+    assert!(!root.join(".sykli").exists());
+    fs::remove_dir_all(root).unwrap();
+}

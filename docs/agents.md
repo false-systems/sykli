@@ -36,14 +36,17 @@ Cache states:
   `artifact_invalid`. Execution falls back to running the task.
 - `deferred`: named `dependencies` need execution, output restoration,
   or resolution of an input error before this task can be evaluated.
-  Ancestors are inspected even when omitted by the display filter.
+  Ancestors are inspected even when omitted by the display filter. When
+  an ancestor has a definite input error, `input_errors` maps its task name
+  to the original error message, including through transitive dependencies.
 - `input_error`: a `message` describes an input that cannot be evaluated
   now. A missing generated input is deferred when its dependency is pending.
 
 Exit 0 means an explanation was produced, including misses, invalid cache
 entries and deferred decisions. Exit 2 means evaluation failed; definite
-input errors in displayed tasks retain the JSON plan and its other
-explanations. Contract or runtime errors use stderr and produce no plan.
+input errors in displayed tasks or their ancestors retain the JSON plan
+and its other explanations. Errors in unrelated, omitted tasks do not
+change the exit code. Contract or runtime errors use stderr and produce no plan.
 Explanations describe current local evidence, not a promised run outcome:
 files, environment or cache contents can change, and task side effects are
 not simulated. Given the same task key and cache contents, planning and
