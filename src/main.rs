@@ -66,17 +66,19 @@ enum Command {
     /// Select the tasks a change requires
     #[command(after_help = "Exit codes:\n  \
         0  plan printed (all tasks when no --changed is given)\n  \
-        2  could not evaluate the contract")]
+        2  could not evaluate the contract or --explain found an input error")]
     Plan {
-        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
-        #[arg(default_value = "sykli.rs")]
-        contract: PathBuf,
+        /// Contract path (--explain defaults to sykli.json; otherwise sykli.rs, falling back to sykli.json)
+        contract: Option<PathBuf>,
         /// Changed file path; repeat for multiple files
         #[arg(long)]
         changed: Vec<PathBuf>,
         /// Print the plan as JSON
         #[arg(long)]
         json: bool,
+        /// Explain selection and current cache evidence without running tasks (JSON contracts only)
+        #[arg(long, conflicts_with = "target")]
+        explain: bool,
         /// Select a typed production target from the positional contract
         #[arg(long)]
         target: Option<String>,
@@ -346,10 +348,198 @@ struct PlanOutput {
     schema: &'static str,
     contract_hash: String,
     tasks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanations: Option<Vec<TaskExplanation>>,
+}
+
+#[derive(Serialize)]
+struct TaskExplanation {
+    task: String,
+    selection: Vec<SelectionReason>,
+    cache: CacheExplanation,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+enum SelectionReason {
+    AllTasks,
+    ChangedInput { path: String },
+    AffectedDependency { task: String },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CacheExplanation {
+    Available {
+        receipt: String,
+    },
+    Missing {
+        code: CacheMiss,
+    },
+    Invalid {
+        code: CacheMiss,
+    },
+    Deferred {
+        dependencies: Vec<String>,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        input_errors: BTreeMap<String, String>,
+    },
+    InputError {
+        message: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CacheMiss {
+    EntryMissing,
+    EntryUnreadable,
+    EntryInvalid,
+    ProvenanceInvalid,
+    ArtifactMissing,
+    ArtifactUnreadable,
+    ArtifactInvalid,
+}
+
+impl std::fmt::Display for CacheMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EntryMissing => "no entry for the current key",
+            Self::EntryUnreadable => "cache entry cannot be read",
+            Self::EntryInvalid => "cache entry is invalid",
+            Self::ProvenanceInvalid => "source receipt is missing or invalid",
+            Self::ArtifactMissing => "cached artifact is missing",
+            Self::ArtifactUnreadable => "cached artifact cannot be read",
+            Self::ArtifactInvalid => "cached artifact digest does not match",
+        })
+    }
+}
+
+impl std::fmt::Display for CacheExplanation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Available { receipt } => write!(
+                f,
+                "available; receipt {receipt} (restoration not attempted)"
+            ),
+            Self::Missing { code } | Self::Invalid { code } => write!(f, "{code}"),
+            Self::Deferred {
+                dependencies,
+                input_errors,
+            } => {
+                write!(
+                    f,
+                    "deferred until dependencies complete: {}",
+                    dependencies.join(", ")
+                )?;
+                for (task, message) in input_errors {
+                    write!(f, "; input error in {task}: {message}")?;
+                }
+                Ok(())
+            }
+            Self::InputError { message } => write!(f, "input error: {message}"),
+        }
+    }
+}
+
+fn explain_plan(
+    contract: &Contract,
+    levels: &[Vec<usize>],
+    changed: &[PathBuf],
+    selected: &[String],
+) -> Result<Vec<TaskExplanation>, String> {
+    let repository = git(&["rev-parse", "--show-toplevel"])
+        .map_err(|_| "plan --explain requires a git repository".to_string())?;
+    let runtime = shell_runtime()?;
+    let cache = LocalCache::new(Path::new(&repository));
+    let changed: HashSet<_> = changed
+        .iter()
+        .map(|path| absolute(path))
+        .collect::<Result<_, _>>()?;
+    let selected: HashSet<_> = selected.iter().map(String::as_str).collect();
+    let mut stable_keys: BTreeMap<&str, String> = BTreeMap::new();
+    let mut explanations = Vec::new();
+    let mut errors_by_task: HashMap<&str, BTreeMap<String, String>> = HashMap::new();
+    for &index in levels.iter().flatten() {
+        let task = &contract.tasks[index];
+        // Inspect omitted ancestors too: --changed filters the display, not execution.
+        let dependencies: Vec<_> = task
+            .after
+            .iter()
+            .filter(|name| !stable_keys.contains_key(name.as_str()))
+            .cloned()
+            .collect();
+        let mut input_errors: BTreeMap<String, String> = task
+            .after
+            .iter()
+            .flat_map(|name| errors_by_task[name.as_str()].iter())
+            .map(|(name, message)| (name.clone(), message.clone()))
+            .collect();
+        let state = if !dependencies.is_empty() {
+            CacheExplanation::Deferred {
+                dependencies,
+                input_errors: input_errors.clone(),
+            }
+        } else {
+            let after = task
+                .after
+                .iter()
+                .map(|name| (name.as_str(), stable_keys[name.as_str()].as_str()))
+                .collect();
+            match cache_key(task, &runtime, &after) {
+                Err(message) => CacheExplanation::InputError { message },
+                Ok(key) => match cache.inspect(task, &key, &runtime) {
+                    Ok(entry) => {
+                        // Restoring outputs can change downstream inputs, even on a cache hit.
+                        if task.outputs.is_empty() {
+                            stable_keys.insert(task.name.as_str(), key);
+                        }
+                        CacheExplanation::Available {
+                            receipt: entry.receipt,
+                        }
+                    }
+                    Err(code @ CacheMiss::EntryMissing) => CacheExplanation::Missing { code },
+                    Err(code) => CacheExplanation::Invalid { code },
+                },
+            }
+        };
+        if let CacheExplanation::InputError { message } = &state {
+            input_errors.insert(task.name.clone(), message.clone());
+        }
+        errors_by_task.insert(task.name.as_str(), input_errors);
+        if !selected.contains(task.name.as_str()) {
+            continue;
+        }
+        let mut selection = Vec::new();
+        if changed.is_empty() {
+            selection.push(SelectionReason::AllTasks);
+        } else {
+            let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+            for input in &task.inputs {
+                if changed.contains(&absolute(&root.join(input))?) {
+                    selection.push(SelectionReason::ChangedInput {
+                        path: input.clone(),
+                    });
+                }
+            }
+            for name in &task.after {
+                if selected.contains(name.as_str()) {
+                    selection.push(SelectionReason::AffectedDependency { task: name.clone() });
+                }
+            }
+        }
+        explanations.push(TaskExplanation {
+            task: task.name.clone(),
+            selection,
+            cache: state,
+        });
+    }
+    Ok(explanations)
 }
 
 /// The contract a command works on when none was named. Every command
-/// defaults to `sykli.rs`, the emitter; a repository set up by `sykli init`
+/// normally defaults to `sykli.rs`, the emitter; `plan --explain` bypasses
+/// this fallback and defaults directly to JSON. A repository set up by `sykli init`
 /// has `sykli.json` and no emitter. When the default was not overridden and
 /// only `sykli.json` exists, that is the contract. An explicit path is never
 /// touched.
@@ -376,9 +566,20 @@ fn main() -> ExitCode {
     }
     let mut cli = Cli::parse();
     match &mut cli.command {
+        Command::Plan {
+            contract, explain, ..
+        } => {
+            let path = contract
+                .take()
+                .unwrap_or_else(|| PathBuf::from(if *explain { "sykli.json" } else { "sykli.rs" }));
+            *contract = Some(if *explain {
+                path
+            } else {
+                resolve_contract(path)
+            });
+        }
         Command::Validate { contract, .. }
         | Command::Run { contract, .. }
-        | Command::Plan { contract, .. }
         | Command::Lock { contract, .. }
         | Command::Verify { contract, .. } => {
             *contract = resolve_contract(std::mem::take(contract));
@@ -482,9 +683,10 @@ fn main() -> ExitCode {
             target: Some(target),
             changed,
             json,
+            ..
         } => production::report(
             if changed.is_empty() {
-                production::plan(&contract, &target)
+                production::plan(contract.as_ref().unwrap(), &target)
             } else {
                 Err("typed planning pins all selected inputs; --changed applies to declared graphs (sykli-contract.v1)".into())
             },
@@ -542,34 +744,83 @@ fn main() -> ExitCode {
             changed,
             json,
             target,
+            explain,
         } => {
+            let contract = contract.unwrap();
             if target.is_some() {
                 eprintln!("typed production requires Linux or macOS");
                 return ExitCode::from(2);
             }
+            if explain
+                && !contract
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                eprintln!(
+                    "plan --explain reads JSON contracts only; use sykli.json or create it with sykli init"
+                );
+                return ExitCode::from(2);
+            }
+            if explain && !contract.exists() {
+                eprintln!(
+                    "JSON contract {} does not exist; use sykli init to create one",
+                    contract.display()
+                );
+                return ExitCode::from(2);
+            }
             match load(&contract).and_then(|(contract, levels, hash)| {
-                affected(&contract, &levels, &changed).map(|tasks| (hash, tasks))
+                let tasks = affected(&contract, &levels, &changed)?;
+                let explanations = if explain {
+                    Some(explain_plan(&contract, &levels, &changed, &tasks)?)
+                } else {
+                    None
+                };
+                Ok(PlanOutput {
+                    schema: "sykli-plan.v1",
+                    contract_hash: hash,
+                    tasks,
+                    explanations,
+                })
             }) {
-                Ok((contract_hash, tasks)) => {
+                Ok(plan) => {
+                    let input_error = plan.explanations.as_ref().is_some_and(|items| {
+                        items.iter().any(|item| match &item.cache {
+                            CacheExplanation::InputError { .. } => true,
+                            CacheExplanation::Deferred { input_errors, .. } => {
+                                !input_errors.is_empty()
+                            }
+                            _ => false,
+                        })
+                    });
                     if json {
-                        let written = serde_json::to_writer(
-                            io::stdout().lock(),
-                            &PlanOutput {
-                                schema: "sykli-plan.v1",
-                                contract_hash,
-                                tasks,
-                            },
-                        );
-                        if written.is_err() {
+                        if serde_json::to_writer(io::stdout().lock(), &plan).is_err() {
                             return ExitCode::from(2);
                         }
                         println!();
+                    } else if let Some(explanations) = &plan.explanations {
+                        for item in explanations {
+                            println!("{}", item.task);
+                            for reason in &item.selection {
+                                match reason {
+                                    SelectionReason::AllTasks => {
+                                        println!("  selected: all tasks requested")
+                                    }
+                                    SelectionReason::ChangedInput { path } => println!(
+                                        "  selected: declared input {path} matches --changed"
+                                    ),
+                                    SelectionReason::AffectedDependency { task } => {
+                                        println!("  selected: affected dependency {task}")
+                                    }
+                                }
+                            }
+                            println!("  cache: {}", item.cache);
+                        }
                     } else {
-                        for task in tasks {
+                        for task in plan.tasks {
                             println!("{task}");
                         }
                     }
-                    ExitCode::SUCCESS
+                    ExitCode::from(if input_error { 2 } else { 0 })
                 }
                 Err(error) => {
                     eprintln!("invalid {}: {error}", contract.display());
@@ -1622,6 +1873,54 @@ impl LocalCache {
         }
     }
 
+    /// Validate evidence without restoring outputs or creating any files.
+    fn inspect(
+        &self,
+        task: &Task,
+        key: &str,
+        runtime: &ShellRuntime,
+    ) -> Result<CacheEntry, CacheMiss> {
+        let directory = self.cache.join(key);
+        let bytes = fs::read(directory.join("entry.json")).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                CacheMiss::EntryMissing
+            } else {
+                CacheMiss::EntryUnreadable
+            }
+        })?;
+        let entry: CacheEntry =
+            serde_json::from_slice(&bytes).map_err(|_| CacheMiss::EntryInvalid)?;
+        if entry.outputs.len() != task.outputs.len()
+            || !entry.outputs.iter().zip(&task.outputs).enumerate().all(
+                |(index, (output, path))| {
+                    output.path == *path && output.artifact == index.to_string()
+                },
+            )
+        {
+            return Err(CacheMiss::EntryInvalid);
+        }
+        if !self.provenance_valid(task, &entry, runtime) {
+            return Err(CacheMiss::ProvenanceInvalid);
+        }
+        for output in &entry.outputs {
+            let artifact = directory.join("outputs").join(&output.artifact);
+            let metadata = fs::metadata(&artifact).map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    CacheMiss::ArtifactMissing
+                } else {
+                    CacheMiss::ArtifactUnreadable
+                }
+            })?;
+            if !metadata.is_file() {
+                return Err(CacheMiss::ArtifactInvalid);
+            }
+            if sha256_file(&artifact).map_err(|_| CacheMiss::ArtifactUnreadable)? != output.digest {
+                return Err(CacheMiss::ArtifactInvalid);
+            }
+        }
+        Ok(entry)
+    }
+
     fn provenance_valid(&self, task: &Task, entry: &CacheEntry, runtime: &ShellRuntime) -> bool {
         let Some(expected) = entry
             .receipt
@@ -1684,25 +1983,7 @@ impl Cache for LocalCache {
     fn restore(&self, task: &Task, key: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
         let started = Instant::now();
         let directory = self.cache.join(key);
-        let entry: CacheEntry =
-            serde_json::from_slice(&fs::read(directory.join("entry.json")).ok()?).ok()?;
-        if entry.outputs.len() != task.outputs.len()
-            || !entry.outputs.iter().zip(&task.outputs).enumerate().all(
-                |(index, (output, path))| {
-                    output.path == *path && output.artifact == index.to_string()
-                },
-            )
-            || !self.provenance_valid(task, &entry, runtime)
-        {
-            return None;
-        }
-
-        for output in &entry.outputs {
-            let artifact = directory.join("outputs").join(&output.artifact);
-            if !artifact.is_file() || sha256_file(&artifact).ok()? != output.digest {
-                return None;
-            }
-        }
+        let entry = self.inspect(task, key, runtime).ok()?;
 
         let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
         for output in &entry.outputs {
