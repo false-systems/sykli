@@ -53,13 +53,33 @@ Each task reports its affected flag, cache evidence, full result and comparison:
 - unproven: available evidence lacks a comparable complete result.
 
 The unmapped_paths field lists changes that match no exact input declaration
-in the candidate contract. These are investigation leads, not proof that a
-file matters or that a task is safe to skip. Changed-path selection and cache
-eligibility are separate decisions. A docs-only PR can select no tasks while
-all checks still run in the authoritative gate.
+in the candidate contract. The coverage field classifies these paths under
+an explicit repository policy requested by Yair after the Cargo configuration
+probe exposed false reuse:
+
+- A modification of the existing regular README.md is exempt, with reason
+  repository-readme-only. A declared README input takes precedence over this
+  exception. Added, deleted, renamed or symlink READMEs are not exempt.
+- Every other unmapped path is unresolved, including new Cargo configuration,
+  workflow changes, other documentation, and contract or lock changes.
+- Any unresolved path requires full execution. Add the missing task inputs,
+  re-pin the contract, or review an explicit exception in the repository script.
+  There is no blanket Markdown or docs-directory exception.
+
+The report retains raw cache proposals and disagreements even when coverage is
+unresolved, so the experiment can still expose missing dependencies. This is
+reporting in the shadow experiment, not a new guard inside `sykli run` or an
+implementation of CI skipping. The full reference graph always runs first.
+
+Accounted coverage only means every changed path matched some input or the
+explicit exception. It does not prove that every affected task declares that
+input, or cover unchanged missing dependencies and external toolchain changes.
 
 The potential_reused_task_ms field sums full-run durations only for
-agreements. Tasks can overlap, so this is **not job wall time saved**.
+agreements, before coverage review. The coverage_qualified_reused_task_ms field
+is zero when coverage is unresolved and otherwise retains that sum. It is not
+permission to skip checks; task comparisons can still be inconclusive or disagree.
+Tasks can overlap, so neither field is **job wall time saved**.
 The report separately records baseline cost, inspection time and total
 experiment time. This first experiment spends an extra baseline run to
 collect evidence; it does not claim a net CI saving.
