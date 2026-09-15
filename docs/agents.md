@@ -52,6 +52,9 @@ files, environment or cache contents can change, and task side effects are
 not simulated. Given the same task key and cache contents, planning and
 execution share the same evidence validation.
 
+The repository's [CI shadow experiment](ci-shadow.md) compares changed-path
+selection and baseline cache evidence with an independent full run. Its
+observations never enable skipping or decide the required CI result.
 
 For typed artifact production, start with `sykli targets --json` and
 `sykli plan sykli.production.json --target TARGET --json`. Use the discovered
