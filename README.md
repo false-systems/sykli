@@ -1,254 +1,241 @@
 <h1 align="center">sykli</h1>
 
-<p align="center"><strong>Know what actually ran. Not what someone says ran.</strong></p>
+<p align="center"><strong>Run your checks. Reuse the work. Explain the result.</strong></p>
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="Rust 1.85+" src="https://img.shields.io/badge/rust-1.85%2B-orange">
   <img alt="Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey">
-  <img alt="No server" src="https://img.shields.io/badge/runs-locally%2C%20no%20server-success">
+  <img alt="Runs locally" src="https://img.shields.io/badge/runs-locally-success">
 </p>
 
-sykli is a content-addressed evaluator for declared work: a small command-line
-tool that runs the commands you name in a repository and writes a **receipt**
-binding each result to the exact files, contract and command it came from.
-Anyone, human or agent, can later ask whether a receipt is still true for the
-code in front of them. It is available as a single binary for Linux, macOS and
-Windows.
+Sykli gives your repository one declared graph for checks, a local cache for
+reusable results, and a receipt for every run. Use the same commands on your
+laptop, in CI, or from a coding agent.
 
-sykli is not a CI service, a task tracker or an agent runner. It sits under the
-tools you already use (cargo, npm, go, your CI runner) and in front of the
-people and agents who need to trust their results without re-doing them or
-taking a summary on faith.
+Keep Cargo, npm, Go and your shell scripts. Declare what each task reads and
+what it depends on; Sykli handles ordering, checks cached evidence, and records
+which tasks ran or reused a result. Before running anything, ask it to explain
+what a change affects and what the cache can supply.
+
+**One binary. Local execution. Readable CLI, structured JSON when you need it.**
+
+## Start in your repository
+
+Install from the current source with Rust 1.85 or newer:
+
+```sh
+cargo install --git https://github.com/false-systems/sykli --branch main --locked sykli
+```
+
+In an existing Cargo, npm or Go repository:
+
+```sh
+sykli init                                  # generate sykli.json and pin it in sykli.lock
+sykli plan --explain                         # inspect selection and cache evidence
+sykli run sykli.json --json > .sykli/receipt.json
+sykli verify .sykli/receipt.json --contract sykli.json
+```
+
+`init` creates `.sykli/` for local state and adds it to `.gitignore`. Review the
+input declarations it generates, especially configuration, fixtures and files
+you add later. Task execution needs Git, a POSIX `sh`, and your project's tools.
+On Windows, Git for Windows supplies `sh`.
+
+This README describes `main`, including `plan --explain`. For reproducible
+installs, replace `--branch main` with `--rev COMMIT`. Tagged downloads, when
+published, are listed on the [releases page](https://github.com/false-systems/sykli/releases).
+The repository includes an installer that verifies release archive checksums;
+see [install.sh](install.sh). Installing Sykli does not install your build tools.
+
+## Why use Sykli?
+
+- **See the work before running it.** Explain why a task is selected, whether
+  cache evidence is available, and which dependencies still need resolution.
+- **Reuse passing work.** Cache keys cover the task declaration, declared
+  input contents and execute bits, runtime fingerprint, inherited environment
+  digests, and dependency keys. A matching entry must validate before reuse.
+- **Keep a record tied to the code.** Each receipt binds task outcomes to the
+  repository tree, declared inputs and contract. Verify it before relying on it.
+- **Give agents a concrete answer.** The CLI does the querying; `--json` gives
+  scripts and agents the same information with versioned schemas and exit codes.
+- **Use it wherever your commands run.** Local development and CI share the
+  graph. Sykli stays a local CLI; your CI service owns runners and scheduling.
 
 ```mermaid
 flowchart LR
-    subgraph declare["You declare"]
-        contract["sykli.json<br/>tasks · commands · input files"]
-        target["sykli.production.json<br/>source · build · required checks"]
-        rules["requirements<br/>for a pull request"]
-    end
-    subgraph engine["sykli runs and records"]
-        run["run / plan / verify"]
-        produce["produce / resume"]
-        inspect["inspect / assess"]
-    end
-    subgraph evidence["Evidence, content-addressed"]
-        receipt["receipt<br/>what ran, on which tree"]
-        artifact["artifact + checks<br/>resumable by ID"]
-        verdict["evidence bundle<br/>established · refuted · unproven"]
-    end
-    contract --> run --> receipt
-    target --> produce --> artifact
-    rules --> inspect --> verdict
-    receipt -. "exit codes + JSON" .-> readers["humans · scripts · agents"]
-    artifact -.-> readers
-    verdict -.-> readers
+    graph["Declare tasks and inputs"] --> plan["Explain the plan"]
+    plan --> run["Run or reuse validated results"]
+    run --> receipt["Record a receipt"]
+    receipt --> verify["Verify against the current code"]
 ```
 
-## Getting started
+## A small graph you can try
 
-- [Install](#install) the binary, then in any Cargo, npm or Go repository:
-  `sykli init && sykli run`.
-- Read the thirty-second walkthrough below to see what a receipt is.
-- Three situations sykli is built for: [run checks and get a receipt](#1-run-your-checks-and-get-a-receipt),
-  [build, stop, let someone else finish](#2-build-something-stop-let-someone-else-finish),
-  [ask whether a pull request is ready](#3-ask-whether-a-pull-request-is-actually-ready).
-- Driving sykli from an agent: [docs/agents.md](docs/agents.md). Every command
-  documents its flags and exit codes under `--help`.
-
-### Thirty seconds, end to end
-
-A repository with two checks. The file is `sykli.json`; `sykli init` writes one
-like it for Cargo, npm and Go projects.
-
-```json
-{"schema":"sykli-contract.v1","tasks":[
-  {"name":"lint","run":"grep -qv TODO src.txt","inputs":["src.txt"]},
-  {"name":"test","run":"sh test.sh","inputs":["src.txt","test.sh"],"after":["lint"]}]}
-```
+In a scratch Git repository, create two scripts and this `sykli.json`:
 
 ```sh
-$ sykli run --json > .sykli/receipt.json
-running: lint
-passed: lint
-running: test
-passed: test
+printf 'echo lint passed\n' > lint.sh
+printf 'echo tests passed\n' > test.sh
 ```
-
-The receipt, trimmed:
 
 ```json
 {
-  "schema": "sykli-receipt.v1",
-  "contract_hash": "c5a2bbbde46a…",
-  "subject": { "tree_oid": "596e8c346e48…", "inputs_digest": "9daed25e15ee…", "dirty": false },
+  "schema": "sykli-contract.v1",
   "tasks": [
-    { "name": "lint", "command": "grep -qv TODO src.txt", "outcome": "passed", "exit_code": 0, "stdout_digest": "e3b0c44298fc…" },
-    { "name": "test", "command": "sh test.sh",            "outcome": "passed", "exit_code": 0, "stdout_digest": "e3b0c44298fc…" }
-  ],
-  "outcome": "passed"
+    { "name": "lint", "run": "sh lint.sh", "inputs": ["lint.sh"] },
+    { "name": "test", "run": "sh test.sh", "inputs": ["test.sh"], "after": ["lint"] }
+  ]
 }
 ```
 
-Every field is a fact, not a summary: which tree, which declared inputs, which
-contract, which command, which exit code, a digest of what it printed. Check
-it, then change a file and check again:
+`inputs` names the files a task reads. `after` makes `test` wait for `lint`
+and binds its cache key to that dependency. Independent tasks can run in parallel.
 
 ```sh
-$ sykli verify .sykli/receipt.json
-verified: receipt matches this tree and contract        # exit 0
-$ echo "// TODO" >> src.txt
-$ sykli verify .sykli/receipt.json
-mismatch: tree expected 596e8c34… but got 21fa0d9e…     # exit 3: the code moved on
+mkdir -p .sykli
+sykli run sykli.json --json > .sykli/first.json
+sykli run sykli.json --json > .sykli/second.json
+sykli verify .sykli/second.json --contract sykli.json
 ```
 
-Run again and only what the change touched runs; the rest comes from a
-content-addressed cache and is marked `cached` in the new receipt.
+The first run executes both scripts. With unchanged inputs and valid local
+cache entries, the second reuses both passing results. Change `test.sh` and
+run again: `lint` can be reused while `test` executes.
 
-Three words cover the model. A **contract** is the JSON file: tasks, commands,
-the files they read, `after` for ordering, nothing else. A **receipt** is what
-one run established, bound by hashes to the exact tree, inputs and contract.
-**Verify** is the question "is this receipt still true here?", answered with an
-exit code: 0 yes, 1 the work failed, 3 the code changed, 4 the contract
-changed, 2 that is not a valid receipt.
+A **contract** declares the work. A **receipt** records one evaluation,
+including commands, outcomes, output digests and whether results were cached.
+**Verify** checks that the record is consistent with the current tree and contract.
+Keep receipts under `.sykli/` or outside the repository so they do not change
+the tree they describe.
 
-## Features
-
-- **Content-addressed everything.** Contracts, receipts, inputs, artifacts and
-  saved evidence are named by the hash of their bytes. One byte different is a
-  different identity and a different result. No "latest", no timestamps to
-  trust.
-- **Delta planning and caching.** `sykli plan --changed PATH` names the tasks
-  a change requires; unchanged work is served from cache, and a task never
-  inherits a pass recorded against inputs it did not see.
-- **Resumable typed production.** Capture source, build an artifact, run
-  required checks, stop at any boundary; another worker resumes by ID from the
-  saved records, without the previous worker's conversation. Linux and macOS.
-- **Pull-request evidence.** Read a PR's CI runs and reviews through your `gh`
-  login into an immutable bundle and assess your own declared requirements
-  against the exact head commit, offline and reproducibly. Advisory: nothing
-  is merged, triggered, posted or certified.
-- **One interface for humans, scripts and agents.** Readable text on the
-  screen, one versioned `sykli-*.v1` JSON document on stdout with `--json`, and
-  fixed exit codes for every command.
-- **Honest about limits.** A receipt says what ran, never what it meant. Every
-  assessment prints its trust boundary. `verify` proves consistency with the
-  tree and contract, not who wrote the receipt.
-
-## Three situations
-
-### 1. Run your checks and get a receipt
-
-The walkthrough above, for real projects. `init` detects the ecosystem and
-writes the contract; `run` executes only what a change affects and records the
-result; `verify` checks a receipt against the code in front of you.
+## Ask what changed—and what can be reused
 
 ```sh
-sykli init                                   # detects Cargo, npm or Go; writes sykli.json, ignores .sykli/
-sykli run --json > .sykli/receipt.json       # runs the graph; the receipt lives outside the tree it describes
-sykli verify .sykli/receipt.json             # is this receipt still true for the tree in front of me?
+sykli plan --explain
+sykli plan --changed test.sh --explain
+sykli plan --changed test.sh --explain --json
 ```
 
-Tasks see only `PATH`, `HOME` and `TMPDIR` unless they declare `env` values or
-`inherit` named variables; inherited values reach the command, and only their
-digests reach the receipt. Run `verify` where the receipt was produced, as the
-GitHub Action does, or sign receipts before trusting them across a boundary.
+`--explain` reads `sykli.json` by default. It runs no task or Rust emitter,
+restores no outputs, and writes no cache entries or receipts. An explicit
+JSON contract path selects another graph.
 
-### 2. Build something, stop, let someone else finish
+| Cache state | What it tells you |
+|---|---|
+| `available` | Cached evidence and artifacts validate; execution can attempt reuse. |
+| `missing` | No entry exists for the current content key. |
+| `invalid` | An entry exists but its evidence or artifacts failed validation. |
+| `deferred` | A dependency needs execution, restoration or error resolution first. |
+| `input_error` | A declared input cannot currently be evaluated. |
 
-Declare a target: the source files, the build, the checks that must pass.
-sykli captures the source, builds, runs the checks, and saves the artifact with
-its identity. Stop early and another terminal or agent resumes with one ID.
+`--changed` takes paths **you supply** and filters the displayed plan to
+matching declared inputs and downstream tasks. It does not discover a Git diff
+or restrict a later `run`. The full run evaluates the graph and decides reuse
+from content keys and valid cache evidence.
+
+Input declarations matter: Sykli does not observe every file or tool your
+commands read. Undeclared dependencies can make cached results misleading.
+An explanation describes the current local evidence, not a guaranteed future
+outcome. See [the agent guide](docs/agents.md) for selection reasons, JSON fields
+and error behavior.
+
+## Use the same graph in CI
+
+After checkout and installation of Sykli and your project toolchain:
+
+```sh
+sykli run sykli.json --json > .sykli/receipt.json
+sykli verify .sykli/receipt.json --contract sykli.json
+```
+
+Create `.sykli/` before redirecting if this is a fresh checkout. Configure your
+CI to fail on either command's nonzero exit and retain the receipt as an artifact.
+The included [GitHub Action](action.yml) handles running, verification, a job
+summary and receipt upload. It also reports affected tasks on pull requests.
+
+### Measuring smarter CI
+
+This repository now runs a [shadow experiment](docs/ci-shadow.md) on pull
+requests. It records changed paths, runs the full candidate graph, then compares
+that result with reuse proposed from a separate base-commit run. It reports
+agreements, disagreements, unmapped paths and potential reused task time.
+
+**All required checks still run.** The experiment adds a baseline run to measure
+whether skipping could be justified later. It does not claim CI savings today,
+and matching observations do not prove that declarations are complete.
+
+## Build artifacts and resume unfinished checks
+
+On Linux and macOS, typed production captures declared source, builds an artifact
+and runs required checks. A production ID lets another terminal or agent resume
+from the same local store.
+
+For a Cargo binary or Go main package:
 
 ```sh
 sykli init --production --smoke '"$SYKLI_INPUT_executable" --help'
-sykli produce sykli --stop-after build    # exits 1: built, checks remain
-sykli resume PRODUCTION_ID                # someone else finishes the checks
+sykli targets
+sykli produce TARGET --stop-after build
+sykli resume PRODUCTION_ID
 ```
 
-The next worker needs the ID and the local store, not a conversation. Edit the
-source and you get a new production; old passing checks never count for new
-bytes. A lost attempt can be abandoned explicitly and retried; nothing is ever
-marked done that did not run.
+Use the discovered target name and the production ID printed by Sykli.
+Stopping after build returns exit 1 when checks remain. Artifact availability
+and completed checks are recorded separately; failed work requires an explicit
+retry, and an unresolved lost attempt cannot silently become a success.
 
-### 3. Ask whether a pull request is actually ready
+See [the production agent loop](docs/agents.md) for preparation without execution,
+individual operations, bounded parallel work and diagnostics.
 
-Point sykli at a pull request. It reads the CI runs and reviews through your
-existing `gh` login, saves what GitHub said as an immutable bundle, and tells
-you which of *your* requirements are established, refuted, or still unproven,
-and why.
+## Inspect pull-request evidence
+
+With an authenticated GitHub CLI (`gh`), collect CI and review evidence for an
+exact candidate and assess requirements you declare:
 
 ```sh
-sykli inspect --repo false-systems/sykli --pr 25 --requirements review.json
+sykli inspect --repo OWNER/REPO --pr NUMBER --requirements review.json
+sykli assess BUNDLE --requirements review.json
 ```
 
-```text
-0e1982a… — UNPROVEN
-Scope: declared review-readiness conditions; advisory
+The requirements file names exact workflow and reviewer IDs. Sykli saves the
+collected responses so the assessment can be replayed offline. Results explain
+which requirements are established, refuted or unproven, including gaps and
+excluded evidence. An approval of an older commit does not satisfy approval of
+the current candidate.
 
-✓ ci      GitHub reports success for the required workflow
-? review  No allowed reviewer has approved this candidate
+These assessments are advisory. They establish declared review-readiness
+conditions, not permission to merge or deploy. `inspect` makes bounded,
+read-only requests through `gh`; it does not post reviews or trigger work.
 
-Trust: local collector and store; receipt is not authenticated
-```
+## What a receipt establishes
 
-Requirements are a small file naming exact workflow and reviewer IDs. An
-approval on an older commit does not count. A newer failing run hides an older
-green one. A run from a fork or a different workflow is excluded and says so.
-`sykli assess BUNDLE` replays a saved bundle later, offline, to the same answer.
+`verify` checks record consistency, contract identity, the repository tree and
+declared inputs, then the recorded outcome. It does **not** authenticate the
+author of a receipt or prove that the declared checks are sufficient.
 
-## Install
+| `verify` exit code | Meaning |
+|---|---|
+| `0` | Receipt matches and work passed or was reused. |
+| `1` | The recorded work failed. |
+| `2` | Receipt cannot be verified. |
+| `3` | Tree or declared inputs changed. |
+| `4` | Contract or lock differs. |
 
-```sh
-curl -fsSLO https://raw.githubusercontent.com/false-systems/sykli/main/install.sh
-sh install.sh v0.6.0
-```
+Tasks receive `PATH`, `HOME` and `TMPDIR`, plus declared `env` values and named
+`inherit` variables. Inherited values reach the task; their digests are recorded
+for identity. Task output is captured, so commands remain responsible for what
+they print. Sykli executes local commands with your permissions.
 
-Or `cargo install --git https://github.com/false-systems/sykli --tag v0.6.0 --locked sykli`
-with Rust 1.85 or newer. Each release carries tarballs for Linux and macOS
-(x86_64 and aarch64), a Windows x86_64 zip, a Homebrew formula and
-`SHA256SUMS`. `action.yml` in this repository is a GitHub Action that installs
-the release matching its ref and runs the graph.
+Machine-readable documents have versioned schemas. Incompatible changes get a
+new schema version; command help documents flags and exit codes.
 
-## Runtime requirements
+## Learn more and contribute
 
-- `git`, for the tree identity every receipt is bound to.
-- A POSIX `sh` on `PATH` to run tasks; on Windows, Git for Windows provides one.
-- For typed production: Linux or macOS, and the toolchain your target uses.
-- For pull-request evidence: the GitHub CLI (`gh`), logged in. sykli never
-  stores credentials.
+- [Agent guide](docs/agents.md): JSON queries, explanations, production and assessment.
+- [CI experiment](docs/ci-shadow.md): methodology, artifacts and limitations.
+- [Changelog](CHANGELOG.md): version history.
+- [Contributing](CONTRIBUTING.md) and [product boundaries](AGENTS.md).
+- [Security policy](SECURITY.md): report vulnerabilities privately.
 
-## Releases and API stability
-
-Every machine-readable document carries a versioned schema (`sykli-contract.v1`,
-`sykli-receipt.v1`, `sykli-assessment.v1`, …). A schema's meaning never
-changes once published; additions are optional fields, and anything
-incompatible is a new version. Exit codes are part of the interface and are
-listed in each command's `--help`. Releases are tagged `vX.Y.Z` and built by
-the release workflow from that tag; see the [changelog](CHANGELOG.md).
-
-## Communication
-
-Issues and pull requests on this repository. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-first: sykli is small on purpose, and [AGENTS.md](AGENTS.md) lists what it will
-not become.
-
-## Reporting security issues
-
-See [SECURITY.md](SECURITY.md). Please do not open public issues for
-vulnerabilities.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Project details
-
-- Boundaries: no server, daemon, webhook or coordination; no agent execution;
-  no interpretation of results beyond the declared predicate. Removed
-  capabilities do not return without a named user ([AGENTS.md](AGENTS.md)).
-- Documentation: this page, `sykli <command> --help`, and
-  [docs/agents.md](docs/agents.md) for driving sykli from an agent.
-- Part of the False Systems family of tools; sykli supplies the evidence that
-  work-tracking and gating tools reason about, and nothing else.
+Part of False Systems. Licensed under [MIT](LICENSE).
