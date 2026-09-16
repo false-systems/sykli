@@ -1079,10 +1079,10 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
         "[package]\nname = \"coverage-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
-    fs::write(root.join("src/main.rs"), "mod worker;\nfn main() {}\n").unwrap();
-    fs::write(root.join("src/worker.rs"), "pub fn worker() {}\n").unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     assert_eq!(run_json(&root).0, Some(0));
-    fs::write(root.join("src/worker.rs"), "pub fn worker( ){ }\n").unwrap();
+    fs::create_dir(root.join("src/bin")).unwrap();
+    fs::write(root.join("src/bin/worker.rs"), "fn main( ){ }\n").unwrap();
     assert!(
         !Command::new("cargo")
             .args(["fmt", "--check"])
@@ -1093,17 +1093,17 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
             .success()
     );
     assert_eq!(
-        run_json(&root).1["outcome"],
-        "cached",
-        "the diagnostic does not change run semantics"
+        run_json(&root).0,
+        Some(2),
+        "missing source must stop before cache reuse"
     );
     let (code, plan) = explain_json(
         &root,
-        &["--changed", "src/main.rs", "--changed", "src/worker.rs"],
+        &["--changed", "src/main.rs", "--changed", "src/bin/worker.rs"],
     );
-    assert_eq!(code, Some(0));
+    assert_eq!(code, Some(2));
     assert_eq!(plan["tasks"], serde_json::json!(["fmt", "check"]));
-    assert_eq!(plan["explanations"][0]["cache"]["status"], "available");
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "input_error");
     let uncovered = |plan: &serde_json::Value| {
         plan["input_coverage"]["paths"]
             .as_array()
@@ -1152,6 +1152,20 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
             .success()
     );
     assert!(!uncovered(&explain_json(&root, &[]).1));
+    assert_eq!(
+        run_json(&root).0,
+        Some(2),
+        "committing an undeclared file must not hide it from run"
+    );
+    let (code, empty_selection) = explain_json(&root, &["--changed", "unrelated-doc.md"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(empty_selection["tasks"], serde_json::json!([]));
+    assert!(
+        !empty_selection["input_coverage"]["cargo_missing_inputs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert!(uncovered(&explain_json(&root, &["--base", "HEAD~1"]).1));
 
     // Declaring the dependency both explains its coverage and invalidates the cached pass.
@@ -1160,7 +1174,7 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
     contract["tasks"][0]["inputs"]
         .as_array_mut()
         .unwrap()
-        .push("src/worker.rs".into());
+        .push("src/bin/worker.rs".into());
     fs::write(
         root.join("sykli.json"),
         serde_json::to_vec(&contract).unwrap(),
@@ -1268,5 +1282,43 @@ fn explain_coverage_separates_metadata_and_preserves_deleted_and_hint_paths() {
             .unwrap()
             .is_empty()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn contract_preview_does_not_accept_drift_or_execute_commands() {
+    let root = graph_repo(
+        "preview",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"check","run":"true"}]}"#,
+    );
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["lock", "sykli.json"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let lock = fs::read(root.join("sykli.lock")).unwrap();
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"check","run":"touch executed"}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let (code, preview) = explain_json(&root, &["--preview"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(preview["contract_preview"]["matches_lock"], false);
+    assert!(preview["contract_preview"]["pinned_hash"].is_string());
+    assert_eq!(fs::read(root.join("sykli.lock")).unwrap(), lock);
+    assert!(!root.join("executed").exists());
+    assert_eq!(run_json(&root).0, Some(2));
+    assert!(!root.join("executed").exists());
     fs::remove_dir_all(root).unwrap();
 }

@@ -175,6 +175,13 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
         .unwrap();
     assert_eq!(stable["comparison"], "not_independently_executed");
     assert_eq!(cached["potential_reused_task_ms"], 0);
+    assert_eq!(
+        cached["independent_comparisons"], 1,
+        "the failing task still executed independently"
+    );
+    let summary = fs::read_to_string(root.join(".sykli/cached-reference/summary.md")).unwrap();
+    assert!(summary.contains("baseline cache evidence"));
+    assert!(summary.contains("candidate source"));
 
     // Moving the candidate makes the old reference unusable, not an agreement.
     fs::write(root.join("new file"), "new").unwrap();
@@ -192,6 +199,19 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     // A reviewed README edit is exempt; other Markdown files are not.
     let docs_base = git(&root, &["rev-parse", "HEAD"]);
     fs::write(root.join("README.md"), "after").unwrap();
+    // Editing metadata must not make every ordinary contract update unresolved.
+    let mut declaration = fs::read_to_string(root.join("sykli.json")).unwrap();
+    declaration.push('\n');
+    fs::write(root.join("sykli.json"), declaration).unwrap();
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["lock", "sykli.json"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     commit(&root);
     fs::remove_dir_all(root.join(".sykli/cache")).unwrap();
     full_run(&root);
@@ -201,12 +221,22 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     assert_eq!(
         docs["coverage"]["exempted_paths"],
         json!([
-            {"path": "README.md", "reason": "repository-readme-only"}
+            {"path": "README.md", "reason": "repository-readme-only"},
+            {"path": "sykli.json", "reason": "evaluation-metadata"},
+            {"path": "sykli.lock", "reason": "evaluation-metadata"}
         ])
     );
     assert_eq!(
         docs["coverage_qualified_reused_task_ms"],
         docs["potential_reused_task_ms"]
+    );
+    full_run(&root);
+    let docs_cached = shadow(&root, &docs_base, "docs-cached", 0);
+    assert_eq!(docs_cached["independent_comparisons"], 0);
+    assert!(
+        fs::read_to_string(root.join(".sykli/docs-cached/summary.md"))
+            .unwrap()
+            .contains("No independent comparison")
     );
     let rename_base = git(&root, &["rev-parse", "HEAD"]);
     fs::rename(root.join("README.md"), root.join("other.md")).unwrap();

@@ -116,6 +116,7 @@ sykli plan --explain
 sykli plan --changed test.sh --explain
 sykli plan --changed test.sh --explain --json
 sykli plan --explain --base origin/main --json
+sykli plan --explain --preview --json          # inspect a contract edit before re-locking
 ```
 
 `--explain` reads `sykli.json` by default. It runs no task or Rust emitter,
@@ -126,8 +127,12 @@ Explain also warns about changed files that no task declares as an input,
 even when the selected tasks already cover the whole graph. It checks staged,
 unstaged and untracked non-ignored files; `--base origin/main` also includes
 committed changes relative to that ref. Contract and lock changes are labeled
-as evaluation metadata. Coverage is diagnostic: a warning does not disable
-cache reuse, and selecting every task does not prove their inputs are complete.
+as evaluation metadata. In Cargo-root repositories, `run` refuses to execute or
+reuse passes when known source/configuration files or test files are missing
+from every task's inputs. This checks the current Git file inventory, including
+committed and new non-ignored files. Other unmapped paths remain advisory.
+Selecting every task still does not prove every dependency is declared; see
+[the coverage limits](docs/agents.md).
 
 | Cache state | What it tells you |
 |---|---|

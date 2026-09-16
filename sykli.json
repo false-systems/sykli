@@ -120,7 +120,8 @@
         "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/fe13a45c4a4753a6d5040b22e4e21a309f02870bb6da68619ac6d09b16092b4f",
         "tests/fixtures/requirements/review-readiness.json",
         "scripts/ci_shadow.py",
-        "tests/ci_shadow.rs"
+        "tests/ci_shadow.rs",
+        "tests/qa/sykli.json"
       ]
     }
   ]

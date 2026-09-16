@@ -53,7 +53,7 @@ enum Command {
     #[command(after_help = "Exit codes:\n  \
         0  every task passed or was cached\n  \
         1  a task failed, errored, or was blocked\n  \
-        2  could not evaluate: unreadable contract, lock drift, no git or sh\n\n\
+        2  could not evaluate: unreadable contract, lock drift, undeclared Cargo inputs, no git or sh\n\n\
         The receipt is written to .sykli/receipts/<hash>.json; --json also prints it.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
@@ -82,6 +82,9 @@ enum Command {
         /// Coverage comparison base (default HEAD); does not filter task selection
         #[arg(long, requires = "explain")]
         base: Option<String>,
+        /// Preview an edited JSON contract despite lock drift; never write or accept the lock
+        #[arg(long, requires = "explain")]
+        preview: bool,
         /// Select a typed production target from the positional contract
         #[arg(long)]
         target: Option<String>,
@@ -355,12 +358,87 @@ struct PlanOutput {
     explanations: Option<Vec<TaskExplanation>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_coverage: Option<InputCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contract_preview: Option<ContractPreview>,
+}
+
+#[derive(Serialize)]
+struct ContractPreview {
+    pinned_hash: Option<String>,
+    matches_lock: bool,
 }
 
 #[derive(Serialize)]
 struct InputCoverage {
     base_commit: Option<String>,
     paths: Vec<CoveragePath>,
+    cargo_missing_inputs: Vec<String>,
+}
+
+fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
+    // This is checked on every invocation, before execution can reuse cached passes. Its
+    // input is the current file inventory, not the contract's existing list.
+    if !Path::new("Cargo.toml").is_file() {
+        return Ok(Vec::new());
+    }
+    let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+    let declared = declared_inputs(contract)?;
+    let names_cargo = contract.tasks.iter().any(|task| {
+        task.run
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .any(|word| word == "cargo")
+    });
+    if !declared.contains_key(&absolute(Path::new("Cargo.toml"))?) && !names_cargo {
+        return Ok(Vec::new());
+    }
+    let paths = git_paths(
+        &root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    let mut missing = BTreeSet::new();
+    for path in paths {
+        if path.starts_with(root.join(".sykli")) || !path.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let cargo_input = path.extension().is_some_and(|ext| ext == "rs")
+            || matches!(
+                name,
+                "Cargo.toml"
+                    | "Cargo.lock"
+                    | "rust-toolchain"
+                    | "rust-toolchain.toml"
+                    | "rustfmt.toml"
+                    | ".rustfmt.toml"
+                    | "clippy.toml"
+                    | ".clippy.toml"
+            )
+            || (path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".cargo")
+                && matches!(name, "config" | "config.toml"))
+            || relative
+                .components()
+                .any(|part| part.as_os_str() == "tests");
+        if cargo_input && !declared.contains_key(&path) {
+            missing.insert(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+fn cargo_coverage_error(missing: &[String]) -> String {
+    format!(
+        "Cargo inputs are undeclared: {missing:?}; add them to the affected tasks and re-lock before running (no cached results used)"
+    )
 }
 
 #[derive(Serialize)]
@@ -368,6 +446,42 @@ struct CoveragePath {
     path: String,
     kind: &'static str,
     tasks: Vec<String>,
+}
+
+fn git_paths(repository: &Path, args: &[&str]) -> Result<Vec<PathBuf>, String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into());
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let path = std::str::from_utf8(path)
+                .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
+            absolute(&repository.join(path))
+        })
+        .collect()
+}
+
+fn declared_inputs(contract: &Contract) -> Result<BTreeMap<PathBuf, Vec<String>>, String> {
+    let mut declared: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for task in &contract.tasks {
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        for input in &task.inputs {
+            let tasks = declared.entry(absolute(&root.join(input))?).or_default();
+            if !tasks.contains(&task.name) {
+                tasks.push(task.name.clone());
+            }
+        }
+    }
+    Ok(declared)
 }
 
 fn input_coverage(
@@ -399,55 +513,26 @@ fn input_coverage(
             }
         },
     };
-    let git_paths = |args: &[&str]| -> Result<Vec<PathBuf>, String> {
-        let output = ProcessCommand::new("git")
-            .arg("-C")
-            .arg(&repository)
-            .args(args)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).into());
-        }
-        output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| {
-                let path = std::str::from_utf8(path)
-                    .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
-                absolute(&repository.join(path))
-            })
-            .collect()
-    };
     let mut paths: BTreeSet<_> = match &base_commit {
-        Some(base) => git_paths(&["diff", "--name-only", "--no-renames", "-z", base, "--"]),
-        None => git_paths(&["ls-files", "--cached", "-z"]),
+        Some(base) => git_paths(
+            &repository,
+            &["diff", "--name-only", "--no-renames", "-z", base, "--"],
+        ),
+        None => git_paths(&repository, &["ls-files", "--cached", "-z"]),
     }?
     .into_iter()
     .collect();
-    paths.extend(git_paths(&[
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ])?);
+    paths.extend(git_paths(
+        &repository,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?);
     // Local receipts and cache are excluded from tree identity too. Explicit
     // hints below remain visible, including ignored files named by the caller.
     paths.retain(|path| !path.starts_with(repository.join(".sykli")));
     for path in changed {
         paths.insert(absolute(path)?);
     }
-    let mut declared: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    for task in &contract.tasks {
-        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
-        for input in &task.inputs {
-            let tasks = declared.entry(absolute(&root.join(input))?).or_default();
-            if !tasks.contains(&task.name) {
-                tasks.push(task.name.clone());
-            }
-        }
-    }
+    let mut declared = declared_inputs(contract)?;
     let contract_path = absolute(contract_path)?;
     let lock_path = contract_path.with_file_name("sykli.lock");
     let paths = paths
@@ -472,7 +557,11 @@ fn input_coverage(
             })
         })
         .collect::<Result<_, String>>()?;
-    Ok(InputCoverage { base_commit, paths })
+    Ok(InputCoverage {
+        base_commit,
+        paths,
+        cargo_missing_inputs: cargo_missing_inputs(contract)?,
+    })
 }
 
 #[derive(Serialize)]
@@ -869,6 +958,7 @@ fn main() -> ExitCode {
             target,
             explain,
             base,
+            preview,
         } => {
             let contract = contract.unwrap();
             if target.is_some() {
@@ -892,10 +982,24 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            match load(&contract).and_then(|(loaded, levels, hash)| {
+            let loaded = if preview {
+                load_unlocked(&contract)
+            } else {
+                load(&contract)
+            };
+            match loaded.and_then(|(loaded, levels, hash)| {
                 let tasks = affected(&loaded, &levels, &changed)?;
-                let explanations = if explain {
+                let mut explanations = if explain {
                     Some(explain_plan(&loaded, &levels, &changed, &tasks)?)
+                } else {
+                    None
+                };
+                let contract_preview = if preview {
+                    let pinned_hash = read_lock(&contract)?;
+                    Some(ContractPreview {
+                        matches_lock: pinned_hash.as_ref() == Some(&hash),
+                        pinned_hash,
+                    })
                 } else {
                     None
                 };
@@ -909,30 +1013,50 @@ fn main() -> ExitCode {
                 } else {
                     None
                 };
+                if let Some(coverage) = &input_coverage {
+                    if !coverage.cargo_missing_inputs.is_empty() {
+                        for item in explanations.iter_mut().flatten() {
+                            item.cache = CacheExplanation::InputError {
+                                message: cargo_coverage_error(&coverage.cargo_missing_inputs),
+                            };
+                        }
+                    }
+                }
                 Ok(PlanOutput {
                     schema: "sykli-plan.v1",
                     contract_hash: hash,
                     tasks,
                     explanations,
                     input_coverage,
+                    contract_preview,
                 })
             }) {
                 Ok(plan) => {
-                    let input_error = plan.explanations.as_ref().is_some_and(|items| {
-                        items.iter().any(|item| match &item.cache {
-                            CacheExplanation::InputError { .. } => true,
-                            CacheExplanation::Deferred { input_errors, .. } => {
-                                !input_errors.is_empty()
-                            }
-                            _ => false,
-                        })
-                    });
+                    let input_error = plan
+                        .input_coverage
+                        .as_ref()
+                        .is_some_and(|coverage| !coverage.cargo_missing_inputs.is_empty())
+                        || plan.explanations.as_ref().is_some_and(|items| {
+                            items.iter().any(|item| match &item.cache {
+                                CacheExplanation::InputError { .. } => true,
+                                CacheExplanation::Deferred { input_errors, .. } => {
+                                    !input_errors.is_empty()
+                                }
+                                _ => false,
+                            })
+                        });
                     if json {
                         if serde_json::to_writer(io::stdout().lock(), &plan).is_err() {
                             return ExitCode::from(2);
                         }
                         println!();
                     } else if let Some(explanations) = &plan.explanations {
+                        if let Some(preview) = &plan.contract_preview {
+                            println!(
+                                "Contract preview only; matches lock: {}. Execution still enforces any existing lock.",
+                                preview.matches_lock
+                            );
+                        }
                         for item in explanations {
                             println!("{}", item.task);
                             for reason in &item.selection {
@@ -951,6 +1075,12 @@ fn main() -> ExitCode {
                             println!("  cache: {}", item.cache);
                         }
                         if let Some(coverage) = &plan.input_coverage {
+                            if !coverage.cargo_missing_inputs.is_empty() {
+                                println!(
+                                    "{}",
+                                    cargo_coverage_error(&coverage.cargo_missing_inputs)
+                                );
+                            }
                             println!(
                                 "Input coverage against {} (plus --changed hints):",
                                 coverage.base_commit.as_deref().unwrap_or("unborn HEAD")
@@ -1457,6 +1587,10 @@ fn run(
     contract_hash: String,
     json: bool,
 ) -> Result<bool, String> {
+    let missing = cargo_missing_inputs(contract)?;
+    if !missing.is_empty() {
+        return Err(cargo_coverage_error(&missing));
+    }
     let subject = subject(contract)?;
     let runtime = shell_runtime()?;
     let cache = LocalCache::new(Path::new(&subject.repository));
