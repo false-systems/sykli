@@ -1082,6 +1082,27 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     assert_eq!(run_json(&root).0, Some(0));
     fs::create_dir(root.join("src/bin")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("missing.rs", root.join("src/bin/worker.rs")).unwrap();
+        assert!(
+            !Command::new("cargo")
+                .args(["fmt", "--check"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(
+            run_json(&root).0,
+            Some(2),
+            "dangling source blocks cache reuse"
+        );
+        assert_eq!(explain_json(&root, &[]).0, Some(2));
+        fs::remove_file(root.join("src/bin/worker.rs")).unwrap();
+        assert_eq!(run_json(&root).0, Some(0));
+    }
     fs::write(root.join("src/bin/worker.rs"), "fn main( ){ }\n").unwrap();
     assert!(
         !Command::new("cargo")

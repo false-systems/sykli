@@ -381,7 +381,7 @@ fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
     if !Path::new("Cargo.toml").is_file() {
         return Ok(Vec::new());
     }
-    let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+    let root = coverage_root()?;
     let declared = declared_inputs(contract)?;
     let names_cargo = contract.tasks.iter().any(|task| {
         task.run
@@ -403,7 +403,7 @@ fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
     )?;
     let mut missing = BTreeSet::new();
     for path in paths {
-        if path.starts_with(root.join(".sykli")) || !path.is_file() {
+        if path.starts_with(root.join(".sykli")) {
             continue;
         }
         let relative = path.strip_prefix(&root).unwrap_or(&path);
@@ -429,7 +429,13 @@ fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
                 .components()
                 .any(|part| part.as_os_str() == "tests");
         if cargo_input && !declared.contains_key(&path) {
-            missing.insert(relative.to_string_lossy().into_owned());
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    missing.insert(relative.to_string_lossy().into_owned());
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+            }
         }
     }
     Ok(missing.into_iter().collect())
@@ -446,6 +452,12 @@ struct CoveragePath {
     path: String,
     kind: &'static str,
     tasks: Vec<String>,
+}
+
+fn coverage_root() -> Result<PathBuf, String> {
+    // Use the same current-directory spelling as declared paths. Git's absolute
+    // root can expand Windows short names, making lexical comparisons disagree.
+    absolute(Path::new(&git(&["rev-parse", "--show-cdup"])?))
 }
 
 fn git_paths(repository: &Path, args: &[&str]) -> Result<Vec<PathBuf>, String> {
@@ -490,7 +502,7 @@ fn input_coverage(
     changed: &[PathBuf],
     base: Option<&str>,
 ) -> Result<InputCoverage, String> {
-    let repository = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+    let repository = coverage_root()?;
     let base_commit = match base {
         Some(base) => Some(git(&[
             "rev-parse",
@@ -1102,7 +1114,7 @@ fn main() -> ExitCode {
                                 }
                             }
                             println!(
-                                "Coverage is advisory; task selection and cache eligibility are unchanged."
+                                "Unmapped paths are advisory except for missing Cargo inputs, which block execution and cache reuse."
                             );
                         }
                     } else {
