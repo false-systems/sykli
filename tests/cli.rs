@@ -1080,7 +1080,8 @@ fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
     )
     .unwrap();
     fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-    assert_eq!(run_json(&root).0, Some(0));
+    let (code, receipt) = run_json(&root);
+    assert_eq!(code, Some(0), "Cargo baseline failed: {receipt}");
     fs::create_dir(root.join("src/bin")).unwrap();
     #[cfg(unix)]
     {
