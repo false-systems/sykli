@@ -1063,3 +1063,284 @@ fn explain_preserves_filtered_ancestor_input_errors() {
     assert!(!root.join(".sykli").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn explain_warns_about_undeclared_rust_even_when_every_task_is_selected() {
+    let root = graph_repo(
+        "coverage-rust",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"fmt","run":"cargo fmt --check","inputs":["Cargo.toml","src/main.rs"]},
+            {"name":"check","run":"true","after":["fmt"]}
+        ]}"#,
+    );
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"coverage-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let (code, receipt) = run_json(&root);
+    assert_eq!(code, Some(0), "Cargo baseline failed: {receipt}");
+    fs::create_dir(root.join("src/bin")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("missing.rs", root.join("src/bin/worker.rs")).unwrap();
+        assert!(
+            !Command::new("cargo")
+                .args(["fmt", "--check"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(
+            run_json(&root).0,
+            Some(2),
+            "dangling source blocks cache reuse"
+        );
+        assert_eq!(explain_json(&root, &[]).0, Some(2));
+        fs::remove_file(root.join("src/bin/worker.rs")).unwrap();
+        assert_eq!(run_json(&root).0, Some(0));
+    }
+    fs::write(root.join("src/bin/worker.rs"), "fn main( ){ }\n").unwrap();
+    assert!(
+        !Command::new("cargo")
+            .args(["fmt", "--check"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        run_json(&root).0,
+        Some(2),
+        "missing source must stop before cache reuse"
+    );
+    let (code, plan) = explain_json(
+        &root,
+        &["--changed", "src/main.rs", "--changed", "src/bin/worker.rs"],
+    );
+    assert_eq!(code, Some(2));
+    assert_eq!(plan["tasks"], serde_json::json!(["fmt", "check"]));
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "input_error");
+    let uncovered = |plan: &serde_json::Value| {
+        plan["input_coverage"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"].as_str().unwrap().ends_with("worker.rs") && p["kind"] == "unmapped")
+    };
+    assert!(uncovered(&plan));
+    assert!(
+        uncovered(&explain_json(&root, &[]).1),
+        "no diff scripting needed for untracked files"
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("warning: no task declares input"));
+    assert!(text.contains("worker.rs"));
+
+    // Staging and committing the new file do not hide it from an explicit base comparison.
+    assert!(
+        Command::new("git")
+            .args(["add", "src", "Cargo.toml"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(uncovered(&explain_json(&root, &[]).1));
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "new source"
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!uncovered(&explain_json(&root, &[]).1));
+    assert_eq!(
+        run_json(&root).0,
+        Some(2),
+        "committing an undeclared file must not hide it from run"
+    );
+    let (code, empty_selection) = explain_json(&root, &["--changed", "unrelated-doc.md"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(empty_selection["tasks"], serde_json::json!([]));
+    assert!(
+        !empty_selection["input_coverage"]["cargo_missing_inputs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(uncovered(&explain_json(&root, &["--base", "HEAD~1"]).1));
+
+    // Declaring the dependency both explains its coverage and invalidates the cached pass.
+    let mut contract: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("sykli.json")).unwrap()).unwrap();
+    contract["tasks"][0]["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push("src/bin/worker.rs".into());
+    fs::write(
+        root.join("sykli.json"),
+        serde_json::to_vec(&contract).unwrap(),
+    )
+    .unwrap();
+    let (_, fixed) = explain_json(&root, &["--base", "HEAD~1"]);
+    assert!(!uncovered(&fixed));
+    assert_eq!(fixed["explanations"][0]["cache"]["status"], "missing");
+    assert_eq!(run_json(&root).0, Some(1));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explain_coverage_separates_metadata_and_preserves_deleted_and_hint_paths() {
+    let root = graph_repo(
+        "coverage-paths",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+        {"name":"check","run":"true","workdir":"sub","inputs":["input"]}
+    ]}"#,
+    );
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/input"), "input").unwrap();
+    fs::write(root.join("old name"), "old").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "paths"
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::rename(root.join("old name"), root.join("new name")).unwrap();
+    #[cfg(unix)]
+    fs::write(root.join("line\nbreak"), "new").unwrap();
+    let (_, plan) = explain_json(
+        &root,
+        &[
+            "--changed",
+            "sub/../sub/input",
+            "--changed",
+            "sykli.json",
+            "--changed",
+            "sykli.lock",
+        ],
+    );
+    let paths = plan["input_coverage"]["paths"].as_array().unwrap();
+    #[cfg(unix)]
+    assert!(paths.iter().any(|p| p["path"] == "line\nbreak"));
+    for path in ["sykli.json", "sykli.lock"] {
+        assert!(
+            paths
+                .iter()
+                .any(|p| p["path"] == path && p["kind"] == "evaluation_metadata")
+        );
+    }
+    for path in ["old name", "new name"] {
+        assert!(
+            paths
+                .iter()
+                .any(|p| p["path"] == path && p["kind"] == "unmapped")
+        );
+    }
+    assert!(
+        paths
+            .iter()
+            .any(|p| p["kind"] == "declared_input" && p["tasks"] == serde_json::json!(["check"]))
+    );
+    let invalid = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain", "--base", "not-a-ref"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(
+        Command::new("git")
+            .args(["update-ref", "-d", "HEAD"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, unborn) = explain_json(&root, &[]);
+    assert_eq!(code, Some(0));
+    assert!(unborn["input_coverage"]["base_commit"].is_null());
+    assert!(
+        !unborn["input_coverage"]["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn contract_preview_does_not_accept_drift_or_execute_commands() {
+    let root = graph_repo(
+        "preview",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"check","run":"true"}]}"#,
+    );
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["lock", "sykli.json"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let lock = fs::read(root.join("sykli.lock")).unwrap();
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"check","run":"touch executed"}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "--explain", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let (code, preview) = explain_json(&root, &["--preview"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(preview["contract_preview"]["matches_lock"], false);
+    assert!(preview["contract_preview"]["pinned_hash"].is_string());
+    assert_eq!(fs::read(root.join("sykli.lock")).unwrap(), lock);
+    assert!(!root.join("executed").exists());
+    assert_eq!(run_json(&root).0, Some(2));
+    assert!(!root.join("executed").exists());
+    fs::remove_dir_all(root).unwrap();
+}

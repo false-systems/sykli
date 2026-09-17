@@ -57,11 +57,15 @@ in the candidate contract. The coverage field classifies these paths under
 an explicit repository policy requested by Yair after the Cargo configuration
 probe exposed false reuse:
 
-- A modification of the existing regular README.md is exempt, with reason
-  repository-readme-only. A declared README input takes precedence over this
-  exception. Added, deleted, renamed or symlink READMEs are not exempt.
+- Modifications of the existing regular README.md, docs/agents.md and
+  docs/ci-shadow.md are explicitly exempt. The script's DOCUMENTATION_PATHS is
+  repository policy, not a blanket Markdown exception. Declared inputs take
+  precedence; additions, deletions, renames and symlinks are not exempt.
+- sykli.json and sykli.lock are evaluation metadata: receipt verification and
+  the candidate contract hash already bind them. Re-locking a declared input
+  update no longer automatically makes coverage unresolved.
 - Every other unmapped path is unresolved, including new Cargo configuration,
-  workflow changes, other documentation, and contract or lock changes.
+  workflow changes and other documentation.
 - Any unresolved path requires full execution. Add the missing task inputs,
   re-pin the contract, or review an explicit exception in the repository script.
   There is no blanket Markdown or docs-directory exception.
@@ -70,6 +74,9 @@ The report retains raw cache proposals and disagreements even when coverage is
 unresolved, so the experiment can still expose missing dependencies. This is
 reporting in the shadow experiment, not a new guard inside `sykli run` or an
 implementation of CI skipping. The full reference graph always runs first.
+The CLI's separate Cargo completeness prerequisite can now refuse an incomplete
+graph before a receipt is produced; such an experiment is unavailable, not a
+successful comparison.
 
 Accounted coverage only means every changed path matched some input or the
 explicit exception. It does not prove that every affected task declares that
@@ -79,6 +86,11 @@ The potential_reused_task_ms field sums full-run durations only for
 agreements, before coverage review. The coverage_qualified_reused_task_ms field
 is zero when coverage is unresolved and otherwise retains that sum. It is not
 permission to skip checks; task comparisons can still be inconclusive or disagree.
+The table labels **baseline cache evidence**, **candidate result**, and
+**candidate source** separately. `independent_comparisons` counts only agrees
+and disagrees verdicts backed by actual candidate execution. When it is zero,
+the summary explicitly says there was no independent comparison; zero
+disagreements alone is not a successful validation of reuse.
 Tasks can overlap, so neither field is **job wall time saved**.
 The report separately records baseline cost, inspection time and total
 experiment time. This first experiment spends an extra baseline run to

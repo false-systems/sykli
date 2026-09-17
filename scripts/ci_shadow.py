@@ -13,6 +13,9 @@ import subprocess
 import tempfile
 import time
 
+# Explicit policy for this repository, not a blanket Markdown exemption.
+DOCUMENTATION_PATHS = {"README.md", "docs/agents.md", "docs/ci-shadow.md"}
+
 
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
@@ -52,11 +55,12 @@ def change_coverage(changes, inputs, root):
         path = change["path"]
         if path in inputs:
             continue
-        # Repository policy: only edits to the existing regular README are
-        # exempt. New docs, deletions, renames and symlinks need review too.
-        if (path == "README.md" and change["status"] == "M"
+        if path in ("sykli.json", "sykli.lock"):
+            exempted.append({"path": path, "reason": "evaluation-metadata"})
+        elif (path in DOCUMENTATION_PATHS and change["status"] == "M"
                 and (root / path).is_file() and not (root / path).is_symlink()):
-            exempted.append({"path": path, "reason": "repository-readme-only"})
+            exempted.append({"path": path, "reason": "repository-readme-only"
+                            if path == "README.md" else "repository-documentation"})
         else:
             unresolved.append(path)
     return {
@@ -206,6 +210,9 @@ def experiment(args, output):
             report["disagreements"] = [
                 row["task"] for row in report["tasks"] if row["comparison"] == "disagrees"
             ]
+            report["independent_comparisons"] = sum(
+                row["comparison"] in ("agrees", "disagrees") for row in report["tasks"]
+            )
             report["potential_reused_task_ms"] = sum(
                 row["full_duration_ms"] for row in report["tasks"] if row["comparison"] == "agrees"
             )
@@ -238,17 +245,22 @@ def summary(report):
     else:
         lines += ["Changed paths are accounted for; this is not proof that reuse is safe."]
     for exemption in coverage["exempted_paths"]:
-        lines.append("Explicit exception: <code>" + exemption["path"] + "</code> (existing README edit).")
+        lines.append("Accounted path: <code>" + html.escape(exemption["path"])
+                     + "</code> (" + exemption["reason"] + ").")
+    if report["independent_comparisons"] == 0:
+        lines += ["", "**No independent comparison: zero disagreements is not evidence of safe reuse.**"]
     lines += [
         "",
-        "| task | affected | cache evidence | full result | comparison |",
-        "|---|---|---|---|---|",
+        "Baseline cache was built separately. Candidate receipt sources below distinguish execution from local reuse.",
+        "",
+        "| task | affected | baseline cache evidence | candidate result | candidate source | comparison |",
+        "|---|---|---|---|---|---|",
     ]
     for row in report["tasks"]:
         name = html.escape(row["task"]).replace("|", "&#124;").replace("\n", "&#10;")
         lines.append("| <code>" + name + "</code> | " + str(row["affected"]).lower()
                      + " | " + row["cache"]["status"] + " | " + row["full_outcome"]
-                     + " | " + row["comparison"] + " |")
+                     + " | " + row["full_source"] + " | " + row["comparison"] + " |")
     lines += [
         "",
         "Matching results before coverage review: **" + str(report["potential_reused_task_ms"])
@@ -259,6 +271,7 @@ def summary(report):
         "Baseline cost: " + str(report["baseline_run_ms"]) + " ms; inspection: "
         + str(report["inspection_ms"]) + " ms.",
         "Reuse disagreements: **" + str(len(report["disagreements"])) + "**.",
+        "Independent comparisons: **" + str(report["independent_comparisons"]) + "**.",
         "Changed paths without an exact declared input: **"
         + str(len(report["unmapped_paths"])) + "** (see changes.json and report.json).",
         "",
