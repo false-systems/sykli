@@ -1,0 +1,13 @@
+# Pinned so that `cargo clippy` here and `cargo clippy` in CI are the same
+# program. Against an unpinned `stable`, a newly released lint turns CI red on
+# whatever pull request happens to be open when it ships, and a clean run
+# locally says nothing about the run in CI.
+#
+# The patch level floats: `1.98` takes 1.98.1 and any later patch, so a fix
+# arrives without a pull request while a new lint does not.
+#
+# Bump deliberately, in a pull request that carries whatever the new version
+# demands.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]

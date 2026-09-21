@@ -6,6 +6,7 @@
       "run": "cargo fmt --check",
       "inputs": [
         "Cargo.toml",
+        "rust-toolchain.toml",
         "src/init.rs",
         "src/lib.rs",
         "src/main.rs",
@@ -54,6 +55,7 @@
       ],
       "inputs": [
         "Cargo.lock",
+        "rust-toolchain.toml",
         "Cargo.toml",
         "src/init.rs",
         "src/lib.rs",
@@ -85,6 +87,7 @@
       ],
       "inputs": [
         "Cargo.lock",
+        "rust-toolchain.toml",
         "Cargo.toml",
         "src/init.rs",
         "src/lib.rs",
