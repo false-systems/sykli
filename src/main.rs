@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::thread;
 use std::time::Instant;
@@ -1342,6 +1342,40 @@ fn emit_contract(path: &Path) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+/// Every contract path is repository-relative by construction: an input, output
+/// or workdir is joined onto the root before it is read, written, or restored
+/// from cache. A path that climbs out of that root, or names a root of its own,
+/// reaches files the contract was never granted.
+///
+/// Rejecting `is_absolute()` alone is not enough. On Windows `C:build` is
+/// drive-relative and reports `is_absolute() == false`, yet resolves against
+/// that drive's current directory rather than the repository. Refusing the
+/// prefix and root components covers every spelling on every platform, and
+/// `components()` preserves `..` rather than resolving it, so a climb is still
+/// visible here.
+///
+/// This is a check on what a contract may *declare*. A declared path that stays
+/// inside the tree can still resolve outside it through a symlink; that is a
+/// property of the tree at execution time, not of the contract, and is tracked
+/// separately.
+fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("task {task:?} declares an empty {field} path"));
+    }
+    for component in path.components() {
+        match component {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "task {task:?} {field} path {:?} must stay inside the repository",
+                    path.display().to_string()
+                ));
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
     if contract.schema != "sykli-contract.v1" {
         return Err(format!("unsupported schema {:?}", contract.schema));
@@ -1361,6 +1395,15 @@ fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
             .is_some_and(|runtime| runtime != "shell")
         {
             return Err(format!("task {:?} uses an unsupported runtime", task.name));
+        }
+        if let Some(workdir) = &task.workdir {
+            validate_contract_path(&task.name, "workdir", workdir)?;
+        }
+        for input in &task.inputs {
+            validate_contract_path(&task.name, "input", Path::new(input))?;
+        }
+        for output in &task.outputs {
+            validate_contract_path(&task.name, "output", Path::new(output))?;
         }
         if names.insert(task.name.as_str(), index).is_some() {
             return Err(format!("duplicate task name {:?}", task.name));
@@ -2887,6 +2930,78 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_paths_cannot_escape_the_repository() {
+        fn parse(json: &str) -> Contract {
+            serde_json::from_str::<Contract>(json).unwrap()
+        }
+        let refuses = |json: &str, field: &str| {
+            let error = validate(&parse(json)).unwrap_err();
+            assert!(
+                error.contains("must stay inside the repository") && error.contains(field),
+                "expected a refusal naming the {field}, got {error:?}"
+            );
+        };
+
+        // The escape the issue reported: an output written outside the tree.
+        refuses(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","outputs":["../../somewhere"]}
+            ]}"#,
+            "output",
+        );
+        // An input read from outside it, which would also pull the file into
+        // the cache key and so into the receipt.
+        refuses(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","inputs":["../../etc/passwd"]}
+            ]}"#,
+            "input",
+        );
+        // A workdir that relocates every relative path the task declares.
+        refuses(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","workdir":"../.."}
+            ]}"#,
+            "workdir",
+        );
+        // Absolute, and a climb buried mid-path rather than at the front:
+        // components() preserves `..` instead of resolving it away.
+        refuses(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","outputs":["/etc/cron.d/payload"]}
+            ]}"#,
+            "output",
+        );
+        refuses(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","inputs":["src/../../../etc/passwd"]}
+            ]}"#,
+            "input",
+        );
+
+        let empty = validate(&parse(
+            r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"evil","run":"true","outputs":[""]}
+            ]}"#,
+        ))
+        .unwrap_err();
+        assert!(empty.contains("empty"), "got {empty:?}");
+
+        // Ordinary contracts still validate: nested paths, an explicit `.`,
+        // and a leading `./` are all inside the tree.
+        assert!(
+            validate(&parse(
+                r#"{"schema":"sykli-contract.v1","tasks":[
+                {"name":"build","run":"true","workdir":"crates/core",
+                 "inputs":["./src/lib.rs","src/nested/deep.rs"],
+                 "outputs":["target/debug/thing"]}
+            ]}"#,
+            ))
+            .is_ok()
+        );
+    }
 
     #[test]
     fn contract_validation() {

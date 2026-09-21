@@ -259,18 +259,16 @@ fn plan_json_identifies_the_graph_and_affected_tasks() {
     let contract = root.join("contract.json");
     fs::write(
         &contract,
-        format!(
-            r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"build","run":"true","workdir":{},"inputs":["input.txt"]}},{{"name":"test","run":"true","after":["build"]}}]}}"#,
-            serde_json::to_string(&root).unwrap()
-        ),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"build","run":"true","inputs":["input.txt"]},{"name":"test","run":"true","after":["build"]}]}"#,
     )
     .unwrap();
 
+    // Contract paths are repository-relative, so the tree under test is named
+    // by the working directory rather than by an absolute workdir the contract
+    // declares. `absolute` resolves `input.txt` against the same directory.
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["plan", "--json"])
-        .arg(&contract)
-        .arg("--changed")
-        .arg(&input)
+        .current_dir(&root)
+        .args(["plan", "--json", "contract.json", "--changed", "input.txt"])
         .output()
         .expect("binary runs");
     fs::remove_dir_all(root).unwrap();
