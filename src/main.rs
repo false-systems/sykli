@@ -1518,6 +1518,13 @@ struct TaskReceipt {
     command: String,
     runtime_fingerprint: String,
     exit_code: Option<i32>,
+    /// When this task was witnessed running. On a cache hit this replays the
+    /// original run's time rather than now — paired with `source: "cache"`, the
+    /// receipt then says the evidence was witnessed then and reused now.
+    /// Absent on receipts written before the field existed, and on tasks that
+    /// never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_at_ms: Option<u64>,
     duration_ms: u64,
     /// Lossy UTF-8 for readers; `stdout_digest` is over the raw bytes.
     stdout: String,
@@ -1547,6 +1554,9 @@ struct TaskReceipt {
 struct Receipt {
     schema: &'static str,
     contract_hash: String,
+    /// When this run began. Always now, even when every task was reused: the
+    /// run is what happened now, the evidence may be older.
+    started_at_ms: u64,
     subject: Subject,
     tasks: Vec<TaskReceipt>,
     outcome: Outcome,
@@ -1572,6 +1582,11 @@ struct CapturedOutput {
 struct CacheEntry {
     receipt: String,
     outputs: Vec<CacheOutput>,
+    /// When the run this entry caches was witnessed. Replayed into a restored
+    /// receipt so a cache hit still says when the evidence was produced, rather
+    /// than claiming now. Absent on entries written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witnessed_at_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1599,6 +1614,9 @@ fn run(
     contract_hash: String,
     json: bool,
 ) -> Result<bool, String> {
+    // Stamped before any task runs, so the receipt's run time brackets every
+    // task time it contains.
+    let run_started_at_ms = unix_time_ms();
     let missing = cargo_missing_inputs(contract)?;
     if !missing.is_empty() {
         return Err(cargo_coverage_error(&missing));
@@ -1622,6 +1640,7 @@ fn run(
     let receipt = Receipt {
         schema: "sykli-receipt.v1",
         contract_hash,
+        started_at_ms: run_started_at_ms,
         subject,
         tasks,
         outcome,
@@ -1807,6 +1826,10 @@ fn run_task(
     isolation: Isolation,
 ) -> TaskReceipt {
     progress(json, "running", &task.name);
+    // Instant for the duration, wall clock for the claim: Instant is monotonic
+    // and cannot be read as a time of day, SystemTime can jump but is what a
+    // freshness policy compares against.
+    let started_at_ms = unix_time_ms();
     let started = Instant::now();
     let mut command = ProcessCommand::new(&runtime.path);
     #[cfg(unix)]
@@ -1968,6 +1991,7 @@ fn run_task(
         name: task.name.clone(),
         command: task.run.clone(),
         runtime_fingerprint: runtime.fingerprint.clone(),
+        started_at_ms: Some(started_at_ms),
         exit_code,
         duration_ms,
         stdout_truncated: stdout_bytes_dropped != 0,
@@ -2054,6 +2078,8 @@ fn empty_task_receipt(
         name: task.name.clone(),
         command: task.run.clone(),
         runtime_fingerprint: runtime.fingerprint.clone(),
+        // The task never started, so there is no moment to witness.
+        started_at_ms: None,
         exit_code: None,
         duration_ms: 0,
         stdout: String::new(),
@@ -2099,6 +2125,16 @@ fn input_digest(path: &Path) -> Result<String, String> {
 /// an `after` edge carry identity: when an upstream task re-runs for new
 /// inputs, everything downstream misses the cache instead of reusing a pass
 /// recorded against outputs it never saw.
+/// Wall-clock milliseconds since the Unix epoch, or 0 if the clock is before
+/// it. Receipts carry this beside `duration_ms` so a receipt can say *when* it
+/// witnessed a run, not only how long the run took.
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 fn cache_key(
     task: &Task,
     runtime: &ShellRuntime,
@@ -2306,6 +2342,9 @@ impl Cache for LocalCache {
             name: task.name.clone(),
             command: task.run.clone(),
             runtime_fingerprint: runtime.fingerprint.clone(),
+            // The original run's moment, not now: this evidence was witnessed
+            // then and is being reused.
+            started_at_ms: entry.witnessed_at_ms,
             exit_code: None,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             stdout: String::new(),
@@ -2361,6 +2400,7 @@ impl Cache for LocalCache {
         let entry = serde_json::to_vec_pretty(&CacheEntry {
             receipt: receipt.into(),
             outputs,
+            witnessed_at_ms: record.started_at_ms,
         })
         .map_err(|error| error.to_string())?;
         fs::write(temporary.join("entry.json"), entry).map_err(|error| error.to_string())?;
@@ -3048,6 +3088,7 @@ mod tests {
         let receipt = Receipt {
             schema: "sykli-receipt.v1",
             contract_hash: "test".into(),
+            started_at_ms: unix_time_ms(),
             subject: Subject {
                 repository: root.to_string_lossy().into(),
                 tree_oid: "test".into(),
@@ -3070,6 +3111,17 @@ mod tests {
         let second = execute(&cached_contract, &[vec![0]], &runtime, &cache, false);
         assert!(second[0].outcome == Outcome::Cached);
         assert_eq!(fs::read(root.join("result")).unwrap(), b"cache");
+
+        // A reused task replays when it was witnessed, not now. Stamping the
+        // restore with the current time would make a cache hit claim the work
+        // was observed at a moment nothing was observed — the one thing the
+        // timestamp exists to rule out.
+        assert_eq!(
+            second[0].started_at_ms, receipt.tasks[0].started_at_ms,
+            "a cache hit must replay the original witness time"
+        );
+        assert!(second[0].started_at_ms.is_some());
+        assert_eq!(second[0].source, "cache");
         fs::remove_dir_all(root).unwrap();
     }
 
