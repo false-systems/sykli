@@ -232,6 +232,12 @@ read-only requests through `gh`; it does not post reviews or trigger work.
 declared inputs, then the recorded outcome. It does **not** authenticate the
 author of a receipt or prove that the declared checks are sufficient.
 
+A receipt also says **when**. `started_at_ms` on the run is when that run began;
+`started_at_ms` on a task is when that task was witnessed running. A task reused
+from cache replays the original moment rather than the current one, so a receipt
+full of cache hits reports old task times under a new run time — which is what
+happened. Neither field is part of any cache key.
+
 | `verify` exit code | Meaning |
 |---|---|
 | `0` | Receipt matches and work passed or was reused. |
