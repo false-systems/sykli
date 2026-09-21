@@ -92,6 +92,11 @@ printf 'echo tests passed\n' > test.sh
 `inputs` names the files a task reads. `after` makes `test` wait for `lint`
 and binds its cache key to that dependency. Independent tasks can run in parallel.
 
+Every path a task declares — `inputs`, `outputs`, and `workdir` — is relative to
+the repository and stays inside it. Absolute paths and `..` are refused when the
+contract is validated, before anything runs, so that a receipt is always a claim
+about the repository it sits in.
+
 ```sh
 mkdir -p .sykli
 sykli run sykli.json --json > .sykli/first.json
