@@ -1646,9 +1646,69 @@ trait Cache {
 }
 
 struct LocalCache {
-    // ponytail: unbounded until family receipts define a real size/age eviction budget.
     cache: PathBuf,
     receipts: PathBuf,
+    /// Bytes the cache directory may hold before the least recently used
+    /// entries are dropped.
+    budget: u64,
+}
+
+/// Default cache budget: 1 GiB.
+///
+/// A cache with no budget is not a cache, it is a leak with a lookup table. The
+/// number is a judgement, not a measurement — this repository's own cache sits
+/// under a megabyte across 238 entries, so the default is far above ordinary
+/// use and exists to bound the pathological case rather than shape the common
+/// one. Override with `SYKLI_CACHE_BUDGET_BYTES`; `0` disables eviction.
+const DEFAULT_CACHE_BUDGET: u64 = 1024 * 1024 * 1024;
+
+fn cache_budget() -> u64 {
+    std::env::var("SYKLI_CACHE_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_CACHE_BUDGET)
+}
+
+/// Every immediate child of `directory` with its total size and the most recent
+/// modification time anywhere beneath it.
+///
+/// Recency comes from the newest file in an entry rather than the directory
+/// stamp: restoring from an entry does not reliably touch the directory, and an
+/// entry being reused is exactly the one eviction must keep.
+fn cache_entries(directory: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    fn walk(path: &Path, size: &mut u64, newest: &mut std::time::SystemTime) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), size, newest);
+            } else {
+                *size += meta.len();
+                if let Ok(modified) = meta.modified() {
+                    if modified > *newest {
+                        *newest = modified;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let Ok(children) = fs::read_dir(directory) else {
+        return out;
+    };
+    for child in children.flatten() {
+        if !child.path().is_dir() {
+            continue;
+        }
+        let mut size = 0;
+        let mut newest = std::time::SystemTime::UNIX_EPOCH;
+        walk(&child.path(), &mut size, &mut newest);
+        out.push((child.path(), size, newest));
+    }
+    out
 }
 
 fn run(
@@ -2255,6 +2315,36 @@ impl LocalCache {
         Self {
             cache: repository.join(".sykli/cache"),
             receipts: repository.join(".sykli/receipts"),
+            budget: cache_budget(),
+        }
+    }
+
+    /// Drop least recently used entries until the cache is inside its budget.
+    ///
+    /// Best effort, and never fails a run: losing a cache entry costs a re-run,
+    /// while failing here would lose the work that just succeeded. `keep` is the
+    /// entry this store wrote — evicting it immediately would mean the cache
+    /// could never hold anything larger than the budget's last increment.
+    fn evict(&self, keep: &Path) {
+        if self.budget == 0 {
+            return;
+        }
+        let mut entries = cache_entries(&self.cache);
+        let mut total: u64 = entries.iter().map(|(_, size, _)| size).sum();
+        if total <= self.budget {
+            return;
+        }
+        entries.sort_by_key(|(_, _, modified)| *modified);
+        for (path, size, _) in entries {
+            if total <= self.budget {
+                break;
+            }
+            if path == keep {
+                continue;
+            }
+            if fs::remove_dir_all(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
         }
     }
 
@@ -2453,7 +2543,9 @@ impl Cache for LocalCache {
         if target.exists() {
             fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
         }
-        fs::rename(temporary, target).map_err(|error| error.to_string())
+        fs::rename(temporary, &target).map_err(|error| error.to_string())?;
+        self.evict(&target);
+        Ok(())
     }
 }
 
@@ -2970,6 +3062,64 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_stays_inside_its_budget_and_drops_the_oldest_first() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = root.join(".sykli/cache");
+        fs::create_dir_all(&cache).unwrap();
+
+        // Three entries of 1 KiB, written oldest to newest.
+        for name in ["old", "middle", "new"] {
+            let entry = cache.join(name);
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(entry.join("blob"), vec![0u8; 1024]).unwrap();
+            // Distinguishable mtimes without sleeping the test. `evict` reads
+            // the newest file beneath an entry, so stamping the blob is what
+            // decides the order.
+            let seconds = match name {
+                "old" => 1_000_000,
+                "middle" => 2_000_000,
+                _ => 3_000_000,
+            };
+            let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+            fs::File::options()
+                .write(true)
+                .open(entry.join("blob"))
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        }
+
+        let mut local = LocalCache::new(&root);
+        // Room for two of the three.
+        local.budget = 2048;
+        local.evict(&cache.join("new"));
+
+        assert!(
+            !cache.join("old").exists(),
+            "the oldest entry must go first"
+        );
+        assert!(
+            cache.join("middle").exists(),
+            "only enough to fit the budget"
+        );
+        assert!(cache.join("new").exists(), "the entry just written is kept");
+
+        // A zero budget disables eviction entirely.
+        local.budget = 0;
+        local.evict(&cache.join("new"));
+        assert!(cache.join("middle").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn contract_paths_cannot_escape_the_repository() {
