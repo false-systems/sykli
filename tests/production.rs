@@ -109,6 +109,51 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
+/// A production must not keep what it did not declare.
+///
+/// A contract may build through `$SYKLI_OUTPUT` — the one this repository
+/// produces itself points Cargo's `--target-dir` there — so the attempt's
+/// output directory ends up holding a whole build tree beside the one file the
+/// contract declares. Keeping it cost 2.0 GB across seven requests while the
+/// collected blobs came to 14 MB.
+///
+/// The declared output is in the store; everything else was scratch.
+#[test]
+fn an_attempt_keeps_only_what_the_contract_declared() {
+    let f = Fixture::new();
+    // Build through the output directory, as a real Cargo contract does, and
+    // leave something large behind that nothing declares.
+    f.write(
+        "build.sh",
+        "set -e\nmkdir -p \"$SYKLI_OUTPUT/scratch\"\nhead -c 200000 /dev/zero > \"$SYKLI_OUTPUT/scratch/junk\"\nrustc \"$SYKLI_INPUT_source/main.rs\" -o \"$SYKLI_OUTPUT/app\"\n",
+    );
+    let produced = f.call(&["produce", "app", "--stop-after", "build", "--json"], 1);
+    assert_eq!(state(&produced, "build"), "satisfied");
+
+    let attempts = f.records(id(&produced)).parent().unwrap().join("attempts");
+    let mut retained = Vec::new();
+    for entry in fs::read_dir(&attempts).unwrap().flatten() {
+        for scratch in ["inputs", "outputs", "work"] {
+            let path = entry.path().join(scratch);
+            if path.exists() {
+                retained.push(path);
+            }
+        }
+    }
+    assert!(
+        retained.is_empty(),
+        "attempt scratch was kept: {retained:?}"
+    );
+
+    // And the product itself is still delivered, from the store rather than
+    // from the directory that was removed.
+    let completed = f.call(&["resume", id(&produced), "--json"], 0);
+    let executable = completed["delivery"]["app"]["availability"]["locations"][0]
+        .as_str()
+        .unwrap();
+    assert_eq!(Command::new(executable).output().unwrap().stdout, b"42\n");
+}
+
 #[test]
 fn fresh_worker_continues_exact_source_and_changed_source_cannot_inherit_success() {
     let f = Fixture::new();
@@ -302,6 +347,11 @@ fn zero_exit_missing_stale_wrong_format_and_wrong_architecture_outputs_fail() {
                 .join("attempts")
                 .join(previous)
                 .join("outputs/app");
+            // The attempt's scratch directory is discarded once its declared
+            // outputs are in the store, so planting a stale artifact now means
+            // creating the directory first. The scenario is unchanged: a
+            // previous attempt's output is present and must not be reused.
+            fs::create_dir_all(stale.parent().unwrap()).unwrap();
             fs::copy(env!("CARGO_BIN_EXE_sykli"), stale).unwrap();
             let retry = f.call(
                 &[
