@@ -10,6 +10,7 @@ Product boundaries:
 - Candidate assessment (`sykli inspect` / `sykli assess`) establishes only the declared review-readiness predicates under a printed trust designation. It is advisory: no merge or deployment authority, no claim that GitHub's full merge policy is met.
 - Container runtime, Toimija gate mode, and Ahti append wait until family repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode) do not return without one.
+- **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
 - Treat `sykli plan --json` as the agent-facing query surface; before handoff run `toimija gates run sykli-full`.
 
 This file is the guidance for any coding agent working in this repository
