@@ -232,6 +232,11 @@ read-only requests through `gh`; it does not post reviews or trigger work.
 declared inputs, then the recorded outcome. It does **not** authenticate the
 author of a receipt or prove that the declared checks are sufficient.
 
+The cache is bounded. It holds up to **1 GiB** by default, dropping the least
+recently used entries when a run would take it over; set
+`SYKLI_CACHE_BUDGET_BYTES` to change that, or `0` to keep everything. Losing an
+entry costs a re-run, never a result.
+
 A receipt also says **when**. `started_at_ms` on the run is when that run began;
 `started_at_ms` on a task is when that task was witnessed running. A task reused
 from cache replays the original moment rather than the current one, so a receipt
