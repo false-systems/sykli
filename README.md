@@ -232,6 +232,11 @@ read-only requests through `gh`; it does not post reviews or trigger work.
 declared inputs, then the recorded outcome. It does **not** authenticate the
 author of a receipt or prove that the declared checks are sufficient.
 
+Receipts are bounded too: **200** by default, oldest removed first, and never
+one a live cache entry cites — a cached result whose receipt had been deleted
+would be a claim with nothing behind it. `SYKLI_RECEIPT_BUDGET` changes the
+count, `0` keeps every receipt.
+
 The cache is bounded. It holds up to **1 GiB** by default, dropping the least
 recently used entries when a run would take it over; set
 `SYKLI_CACHE_BUDGET_BYTES` to change that, or `0` to keep everything. Losing an
