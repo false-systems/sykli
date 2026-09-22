@@ -883,10 +883,6 @@ pub fn produce(
     jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
-    // Recover the working directories of attempts nobody is executing, before
-    // adding more. A run killed mid-attempt never reaches the sweep that
-    // follows a finished one.
-    store.sweep_abandoned();
     let request = request(&store, path, target)?;
     let directory = store.production(&request.id()?)?;
     fs::create_dir_all(&directory).map_err(err)?;
@@ -894,6 +890,11 @@ pub fn produce(
     if prepare {
         return inspect(store_path, &request.id()?);
     }
+    // Reclaim concluded attempts before adding more, and only once this command
+    // is certain to do work. Sweeping before the request parses would mean an
+    // unknown target — a command that then does nothing at all — had already
+    // walked and modified every request in the store.
+    store.sweep_concluded();
     advance(&store, &request, None, stop_after, None, jobs)
 }
 
@@ -907,11 +908,14 @@ pub fn resume(
     jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
-    store.sweep_abandoned();
     let request = Request::load(&store, id)?;
     if let Some(attempt) = abandon {
         abandon_attempt(&store, &request, attempt)?;
     }
+    // After the abandon, not before: abandoning is what turns a contact-lost
+    // attempt into a concluded one, and its scratch is the evidence the
+    // operator was weighing up until that moment.
+    store.sweep_concluded();
     advance(&store, &request, retry, stop_after, operation, jobs)
 }
 

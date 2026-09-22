@@ -1651,6 +1651,11 @@ struct LocalCache {
     /// Bytes the cache directory may hold before the least recently used
     /// entries are dropped.
     budget: u64,
+    /// Receipts the directory may hold before the oldest unreferenced ones are
+    /// dropped. Read once here rather than inside the prune so a test can set
+    /// it without touching the environment: `set_var` is process-global and
+    /// unsound beside the rest of a threaded test binary.
+    receipt_budget: usize,
 }
 
 /// Default cache budget: 1 GiB.
@@ -1793,6 +1798,10 @@ fn run(
             }
         }
     }
+    // Once for the run, not once per task. Every task here cites the same
+    // receipt, so the answer cannot change between them, and each call would
+    // otherwise re-read and re-parse `entry.json` for every entry in the cache.
+    cache.prune_receipts();
     if json {
         serde_json::to_writer(io::stdout().lock(), &receipt).map_err(|error| error.to_string())?;
         println!();
@@ -2352,22 +2361,27 @@ impl LocalCache {
             cache: repository.join(".sykli/cache"),
             receipts: repository.join(".sykli/receipts"),
             budget: cache_budget(),
+            receipt_budget: receipt_budget(),
         }
     }
 
-    /// Drop least recently used entries until the cache is inside its budget.
-    ///
-    /// Best effort, and never fails a run: losing a cache entry costs a re-run,
-    /// while failing here would lose the work that just succeeded. `keep` is the
-    /// entry this store wrote — evicting it immediately would mean the cache
-    /// could never hold anything larger than the budget's last increment.
-    /// Drop unreferenced receipts until the directory is inside its budget.
+    /// Drop unreferenced receipts until the directory is inside its budget,
+    /// and clear staging files no run will finish.
     ///
     /// Runs after cache eviction, because evicting a cache entry is what
     /// releases the receipt it cited. Oldest first, and never a receipt a
     /// surviving cache entry still names.
+    ///
+    /// Nothing written in the last `IN_FLIGHT` is touched. A run writes its
+    /// receipt before storing the cache entries that cite it, so between those
+    /// two moments the receipt is on disk and unreferenced. Another process
+    /// pruning in that window would delete it, and the first would then store
+    /// an entry citing a receipt that no longer exists — a cache entry that can
+    /// never hit again, which is the one state this design must not produce.
     fn prune_receipts(&self) {
-        let budget = receipt_budget();
+        const IN_FLIGHT: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let budget = self.receipt_budget;
         if budget == 0 {
             return;
         }
@@ -2375,26 +2389,59 @@ impl LocalCache {
         let Ok(entries) = fs::read_dir(&self.receipts) else {
             return;
         };
-        let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = path.file_name()?.to_str()?.to_string();
-                if !name.starts_with("rcpt_") || referenced.contains(&name) {
-                    return None;
+        let now = std::time::SystemTime::now();
+        let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        // Referenced receipts consume the budget without being candidates, but
+        // only the ones actually on disk: counting a name whose file is gone
+        // would shrink the budget and destroy a live receipt for nothing.
+        let mut present_referenced = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            let recent = now
+                .duration_since(modified)
+                .map(|age| age < IN_FLIGHT)
+                .unwrap_or(true);
+            if !name.starts_with("rcpt_") {
+                // `write_receipt` stages through `.{hash}.tmp-{pid}`. A run
+                // killed between the write and the rename leaves one behind,
+                // and nothing else ever removes it — so the directory grew
+                // without limit despite having a budget.
+                if name.starts_with('.') && name.contains(".tmp-") && !recent {
+                    let _ = fs::remove_file(&path);
                 }
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                Some((path, modified))
-            })
-            .collect();
-        // `files` holds only the removable ones; the budget counts every
-        // receipt, so referenced receipts consume it without being candidates.
-        let total = files.len() + referenced.len();
+                continue;
+            }
+            if referenced.contains(&name) {
+                present_referenced += 1;
+                continue;
+            }
+            if recent {
+                continue;
+            }
+            files.push((path, modified));
+        }
+        let total = files.len() + present_referenced;
         if total <= budget {
             return;
         }
         files.sort_by_key(|(_, modified)| *modified);
-        for (path, _) in files.iter().take(total - budget) {
+        // Never more than there are candidates. When referenced receipts alone
+        // exceed the budget, `total - budget` runs past the end of the list and
+        // would take every candidate regardless of age — the budget cannot be
+        // met by deleting things it is not allowed to delete, and pretending
+        // otherwise just destroys the newest receipts too.
+        let over = (total - budget).min(files.len());
+        for (path, _) in files.iter().take(over) {
             let _ = fs::remove_file(path);
         }
     }
@@ -2412,6 +2459,12 @@ impl LocalCache {
         self.prune_receipts();
     }
 
+    /// Drop least recently used entries until the cache is inside its budget.
+    ///
+    /// Best effort, and never fails a run: losing a cache entry costs a re-run,
+    /// while failing here would lose the work that just succeeded. `keep` is the
+    /// entry this store wrote — evicting it immediately would mean the cache
+    /// could never hold anything larger than the budget's last increment.
     fn evict(&self, keep: &Path) {
         if self.budget == 0 {
             return;
@@ -2553,6 +2606,14 @@ impl Cache for LocalCache {
             restore_file(&artifact, &root.join(&output.path), &output.artifact).ok()?;
         }
 
+        // Record the use. Restoring only reads the stored artifacts, so without
+        // this an entry hit by every run looks exactly as old as the day it was
+        // written, and eviction would drop the hottest entries first — the run
+        // then recomputes that work, stores it again, and goes over budget
+        // again. Touching a marker is what makes "least recently used" mean
+        // used rather than written.
+        let _ = fs::write(directory.join("used"), b"");
+
         let output_digests = entry
             .outputs
             .iter()
@@ -2632,7 +2693,6 @@ impl Cache for LocalCache {
         }
         fs::rename(temporary, &target).map_err(|error| error.to_string())?;
         self.evict(&target);
-        self.prune_receipts();
         Ok(())
     }
 }
@@ -3259,10 +3319,12 @@ mod tests {
         .unwrap();
 
         // Budget of three across four receipts: exactly one must go, and it
-        // cannot be the cited one, so it is the oldest of the rest.
-        unsafe { std::env::set_var("SYKLI_RECEIPT_BUDGET", "3") };
-        LocalCache::new(&root).prune_receipts();
-        unsafe { std::env::remove_var("SYKLI_RECEIPT_BUDGET") };
+        // cannot be the cited one, so it is the oldest of the rest. The budget
+        // is set on the value rather than through the environment, which is
+        // process-global and unsound beside a threaded test binary.
+        let mut cache_under_test = LocalCache::new(&root);
+        cache_under_test.receipt_budget = 3;
+        cache_under_test.prune_receipts();
 
         assert!(
             receipts.join("rcpt_aaa.json").exists(),
@@ -3275,6 +3337,68 @@ mod tests {
         assert!(receipts.join("rcpt_ccc.json").exists());
         assert!(receipts.join("rcpt_ddd.json").exists());
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A receipt written moments ago is never pruned, even when the budget
+    /// cannot be met without it.
+    ///
+    /// A run writes its receipt and only then stores the cache entries that
+    /// cite it. In between, the receipt is on disk and unreferenced. A
+    /// concurrent prune that deleted it would leave the first run storing an
+    /// entry that names a receipt which no longer exists — an entry that can
+    /// never hit again, and a cached result with nothing behind it.
+    ///
+    /// Reachable whenever referenced receipts alone exceed the budget, which
+    /// is ordinary for a cache larger than the receipt budget.
+    #[test]
+    fn a_receipt_still_in_flight_survives_a_prune_that_cannot_meet_its_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-inflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let receipts = root.join(".sykli/receipts");
+        let cache = root.join(".sykli/cache");
+        fs::create_dir_all(&receipts).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+
+        // Three cited receipts against a budget of two: the budget is already
+        // unmeetable before the new receipt is considered.
+        for (index, name) in ["rcpt_1.json", "rcpt_2.json", "rcpt_3.json"]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(receipts.join(name), b"{}").unwrap();
+            let entry = cache.join(format!("key{index}"));
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(
+                entry.join("entry.json"),
+                serde_json::to_vec(&CacheEntry {
+                    receipt: name.into(),
+                    outputs: vec![],
+                    witnessed_at_ms: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        // Just written, not yet cited — exactly the window.
+        let in_flight = receipts.join("rcpt_new.json");
+        fs::write(&in_flight, b"{}").unwrap();
+
+        let mut cache_under_test = LocalCache::new(&root);
+        cache_under_test.receipt_budget = 2;
+        cache_under_test.prune_receipts();
+
+        assert!(
+            in_flight.exists(),
+            "a receipt written moments ago must survive; deleting it poisons \
+             the cache entry about to cite it"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
