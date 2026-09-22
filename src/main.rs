@@ -1669,6 +1669,41 @@ fn cache_budget() -> u64 {
         .unwrap_or(DEFAULT_CACHE_BUDGET)
 }
 
+/// Default receipt budget: 200 files.
+///
+/// Counted rather than sized because receipts are small and numerous — about
+/// 8 KiB each here — so what accumulates is entries in a directory, not bytes.
+/// Override with `SYKLI_RECEIPT_BUDGET`; `0` keeps every receipt forever.
+const DEFAULT_RECEIPT_BUDGET: usize = 200;
+
+fn receipt_budget() -> usize {
+    std::env::var("SYKLI_RECEIPT_BUDGET")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_RECEIPT_BUDGET)
+}
+
+/// Receipt filenames any surviving cache entry still cites.
+///
+/// A cached result is only evidence because the receipt it names can still be
+/// read. Evicting one of these would turn a cache hit into a claim with nothing
+/// behind it, so they are never counted against the budget and never removed.
+fn referenced_receipts(cache: &Path) -> std::collections::HashSet<String> {
+    let mut referenced = std::collections::HashSet::new();
+    let Ok(entries) = fs::read_dir(cache) else {
+        return referenced;
+    };
+    for entry in entries.flatten() {
+        let Ok(bytes) = fs::read(entry.path().join("entry.json")) else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_slice::<CacheEntry>(&bytes) {
+            referenced.insert(parsed.receipt);
+        }
+    }
+    referenced
+}
+
 /// Every immediate child of `directory` with its total size and the most recent
 /// modification time anywhere beneath it.
 ///
@@ -2325,6 +2360,44 @@ impl LocalCache {
     /// while failing here would lose the work that just succeeded. `keep` is the
     /// entry this store wrote — evicting it immediately would mean the cache
     /// could never hold anything larger than the budget's last increment.
+    /// Drop unreferenced receipts until the directory is inside its budget.
+    ///
+    /// Runs after cache eviction, because evicting a cache entry is what
+    /// releases the receipt it cited. Oldest first, and never a receipt a
+    /// surviving cache entry still names.
+    fn prune_receipts(&self) {
+        let budget = receipt_budget();
+        if budget == 0 {
+            return;
+        }
+        let referenced = referenced_receipts(&self.cache);
+        let Ok(entries) = fs::read_dir(&self.receipts) else {
+            return;
+        };
+        let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?.to_string();
+                if !name.starts_with("rcpt_") || referenced.contains(&name) {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((path, modified))
+            })
+            .collect();
+        // `files` holds only the removable ones; the budget counts every
+        // receipt, so referenced receipts consume it without being candidates.
+        let total = files.len() + referenced.len();
+        if total <= budget {
+            return;
+        }
+        files.sort_by_key(|(_, modified)| *modified);
+        for (path, _) in files.iter().take(total - budget) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     fn evict(&self, keep: &Path) {
         if self.budget == 0 {
             return;
@@ -2545,6 +2618,7 @@ impl Cache for LocalCache {
         }
         fs::rename(temporary, &target).map_err(|error| error.to_string())?;
         self.evict(&target);
+        self.prune_receipts();
         Ok(())
     }
 }
@@ -3117,6 +3191,75 @@ mod tests {
         local.budget = 0;
         local.evict(&cache.join("new"));
         assert!(cache.join("middle").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn receipts_are_pruned_oldest_first_but_never_one_a_cache_entry_cites() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-receipts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let receipts = root.join(".sykli/receipts");
+        let cache = root.join(".sykli/cache");
+        fs::create_dir_all(&receipts).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+
+        let stamp = |path: &Path, seconds: u64| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        };
+
+        // Four receipts, oldest to newest. The oldest is the one a live cache
+        // entry cites, so age alone must not condemn it.
+        for (name, seconds) in [
+            ("rcpt_aaa.json", 1_000_000),
+            ("rcpt_bbb.json", 2_000_000),
+            ("rcpt_ccc.json", 3_000_000),
+            ("rcpt_ddd.json", 4_000_000),
+        ] {
+            let path = receipts.join(name);
+            fs::write(&path, b"{}").unwrap();
+            stamp(&path, seconds);
+        }
+        let entry = cache.join("some-key");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(
+            entry.join("entry.json"),
+            serde_json::to_vec(&CacheEntry {
+                receipt: "rcpt_aaa.json".into(),
+                outputs: vec![],
+                witnessed_at_ms: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Budget of three across four receipts: exactly one must go, and it
+        // cannot be the cited one, so it is the oldest of the rest.
+        unsafe { std::env::set_var("SYKLI_RECEIPT_BUDGET", "3") };
+        LocalCache::new(&root).prune_receipts();
+        unsafe { std::env::remove_var("SYKLI_RECEIPT_BUDGET") };
+
+        assert!(
+            receipts.join("rcpt_aaa.json").exists(),
+            "a receipt a cache entry cites must survive, however old"
+        );
+        assert!(
+            !receipts.join("rcpt_bbb.json").exists(),
+            "the oldest removable receipt goes first"
+        );
+        assert!(receipts.join("rcpt_ccc.json").exists());
+        assert!(receipts.join("rcpt_ddd.json").exists());
 
         fs::remove_dir_all(&root).unwrap();
     }
