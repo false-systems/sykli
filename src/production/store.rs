@@ -48,6 +48,57 @@ impl Store {
     pub fn new(path: &Path) -> Result<Self, String> {
         Ok(Self(super::super::absolute(path)?))
     }
+    /// Remove the working directories of every attempt no executor holds.
+    ///
+    /// An attempt's `inputs`, `outputs` and `work` are swept when it finishes,
+    /// but a run that is killed mid-attempt never reaches that point and leaves
+    /// them behind for good. Sweeping at the start of a command is the only
+    /// place that debris can be recovered — and the only place that reclaims
+    /// what older versions left.
+    ///
+    /// The lease is what makes it safe: `Lease::observe` is a non-blocking
+    /// probe, so an attempt another process is executing right now reports as
+    /// held and is left alone. An unheld attempt has no executor by definition,
+    /// and its working directories are reproducible — `inputs` is materialized
+    /// from this store, `outputs` holds nothing that was not already collected.
+    ///
+    /// Best effort throughout. A sweep that cannot read a directory, or cannot
+    /// remove one, must never stop the command it preceded.
+    pub fn sweep_abandoned(&self) -> usize {
+        let Ok(requests) = fs::read_dir(self.0.join("requests")) else {
+            return 0;
+        };
+        let mut swept = 0;
+        for request in requests.flatten() {
+            let request = request.path();
+            let Ok(attempts) = fs::read_dir(request.join("attempts")) else {
+                continue;
+            };
+            for attempt in attempts.flatten() {
+                let Some(name) = attempt.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let lease = request.join("attempt-leases").join(&name);
+                // Only an unambiguous "nobody holds this" licenses removal. An
+                // error probing the lease is treated as held.
+                if Lease::observe(&lease).unwrap_or(true) {
+                    continue;
+                }
+                let mut removed = false;
+                for scratch in ["inputs", "outputs", "work"] {
+                    let path = attempt.path().join(scratch);
+                    if path.exists() && fs::remove_dir_all(&path).is_ok() {
+                        removed = true;
+                    }
+                }
+                if removed {
+                    swept += 1;
+                }
+            }
+        }
+        swept
+    }
+
     pub fn production(&self, id: &str) -> Result<PathBuf, String> {
         digest(id)?;
         Ok(self.0.join("requests").join(id))
@@ -492,5 +543,58 @@ mod tests {
         assert!(Lease::acquire(&directory).is_err());
         drop(next_controller);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sweeping_spares_the_attempt_an_executor_is_holding() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let request = root.join("requests").join("r".repeat(64));
+        let live = "a".repeat(64);
+        let dead = "b".repeat(64);
+        for attempt in [&live, &dead] {
+            for scratch in ["inputs", "outputs", "work"] {
+                let path = request.join("attempts").join(attempt).join(scratch);
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("junk"), b"x").unwrap();
+            }
+        }
+
+        // Hold the live attempt exactly as an executor would.
+        let held = Lease::attempt(&request, &live).unwrap();
+
+        let store = Store::new(&root).unwrap();
+        let swept = store.sweep_abandoned();
+
+        assert_eq!(swept, 1, "only the unheld attempt is swept");
+        for scratch in ["inputs", "outputs", "work"] {
+            assert!(
+                request.join("attempts").join(&live).join(scratch).exists(),
+                "an attempt under execution must keep its {scratch}"
+            );
+            assert!(
+                !request.join("attempts").join(&dead).join(scratch).exists(),
+                "an abandoned attempt's {scratch} must go"
+            );
+        }
+
+        // Once the executor is gone, the rest is reclaimable too.
+        drop(held);
+        assert_eq!(store.sweep_abandoned(), 1);
+        assert!(
+            !request
+                .join("attempts")
+                .join(&live)
+                .join("outputs")
+                .exists()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

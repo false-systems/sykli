@@ -1762,6 +1762,7 @@ fn run(
     let subject = subject(contract)?;
     let runtime = shell_runtime()?;
     let cache = LocalCache::new(Path::new(&subject.repository));
+    cache.bound();
     let tasks = execute(contract, levels, &runtime, &cache, json);
     let outcome = if tasks.iter().any(|task| task.outcome == Outcome::Errored) {
         Outcome::Errored
@@ -2396,6 +2397,19 @@ impl LocalCache {
         for (path, _) in files.iter().take(total - budget) {
             let _ = fs::remove_file(path);
         }
+    }
+
+    /// Bring the cache and the receipts directory inside their budgets.
+    ///
+    /// Called when a run starts as well as when it stores. Enforcing only on
+    /// store means a repository that stops producing new entries keeps whatever
+    /// it had forever — the budget would bound growth but never the standing
+    /// total, and a repository that has just been cloned or has had its budget
+    /// lowered would never act on it.
+    fn bound(&self) {
+        // Nothing is being written, so no entry is exempt.
+        self.evict(Path::new(""));
+        self.prune_receipts();
     }
 
     fn evict(&self, keep: &Path) {

@@ -883,6 +883,10 @@ pub fn produce(
     jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
+    // Recover the working directories of attempts nobody is executing, before
+    // adding more. A run killed mid-attempt never reaches the sweep that
+    // follows a finished one.
+    store.sweep_abandoned();
     let request = request(&store, path, target)?;
     let directory = store.production(&request.id()?)?;
     fs::create_dir_all(&directory).map_err(err)?;
@@ -903,6 +907,7 @@ pub fn resume(
     jobs: usize,
 ) -> Result<Value, String> {
     let store = Store::new(store_path)?;
+    store.sweep_abandoned();
     let request = Request::load(&store, id)?;
     if let Some(attempt) = abandon {
         abandon_attempt(&store, &request, attempt)?;
