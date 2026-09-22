@@ -1273,6 +1273,37 @@ fn execute(
             }
         }
     };
+    // An attempt's three working directories are scratch once its declared
+    // outputs are in the store.
+    //
+    // `outputs` is the expensive one. A contract may build through
+    // `$SYKLI_OUTPUT` — the contract this repository produces for itself points
+    // Cargo's `--target-dir` there — so it ends up holding a whole build tree
+    // beside the one file the contract declares. Keeping it cost 2.0 GB across
+    // seven requests while the collected blobs came to 14 MB.
+    //
+    // `inputs` is materialized from the store and never read back, so a later
+    // attempt re-materializes it rather than finding it here. `work` is the
+    // task's working directory.
+    //
+    // Everything not declared as an output is scratch by the contract's own
+    // definition, which is the premise sykli is built on.
+    //
+    // Removal is best effort. A sweep that fails must not turn a successful
+    // production into a failed one; the next attempt recreates these anyway, so
+    // the cost of a failed removal is bounded by one attempt.
+    let mut retained = Vec::new();
+    for scratch in ["inputs", "outputs", "work"] {
+        if let Err(error) = std::fs::remove_dir_all(root.join(scratch)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                retained.push(format!("{scratch}: {error}"));
+            }
+        }
+    }
+    if !retained.is_empty() {
+        observation["scratch_retained"] = retained.join("; ").into();
+    }
+
     Ok(Some((result, observation)))
 }
 
