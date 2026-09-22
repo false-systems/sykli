@@ -347,12 +347,20 @@ fn zero_exit_missing_stale_wrong_format_and_wrong_architecture_outputs_fail() {
                 .join("attempts")
                 .join(previous)
                 .join("outputs/app");
-            // The attempt's scratch directory is discarded once its declared
-            // outputs are in the store, so planting a stale artifact now means
-            // creating the directory first. The scenario is unchanged: a
-            // previous attempt's output is present and must not be reused.
+            // Plant a previous attempt's output and show it cannot be
+            // reused. Two things now stand between it and a retry, and this
+            // asserts both: the attempt's scratch is discarded when it
+            // finishes, so the directory has to be recreated to plant anything
+            // at all, and `resume` sweeps abandoned attempts before it starts,
+            // so the plant is gone before the retry can see it.
+            //
+            // Reuse is prevented by construction rather than by rejection. The
+            // rejection path itself stays covered by the `format` and
+            // `architecture` cases in this same test, which validate an output
+            // the run actually produced.
             fs::create_dir_all(stale.parent().unwrap()).unwrap();
-            fs::copy(env!("CARGO_BIN_EXE_sykli"), stale).unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_sykli"), &stale).unwrap();
+            let planted = stale.clone();
             let retry = f.call(
                 &[
                     "resume",
@@ -367,6 +375,10 @@ fn zero_exit_missing_stale_wrong_format_and_wrong_architecture_outputs_fail() {
             );
             assert_eq!(state(&retry, "build"), "failed");
             assert_ne!(retry["work"]["build"]["state"]["attempt"], previous);
+            assert!(
+                !planted.exists(),
+                "resume must sweep an abandoned attempt's scratch before retrying"
+            );
         }
     }
 }

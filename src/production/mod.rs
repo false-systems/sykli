@@ -890,6 +890,11 @@ pub fn produce(
     if prepare {
         return inspect(store_path, &request.id()?);
     }
+    // Reclaim concluded attempts before adding more, and only once this command
+    // is certain to do work. Sweeping before the request parses would mean an
+    // unknown target — a command that then does nothing at all — had already
+    // walked and modified every request in the store.
+    store.sweep_concluded();
     advance(&store, &request, None, stop_after, None, jobs)
 }
 
@@ -907,6 +912,10 @@ pub fn resume(
     if let Some(attempt) = abandon {
         abandon_attempt(&store, &request, attempt)?;
     }
+    // After the abandon, not before: abandoning is what turns a contact-lost
+    // attempt into a concluded one, and its scratch is the evidence the
+    // operator was weighing up until that moment.
+    store.sweep_concluded();
     advance(&store, &request, retry, stop_after, operation, jobs)
 }
 
