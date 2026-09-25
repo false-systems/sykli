@@ -14,8 +14,7 @@ opening a pull request:
 cargo run --quiet --locked -- run sykli.json --json
 ```
 
-That is what CI runs. If you have Toimija, `toimija gates run sykli-full`
-runs the same graph against an isolated snapshot and records a receipt.
+That is what CI runs.
 
 The QA graph for behaviour changes lives in `tests/qa/sykli.json`; add a
 task there when you add behaviour, and make sure it fails before your change
