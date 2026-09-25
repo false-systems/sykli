@@ -8,10 +8,10 @@ Product boundaries:
 - Production assessment establishes declared products and checks, not task closure or publication authority. External tools and workers remain optional consumers.
 - Stay a local CLI: no server, network service, daemon, coordination, or agent execution. The one network use is on-demand, read-only acquisition of pull-request evidence through the operator's `gh` (`sykli inspect`); it never mutates a provider, triggers work, or runs candidate code. A bounded executor may finish its attempt after its initiating client exits.
 - Candidate assessment (`sykli inspect` / `sykli assess`) establishes only the declared review-readiness predicates under a printed trust designation. It is advisory: no merge or deployment authority, no claim that GitHub's full merge policy is met.
-- Container runtime, Toimija gate mode, and Ahti append wait until family repositories run v0 daily.
+- Container runtime and Ahti append wait until family repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode) do not return without one.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
-- Treat `sykli plan --json` as the agent-facing query surface; before handoff run `toimija gates run sykli-full`.
+- Treat `sykli plan --json` as the agent-facing query surface; before handoff run sykli's own graph, `cargo run --quiet --locked -- run sykli.json --json` (the same run CI does).
 
 This file is the guidance for any coding agent working in this repository
 (Codex, Claude Code, Gemini, Copilot, Cursor and others read it or are pointed
