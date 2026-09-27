@@ -7,6 +7,15 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Changed
+- A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
+  task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,
+  joins the runtime fingerprint. A pass recorded under one compiler is no
+  longer reused after rustup's default moves. Existing Cargo-graph cache
+  entries miss once; other graphs' keys are unchanged. A Cargo graph whose
+  task shell cannot run those two commands exits 2 from `run` and
+  `plan --explain`.
+
 ## [0.6.0] - 2026-09-09
 
 The first published release of this implementation. Version 0.2.0 was bumped

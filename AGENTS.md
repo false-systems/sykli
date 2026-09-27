@@ -76,7 +76,9 @@ ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
 `inherit` variables (inherited values reach the task; only their digests reach
 the receipt). A task's cache key covers its declaration, input digests
-(content plus execute bits), runtime fingerprint, inherited-value digests, and
+(content plus execute bits), runtime fingerprint (for a Cargo graph, including
+the `rustc -vV`/`cargo -V` the task shell resolves: `graph_runtime`, sykli#64),
+inherited-value digests, and
 the cache keys of its `after` dependencies, so a downstream task never reuses a
 pass recorded against upstream outputs it did not see. The receipt's subject
 binds the git tree OID (computed from a temporary index seeded from HEAD, with

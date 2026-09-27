@@ -375,22 +375,29 @@ struct InputCoverage {
     cargo_missing_inputs: Vec<String>,
 }
 
-fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
-    // This is checked on every invocation, before execution can reuse cached passes. Its
-    // input is the current file inventory, not the contract's existing list.
+/// A Cargo graph: `Cargo.toml` at the root, and the graph declares it or a
+/// task names `cargo`. It decides both the input-completeness check and
+/// whether the toolchain is part of every task's runtime (sykli#64).
+fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
     if !Path::new("Cargo.toml").is_file() {
-        return Ok(Vec::new());
+        return Ok(false);
     }
-    let root = coverage_root()?;
-    let declared = declared_inputs(contract)?;
     let names_cargo = contract.tasks.iter().any(|task| {
         task.run
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
             .any(|word| word == "cargo")
     });
-    if !declared.contains_key(&absolute(Path::new("Cargo.toml"))?) && !names_cargo {
+    Ok(names_cargo || declared_inputs(contract)?.contains_key(&absolute(Path::new("Cargo.toml"))?))
+}
+
+fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
+    // This is checked on every invocation, before execution can reuse cached passes. Its
+    // input is the current file inventory, not the contract's existing list.
+    if !is_cargo_graph(contract)? {
         return Ok(Vec::new());
     }
+    let root = coverage_root()?;
+    let declared = declared_inputs(contract)?;
     let paths = git_paths(
         &root,
         &[
@@ -674,7 +681,7 @@ fn explain_plan(
 ) -> Result<Vec<TaskExplanation>, String> {
     let repository = git(&["rev-parse", "--show-toplevel"])
         .map_err(|_| "plan --explain requires a git repository".to_string())?;
-    let runtime = shell_runtime()?;
+    let runtime = graph_runtime(contract)?;
     let cache = LocalCache::new(Path::new(&repository));
     let changed: HashSet<_> = changed
         .iter()
@@ -1765,7 +1772,7 @@ fn run(
         return Err(cargo_coverage_error(&missing));
     }
     let subject = subject(contract)?;
-    let runtime = shell_runtime()?;
+    let runtime = graph_runtime(contract)?;
     let cache = LocalCache::new(Path::new(&subject.repository));
     cache.bound();
     let tasks = execute(contract, levels, &runtime, &cache, json);
@@ -2736,6 +2743,58 @@ fn shell_runtime() -> Result<ShellRuntime, String> {
         path,
         fingerprint,
         environment,
+    })
+}
+
+/// The runtime a graph's tasks run on. For a Cargo graph that includes the
+/// compiler (sykli#64): `cargo` is usually rustup's proxy, which resolves a
+/// toolchain from `rust-toolchain.toml` or rustup's default, and moving the
+/// default changes neither the shell, `PATH` nor any declared input. So what
+/// the task shell resolves `rustc -vV` and `cargo -V` to, in every workdir the
+/// graph uses and with the tasks' environment, joins the fingerprint. `run`
+/// and `plan --explain` both build their runtime here, so they cannot
+/// disagree about a key.
+fn graph_runtime(contract: &Contract) -> Result<ShellRuntime, String> {
+    let runtime = shell_runtime()?;
+    if !is_cargo_graph(contract)? {
+        return Ok(runtime);
+    }
+    let workdirs: BTreeSet<&Path> = contract
+        .tasks
+        .iter()
+        .map(|task| task.workdir.as_deref().unwrap_or_else(|| Path::new(".")))
+        .collect();
+    let mut reports = Vec::new();
+    for workdir in workdirs {
+        let output = ProcessCommand::new(&runtime.path)
+            .args(["-c", "--", "rustc -vV && cargo -V"])
+            .current_dir(workdir)
+            .env_clear()
+            .envs(
+                runtime
+                    .environment
+                    .iter()
+                    .map(|(name, value)| (name, value)),
+            )
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot resolve the Rust toolchain: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "cannot resolve the Rust toolchain of this Cargo graph in {}: {}",
+                workdir.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        reports.push(serde_json::json!([
+            workdir.to_string_lossy(),
+            sha256(&output.stdout)
+        ]));
+    }
+    let digest = sha256(&serde_json::to_vec(&reports).map_err(|error| error.to_string())?);
+    Ok(ShellRuntime {
+        fingerprint: format!("{}:rust:sha256:{digest}", runtime.fingerprint),
+        ..runtime
     })
 }
 

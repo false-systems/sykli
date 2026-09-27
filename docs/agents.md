@@ -76,6 +76,14 @@ Git discovery errors, invalid base refs and unsupported non-UTF-8 paths return
 exit 2, never an empty successful coverage result. Commands without `--explain`
 keep their existing output. This diagnostic does not modify the graph.
 
+The same Cargo-graph test decides one more thing (sykli#64): the compiler is
+part of every task's runtime. `cargo` is usually rustup's proxy, and moving
+rustup's default changes no file or `PATH` entry, so `run` and explain both
+fold what the task shell resolves `rustc -vV` and `cargo -V` to (in each
+workdir, with the tasks' environment) into the runtime fingerprint. A pass
+recorded under one compiler is `missing` under another. A Cargo graph whose
+task shell cannot run them cannot be evaluated (exit 2).
+
 To inspect a contract edit before accepting it, use
 `sykli plan --explain --preview --json`. Preview reads the edited JSON despite
 lock drift and labels the result with `contract_preview.pinned_hash` and
