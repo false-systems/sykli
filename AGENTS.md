@@ -146,3 +146,11 @@ latched operation must feed the latch again.
   five targets) unless told to.
 - `.sykli/`, `.toimija/`, `.teko/` and `.claude/` are local state and ignored;
   the production store and toimija packets live there.
+
+## Languages
+
+Code in this repository is **Rust, or Elixir/Erlang**. Never add Python, Go
+or Node (JavaScript/TypeScript): not for tools, scripts, CI helpers, tests,
+dashboards or glue. A thin shell step in a CI workflow is fine; anything with
+logic is Rust. Existing Python or Node files are debt to be rewritten, not
+precedent to follow.
