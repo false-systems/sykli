@@ -625,6 +625,71 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
     fs::remove_dir_all(root).unwrap();
 }
 
+/// sykli#64: a Cargo graph runs on whatever compiler rustup resolves. Moving
+/// rustup's default changes neither the shell, `PATH` nor any declared input,
+/// so without the toolchain in the key a pass recorded under one rustc was
+/// reused under another. A fake `rustc` and `cargo` on one fixed `PATH` entry
+/// stand in for rustup's proxies: only what they report changes.
+#[cfg(unix)]
+#[test]
+fn a_cargo_graph_is_not_reused_across_a_toolchain_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = graph_repo(
+        "toolchain",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"check","run":"cargo check","inputs":["Cargo.toml"]}]}"#,
+    );
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+    let bin = root.with_extension("bin");
+    fs::create_dir(&bin).unwrap();
+    let toolchain = |version: &str| {
+        for (tool, line) in [("rustc", "rustc"), ("cargo", "cargo")] {
+            let path = bin.join(tool);
+            fs::write(&path, format!("#!/bin/sh\necho '{line} {version}'\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    };
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .env("PATH", &path)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        receipt["tasks"][0]["outcome"].as_str().unwrap().to_string()
+    };
+    let explain = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["plan", "--explain", "--json"])
+            .env("PATH", &path)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let plan: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        plan["explanations"][0]["cache"]["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    toolchain("1.89.0");
+    assert_eq!(run(), "passed");
+    assert_eq!(run(), "cached");
+    assert_eq!(explain(), "available");
+    toolchain("1.98.1");
+    assert_eq!(
+        explain(),
+        "missing",
+        "explain and run agree that another compiler has no cached pass"
+    );
+    assert_eq!(run(), "passed", "a different compiler is a different task");
+    assert_eq!(run(), "cached");
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(bin).unwrap();
+}
+
 #[test]
 fn one_lock_file_pins_every_contract_in_its_directory() {
     let root = graph_repo(

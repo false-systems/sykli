@@ -161,6 +161,9 @@ the contents and execute bits of its declared inputs, the runtime fingerprint,
 digests of inherited environment values, and the cache keys of every task it
 runs `after`. A downstream task never reuses a pass recorded against upstream
 outputs it did not see, and a matching entry must validate before it is used.
+In a Cargo graph the runtime fingerprint also covers the Rust toolchain the
+task shell resolves (`rustc -vV`, `cargo -V`), so a pass recorded under one
+compiler is not reused under another.
 
 ### A graph you can try
 
