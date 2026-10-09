@@ -1,5 +1,5 @@
 <!-- toimija:adopt:v1:begin -->
-Read `.toimija/current.md` before reading anything else in this repo; it is your workset contract. Under a toimija session your launch prompt names your live packet — that file supersedes this one.
+If your launch prompt names a workset packet, read it before anything else in this repo; it is your workset contract and supersedes this file.
 <!-- toimija:adopt:v1:end -->
 
 Product boundaries:
@@ -15,8 +15,8 @@ Product boundaries:
 
 This file is the guidance for any coding agent working in this repository
 (Codex, Claude Code, Gemini, Copilot, Cursor and others read it or are pointed
-here). Under a toimija session, the packet named in your launch prompt is the
-workset contract; run `toimija verify` before committing.
+here). When your launch prompt names a workset packet, that packet is the
+workset contract; run the check it names before committing.
 
 ## Commands
 
@@ -141,14 +141,15 @@ latched operation must feed the latch again.
 - Never push to `main`; branch, push, open a PR. Never merge without the
   owner's explicit approval of that PR. Push a branch only when it is complete
   and say so: merges here have repeatedly caught branches mid-push.
-- Validate locally before pushing (`sykli run sykli.json`, `toimija verify`);
+- Validate locally before pushing (`sykli run sykli.json`, and any workset
+  check your launch prompt names);
   CI then runs the Linux gate and the Windows tests on every pull request and
   on `main`. The repository is public, so standard hosted runners are free;
   keep to `ubuntu-latest` and `windows-latest` (macOS is the development host
   and is covered locally). Do not push a release tag (`release.yml` builds
   five targets) unless told to.
-- `.sykli/`, `.toimija/`, `.teko/` and `.claude/` are local state and ignored;
-  the production store and toimija packets live there.
+- `.sykli/` and other tools' local state directories are ignored; the
+  production store lives under `.sykli/`.
 
 ## Languages
 

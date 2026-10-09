@@ -8,10 +8,6 @@ repo:
   - datastore
   - server
   - interpreter
-composition:
-  work: teko
-  default_worker: null
-  require_work: false
 context:
   default_budget: 8000
   important_docs:
