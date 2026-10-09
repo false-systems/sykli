@@ -5,6 +5,7 @@
       "inputs": {
         "source": {
           "paths": [
+            ".github/workflows/ci.yml",
             "AGENTS.md",
             "CHANGELOG.md",
             "CLAUDE.md",

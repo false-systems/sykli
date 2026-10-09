@@ -8,6 +8,8 @@ set -eu
 binary=${SYKLI_BINARY:?SYKLI_BINARY is required}
 contract=${SYKLI_CONTRACT:?SYKLI_CONTRACT is required}
 receipt=${SYKLI_RECEIPT:?SYKLI_RECEIPT is required}
+# The commit the receipt must be a clean run of; 'none' skips that check.
+commit=${SYKLI_COMMIT:-HEAD}
 output=${GITHUB_OUTPUT:-/dev/null}
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 
@@ -18,7 +20,11 @@ if [ ! -s "$receipt" ]; then
 fi
 
 set +e
-"$binary" verify "$receipt" --contract "$contract"
+if [ "$commit" = none ]; then
+  "$binary" verify "$receipt" --contract "$contract"
+else
+  "$binary" verify "$receipt" --contract "$contract" --commit "$commit"
+fi
 code=$?
 set -e
 echo "code=$code" >>"$output"
@@ -40,12 +46,12 @@ case "$code" in
     ;;
   2)
     title="cannot verify"
-    hint="the receipt, contract, or git state is unreadable — this is a broken gate, not a failed one"
+    hint="the receipt, contract, or git state is unreadable, or commit $commit is not in this checkout — this is a broken gate, not a failed one"
     level=error
     ;;
   3)
     title="receipt is stale"
-    hint="the tree or declared inputs changed after the run; a task most likely wrote a file that is neither gitignored nor declared as an output"
+    hint="the receipt is not a clean run of commit $commit as checked out now: on pull requests check out the head (actions/checkout with ref: github.event.pull_request.head.sha), not the merge commit; otherwise a task most likely wrote a file that is neither gitignored nor declared as an output"
     level=error
     ;;
   4)

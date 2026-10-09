@@ -25,6 +25,14 @@ inputs:
   verify:
     description: Check the receipt against the tree and contract that produced it.
     default: "true"
+  commit:
+    description: >-
+      The commit the receipt must be a clean, passing run of (`sykli verify --commit`).
+      Defaults to the pull request's head on pull_request events and to HEAD otherwise,
+      so check that head out (actions/checkout with its ref set to
+      github.event.pull_request.head.sha), not GitHub's merge commit.
+      'none' skips the commit check.
+    default: ""
   upload-receipt:
     description: Attach the receipt to the run as an artifact.
     default: "true"
@@ -114,6 +122,7 @@ runs:
         SYKLI_BINARY: ${{ steps.binary.outputs.binary }}
         SYKLI_CONTRACT: ${{ inputs.contract }}
         SYKLI_RECEIPT: ${{ runner.temp }}/sykli-receipt.json
+        SYKLI_COMMIT: ${{ inputs.commit || github.event.pull_request.head.sha || 'HEAD' }}
       run: sh "${{ github.action_path }}/action/verify.sh"
 
     - name: Attach receipt

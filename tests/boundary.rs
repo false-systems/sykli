@@ -559,3 +559,64 @@ fn installed_hooks_gate_real_commits_and_pushes() {
     fs::remove_dir_all(origin).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ci_checks_out_the_pull_request_head_not_the_merge_ref() {
+    let ci =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"))
+            .unwrap();
+    let checkouts = ci.matches("uses: actions/checkout@").count();
+    assert!(checkouts > 0);
+    assert_eq!(
+        ci.matches("ref: ${{ github.event.pull_request.head.sha || github.sha }}")
+            .count(),
+        checkouts,
+        "every checkout names the pull request head"
+    );
+}
+
+/// The Action's verify step, run as the Action runs it, with this build.
+#[cfg(unix)]
+#[test]
+fn the_action_verifies_the_receipt_against_the_pull_request_head() {
+    let root = repo("action", PASSING);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let action_verify = |receipt: &Path, commit: &str| {
+        let output = root.with_extension("github-output");
+        let _ = fs::remove_file(&output);
+        let out = Command::new("sh")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("action/verify.sh"))
+            .current_dir(&root)
+            .env("SYKLI_BINARY", env!("CARGO_BIN_EXE_sykli"))
+            .env("SYKLI_CONTRACT", "sykli.json")
+            .env("SYKLI_RECEIPT", receipt)
+            .env("SYKLI_COMMIT", commit)
+            .env("GITHUB_OUTPUT", &output)
+            .env_remove("GITHUB_STEP_SUMMARY")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let code = fs::read_to_string(&output).unwrap();
+        let _ = fs::remove_file(&output);
+        (code, text(&out.stdout))
+    };
+    // Checked out at GitHub's merge commit, a clean, passing receipt of that
+    // checkout is still not evidence for the pull request's head.
+    fs::write(root.join("file.txt"), "merged\n").unwrap();
+    commit(&root, "merge");
+    let (merged, _) = receipt(&root);
+    let (code, annotations) = action_verify(&merged, &head);
+    assert_eq!(code.trim(), "code=3", "{annotations}");
+    assert!(
+        annotations.contains("pull_request.head.sha"),
+        "{annotations}"
+    );
+    // Checked out at the head itself, it is.
+    git(&root, &["checkout", "--quiet", &head]);
+    let (at_head, _) = receipt(&root);
+    let (code, annotations) = action_verify(&at_head, &head);
+    assert_eq!(code.trim(), "code=0", "{annotations}");
+    let _ = fs::remove_file(merged);
+    let _ = fs::remove_file(at_head);
+    fs::remove_dir_all(root).unwrap();
+}

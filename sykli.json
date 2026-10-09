@@ -130,7 +130,9 @@
         "examples/ci_shadow.rs",
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
-        "tests/qa/sykli.json"
+        "tests/qa/sykli.json",
+        ".github/workflows/ci.yml",
+        "action/verify.sh"
       ]
     }
   ]

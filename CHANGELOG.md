@@ -39,6 +39,11 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Changed
+- The GitHub Action verifies with `--commit`: by default against the pull
+  request's head on `pull_request` events and against HEAD otherwise (new
+  `commit` input; `none` skips it). A workflow that checks out GitHub's merge
+  commit now fails verify with exit 3 on pull requests; check out
+  `github.event.pull_request.head.sha` instead. This repository's CI does.
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
   task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,
   joins the runtime fingerprint. A pass recorded under one compiler is no

@@ -258,11 +258,15 @@ After checkout, install Sykli and your project's toolchain, then:
 ```sh
 mkdir -p .sykli
 sykli run --json > .sykli/receipt.json
-sykli verify .sykli/receipt.json --contract sykli.json
+sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 ```
 
 Fail the job on either command's nonzero exit and keep the receipt as an
-artifact. The included [GitHub Action](action.yml) runs and verifies the graph,
+artifact. On pull requests, check out the pull request's head
+(`ref: ${{ github.event.pull_request.head.sha }}` on `actions/checkout`), not
+GitHub's merge commit, so the receipt is evidence for the commit that gets
+merged. The Action verifies against that head by default; its `commit` input
+overrides that. The included [GitHub Action](action.yml) runs and verifies the graph,
 writes a job summary, uploads the receipt, and reports which tasks a pull
 request affects. It installs a release tag, so pin it with
 `uses: false-systems/sykli@vX.Y.Z` once one is published. This repository gates
