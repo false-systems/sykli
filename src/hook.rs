@@ -129,17 +129,35 @@ pub(crate) fn pre_commit() -> ExitCode {
         Err(error) => return cannot(error),
     };
     match verify(&receipt, &contract, None) {
-        Ok(checks) => match checks.iter().find(|check| !check.ok) {
-            Some(failed) => refuse(format!(
-                "the run's receipt does not verify: {}",
-                refusal(failed)
-            )),
-            None => {
-                eprintln!("sykli hook {HOOK}: the staged tree passed");
-                ExitCode::SUCCESS
+        Ok(checks) => {
+            if let Some(failed) = checks.iter().find(|check| !check.ok) {
+                return refuse(format!(
+                    "the run's receipt does not verify: {}",
+                    refusal(failed)
+                ));
             }
-        },
-        Err(error) => cannot(error),
+        }
+        Err(error) => return cannot(error),
+    }
+    // The checks above are early, readable refusals; this is the guarantee.
+    // `git diff` is silent for assume-unchanged and skip-worktree files, so
+    // compare the tree that ran with the tree the index will commit.
+    let ran = std::fs::read(&receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|receipt| receipt["subject"]["tree_oid"].as_str().map(String::from));
+    let committed = git(&["write-tree"]).and_then(|tree| commit_tree_oid(Path::new("."), &tree));
+    match (ran, committed) {
+        (Some(ran), Ok(committed)) if ran == committed => {
+            eprintln!("sykli hook {HOOK}: the staged tree passed");
+            ExitCode::SUCCESS
+        }
+        (Some(ran), Ok(committed)) => refuse(format!(
+            "the run's tree {ran} is not the tree being committed {committed}; a file marked \
+             assume-unchanged or skip-worktree differs from what is staged (`git ls-files -v` marks them)"
+        )),
+        (None, _) => cannot(format!("cannot read the tree from {}", receipt.display())),
+        (_, Err(error)) => cannot(error),
     }
 }
 

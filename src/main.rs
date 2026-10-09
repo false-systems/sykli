@@ -2979,7 +2979,8 @@ fn head_tree_oid(repository: &Path) -> Result<String, String> {
 }
 
 /// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
-/// Where `.sykli` is untracked (the usual case) this is `COMMIT^{tree}`.
+/// Where `.sykli` is untracked (the usual case) this is `COMMIT^{tree}`. Any
+/// tree-ish works, so the pre-commit hook passes the index's `write-tree`.
 fn commit_tree_oid(repository: &Path, commit: &str) -> Result<String, String> {
     let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
     git_with_temporary_state(repository, &state, &["read-tree", commit])

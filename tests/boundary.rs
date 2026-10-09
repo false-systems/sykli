@@ -938,3 +938,24 @@ fn a_push_with_one_refused_ref_is_refused_whole() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Review finding 3: `git diff` is silent for files marked assume-unchanged
+/// or skip-worktree, so the hook compares the run's tree with the index.
+#[test]
+fn pre_commit_compares_the_run_with_the_tree_it_commits() {
+    for bit in ["--assume-unchanged", "--skip-worktree"] {
+        let root = repo("indexbits", READS_FILE);
+        fs::write(root.join("file.txt"), "broken\n").unwrap();
+        git(&root, &["add", "file.txt"]);
+        fs::write(root.join("file.txt"), "one\n").unwrap();
+        git(&root, &["update-index", bit, "file.txt"]);
+        let out = sykli(&root, &["hook", "pre-commit"]);
+        assert_eq!(out.status.code(), Some(1), "{bit}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stderr).contains("not the tree being committed"),
+            "{bit}: {}",
+            text(&out.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

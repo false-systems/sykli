@@ -307,7 +307,13 @@ a hook it did not write unless you pass `--force`. Running it again is safe.
 - `sykli hook pre-commit` refuses the commit when a tracked file has changes
   that are not staged, or an untracked file is not ignored, because the run
   would then check a tree other than the commit's. Otherwise it runs and
-  verifies the graph on exactly the staged tree. It stashes nothing.
+  verifies the graph, and last compares the tree that ran with the tree the
+  index will commit (`git write-tree`), so a file marked assume-unchanged or
+  skip-worktree cannot carry other content past it. It stashes nothing. A tool
+  that writes a temporary file beside an ignored one (`name.json.tmp-*` next to
+  an ignored `name.json`) trips the untracked-file refusal while it writes;
+  the fix belongs in that tool: write temporary files into an ignored
+  directory.
 - `sykli hook pre-push` refuses a push that moves the remote's default branch
   unless this worktree holds a receipt that passes
   `sykli verify --commit` for the pushed commit. It looks in

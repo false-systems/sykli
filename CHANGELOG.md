@@ -25,7 +25,9 @@ contract consumer can observe; internal refactors are not listed.
   being committed rather than the files on disk. It refuses (exit 1) when a
   tracked file has unstaged changes or an untracked file is not ignored, since
   the run would then check another tree; otherwise it runs and verifies the
-  graph and refuses when either fails. It stashes nothing. No `sykli.json` or
+  graph and refuses when either fails, or when the tree that ran is not the
+  tree the index will commit (`git write-tree`; `git diff` is silent for
+  assume-unchanged and skip-worktree files). It stashes nothing. No `sykli.json` or
   `sykli.rs` at the root, or no commit yet, passes with a note.
 - `sykli hook pre-push [REMOTE [URL]]`, a git pre-push entrypoint reading
   git's `<local ref> <local sha> <remote ref> <remote sha>` lines. A push that
