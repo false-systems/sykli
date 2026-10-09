@@ -3436,6 +3436,20 @@ fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8
     Ok(Some(blob.stdout))
 }
 
+/// Whether `verify --commit` also requires a clean run (`dirty: false`).
+///
+/// This is policy, not evidence. Once the receipt's tree is the commit's
+/// tree, the run checked exactly the commit's content whatever HEAD was; a
+/// clean run adds that the commit was checked out when it ran. Requiring it
+/// costs a second, cached run after committing, because the pre-commit hook's
+/// run happens before HEAD moves and is always dirty. `false` keeps reporting
+/// the `clean` check but stops it refusing; submodule changes are refused by
+/// their own check either way. Changing this flips the end-to-end hook tests
+/// that encode the second run (`installed_hooks_gate_real_commits_and_pushes`,
+/// `pre_push_refuses_a_failing_or_dirty_commit_on_main` and the dirty-run
+/// `verify_commit_*` test).
+const COMMIT_REQUIRES_CLEAN_RUN: bool = true;
+
 /// The receipt's tree is the commit's, and the run was clean.
 fn commit_checks(
     checks: &mut Vec<Check>,
@@ -3476,7 +3490,7 @@ fn commit_checks(
             Some(_) => format!("dirty {dirty}"),
             None => format!("dirty {dirty} and no HEAD tree recorded"),
         },
-        ok: clean,
+        ok: clean || !COMMIT_REQUIRES_CLEAN_RUN,
         failure_code: TREE_MISMATCH,
     });
     Ok(())

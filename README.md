@@ -418,7 +418,10 @@ sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 With `--commit REV`, the subject is the commit, not the checkout. The
 contract and its `sykli.lock` pin are read from `REV`. The receipt's tree must
 be `REV^{tree}`, and the run must have been clean (`dirty: false`, the tree
-that ran was HEAD's). Otherwise it exits 3. Nothing is read from the checkout,
+that ran was HEAD's). Otherwise it exits 3. The tree check is what binds the
+receipt to the commit's content; requiring a clean run is policy on top of it,
+that the commit was checked out when it ran. It is why a pre-commit run, made
+before HEAD moves, does not count for a push. Nothing is read from the checkout,
 so any commit can be verified from any checkout, uncommitted edits or not.
 Declared inputs that the commit does not track, such as ignored files, are not
 part of a commit and are not judged. On any failure, the first failing check is
