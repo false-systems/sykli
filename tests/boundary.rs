@@ -205,3 +205,82 @@ fn verify_commit_cannot_verify_an_unknown_revision() {
     let _ = fs::remove_file(path);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The task reads `file.txt`, so it passes only while that file says `one`.
+const READS_FILE: &str = r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"test \"$(cat file.txt)\" = one","inputs":["file.txt"]}]}"#;
+
+#[test]
+fn pre_commit_refuses_when_the_disk_is_not_what_is_staged() {
+    let root = repo("staged", READS_FILE);
+    // Stage a broken line, then put the disk back as HEAD has it: the commit
+    // would carry the broken line, while the files on disk still pass.
+    fs::write(root.join("file.txt"), "broken\n").unwrap();
+    git(&root, &["add", "file.txt"]);
+    fs::write(root.join("file.txt"), "one\n").unwrap();
+    assert_eq!(
+        sykli(&root, &["run", "sykli.json"]).status.code(),
+        Some(0),
+        "a run checks the disk, which passes"
+    );
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert!(message.contains("file.txt"), "{message}");
+    assert!(message.contains("not staged"), "{message}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_commit_refuses_untracked_files_the_commit_would_not_carry() {
+    let root = repo("untracked", READS_FILE);
+    fs::write(root.join("new.txt"), "scratch\n").unwrap();
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("new.txt"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Ignored files are not part of any tree, and `.sykli/` is sykli's own.
+    fs::write(root.join(".gitignore"), "new.txt\n").unwrap();
+    git(&root, &["add", ".gitignore"]);
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_commit_runs_the_graph_on_exactly_what_is_staged() {
+    let root = repo("gate", READS_FILE);
+    // Staged and on disk alike: the commit's tree is what runs.
+    fs::write(root.join("file.txt"), "broken\n").unwrap();
+    git(&root, &["add", "file.txt"]);
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refusing"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    fs::write(root.join("file.txt"), "one\n").unwrap();
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    git(&root, &["add", "--all"]);
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_commit_passes_where_there_is_no_contract() {
+    let root = repo("nocontract", PASSING);
+    git(&root, &["rm", "--quiet", "sykli.json", "sykli.lock"]);
+    let out = sykli(&root, &["hook", "pre-commit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no sykli.json"),
+        "{}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}

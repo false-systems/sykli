@@ -285,6 +285,18 @@ observations do not prove that declarations are complete.
 
 </details>
 
+## Git hooks
+
+A run checks the files on disk. A commit carries what is staged. The hooks
+check what is committed:
+
+- `sykli hook pre-commit` refuses the commit when a tracked file has changes
+  that are not staged, or an untracked file is not ignored, because the run
+  would then check a tree other than the commit's. Otherwise it runs and
+  verifies the graph on exactly the staged tree. It stashes nothing.
+
+A repository with no `sykli.json` or `sykli.rs` passes with a note.
+
 ## Built for agents
 
 The CLI does the querying, and `--json` gives scripts and agents the same
@@ -408,7 +420,8 @@ entry costs a re-run, never a result.
 | | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
 | | `run` | Execute the graph and record a receipt |
-| | `verify` | Check a receipt against the current tree and contract |
+| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit |
+| | `hook` | Git hook entrypoints that gate what is committed |
 | **Production** | `targets` | Discover typed artifact targets without building |
 | | `produce` | Build an artifact from captured source and run its checks |
 | | `status` · `resume` | Inspect or continue a production by ID |

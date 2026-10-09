@@ -17,6 +17,12 @@ contract consumer can observe; internal refactors are not listed.
   tree on disk.
 - `verify` prints the first failing check to stderr as one line
   (`refused: CHECK expected … but got …`); stdout is unchanged.
+- `sykli hook pre-commit`, a git pre-commit entrypoint that checks the tree
+  being committed rather than the files on disk. It refuses (exit 1) when a
+  tracked file has unstaged changes or an untracked file is not ignored, since
+  the run would then check another tree; otherwise it runs and verifies the
+  graph and refuses when either fails. It stashes nothing. No `sykli.json` or
+  `sykli.rs` at the root, or no commit yet, passes with a note.
 
 ### Changed
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the

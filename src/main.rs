@@ -19,6 +19,7 @@ mod assessment;
 mod canonical;
 mod evidence;
 mod github;
+mod hook;
 mod init;
 mod inspect;
 #[cfg(unix)]
@@ -332,6 +333,24 @@ enum Command {
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
     },
+    /// Git hook entrypoints that gate what is committed and pushed
+    Hook {
+        #[command(subcommand)]
+        hook: Hook,
+    },
+}
+
+#[derive(Subcommand)]
+enum Hook {
+    /// Refuse a commit unless the graph passes on exactly the tree being committed
+    #[command(after_help = "Exit codes:\n  \
+        0  the graph passed on the staged tree, or there is no sykli.json or sykli.rs\n  \
+        1  refused: unstaged changes or untracked files, or the graph failed\n  \
+        2  could not evaluate: no git repository or an unreadable contract\n\n\
+        Runs from the repository root. A tracked file whose disk content differs\n\
+        from the index, or an untracked file that is not ignored, would make the\n\
+        run check a tree other than the commit's, so either one refuses the commit.")]
+    PreCommit,
 }
 
 /// `sykli-lock.v2`: one lock file per directory, one entry per contract file
@@ -969,13 +988,16 @@ fn main() -> ExitCode {
         Command::Run { contract, json } => match load(&contract)
             .and_then(|(contract, levels, hash)| run(&contract, &levels, hash, json))
         {
-            Ok(true) => ExitCode::SUCCESS,
-            Ok(false) => ExitCode::FAILURE,
+            Ok((true, _)) => ExitCode::SUCCESS,
+            Ok((false, _)) => ExitCode::FAILURE,
             Err(error) => {
                 eprintln!("error: {error}");
                 ExitCode::from(2)
             }
         },
+        Command::Hook {
+            hook: Hook::PreCommit,
+        } => hook::pre_commit(),
         Command::Plan {
             contract,
             changed,
@@ -1768,12 +1790,13 @@ fn cache_entries(directory: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)>
     out
 }
 
+/// Whether every task passed or was cached, and where the receipt was written.
 fn run(
     contract: &Contract,
     levels: &[Vec<usize>],
     contract_hash: String,
     json: bool,
-) -> Result<bool, String> {
+) -> Result<(bool, PathBuf), String> {
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
@@ -1825,7 +1848,7 @@ fn run(
     } else {
         println!("receipt: {}", path.display());
     }
-    Ok(matches!(outcome, Outcome::Passed | Outcome::Cached))
+    Ok((matches!(outcome, Outcome::Passed | Outcome::Cached), path))
 }
 
 fn execute(

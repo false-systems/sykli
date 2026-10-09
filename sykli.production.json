@@ -26,6 +26,7 @@
             "src/canonical.rs",
             "src/evidence.rs",
             "src/github.rs",
+            "src/hook.rs",
             "src/init.rs",
             "src/inspect.rs",
             "src/lib.rs",
