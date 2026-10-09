@@ -320,7 +320,11 @@ enum Command {
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
         3  tree or input mismatch — receipt is stale; re-run sykli\n     \
            (with --commit: not a clean run of that commit's tree)\n  \
-        4  contract mismatch — contract drifted from the receipt; re-lock\n\n\
+        4  contract mismatch — contract drifted from the receipt; re-lock\n     \
+           (with --commit: from the contract or lock in that commit)\n\n\
+        Without --commit the subject is the checkout: its tree and declared inputs.\n\
+        With --commit the subject is the commit, and nothing is read from the\n\
+        checkout; REV is resolved in the repository around the current directory.\n\
         On any failure the first failing check is also printed to stderr as one line.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
@@ -328,8 +332,9 @@ enum Command {
         /// Path to sykli.rs or a sykli-contract.v1 JSON file
         #[arg(long, default_value = "sykli.rs")]
         contract: PathBuf,
-        /// Also require a clean run of this commit: the receipt's tree is
-        /// REV^{tree}, the run was not dirty, and every task passed or was cached
+        /// Judge the receipt as evidence for this commit instead of the checkout:
+        /// the contract and lock are read from REV, the receipt's tree must be
+        /// REV^{tree}, the run clean, and every task passed or cached
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
     },
@@ -1307,26 +1312,32 @@ fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>, String> {
     if !lock_path.is_file() {
         return Ok(None);
     }
+    let bytes = fs::read(lock_path).map_err(|error| error.to_string())?;
+    parse_lock(&bytes, &lock_path.display().to_string()).map(Some)
+}
+
+fn parse_lock(bytes: &[u8], name: &str) -> Result<LockFile, String> {
     let lock: LockFile =
-        serde_json::from_slice(&fs::read(lock_path).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("invalid {}: {error}", lock_path.display()))?;
+        serde_json::from_slice(bytes).map_err(|error| format!("invalid {name}: {error}"))?;
     match lock.schema.as_str() {
         "sykli-lock.v1" if lock.contract_hash.is_some() && lock.contracts.is_empty() => {}
         "sykli-lock.v2" if lock.contract_hash.is_none() => {}
-        _ => return Err(format!("unsupported lock file {}", lock_path.display())),
+        _ => return Err(format!("unsupported lock file {name}")),
     }
-    Ok(Some(lock))
+    Ok(lock)
+}
+
+/// The hash a lock file pins for this contract, if it pins one.
+fn pinned(lock: LockFile, contract: &Path) -> Option<String> {
+    match lock.contract_hash {
+        Some(hash) => Some(hash),
+        None => lock.contracts.get(&lock_key(contract)).cloned(),
+    }
 }
 
 /// The pinned hash for this contract, if its directory's lock file has one.
 fn read_lock(path: &Path) -> Result<Option<String>, String> {
-    let Some(lock) = read_lock_file(&lock_path(path))? else {
-        return Ok(None);
-    };
-    Ok(match lock.contract_hash {
-        Some(hash) => Some(hash),
-        None => lock.contracts.get(&lock_key(path)).cloned(),
-    })
+    Ok(read_lock_file(&lock_path(path))?.and_then(|lock| pinned(lock, path)))
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
@@ -1344,8 +1355,12 @@ fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), Str
             path.display()
         ));
     };
+    parse_contract(&bytes)
+}
+
+fn parse_contract(bytes: &[u8]) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let hash = sha256(&serde_json::to_vec(&value).map_err(|error| error.to_string())?);
     let contract: Contract = serde_json::from_value(value).map_err(|error| error.to_string())?;
     let levels = validate(&contract)?;
@@ -3202,9 +3217,13 @@ impl Check {
 /// working tree and the pinned contract, and its outcome was success. It
 /// cannot prove the commands truly ran — that would take attestation.
 ///
-/// With a commit, the receipt must also be a clean run of that commit: its
-/// tree is the commit's tree and HEAD's tree when it ran (`dirty: false`). A
-/// receipt binds a tree, so this is what ties it to a commit someone pushes.
+/// With a commit, the subject is that commit and nothing is read from the
+/// checkout: the contract and its lock pin come from the commit, the
+/// receipt's tree must be the commit's tree, and the run must have been
+/// clean. A receipt binds a tree, so this is what ties it to a commit someone
+/// pushes, whatever is checked out or uncommitted when it is asked. Declared
+/// inputs the commit does not track are local state, like the toolchain, and
+/// are not judged.
 fn verify(
     receipt_path: &Path,
     contract_path: &Path,
@@ -3213,85 +3232,199 @@ fn verify(
     let receipt: ReceiptSummary =
         serde_json::from_slice(&fs::read(receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", receipt_path.display()))?;
-    let (contract, _, contract_hash) = load_unlocked(contract_path)?;
     let mut checks = vec![Check::equals(
         "schema",
         NOT_VERIFIABLE,
         "sykli-receipt.v1",
-        receipt.schema,
+        &receipt.schema,
     )];
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
-    if let Some(lock) = read_lock(contract_path)? {
+    let contract = match commit {
+        None => {
+            let (contract, _, contract_hash) = load_unlocked(contract_path)?;
+            let lock = read_lock(contract_path)?;
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+                return Ok(checks);
+            }
+            let subject = subject(&contract)?;
+            checks.extend([
+                Check::equals(
+                    "tree",
+                    TREE_MISMATCH,
+                    subject.tree_oid,
+                    &receipt.subject.tree_oid,
+                ),
+                Check::equals(
+                    "inputs",
+                    TREE_MISMATCH,
+                    subject.inputs_digest,
+                    &receipt.subject.inputs_digest,
+                ),
+            ]);
+            contract
+        }
+        Some(rev) => {
+            let repository =
+                PathBuf::from(git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
+                    "not inside a git repository; --commit names a commit".to_string()
+                })?);
+            let id = resolve_commit(&repository, rev)?;
+            let (contract, contract_hash, lock) = contract_at(&repository, &id, contract_path)?;
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+                return Ok(checks);
+            }
+            commit_checks(&mut checks, &receipt, &repository, &id)?;
+            contract
+        }
+    };
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    record_checks(&mut checks, &receipt, &contract);
+    Ok(checks)
+}
+
+/// The contract and lock stages; whether both passed.
+fn contract_checks(
+    checks: &mut Vec<Check>,
+    receipt: &ReceiptSummary,
+    contract_hash: &str,
+    lock: Option<String>,
+) -> bool {
+    if let Some(lock) = lock {
         checks.push(Check::equals(
             "contract lock",
             CONTRACT_MISMATCH,
-            &contract_hash,
+            contract_hash,
             lock,
         ));
     }
     checks.push(Check::equals(
         "contract",
         CONTRACT_MISMATCH,
-        &contract_hash,
-        receipt.contract_hash,
+        contract_hash,
+        &receipt.contract_hash,
     ));
-    if checks.iter().any(|check| !check.ok) {
-        return Ok(checks);
+    checks.iter().all(|check| check.ok)
+}
+
+/// The contract and its lock pin as `commit` has them, read from git rather
+/// than from the checkout. JSON only: an emitter would have to be run, and
+/// `sykli.rs` falls back to `sykli.json` beside it, as `run` does.
+fn contract_at(
+    repository: &Path,
+    commit: &str,
+    contract: &Path,
+) -> Result<(Contract, String, Option<String>), String> {
+    let short = &commit[..12];
+    let mut path = contract.to_path_buf();
+    let mut bytes = blob_at(repository, commit, &path)?;
+    if bytes.is_none() && path.file_name().is_some_and(|name| name == "sykli.rs") {
+        path.set_file_name("sykli.json");
+        bytes = blob_at(repository, commit, &path)?;
     }
-    if let Some(rev) = commit {
-        let repository = git(&["rev-parse", "--show-toplevel"])
-            .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
-        let id = resolve_commit(Path::new(&repository), rev)?;
-        let tree = commit_tree_oid(Path::new(&repository), &id)?;
-        let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
-        check.expected = format!("{} (the tree of commit {})", check.expected, &id[..12]);
-        checks.push(check);
-        // `dirty` alone is one editable field; HEAD's recorded tree must agree.
-        let clean = receipt.subject.dirty == Some(false)
-            && receipt.subject.head_tree_oid.as_deref() == Some(&receipt.subject.tree_oid);
-        let dirty = receipt
-            .subject
-            .dirty
-            .map_or("absent".into(), |dirty| dirty.to_string());
-        checks.push(Check {
-            name: "clean",
-            expected: "a clean run (dirty false: the tree that ran was HEAD's)".into(),
-            actual: match receipt.subject.head_tree_oid.as_deref() {
-                _ if clean => "dirty false".into(),
-                Some(head) if head != receipt.subject.tree_oid => format!(
-                    "dirty {dirty}: tree {} ran with HEAD at tree {head}",
-                    receipt.subject.tree_oid
-                ),
-                Some(_) => format!("dirty {dirty}"),
-                None => format!("dirty {dirty} and no HEAD tree recorded"),
-            },
-            ok: clean,
-            failure_code: TREE_MISMATCH,
-        });
-        if checks.iter().any(|check| !check.ok) {
-            return Ok(checks);
-        }
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        return Err(format!(
+            "verify --commit reads a JSON contract from the commit; {} is not one",
+            path.display()
+        ));
     }
-    let subject = subject(&contract)?;
-    checks.extend([
-        Check::equals(
-            "tree",
-            TREE_MISMATCH,
-            subject.tree_oid,
-            receipt.subject.tree_oid,
+    let bytes = bytes.ok_or_else(|| format!("commit {short} has no {}", path.display()))?;
+    let (contract, _, hash) = parse_contract(&bytes)
+        .map_err(|error| format!("{} in commit {short}: {error}", path.display()))?;
+    let lock = match blob_at(repository, commit, &lock_path(&path))? {
+        Some(bytes) => pinned(
+            parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
+            &path,
         ),
-        Check::equals(
-            "inputs",
-            TREE_MISMATCH,
-            subject.inputs_digest,
-            receipt.subject.inputs_digest,
-        ),
-    ]);
-    if checks.iter().any(|check| !check.ok) {
-        return Ok(checks);
+        None => None,
+    };
+    Ok((contract, hash, lock))
+}
+
+/// A file's bytes as `commit` has them, or `None` when it has no such file.
+/// A relative path is relative to the current directory, as `--contract` is.
+fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path_text = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    let spec = if path.is_absolute() {
+        let relative = path.strip_prefix(repository).map_err(|_| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                repository.display()
+            )
+        })?;
+        format!("{commit}:{}", path_text(relative))
+    } else {
+        format!("{commit}:./{}", path_text(path))
+    };
+    let object = ProcessCommand::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !object.status.success() {
+        return Ok(None);
     }
+    let id = String::from_utf8_lossy(&object.stdout).trim().to_string();
+    let blob = ProcessCommand::new("git")
+        .args(["cat-file", "blob", &id])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !blob.status.success() {
+        return Err(format!("{spec} is not a file"));
+    }
+    Ok(Some(blob.stdout))
+}
+
+/// The receipt's tree is the commit's, and the run was clean.
+fn commit_checks(
+    checks: &mut Vec<Check>,
+    receipt: &ReceiptSummary,
+    repository: &Path,
+    commit: &str,
+) -> Result<(), String> {
+    let tree = commit_tree_oid(repository, commit)?;
+    let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
+    check.expected = format!("{} (the tree of commit {})", check.expected, &commit[..12]);
+    checks.push(check);
+    // `dirty` alone is one editable field; HEAD's recorded tree must agree.
+    let clean = receipt.subject.dirty == Some(false)
+        && receipt.subject.head_tree_oid.as_deref() == Some(&receipt.subject.tree_oid);
+    let dirty = receipt
+        .subject
+        .dirty
+        .map_or("absent".into(), |dirty| dirty.to_string());
+    checks.push(Check {
+        name: "clean",
+        expected: "a clean run (dirty false: the tree that ran was HEAD's)".into(),
+        actual: match receipt.subject.head_tree_oid.as_deref() {
+            _ if clean => "dirty false".into(),
+            Some(head) if head != receipt.subject.tree_oid => format!(
+                "dirty {dirty}: tree {} ran with HEAD at tree {head}",
+                receipt.subject.tree_oid
+            ),
+            Some(_) => format!("dirty {dirty}"),
+            None => format!("dirty {dirty} and no HEAD tree recorded"),
+        },
+        ok: clean,
+        failure_code: TREE_MISMATCH,
+    });
+    Ok(())
+}
+
+/// The records and outcome stages, against the contract that was judged.
+fn record_checks(checks: &mut Vec<Check>, receipt: &ReceiptSummary, contract: &Contract) {
     let contradiction = if receipt.tasks.len() != contract.tasks.len() {
         Some(format!(
             "{} task records for {} declared tasks",
@@ -3326,7 +3459,7 @@ fn verify(
         failure_code: NOT_VERIFIABLE,
     });
     if contradiction.is_some() {
-        return Ok(checks);
+        return;
     }
     let tasks_ok = receipt
         .tasks
@@ -3343,7 +3476,6 @@ fn verify(
         ok: matches!(receipt.outcome.as_str(), "passed" | "cached") && tasks_ok,
         failure_code: OUTCOME_FAILED,
     });
-    Ok(checks)
 }
 
 /// Verify exit codes are stages, like a CI pipeline: checks run in order and

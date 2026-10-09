@@ -258,10 +258,11 @@ After checkout, install Sykli and your project's toolchain, then:
 ```sh
 mkdir -p .sykli
 sykli run --json > .sykli/receipt.json
+sykli verify .sykli/receipt.json --contract sykli.json
 sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 ```
 
-Fail the job on either command's nonzero exit and keep the receipt as an
+Fail the job on any command's nonzero exit and keep the receipt as an
 artifact. On pull requests, check out the pull request's head
 (`ref: ${{ github.event.pull_request.head.sha }}` on `actions/checkout`), not
 GitHub's merge commit, so the receipt is evidence for the commit that gets
@@ -402,10 +403,18 @@ marked `dirty`. To ask whether a receipt is evidence for a commit, name it:
 sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 ```
 
-With `--commit REV`, verify also requires that the receipt's tree is
-`REV^{tree}` and that the run was clean (`dirty: false`, the tree that ran was
-HEAD's). Otherwise it exits 3. On any failure, the first failing check is also
-printed to stderr as one line.
+With `--commit REV`, the subject is the commit, not the checkout. The
+contract and its `sykli.lock` pin are read from `REV`. The receipt's tree must
+be `REV^{tree}`, and the run must have been clean (`dirty: false`, the tree
+that ran was HEAD's). Otherwise it exits 3. Nothing is read from the checkout,
+so any commit can be verified from any checkout, uncommitted edits or not.
+Declared inputs that the commit does not track, such as ignored files, are not
+part of a commit and are not judged. On any failure, the first failing check is
+also printed to stderr as one line.
+
+Without `--commit`, verify judges the checkout as it is now. Run both in CI: a
+run hashes its tree before its tasks execute, so only the live check notices a
+task that leaves an undeclared file behind.
 
 A receipt also records **when**. `started_at_ms` on the run is when that run
 began; on a task, it is when that task was seen running. A cached task replays

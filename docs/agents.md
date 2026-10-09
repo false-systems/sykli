@@ -8,9 +8,11 @@ receipt still describes the tree in front of you. Exit codes are the answer:
 0 verified, 1 the work failed, 2 cannot verify, 3 the tree or inputs changed,
 4 the contract changed. Write receipts under `.sykli/` or outside the tree;
 a receipt inside the tree changes the tree it describes. A receipt binds a
-tree, not a commit: `sykli verify RECEIPT --commit REV` also requires a clean
-run (`dirty: false`) of exactly `REV^{tree}`, exits 3 when it is not one, and
-prints the first failing check on stderr.
+tree, not a commit: `sykli verify RECEIPT --commit REV` judges the receipt as
+evidence for that commit, reading the contract and lock from `REV` and nothing
+from the checkout. It requires a clean run (`dirty: false`) of exactly
+`REV^{tree}`, exits 3 when it is not one, and prints the first failing check on
+stderr.
 
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also

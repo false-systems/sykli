@@ -20,14 +20,30 @@ if [ ! -s "$receipt" ]; then
 fi
 
 set +e
-if [ "$commit" = none ]; then
-  "$binary" verify "$receipt" --contract "$contract"
-else
-  "$binary" verify "$receipt" --contract "$contract" --commit "$commit"
-fi
+# The live check first: `run` hashes the tree before its tasks execute, so
+# only this sees a task that left a file behind. Then the commit check, which
+# reads nothing from the checkout: is this receipt evidence for that commit?
+"$binary" verify "$receipt" --contract "$contract"
 code=$?
+stage=checkout
+if [ "$code" = 0 ] && [ "$commit" != none ]; then
+  "$binary" verify "$receipt" --contract "$contract" --commit "$commit"
+  code=$?
+  stage=commit
+fi
 set -e
 echo "code=$code" >>"$output"
+
+# GitHub's default pull-request checkout is a merge commit whose second
+# parent is the head; name that case exactly.
+merge_checkout=false
+if [ "$stage" = commit ] && [ "$code" = 3 ]; then
+  head=$(git rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null || true)
+  second=$(git rev-parse --verify --quiet "HEAD^2" 2>/dev/null || true)
+  if [ -n "$head" ] && [ "$head" = "$second" ]; then
+    merge_checkout=true
+  fi
+fi
 
 # Exit-code policy. Sykli's verify codes are stages: checks run in
 # order and the first failing stage decides. This block is the only place the
@@ -51,7 +67,13 @@ case "$code" in
     ;;
   3)
     title="receipt is stale"
-    hint="the receipt is not a clean run of commit $commit as checked out now: on pull requests check out the head (actions/checkout with ref: github.event.pull_request.head.sha), not the merge commit; otherwise a task most likely wrote a file that is neither gitignored nor declared as an output"
+    if [ "$merge_checkout" = true ]; then
+      hint="this job checked out GitHub's merge commit, not the pull request head $commit: set actions/checkout's ref to github.event.pull_request.head.sha"
+    elif [ "$stage" = commit ]; then
+      hint="the receipt is not a clean run of commit $commit: check out that commit and run the graph there"
+    else
+      hint="the tree or declared inputs changed after the run; a task most likely wrote a file that is neither gitignored nor declared as an output"
+    fi
     level=error
     ;;
   4)

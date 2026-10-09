@@ -8,11 +8,15 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
-- `sykli verify RECEIPT --contract FILE --commit REV` ties a receipt to a
-  commit. Besides the existing checks it requires the receipt's tree to be
+- `sykli verify RECEIPT --contract FILE --commit REV` judges a
+  receipt as evidence for a commit rather than the checkout. The contract and
+  its lock pin are read from `REV`, and nothing is read from the checkout, so
+  any commit verifies from any checkout. The receipt's tree must be
   `REV^{tree}` (with `.sykli/` excluded, as in every receipt tree) and the run
-  to be clean: `dirty: false`, with HEAD's recorded tree equal to the tree that
-  ran. A miss exits 3; a revision that names no commit exits 2. Without
+  clean: `dirty: false`, with HEAD's recorded tree equal to the tree that ran.
+  A miss exits 3, a contract or lock in `REV` that differs exits 4, and a
+  revision that names no commit, or a commit without the JSON contract, exits
+  2. Declared inputs the commit does not track are not judged. Without
   `--commit`, verify is unchanged and still accepts a dirty receipt for the
   tree on disk.
 - `verify` prints the first failing check to stderr as one line
@@ -38,12 +42,16 @@ contract consumer can observe; internal refactors are not listed.
   write is replaced only with `--force` (exit 1 otherwise, nothing written),
   and a `core.hooksPath` that sends git elsewhere is refused.
 
+### Breaking
+- The GitHub Action verifies twice: the live check against the checkout, as
+  before, and then `--commit`, by default against the pull request's head on
+  `pull_request` events and against HEAD otherwise (new `commit` input; `none`
+  skips the second check). **A workflow that checks out GitHub's merge commit
+  now fails verify with exit 3 on pull requests**, and the annotation says the
+  merge commit was checked out. Check out `github.event.pull_request.head.sha`
+  instead; this repository's CI does.
+
 ### Changed
-- The GitHub Action verifies with `--commit`: by default against the pull
-  request's head on `pull_request` events and against HEAD otherwise (new
-  `commit` input; `none` skips it). A workflow that checks out GitHub's merge
-  commit now fails verify with exit 3 on pull requests; check out
-  `github.event.pull_request.head.sha` instead. This repository's CI does.
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
   task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,
   joins the runtime fingerprint. A pass recorded under one compiler is no

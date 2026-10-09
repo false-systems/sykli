@@ -608,7 +608,7 @@ fn the_action_verifies_the_receipt_against_the_pull_request_head() {
     let (code, annotations) = action_verify(&merged, &head);
     assert_eq!(code.trim(), "code=3", "{annotations}");
     assert!(
-        annotations.contains("pull_request.head.sha"),
+        annotations.contains("not a clean run of commit"),
         "{annotations}"
     );
     // Checked out at the head itself, it is.
@@ -618,5 +618,253 @@ fn the_action_verifies_the_receipt_against_the_pull_request_head() {
     assert_eq!(code.trim(), "code=0", "{annotations}");
     let _ = fs::remove_file(merged);
     let _ = fs::remove_file(at_head);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Review of the Boundary: `--commit` must judge the receipt against the
+/// commit alone, whatever is checked out and whatever is uncommitted.
+#[test]
+fn verify_commit_judges_the_commit_not_the_checkout() {
+    let root = repo("notcheckedout", PASSING);
+    let first = git(&root, &["rev-parse", "HEAD"]);
+    let (r1, _) = receipt(&root);
+    // A second commit changes a file and the contract itself.
+    fs::write(root.join("file.txt"), "two\n").unwrap();
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true","inputs":["file.txt"]},{"name":"u","run":"true"}]}"#,
+    )
+    .unwrap();
+    assert!(sykli(&root, &["lock", "sykli.json"]).status.success());
+    commit(&root, "second");
+    // Uncommitted noise on top: an unstaged edit and an untracked file.
+    fs::write(root.join("file.txt"), "three\n").unwrap();
+    fs::write(root.join("editor.swp"), "x").unwrap();
+
+    let out = verify_commit(&root, &r1, &first);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    // Plain verify still judges the live checkout.
+    let live = sykli(
+        &root,
+        &["verify", r1.to_str().unwrap(), "--contract", "sykli.json"],
+    );
+    assert_ne!(live.status.code(), Some(0));
+    // A receipt of another tree is still refused, checked out or not.
+    let out = verify_commit(&root, &r1, "HEAD");
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "the commit's contract differs: {}",
+        text(&out.stderr)
+    );
+    git(&root, &["checkout", "--quiet", "--", "file.txt"]);
+    fs::remove_file(root.join("editor.swp")).unwrap();
+    let (r2, _) = receipt(&root);
+    let out = verify_commit(&root, &r2, &first);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    fs::write(root.join("editor.swp"), "x").unwrap();
+    let out = verify_commit(&root, &r2, "HEAD");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let _ = fs::remove_file(r1);
+    let _ = fs::remove_file(r2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_commit_reads_the_contract_from_the_commit_even_when_it_is_gone_from_disk() {
+    let root = repo("contractgone", PASSING);
+    let (r1, _) = receipt(&root);
+    fs::remove_file(root.join("sykli.json")).unwrap();
+    fs::remove_file(root.join("sykli.lock")).unwrap();
+    let out = verify_commit(&root, &r1, "HEAD");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    // A commit without that contract cannot be verified.
+    git(&root, &["add", "--all"]);
+    git(
+        &root,
+        &[
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            "drop the contract",
+        ],
+    );
+    let out = verify_commit(&root, &r1, "HEAD");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("sykli.json"),
+        "{}",
+        text(&out.stderr)
+    );
+    let _ = fs::remove_file(r1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_push_judges_the_pushed_commit_not_the_checkout() {
+    let root = repo("pushnotcheckedout", READS_FILE);
+    let first = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    let second = commit(&root, "second");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    // `git push origin <first>:main`, not checked out.
+    let out = pre_push(&root, "origin", &[update(&first, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // A force-push of the older, verified commit over the newer one.
+    let force = format!("refs/heads/work {first} refs/heads/main {second}");
+    let out = pre_push(&root, "origin", &[force]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // HEAD with an unrelated unstaged edit and an untracked file.
+    fs::write(root.join("other.txt"), "edited\n").unwrap();
+    fs::write(root.join("scratch.tmp"), "x").unwrap();
+    let out = pre_push(&root, "origin", &[update(&second, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The same three pushes through installed hooks and real `git push`.
+#[cfg(unix)]
+#[test]
+fn installed_pre_push_judges_the_pushed_commit_not_the_checkout() {
+    let root = repo("e2enotcheckedout", READS_FILE);
+    let origin = root.with_extension("origin.git");
+    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let hooked = |args: &[&str]| {
+        Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", &path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+    };
+    git(
+        &root,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    assert!(
+        sykli(&root, &["hook", "install", "--pre-push"])
+            .status
+            .success()
+    );
+    let first = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    let second = commit(&root, "second");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+
+    let out = hooked(&[
+        "push",
+        "--quiet",
+        "origin",
+        &format!("{first}:refs/heads/main"),
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = hooked(&["push", "--quiet", "origin", "main"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = hooked(&[
+        "push",
+        "--quiet",
+        "--force",
+        "origin",
+        &format!("{first}:refs/heads/main"),
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    fs::write(root.join("other.txt"), "edited\n").unwrap();
+    fs::write(root.join("scratch.tmp"), "x").unwrap();
+    let out = hooked(&["push", "--quiet", "origin", "main"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(git(&origin, &["rev-parse", "main"]), second);
+    fs::remove_dir_all(origin).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `action/verify.sh`, as the Action runs it; returns (`code=` line, annotations).
+#[cfg(unix)]
+fn action_verify(root: &Path, receipt: &Path, commit: &str) -> (String, String) {
+    let output = root.with_extension("github-output");
+    let _ = fs::remove_file(&output);
+    let out = Command::new("sh")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("action/verify.sh"))
+        .current_dir(root)
+        .env("SYKLI_BINARY", env!("CARGO_BIN_EXE_sykli"))
+        .env("SYKLI_CONTRACT", "sykli.json")
+        .env("SYKLI_RECEIPT", receipt)
+        .env("SYKLI_COMMIT", commit)
+        .env("GITHUB_OUTPUT", &output)
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let code = fs::read_to_string(&output).unwrap().trim().to_string();
+    let _ = fs::remove_file(&output);
+    (code, text(&out.stdout))
+}
+
+/// `run` hashes the tree before tasks execute, so only the live check sees a
+/// task that leaves a stray file behind; the Action keeps it beside --commit.
+#[cfg(unix)]
+#[test]
+fn the_action_keeps_the_live_check_and_names_a_merge_checkout() {
+    let root = repo(
+        "actionlive",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"echo x > stray.txt","inputs":["file.txt"]}]}"#,
+    );
+    let (stray, _) = receipt(&root);
+    assert_eq!(verify_commit(&root, &stray, "HEAD").status.code(), Some(0));
+    let (code, annotations) = action_verify(&root, &stray, "HEAD");
+    assert_eq!(code, "code=3", "{annotations}");
+    fs::remove_file(root.join("stray.txt")).unwrap();
+    fs::write(root.join(".gitignore"), "stray.txt\n").unwrap();
+    commit(&root, "ignore the output");
+
+    // GitHub's merge ref: a merge commit whose second parent is the head.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["checkout", "--quiet", "-b", "topic"]);
+    fs::write(root.join("file.txt"), "topic\n").unwrap();
+    let head = commit(&root, "topic");
+    git(&root, &["checkout", "--quiet", &base]);
+    fs::write(root.join("other.txt"), "main moved\n").unwrap();
+    commit(&root, "main moved");
+    git(
+        &root,
+        &["merge", "--quiet", "--no-ff", "--no-edit", "topic"],
+    );
+    let (merged, _) = receipt(&root);
+    let (code, annotations) = action_verify(&root, &merged, &head);
+    assert_eq!(code, "code=3", "{annotations}");
+    assert!(annotations.contains("merge commit"), "{annotations}");
+    git(&root, &["checkout", "--quiet", &head]);
+    let (at_head, _) = receipt(&root);
+    let (code, annotations) = action_verify(&root, &at_head, &head);
+    assert_eq!(code, "code=0", "{annotations}");
+    for path in [stray, merged, at_head] {
+        let _ = fs::remove_file(path);
+    }
     fs::remove_dir_all(root).unwrap();
 }
