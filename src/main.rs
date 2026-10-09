@@ -1651,7 +1651,12 @@ struct Subject {
     tree_oid: String,
     inputs_digest: String,
     head_tree_oid: String,
+    /// The tree that ran is not HEAD's, or a submodule had uncommitted changes.
     dirty: bool,
+    /// A submodule had uncommitted changes, which its gitlink in `tree_oid`
+    /// does not show. Written only when true, so other receipts are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    submodules_modified: bool,
 }
 
 #[derive(Serialize)]
@@ -2947,14 +2952,53 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
     let head_tree_oid = head_tree_oid(Path::new(&repository))?;
     let tree_oid = working_tree_oid(Path::new(&repository))?;
     let inputs_digest = declared_inputs_digest(contract)?;
-    let dirty = tree_oid != head_tree_oid;
+    let submodules_modified = submodules_modified(Path::new(&repository))?;
+    let dirty = tree_oid != head_tree_oid || submodules_modified;
     Ok(Subject {
         repository,
         tree_oid,
         inputs_digest,
         head_tree_oid,
         dirty,
+        submodules_modified,
     })
+}
+
+/// Whether a submodule has uncommitted changes, tracked or untracked. A tree
+/// records each submodule as its gitlink, the commit it is at, so content the
+/// submodule has not committed is invisible to the tree that ran.
+fn submodules_modified(repository: &Path) -> Result<bool, String> {
+    if !repository.join(".gitmodules").is_file() {
+        return Ok(false);
+    }
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["status", "--porcelain=v2", "-z", "--ignore-submodules=none"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+    // Changed entries are `1 XY SUB ...`, `2 XY SUB ... PATH` followed by the
+    // original path, and `u XY SUB ...`; SUB is `S<c><m><u>` for a submodule,
+    // with `M` for tracked and `U` for untracked changes inside it.
+    let mut entries = output.stdout.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
+        let fields = entry.splitn(4, |byte| *byte == b' ').collect::<Vec<_>>();
+        if !matches!(fields.first(), Some(&(b"1" | b"2" | b"u"))) {
+            continue;
+        }
+        if let Some(&[b'S', _, tracked, untracked]) = fields.get(2).copied() {
+            if tracked == b'M' || untracked == b'U' {
+                return Ok(true);
+            }
+        }
+        if fields[0] == b"2" {
+            entries.next();
+        }
+    }
+    Ok(false)
 }
 
 /// Content-address the working tree itself: stage every non-ignored file into
@@ -3141,6 +3185,8 @@ struct SubjectSummary {
     head_tree_oid: Option<String>,
     #[serde(default)]
     dirty: Option<bool>,
+    #[serde(default)]
+    submodules_modified: bool,
 }
 
 #[derive(Deserialize)]
@@ -3401,6 +3447,16 @@ fn commit_checks(
     let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
     check.expected = format!("{} (the tree of commit {})", check.expected, &commit[..12]);
     checks.push(check);
+    // Refused whatever the clean rule is: the tree cannot show this content.
+    if receipt.subject.submodules_modified {
+        checks.push(Check {
+            name: "submodules",
+            expected: "submodules as the commit records them".into(),
+            actual: "a submodule had uncommitted changes when it ran".into(),
+            ok: false,
+            failure_code: TREE_MISMATCH,
+        });
+    }
     // `dirty` alone is one editable field; HEAD's recorded tree must agree.
     let clean = receipt.subject.dirty == Some(false)
         && receipt.subject.head_tree_oid.as_deref() == Some(&receipt.subject.tree_oid);
@@ -3996,6 +4052,7 @@ mod tests {
                 inputs_digest: "test".into(),
                 head_tree_oid: "test".into(),
                 dirty: false,
+                submodules_modified: false,
             },
             tasks: first,
             outcome: Outcome::Passed,

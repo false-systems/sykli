@@ -428,6 +428,11 @@ Without `--commit`, verify judges the checkout as it is now. Run both in CI: a
 run hashes its tree before its tasks execute, so only the live check notices a
 task that leaves an undeclared file behind.
 
+A tree records a submodule only as the commit it is at. When a submodule has
+uncommitted changes, tracked or untracked, the run is marked `dirty` and
+records `submodules_modified: true`, and `--commit` refuses that receipt with
+exit 3.
+
 A receipt also records **when**. `started_at_ms` on the run is when that run
 began; on a task, it is when that task was seen running. A cached task replays
 its original moment, so a receipt full of cache hits reports old task times

@@ -959,3 +959,48 @@ fn pre_commit_compares_the_run_with_the_tree_it_commits() {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+/// Review finding 4: a receipt records a submodule as its gitlink, so content
+/// a submodule has not committed is invisible to the tree. Such a run is
+/// dirty, and `--commit` refuses it on its own account.
+#[test]
+fn a_modified_submodule_makes_the_run_dirty_and_is_refused_for_a_commit() {
+    let root = repo(
+        "submodule",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"test \"$(cat sub/file.txt)\" = one","inputs":["sub/file.txt"]}]}"#,
+    );
+    let sub = root.with_extension("sub");
+    fs::create_dir(&sub).unwrap();
+    git(&sub, &["init", "--quiet"]);
+    fs::write(sub.join("file.txt"), "broken\n").unwrap();
+    commit(&sub, "broken");
+    git(
+        &root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    commit(&root, "add the submodule at a broken commit");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(1));
+    // Fix the file inside the submodule without committing it there.
+    fs::write(root.join("sub/file.txt"), "one\n").unwrap();
+    let (path, value) = receipt(&root);
+    assert_eq!(value["outcome"], "passed");
+    assert_eq!(value["subject"]["dirty"], true, "{}", value["subject"]);
+    let out = verify_commit(&root, &path, "HEAD");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("submodule"),
+        "{}",
+        text(&out.stderr)
+    );
+    let _ = fs::remove_file(path);
+    fs::remove_dir_all(sub).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}

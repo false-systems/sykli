@@ -19,6 +19,11 @@ contract consumer can observe; internal refactors are not listed.
   2. Declared inputs the commit does not track are not judged. Without
   `--commit`, verify is unchanged and still accepts a dirty receipt for the
   tree on disk.
+- A run in a repository whose submodule has uncommitted changes (tracked or
+  untracked) is `dirty`, and its receipt's subject records
+  `submodules_modified: true`; the tree shows a submodule only as its gitlink.
+  `verify --commit` refuses such a receipt (exit 3) on its own check. The
+  field is written only when true, so other receipts are unchanged.
 - `verify` prints the first failing check to stderr as one line
   (`refused: CHECK expected … but got …`); stdout is unchanged.
 - `sykli hook pre-commit`, a git pre-commit entrypoint that checks the tree
