@@ -41,10 +41,14 @@ pub struct Args {
     pub pr_head: Option<String>,
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
+/// The arguments, or `None` when `-h`/`--help` appears where a flag may.
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>> {
     let (mut base, mut binary, mut receipt, mut output, mut pr_head) =
         (None, None, None, None, None);
     while let Some(argument) = args.next() {
+        if argument == "-h" || argument == "--help" {
+            return Ok(None);
+        }
         // `--flag value` or `--flag=value`.
         let (flag, value) = match argument.split_once('=') {
             Some((flag, value)) if flag.starts_with("--") => (flag.to_string(), value.to_string()),
@@ -64,46 +68,59 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             _ => return Err(format!("unknown argument {flag}")),
         }
     }
-    Ok(Args {
+    Ok(Some(Args {
         base: base.ok_or("--base is required")?,
         binary: binary.ok_or("--binary is required")?,
         receipt: receipt.ok_or("--receipt is required")?,
         output: output.ok_or("--output is required")?,
         pr_head,
-    })
+    }))
 }
 
 fn main() -> ExitCode {
-    if std::env::args()
-        .skip(1)
-        .any(|arg| arg == "-h" || arg == "--help")
-    {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+    let summary = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty());
+    match std::env::current_dir() {
+        Ok(cwd) => ExitCode::from(run(
+            std::env::args().skip(1),
+            &cwd,
+            summary.map(PathBuf::from).as_deref(),
+        )),
+        Err(error) => {
+            eprintln!("ci_shadow: current directory: {error}");
+            ExitCode::FAILURE
+        }
     }
-    if !cfg!(unix) {
-        eprintln!("ci_shadow: Unix CI glue; it does not run on this platform");
-        return ExitCode::from(2);
-    }
-    let args = match parse_args(std::env::args().skip(1)) {
-        Ok(args) => args,
+}
+
+/// The command line from `cwd`, appending the summary to `step_summary`:
+/// 0 observed (or help), 2 unavailable or bad arguments, 1 when no report
+/// could be written at all.
+pub fn run(args: impl Iterator<Item = String>, cwd: &Path, step_summary: Option<&Path>) -> u8 {
+    let mut args = match parse_args(args) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            println!("{USAGE}");
+            return 0;
+        }
         Err(error) => {
             eprintln!("ci_shadow: {error}\n{USAGE}");
-            return ExitCode::from(2);
+            return 2;
         }
     };
-    let observed = std::env::current_dir()
-        .map_err(|e| format!("current directory: {e}"))
-        .and_then(|cwd| {
-            let summary = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty());
-            observe(&args, &cwd, summary.map(PathBuf::from).as_deref())
-        });
-    match observed {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(2),
+    if !cfg!(unix) {
+        eprintln!("ci_shadow: Unix CI glue; it does not run on this platform");
+        return 2;
+    }
+    // Relative paths are relative to `cwd`, as they are on the command line.
+    for path in [&mut args.binary, &mut args.receipt, &mut args.output] {
+        *path = cwd.join(&*path);
+    }
+    match observe(&args, cwd, step_summary) {
+        Ok(true) => 0,
+        Ok(false) => 2,
         Err(error) => {
             eprintln!("ci_shadow: {error}");
-            ExitCode::FAILURE
+            1
         }
     }
 }
@@ -1201,6 +1218,7 @@ mod tests {
             "--pr-head",
             "h",
         ])
+        .unwrap()
         .unwrap();
         assert_eq!(
             (args.base.as_str(), args.pr_head.as_deref()),
@@ -1209,7 +1227,9 @@ mod tests {
         assert!(parse(&["--base", "b", "--binary", "s", "--receipt", "r"]).is_err());
         assert!(parse(&["--base"]).is_err());
         assert!(parse(&["--unknown", "x"]).is_err());
-        let joined = parse(&["--base=b=c", "--binary=s", "--receipt", "r", "--output=o"]).unwrap();
+        let joined = parse(&["--base=b=c", "--binary=s", "--receipt", "r", "--output=o"])
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (joined.base.as_str(), joined.output.as_path()),
             ("b=c", Path::new("o"))
