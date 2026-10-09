@@ -38,6 +38,7 @@
             "sykli.lock",
             "tests/assess.rs",
             "tests/assess_portable.rs",
+            "tests/boundary.rs",
             "tests/cli.rs",
             "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/diagnostics.json",
             "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/manifest.json",

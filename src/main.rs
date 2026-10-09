@@ -317,14 +317,20 @@ enum Command {
         0  verified\n  \
         1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
-        3  tree or input mismatch — receipt is stale; re-run sykli\n  \
-        4  contract mismatch — contract drifted from the receipt; re-lock")]
+        3  tree or input mismatch — receipt is stale; re-run sykli\n     \
+           (with --commit: not a clean run of that commit's tree)\n  \
+        4  contract mismatch — contract drifted from the receipt; re-lock\n\n\
+        On any failure the first failing check is also printed to stderr as one line.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
         /// Path to sykli.rs or a sykli-contract.v1 JSON file
         #[arg(long, default_value = "sykli.rs")]
         contract: PathBuf,
+        /// Also require a clean run of this commit: the receipt's tree is
+        /// REV^{tree}, the run was not dirty, and every task passed or was cached
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
     },
 }
 
@@ -1205,7 +1211,11 @@ fn main() -> ExitCode {
             why.as_deref(),
             json,
         ),
-        Command::Verify { receipt, contract } => match verify(&receipt, &contract) {
+        Command::Verify {
+            receipt,
+            contract,
+            commit,
+        } => match verify(&receipt, &contract, commit.as_deref()) {
             Ok(checks) => report(&checks),
             Err(error) => {
                 eprintln!("error: {error}");
@@ -2881,11 +2891,38 @@ fn working_tree_oid(repository: &Path) -> Result<String, String> {
 /// HEAD's tree with the same `.sykli` exclusion as the working tree, so a
 /// checkout that tracks its own receipts or evidence is not reported dirty.
 fn head_tree_oid(repository: &Path) -> Result<String, String> {
-    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
-    git_with_temporary_state(repository, &state, &["read-tree", "HEAD"])
+    commit_tree_oid(repository, "HEAD")
         .map_err(|_| "repository has no commits; commit once before running sykli".to_string())
+}
+
+/// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
+/// Where `.sykli` is untracked (the usual case) this is `COMMIT^{tree}`.
+fn commit_tree_oid(repository: &Path, commit: &str) -> Result<String, String> {
+    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    git_with_temporary_state(repository, &state, &["read-tree", commit])
         .and_then(|_| exclude_sykli(repository, &state))
         .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
+}
+
+/// Resolve a revision to the full id of the commit it names.
+fn resolve_commit(repository: &Path, rev: &str) -> Result<String, String> {
+    let spec = format!("{rev}^{{commit}}");
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("{rev:?} does not name a commit in this repository"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
 fn exclude_sykli(repository: &Path, state: &TemporaryGitState) -> Result<String, String> {
@@ -3015,6 +3052,11 @@ struct ReceiptSummary {
 struct SubjectSummary {
     tree_oid: String,
     inputs_digest: String,
+    /// Read only by `verify --commit`, which refuses a receipt without them.
+    #[serde(default)]
+    head_tree_oid: Option<String>,
+    #[serde(default)]
+    dirty: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -3093,7 +3135,15 @@ impl Check {
 /// Verify proves consistency, not authenticity: the receipt matches this exact
 /// working tree and the pinned contract, and its outcome was success. It
 /// cannot prove the commands truly ran — that would take attestation.
-fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, String> {
+///
+/// With a commit, the receipt must also be a clean run of that commit: its
+/// tree is the commit's tree and HEAD's tree when it ran (`dirty: false`). A
+/// receipt binds a tree, so this is what ties it to a commit someone pushes.
+fn verify(
+    receipt_path: &Path,
+    contract_path: &Path,
+    commit: Option<&str>,
+) -> Result<Vec<Check>, String> {
     let receipt: ReceiptSummary =
         serde_json::from_slice(&fs::read(receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", receipt_path.display()))?;
@@ -3123,6 +3173,40 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
     ));
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
+    }
+    if let Some(rev) = commit {
+        let repository = git(&["rev-parse", "--show-toplevel"])
+            .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
+        let id = resolve_commit(Path::new(&repository), rev)?;
+        let tree = commit_tree_oid(Path::new(&repository), &id)?;
+        let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
+        check.expected = format!("{} (the tree of commit {})", check.expected, &id[..12]);
+        checks.push(check);
+        // `dirty` alone is one editable field; HEAD's recorded tree must agree.
+        let clean = receipt.subject.dirty == Some(false)
+            && receipt.subject.head_tree_oid.as_deref() == Some(&receipt.subject.tree_oid);
+        let dirty = receipt
+            .subject
+            .dirty
+            .map_or("absent".into(), |dirty| dirty.to_string());
+        checks.push(Check {
+            name: "clean",
+            expected: "a clean run (dirty false: the tree that ran was HEAD's)".into(),
+            actual: match receipt.subject.head_tree_oid.as_deref() {
+                _ if clean => "dirty false".into(),
+                Some(head) if head != receipt.subject.tree_oid => format!(
+                    "dirty {dirty}: tree {} ran with HEAD at tree {head}",
+                    receipt.subject.tree_oid
+                ),
+                Some(_) => format!("dirty {dirty}"),
+                None => format!("dirty {dirty} and no HEAD tree recorded"),
+            },
+            ok: clean,
+            failure_code: TREE_MISMATCH,
+        });
+        if checks.iter().any(|check| !check.ok) {
+            return Ok(checks);
+        }
     }
     let subject = subject(&contract)?;
     checks.extend([
@@ -3223,8 +3307,19 @@ fn report(checks: &[Check]) -> ExitCode {
             println!("verified: receipt matches this tree and contract");
             ExitCode::SUCCESS
         }
-        Some(first) => ExitCode::from(first.failure_code),
+        Some(first) => {
+            eprintln!("refused: {}", refusal(first));
+            ExitCode::from(first.failure_code)
+        }
     }
+}
+
+/// The first failing check as one line, for stderr and for the hooks.
+fn refusal(check: &Check) -> String {
+    format!(
+        "{} expected {} but got {}",
+        check.name, check.expected, check.actual
+    )
 }
 
 fn write_receipt(receipt: &Receipt) -> Result<PathBuf, String> {

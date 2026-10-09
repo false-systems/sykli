@@ -7,6 +7,17 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Added
+- `sykli verify RECEIPT --contract FILE --commit REV` ties a receipt to a
+  commit. Besides the existing checks it requires the receipt's tree to be
+  `REV^{tree}` (with `.sykli/` excluded, as in every receipt tree) and the run
+  to be clean: `dirty: false`, with HEAD's recorded tree equal to the tree that
+  ran. A miss exits 3; a revision that names no commit exits 2. Without
+  `--commit`, verify is unchanged and still accepts a dirty receipt for the
+  tree on disk.
+- `verify` prints the first failing check to stderr as one line
+  (`refused: CHECK expected … but got …`); stdout is unchanged.
+
 ### Changed
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
   task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,

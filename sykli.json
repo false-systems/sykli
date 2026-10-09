@@ -26,7 +26,8 @@
         "tests/assess.rs",
         "tests/assess_portable.rs",
         "examples/ci_shadow.rs",
-        "tests/ci_shadow.rs"
+        "tests/ci_shadow.rs",
+        "tests/boundary.rs"
       ]
     },
     {
@@ -76,7 +77,8 @@
         "tests/assess.rs",
         "tests/assess_portable.rs",
         "examples/ci_shadow.rs",
-        "tests/ci_shadow.rs"
+        "tests/ci_shadow.rs",
+        "tests/boundary.rs"
       ]
     },
     {
@@ -124,6 +126,7 @@
         "tests/fixtures/requirements/review-readiness.json",
         "examples/ci_shadow.rs",
         "tests/ci_shadow.rs",
+        "tests/boundary.rs",
         "tests/qa/sykli.json"
       ]
     }

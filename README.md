@@ -361,6 +361,18 @@ declared inputs, and then the recorded outcome. It **does not** authenticate who
 wrote the receipt, and it does not prove that the declared checks are
 sufficient.
 
+A receipt binds a tree, not a commit, and a run of uncommitted work is only
+marked `dirty`. To ask whether a receipt is evidence for a commit, name it:
+
+```sh
+sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
+```
+
+With `--commit REV`, verify also requires that the receipt's tree is
+`REV^{tree}` and that the run was clean (`dirty: false`, the tree that ran was
+HEAD's). Otherwise it exits 3. On any failure, the first failing check is also
+printed to stderr as one line.
+
 A receipt also records **when**. `started_at_ms` on the run is when that run
 began; on a task, it is when that task was seen running. A cached task replays
 its original moment, so a receipt full of cache hits reports old task times
