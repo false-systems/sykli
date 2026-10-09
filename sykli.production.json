@@ -58,7 +58,7 @@
             "tests/init.rs",
             "tests/production.rs",
             "tests/qa/sykli.json",
-            "scripts/ci_shadow.py",
+            "examples/ci_shadow.rs",
             "tests/ci_shadow.rs",
             "docs/ci-shadow.md"
           ],

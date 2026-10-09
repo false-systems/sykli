@@ -25,7 +25,7 @@
         "src/inspect.rs",
         "tests/assess.rs",
         "tests/assess_portable.rs",
-        "scripts/ci_shadow.py",
+        "examples/ci_shadow.rs",
         "tests/ci_shadow.rs"
       ]
     },
@@ -75,7 +75,7 @@
         "src/inspect.rs",
         "tests/assess.rs",
         "tests/assess_portable.rs",
-        "scripts/ci_shadow.py",
+        "examples/ci_shadow.rs",
         "tests/ci_shadow.rs"
       ]
     },
@@ -122,7 +122,7 @@
         "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/c2cbe80e9f109f6ad2ef6d22561f444608b0cff1a897919f5528a184dbca3aac",
         "tests/fixtures/bundle/a7f2935315fb35a45c410c5e2cf6996fe12f70d836ec321f930c62a8447d03ee/objects/fe13a45c4a4753a6d5040b22e4e21a309f02870bb6da68619ac6d09b16092b4f",
         "tests/fixtures/requirements/review-readiness.json",
-        "scripts/ci_shadow.py",
+        "examples/ci_shadow.rs",
         "tests/ci_shadow.rs",
         "tests/qa/sykli.json"
       ]

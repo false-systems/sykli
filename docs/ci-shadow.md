@@ -13,11 +13,12 @@ otherwise successful gate.
 
 ## What gets compared
 
-The repository script, scripts/ci_shadow.py, uses disposable worktrees:
+The experiment, examples/ci_shadow.rs (a Cargo example, so `cargo install`
+never ships it), uses disposable worktrees:
 
 1. Resolve the supplied base and the current checkout's exact commit. On a
-   pull request, the latter is the merge candidate Actions tested, which
-   may differ from the PR head. Record both coordinates.
+   pull request, the latter is the commit Actions checked out. Record
+   both coordinates, and the PR head.
 2. Record a NUL-delimited name/status diff between those commits, with rename
    detection disabled. Renames appear as deletion plus addition so both
    paths are accounted for. Deleted files, mode changes, spaces and newlines
@@ -58,7 +59,7 @@ an explicit repository policy requested by Yair after the Cargo configuration
 probe exposed false reuse:
 
 - Modifications of the existing regular README.md, docs/agents.md and
-  docs/ci-shadow.md are explicitly exempt. The script's DOCUMENTATION_PATHS is
+  docs/ci-shadow.md are explicitly exempt. The experiment's DOCUMENTATION_PATHS is
   repository policy, not a blanket Markdown exception. Declared inputs take
   precedence; additions, deletions, renames and symlinks are not exempt.
 - sykli.json and sykli.lock are evaluation metadata: receipt verification and
@@ -67,7 +68,7 @@ probe exposed false reuse:
 - Every other unmapped path is unresolved, including new Cargo configuration,
   workflow changes and other documentation.
 - Any unresolved path requires full execution. Add the missing task inputs,
-  re-pin the contract, or review an explicit exception in the repository script.
+  re-pin the contract, or review an explicit exception in examples/ci_shadow.rs.
   There is no blanket Markdown or docs-directory exception.
 
 The report retains raw cache proposals and disagreements even when coverage is
@@ -107,13 +108,13 @@ allow disagreements to be inspected without rerunning the PR.
 Use a fresh output directory outside the tracked tree, a committed candidate,
 and a receipt from a full run of that candidate:
 
-    python3 scripts/ci_shadow.py \
+    cargo run --quiet --locked --example ci_shadow -- \
       --base BASE_COMMIT --binary "$(command -v sykli)" \
       --receipt .sykli/full-receipt.json --output .sykli/shadow-observation
 
-This is Unix CI glue for Sykli's root sykli.json graph. It uses Python's
-standard library, Git and Sykli. It executes the base graph, so baseline
-toolchains must be available. The baseline attempt is bounded to ten minutes;
+This is Unix CI glue for Sykli's root sykli.json graph, written in Rust with
+the crate's own dependencies; it runs Git and Sykli. It executes the base
+graph, so baseline toolchains must be available. The baseline attempt is bounded to ten minutes;
 the CI step has a twelve-minute limit. Missing history, missing contracts,
 unsupported filenames, failed evaluation or invalid receipts produce an
 unavailable observation, never fabricated agreements.

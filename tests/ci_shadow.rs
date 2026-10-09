@@ -1,5 +1,12 @@
 //! The experiment is Linux CI glue; exercise it with real Git points and Sykli.
+//! Its source is an example, so CI runs it with `cargo run --example
+//! ci_shadow` and `cargo install` never ships it. Included here, its own unit
+//! tests run with this suite.
 #![cfg(unix)]
+
+#[allow(dead_code)]
+#[path = "../examples/ci_shadow.rs"]
+mod ci_shadow;
 
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -51,26 +58,19 @@ fn full_run(root: &Path) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// The experiment as CI runs it (`cargo run --example ci_shadow`), called in
+/// place so it can use this build's `sykli`; 0 observed, 2 unavailable.
 fn shadow(root: &Path, base: &str, name: &str, expected_code: i32) -> Value {
     let output = root.join(".sykli").join(name);
-    let out = Command::new("python3")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ci_shadow.py"))
-        .args(["--base", base, "--binary", env!("CARGO_BIN_EXE_sykli")])
-        .arg("--receipt")
-        .arg(root.join(".sykli/full.json"))
-        .arg("--output")
-        .arg(&output)
-        .env_remove("GITHUB_STEP_SUMMARY")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(expected_code),
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let args = ci_shadow::Args {
+        base: base.into(),
+        binary: env!("CARGO_BIN_EXE_sykli").into(),
+        receipt: root.join(".sykli/full.json"),
+        output: output.clone(),
+        pr_head: None,
+    };
+    let observed = ci_shadow::observe(&args, root, None).unwrap();
+    assert_eq!(if observed { 0 } else { 2 }, expected_code, "{name}");
     serde_json::from_slice(&fs::read(output.join("report.json")).unwrap()).unwrap()
 }
 
