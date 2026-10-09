@@ -351,6 +351,22 @@ enum Hook {
         from the index, or an untracked file that is not ignored, would make the\n\
         run check a tree other than the commit's, so either one refuses the commit.")]
     PreCommit,
+    /// Refuse a push to the default branch without a clean, passing receipt of the pushed commit
+    #[command(after_help = "Exit codes:\n  \
+        0  nothing pushed to the default branch, every such push has a receipt that\n     \
+           passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
+        1  refused: a push to the default branch has no such receipt\n  \
+        2  could not evaluate: no git repository or unreadable input\n\n\
+        Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
+        The default branch is the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
+        Deletions and pushes to other branches pass. Receipts are looked for in this\n\
+        worktree: .sykli/receipt.json and .sykli/receipts/*.json.")]
+    PrePush {
+        /// Remote name, as git passes it
+        remote: Option<String>,
+        /// Remote URL, as git passes it (unused)
+        url: Option<String>,
+    },
 }
 
 /// `sykli-lock.v2`: one lock file per directory, one entry per contract file
@@ -995,9 +1011,10 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Command::Hook {
-            hook: Hook::PreCommit,
-        } => hook::pre_commit(),
+        Command::Hook { hook } => match hook {
+            Hook::PreCommit => hook::pre_commit(),
+            Hook::PrePush { remote, url: _ } => hook::pre_push(remote.as_deref()),
+        },
         Command::Plan {
             contract,
             changed,

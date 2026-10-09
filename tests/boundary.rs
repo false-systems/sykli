@@ -284,3 +284,125 @@ fn pre_commit_passes_where_there_is_no_contract() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+const ZEROS: &str = "0000000000000000000000000000000000000000";
+
+/// Feed git's pre-push lines (`<local ref> <local sha> <remote ref> <remote sha>`).
+fn pre_push(root: &Path, remote: &str, lines: &[String]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["hook", "pre-push", remote, "/nowhere/origin.git"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+fn update(sha: &str, remote_ref: &str) -> String {
+    format!("refs/heads/work {sha} {remote_ref} {ZEROS}")
+}
+
+#[test]
+fn pre_push_to_main_requires_a_clean_passing_receipt_of_the_pushed_commit() {
+    let root = repo("push", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("sykli run sykli.json"),
+        "the refusal names the command that produces a receipt: {}",
+        text(&out.stderr)
+    );
+
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // `.sykli/receipt.json`, where the documented gate writes, counts too.
+    let receipt = sykli(&root, &["run", "sykli.json", "--json"]);
+    fs::remove_dir_all(root.join(".sykli/receipts")).unwrap();
+    assert_eq!(
+        pre_push(&root, "origin", &[update(&head, "refs/heads/main")])
+            .status
+            .code(),
+        Some(1)
+    );
+    fs::write(root.join(".sykli/receipt.json"), receipt.stdout).unwrap();
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_push_refuses_a_failing_or_dirty_commit_on_main() {
+    let root = repo("pushfail", READS_FILE);
+    // A failing commit, with its honest receipt.
+    fs::write(root.join("file.txt"), "broken\n").unwrap();
+    let broken = commit(&root, "broken");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(1));
+    let out = pre_push(&root, "origin", &[update(&broken, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("outcome"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // A passing tree that only ever ran uncommitted.
+    fs::write(root.join("file.txt"), "one\n").unwrap();
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let fixed = commit(&root, "fixed");
+    let out = pre_push(&root, "origin", &[update(&fixed, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("dirty"), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_push_gates_only_the_default_branch() {
+    let root = repo("pushbranch", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let feature = update(&head, "refs/heads/feature");
+    let delete = format!("(delete) {ZEROS} refs/heads/main {head}");
+    let out = pre_push(&root, "origin", &[feature, delete]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Without the remote's HEAD, main and master are the default branch.
+    let master = pre_push(&root, "origin", &[update(&head, "refs/heads/master")]);
+    assert_eq!(master.status.code(), Some(1));
+    // With it, the remote's HEAD names the one default branch.
+    git(&root, &["update-ref", "refs/remotes/origin/trunk", &head]);
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    let trunk = pre_push(&root, "origin", &[update(&head, "refs/heads/trunk")]);
+    assert_eq!(trunk.status.code(), Some(1), "{}", text(&trunk.stderr));
+    let main = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(main.status.code(), Some(0), "{}", text(&main.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_push_passes_where_there_is_no_contract() {
+    let root = repo("pushnocontract", PASSING);
+    git(&root, &["rm", "--quiet", "sykli.json", "sykli.lock"]);
+    let head = commit(&root, "no contract");
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let note = text(&out.stderr);
+    assert_eq!(note.trim().lines().count(), 1, "{note}");
+    assert!(note.contains("no sykli.json"), "{note}");
+    fs::remove_dir_all(root).unwrap();
+}

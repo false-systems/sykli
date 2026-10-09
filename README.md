@@ -294,6 +294,15 @@ check what is committed:
   that are not staged, or an untracked file is not ignored, because the run
   would then check a tree other than the commit's. Otherwise it runs and
   verifies the graph on exactly the staged tree. It stashes nothing.
+- `sykli hook pre-push` refuses a push that moves the remote's default branch
+  unless this worktree holds a receipt that passes
+  `sykli verify --commit` for the pushed commit. It looks in
+  `.sykli/receipt.json` and `.sykli/receipts/`. The default branch is the one
+  `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. Deletions and
+  pushes to other branches pass. A refusal names the command that produces a
+  receipt: commit, then `sykli run sykli.json`. Cached tasks make that run
+  quick. The run the pre-commit hook made does not count, because HEAD had not
+  moved yet, so that run was dirty.
 
 A repository with no `sykli.json` or `sykli.rs` passes with a note.
 
@@ -421,7 +430,7 @@ entry costs a re-run, never a result.
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
 | | `run` | Execute the graph and record a receipt |
 | | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit |
-| | `hook` | Git hook entrypoints that gate what is committed |
+| | `hook` | Git hook entrypoints that gate what is committed and pushed |
 | **Production** | `targets` | Discover typed artifact targets without building |
 | | `produce` | Build an artifact from captured source and run its checks |
 | | `status` · `resume` | Inspect or continue a production by ID |

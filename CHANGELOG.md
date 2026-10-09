@@ -23,6 +23,14 @@ contract consumer can observe; internal refactors are not listed.
   the run would then check another tree; otherwise it runs and verifies the
   graph and refuses when either fails. It stashes nothing. No `sykli.json` or
   `sykli.rs` at the root, or no commit yet, passes with a note.
+- `sykli hook pre-push [REMOTE [URL]]`, a git pre-push entrypoint reading
+  git's `<local ref> <local sha> <remote ref> <remote sha>` lines. A push that
+  updates the remote's default branch (`refs/remotes/REMOTE/HEAD`, else `main`
+  and `master`) is refused (exit 1) unless a receipt in this worktree,
+  `.sykli/receipt.json` or `.sykli/receipts/*.json`, passes
+  `verify --commit` for the pushed commit; the refusal names the command that
+  produces one. Deletions and other branches pass; so does a repository
+  without a contract, with a one-line note.
 
 ### Changed
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the

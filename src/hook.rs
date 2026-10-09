@@ -2,8 +2,9 @@
 //! merely the files on disk, and they only refuse: nothing is staged, stashed
 //! or rewritten on the operator's behalf.
 
-use crate::{git, load, refusal, resolve_contract, run, verify};
-use std::path::PathBuf;
+use crate::{commit_tree_oid, git, load, refusal, resolve_contract, run, verify};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 
 const REFUSED: u8 = 1;
@@ -140,4 +141,146 @@ pub(crate) fn pre_commit() -> ExitCode {
         },
         Err(error) => cannot(error),
     }
+}
+
+/// One line of git's pre-push input.
+struct Update {
+    local_sha: String,
+    remote_ref: String,
+}
+
+fn updates(input: &str) -> Result<Vec<Update>, String> {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(
+            |line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                [_, local_sha, remote_ref, _] => Ok(Update {
+                    local_sha: local_sha.into(),
+                    remote_ref: remote_ref.into(),
+                }),
+                _ => Err(format!("unexpected pre-push input line {line:?}")),
+            },
+        )
+        .collect()
+}
+
+/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, else
+/// `main` and `master`.
+fn default_branches(remote: Option<&str>) -> Vec<String> {
+    remote
+        .and_then(|remote| {
+            git(&[
+                "symbolic-ref",
+                "--quiet",
+                &format!("refs/remotes/{remote}/HEAD"),
+            ])
+            .ok()?
+            .strip_prefix(&format!("refs/remotes/{remote}/"))
+            .map(|branch| vec![format!("refs/heads/{branch}")])
+        })
+        .unwrap_or_else(|| vec!["refs/heads/main".into(), "refs/heads/master".into()])
+}
+
+/// Receipts this worktree holds whose tree is `tree`, newest first: the
+/// documented gate's `.sykli/receipt.json` and every receipt `run` wrote.
+fn receipts_of(tree: &str) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(".sykli/receipt.json")];
+    if let Ok(entries) = std::fs::read_dir(".sykli/receipts") {
+        paths.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json")),
+        );
+    }
+    let mut found = paths
+        .into_iter()
+        .filter_map(|path| {
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            (receipt["subject"]["tree_oid"].as_str() == Some(tree))
+                .then(|| (receipt["started_at_ms"].as_u64().unwrap_or(0), path))
+        })
+        .collect::<Vec<_>>();
+    found.sort_by_key(|(started, _)| std::cmp::Reverse(*started));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// A receipt in this worktree that passes `verify --commit COMMIT`, or why
+/// there is none.
+fn receipt_for(contract: &Path, commit: &str) -> Result<PathBuf, String> {
+    let tree = commit_tree_oid(Path::new("."), commit)?;
+    let candidates = receipts_of(&tree);
+    let mut newest_refusal = None;
+    for receipt in candidates {
+        let refused = match verify(&receipt, contract, Some(commit)) {
+            Ok(checks) => match checks.iter().find(|check| !check.ok) {
+                None => return Ok(receipt),
+                Some(failed) => refusal(failed),
+            },
+            Err(error) => error,
+        };
+        newest_refusal.get_or_insert(format!("{}: {refused}", receipt.display()));
+    }
+    Err(match newest_refusal {
+        Some(refused) => format!("no receipt of its tree verifies; the newest says {refused}"),
+        None => "no receipt in this worktree is a run of its tree".into(),
+    })
+}
+
+/// `sykli hook pre-push`: a push that moves the default branch needs a clean,
+/// passing receipt of exactly the commit it pushes.
+pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
+    const HOOK: &str = "pre-push";
+    let root = match enter_repository(HOOK) {
+        Ok(root) => root,
+        Err(code) => return code,
+    };
+    let mut input = String::new();
+    let parsed = std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|error| error.to_string())
+        .and_then(|_| updates(&input));
+    let updates = match parsed {
+        Ok(updates) => updates,
+        Err(error) => {
+            eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
+    };
+    let Some(contract) = root_contract() else {
+        eprintln!(
+            "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; pushes are not gated",
+            root.display()
+        );
+        return ExitCode::SUCCESS;
+    };
+    let defaults = default_branches(remote);
+    let deletion = |sha: &str| sha.bytes().all(|byte| byte == b'0');
+    for update in updates
+        .iter()
+        .filter(|update| !deletion(&update.local_sha) && defaults.contains(&update.remote_ref))
+    {
+        let short = &update.local_sha[..update.local_sha.len().min(12)];
+        match receipt_for(&contract, &update.local_sha) {
+            Ok(receipt) => eprintln!(
+                "sykli hook {HOOK}: {short} to {}: {} is a clean, passing run of it",
+                update.remote_ref,
+                receipt.display()
+            ),
+            Err(reason) => {
+                eprintln!(
+                    "sykli hook {HOOK}: refusing to push {short} to {}: {reason}",
+                    update.remote_ref
+                );
+                eprintln!(
+                    "sykli hook {HOOK}: to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {}",
+                    contract.display()
+                );
+                return ExitCode::from(REFUSED);
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
