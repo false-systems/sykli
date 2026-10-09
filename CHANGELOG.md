@@ -33,8 +33,13 @@ contract consumer can observe; internal refactors are not listed.
   and `master`) is refused (exit 1) unless a receipt in this worktree,
   `.sykli/receipt.json` or `.sykli/receipts/*.json`, passes
   `verify --commit` for the pushed commit; the refusal names the command that
-  produces one. Deletions and other branches pass; so does a repository
-  without a contract, with a one-line note.
+  produces one. Deletions and other branches pass. Whether a push is gated is
+  decided from the commits: the pushed commit's own contract gates it, and a
+  commit without one is refused when the branch it replaces (the line's remote
+  sha, else `refs/remotes/REMOTE/BRANCH`) had one; `--no-verify` is the
+  deliberate way to take the gate off. A push where neither has a contract
+  passes with a one-line note, and an unknown default branch is noted with the
+  `git remote set-head` command that names it.
 - `sykli hook install [--pre-commit] [--pre-push] [--force]` writes thin
   `#!/bin/sh` hooks (`exec sykli hook NAME "$@"`) into
   `$(git rev-parse --git-common-dir)/hooks`, so every worktree shares them;

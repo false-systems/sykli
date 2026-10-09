@@ -868,3 +868,73 @@ fn the_action_keeps_the_live_check_and_names_a_merge_checkout() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Review finding 2: whether a push is gated is decided from the commits,
+/// not from the working tree.
+#[test]
+fn pre_push_refuses_a_commit_that_takes_the_gate_off_main() {
+    let root = repo("pushdropgate", PASSING);
+    let gated = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["rm", "--quiet", "sykli.json", "sykli.lock"]);
+    let dropped = commit(&root, "drop the contract");
+    // The remote's main, the line's fourth field, has the contract.
+    let over = format!("refs/heads/main {dropped} refs/heads/main {gated}");
+    let out = pre_push(&root, "origin", &[over]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("--no-verify"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Unknown here, so the remote-tracking branch says what main has.
+    git(&root, &["update-ref", "refs/remotes/origin/main", &gated]);
+    let unknown = format!(
+        "refs/heads/main {dropped} refs/heads/main 1111111111111111111111111111111111111111"
+    );
+    let out = pre_push(&root, "origin", std::slice::from_ref(&unknown));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    // Putting the contract back on disk does not change the pushed commit.
+    git(
+        &root,
+        &["checkout", &gated, "--", "sykli.json", "sykli.lock"],
+    );
+    let out = pre_push(&root, "origin", &[unknown]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+
+    // And a pushed commit with a contract is gated with none on disk.
+    git(&root, &["checkout", "--quiet", &gated]);
+    fs::remove_file(root.join("sykli.json")).unwrap();
+    let out = pre_push(&root, "origin", &[update(&gated, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pre_push_says_when_it_cannot_tell_the_default_branch() {
+    let root = repo("pushtrunk", PASSING);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/trunk")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("git remote set-head origin --auto"),
+        "{}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_push_with_one_refused_ref_is_refused_whole() {
+    let root = repo("pushmulti", PASSING);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let out = pre_push(
+        &root,
+        "origin",
+        &[
+            update(&head, "refs/heads/feature"),
+            update(&head, "refs/heads/main"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}

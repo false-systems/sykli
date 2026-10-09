@@ -147,6 +147,7 @@ pub(crate) fn pre_commit() -> ExitCode {
 struct Update {
     local_sha: String,
     remote_ref: String,
+    remote_sha: String,
 }
 
 fn updates(input: &str) -> Result<Vec<Update>, String> {
@@ -155,9 +156,10 @@ fn updates(input: &str) -> Result<Vec<Update>, String> {
         .filter(|line| !line.trim().is_empty())
         .map(
             |line| match line.split_whitespace().collect::<Vec<_>>()[..] {
-                [_, local_sha, remote_ref, _] => Ok(Update {
+                [_, local_sha, remote_ref, remote_sha] => Ok(Update {
                     local_sha: local_sha.into(),
                     remote_ref: remote_ref.into(),
+                    remote_sha: remote_sha.into(),
                 }),
                 _ => Err(format!("unexpected pre-push input line {line:?}")),
             },
@@ -165,9 +167,14 @@ fn updates(input: &str) -> Result<Vec<Update>, String> {
         .collect()
 }
 
-/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, else
-/// `main` and `master`.
-fn default_branches(remote: Option<&str>) -> Vec<String> {
+/// An all-zero object id: git's "no such ref" in pre-push lines.
+fn absent(sha: &str) -> bool {
+    sha.bytes().all(|byte| byte == b'0')
+}
+
+/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, and
+/// `true`; else `main` and `master`, and `false`.
+fn default_branches(remote: Option<&str>) -> (Vec<String>, bool) {
     remote
         .and_then(|remote| {
             git(&[
@@ -177,9 +184,47 @@ fn default_branches(remote: Option<&str>) -> Vec<String> {
             ])
             .ok()?
             .strip_prefix(&format!("refs/remotes/{remote}/"))
-            .map(|branch| vec![format!("refs/heads/{branch}")])
+            .map(|branch| (vec![format!("refs/heads/{branch}")], true))
         })
-        .unwrap_or_else(|| vec!["refs/heads/main".into(), "refs/heads/master".into()])
+        .unwrap_or_else(|| {
+            (
+                vec!["refs/heads/main".into(), "refs/heads/master".into()],
+                false,
+            )
+        })
+}
+
+/// The root contract a commit carries, as the hook gates on it: `sykli.json`,
+/// else `sykli.rs` (which `verify --commit` cannot read, so it refuses).
+fn contract_in(commit: &str) -> Option<PathBuf> {
+    ["sykli.json", "sykli.rs"]
+        .into_iter()
+        .find(|name| git(&["cat-file", "-e", &format!("{commit}:{name}")]).is_ok())
+        .map(PathBuf::from)
+}
+
+/// What the remote's branch points at before this push, as far as this
+/// repository knows: the line's remote sha when its commit is here, else the
+/// remote-tracking branch.
+fn remote_tip(update: &Update, remote: Option<&str>) -> Option<String> {
+    if !absent(&update.remote_sha)
+        && git(&[
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", update.remote_sha),
+        ])
+        .is_ok()
+    {
+        return Some(update.remote_sha.clone());
+    }
+    let branch = update.remote_ref.strip_prefix("refs/heads/")?;
+    git(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/{}/{branch}", remote?),
+    ])
+    .ok()
 }
 
 /// Receipts this worktree holds whose tree is `tree`, newest first: the
@@ -230,13 +275,15 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<PathBuf, String> {
 }
 
 /// `sykli hook pre-push`: a push that moves the default branch needs a clean,
-/// passing receipt of exactly the commit it pushes.
+/// passing receipt of exactly the commit it pushes. Whether a push is gated is
+/// decided from the commits, never from the working tree: the pushed commit's
+/// contract gates it, and a commit that drops the contract the branch had is
+/// refused, so taking the gate off takes an explicit `--no-verify`.
 pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
     const HOOK: &str = "pre-push";
-    let root = match enter_repository(HOOK) {
-        Ok(root) => root,
-        Err(code) => return code,
-    };
+    if let Err(code) = enter_repository(HOOK) {
+        return code;
+    }
     let mut input = String::new();
     let parsed = std::io::stdin()
         .read_to_string(&mut input)
@@ -249,20 +296,43 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             return ExitCode::from(CANNOT_EVALUATE);
         }
     };
-    let Some(contract) = root_contract() else {
-        eprintln!(
-            "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; pushes are not gated",
-            root.display()
-        );
-        return ExitCode::SUCCESS;
-    };
-    let defaults = default_branches(remote);
-    let deletion = |sha: &str| sha.bytes().all(|byte| byte == b'0');
-    for update in updates
+    let (defaults, known) = default_branches(remote);
+    let pushed = updates
         .iter()
-        .filter(|update| !deletion(&update.local_sha) && defaults.contains(&update.remote_ref))
+        .filter(|update| !absent(&update.local_sha))
+        .collect::<Vec<_>>();
+    if !known
+        && pushed.iter().any(|update| {
+            update.remote_ref.starts_with("refs/heads/") && !defaults.contains(&update.remote_ref)
+        })
+    {
+        let remote = remote.unwrap_or("REMOTE");
+        eprintln!(
+            "sykli hook {HOOK}: {remote}'s default branch is unknown here, so only main and master are gated; name it with: git remote set-head {remote} --auto"
+        );
+    }
+    for update in pushed
+        .into_iter()
+        .filter(|update| defaults.contains(&update.remote_ref))
     {
         let short = &update.local_sha[..update.local_sha.len().min(12)];
+        let Some(contract) = contract_in(&update.local_sha) else {
+            let before = remote_tip(update, remote);
+            if let Some(tip) = before.filter(|tip| contract_in(tip).is_some()) {
+                eprintln!(
+                    "sykli hook {HOOK}: refusing to push {short} to {}: it has no sykli.json or sykli.rs, but {} there does; \
+                     this push would take the gate off. To do that on purpose, push with --no-verify",
+                    update.remote_ref,
+                    &tip[..tip.len().min(12)]
+                );
+                return ExitCode::from(REFUSED);
+            }
+            eprintln!(
+                "sykli hook {HOOK}: {short} has no sykli.json or sykli.rs, nor did {} before; not gated",
+                update.remote_ref
+            );
+            continue;
+        };
         match receipt_for(&contract, &update.local_sha) {
             Ok(receipt) => eprintln!(
                 "sykli hook {HOOK}: {short} to {}: {} is a clean, passing run of it",

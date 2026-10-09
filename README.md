@@ -317,8 +317,14 @@ a hook it did not write unless you pass `--force`. Running it again is safe.
   receipt: commit, then `sykli run sykli.json`. Cached tasks make that run
   quick. The run the pre-commit hook made does not count, because HEAD had not
   moved yet, so that run was dirty.
+- Whether a push is gated is decided from the commits, not the working tree.
+  The pushed commit's own `sykli.json` gates it. A commit without one is refused
+  when the branch it replaces had one, so taking the gate off main is a
+  deliberate `git push --no-verify`. When the remote's default branch is
+  unknown, a note says so and suggests `git remote set-head REMOTE --auto`.
 
-A repository with no `sykli.json` or `sykli.rs` passes with a note.
+A commit with no `sykli.json` or `sykli.rs`, pushed where there was none
+before, passes with a note.
 
 ## Built for agents
 

@@ -365,7 +365,9 @@ enum Hook {
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
         The default branch is the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
         Deletions and pushes to other branches pass. Receipts are looked for in this\n\
-        worktree: .sykli/receipt.json and .sykli/receipts/*.json.")]
+        worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
+        is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
+        without one is refused when the branch had one (push with --no-verify to drop it).")]
     PrePush {
         /// Remote name, as git passes it
         remote: Option<String>,
