@@ -290,6 +290,15 @@ observations do not prove that declarations are complete.
 A run checks the files on disk. A commit carries what is staged. The hooks
 check what is committed:
 
+```sh
+sykli hook install            # both hooks; --pre-commit or --pre-push for one
+```
+
+`install` writes a two-line `#!/bin/sh` hook that calls `exec sykli hook NAME "$@"`.
+It writes into the repository's common git directory, so every worktree shares
+the hooks, and `sykli` must be on `PATH` wherever git runs. It does not replace
+a hook it did not write unless you pass `--force`. Running it again is safe.
+
 - `sykli hook pre-commit` refuses the commit when a tracked file has changes
   that are not staged, or an untracked file is not ignored, because the run
   would then check a tree other than the commit's. Otherwise it runs and

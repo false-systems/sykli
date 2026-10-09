@@ -406,3 +406,156 @@ fn pre_push_passes_where_there_is_no_contract() {
     assert!(note.contains("no sykli.json"), "{note}");
     fs::remove_dir_all(root).unwrap();
 }
+
+fn hooks_dir(root: &Path) -> PathBuf {
+    root.join(".git/hooks")
+}
+
+#[test]
+fn install_writes_thin_hooks_every_worktree_shares() {
+    let root = repo("install", PASSING);
+    let worktree = root.with_extension("worktree");
+    git(
+        &root,
+        &["worktree", "add", "--quiet", worktree.to_str().unwrap()],
+    );
+    // Installed from a linked worktree, the hooks land in the common dir.
+    let out = sykli(&worktree, &["hook", "install"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    for name in ["pre-commit", "pre-push"] {
+        let path = hooks_dir(&root).join(name);
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("#!/bin/sh\n"), "{body}");
+        assert!(
+            body.contains(&format!("exec sykli hook {name} \"$@\"")),
+            "{body}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "{name} is executable");
+        }
+    }
+    // Idempotent.
+    let before = fs::read(hooks_dir(&root).join("pre-push")).unwrap();
+    let again = sykli(&root, &["hook", "install"]);
+    assert_eq!(again.status.code(), Some(0), "{}", text(&again.stderr));
+    assert_eq!(fs::read(hooks_dir(&root).join("pre-push")).unwrap(), before);
+    git(
+        &root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_replaces_a_foreign_hook_only_with_force() {
+    let root = repo("foreign", PASSING);
+    fs::create_dir_all(hooks_dir(&root)).unwrap();
+    let mine = "#!/bin/sh\necho mine\n";
+    fs::write(hooks_dir(&root).join("pre-push"), mine).unwrap();
+    let out = sykli(&root, &["hook", "install", "--pre-push"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("--force"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(hooks_dir(&root).join("pre-push")).unwrap(),
+        mine
+    );
+    // Only the hook asked for is written.
+    assert!(!hooks_dir(&root).join("pre-commit").exists());
+    let out = sykli(&root, &["hook", "install", "--pre-push", "--force"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        fs::read_to_string(hooks_dir(&root).join("pre-push"))
+            .unwrap()
+            .contains("exec sykli hook pre-push")
+    );
+    assert!(!hooks_dir(&root).join("pre-commit").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Installed hooks, real `git commit` and `git push`, a bare origin, and the
+/// binary under test as the `sykli` on PATH.
+#[cfg(unix)]
+#[test]
+fn installed_hooks_gate_real_commits_and_pushes() {
+    let root = repo("e2e", READS_FILE);
+    let origin = root.with_extension("origin.git");
+    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    // Hooks run: no --no-verify, and no global hooksPath can redirect them.
+    let hooked = |args: &[&str]| {
+        Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", &path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+    };
+    git(
+        &root,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    assert!(sykli(&root, &["hook", "install"]).status.success());
+
+    // A broken change staged while the disk still passes: refused.
+    fs::write(root.join("file.txt"), "broken\n").unwrap();
+    git(&root, &["add", "file.txt"]);
+    fs::write(root.join("file.txt"), "one\n").unwrap();
+    let out = hooked(&["commit", "--quiet", "-m", "sneak"]);
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("not staged"),
+        "{}",
+        text(&out.stderr)
+    );
+    git(&root, &["reset", "--quiet"]);
+
+    // A failing commit (made without hooks) cannot reach main.
+    fs::write(root.join("file.txt"), "broken\n").unwrap();
+    commit(&root, "broken");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(1));
+    let out = hooked(&["push", "--quiet", "origin", "main"]);
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refusing to push"),
+        "{}",
+        text(&out.stderr)
+    );
+    // A feature branch is not gated.
+    let out = hooked(&["push", "--quiet", "origin", "main:feature"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    // Fixed through the pre-commit hook, run clean once committed: accepted.
+    fs::write(root.join("file.txt"), "one\n").unwrap();
+    git(&root, &["add", "file.txt"]);
+    let out = hooked(&["commit", "--quiet", "-m", "fixed"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = hooked(&["push", "--quiet", "origin", "main"]);
+    assert!(!out.status.success(), "the pre-commit run was dirty");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let out = hooked(&["push", "--quiet", "origin", "main"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        git(&root, &["rev-parse", "HEAD"]),
+        git(&origin, &["rev-parse", "main"])
+    );
+    fs::remove_dir_all(origin).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}

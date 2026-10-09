@@ -31,6 +31,12 @@ contract consumer can observe; internal refactors are not listed.
   `verify --commit` for the pushed commit; the refusal names the command that
   produces one. Deletions and other branches pass; so does a repository
   without a contract, with a one-line note.
+- `sykli hook install [--pre-commit] [--pre-push] [--force]` writes thin
+  `#!/bin/sh` hooks (`exec sykli hook NAME "$@"`) into
+  `$(git rev-parse --git-common-dir)/hooks`, so every worktree shares them;
+  both hooks when neither flag is given. Idempotent. A hook sykli did not
+  write is replaced only with `--force` (exit 1 otherwise, nothing written),
+  and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Changed
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the

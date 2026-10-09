@@ -367,6 +367,27 @@ enum Hook {
         /// Remote URL, as git passes it (unused)
         url: Option<String>,
     },
+    /// Install thin git hooks that call `sykli hook`, shared by every worktree
+    #[command(after_help = "Exit codes:\n  \
+        0  installed, updated, or already current\n  \
+        1  refused: a hook sykli did not write is in the way (see --force), or\n     \
+           core.hooksPath sends git elsewhere\n  \
+        2  not a git repository, or a hook could not be written\n\n\
+        Writes $(git rev-parse --git-common-dir)/hooks/<name> as\n  \
+        #!/bin/sh\n  \
+        exec sykli hook <name> \"$@\"\n\
+        so `sykli` must be on PATH wherever git runs. With neither flag, both hooks.")]
+    Install {
+        /// Install the pre-commit hook
+        #[arg(long)]
+        pre_commit: bool,
+        /// Install the pre-push hook
+        #[arg(long)]
+        pre_push: bool,
+        /// Replace an existing hook that sykli did not write
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// `sykli-lock.v2`: one lock file per directory, one entry per contract file
@@ -1014,6 +1035,11 @@ fn main() -> ExitCode {
         Command::Hook { hook } => match hook {
             Hook::PreCommit => hook::pre_commit(),
             Hook::PrePush { remote, url: _ } => hook::pre_push(remote.as_deref()),
+            Hook::Install {
+                pre_commit,
+                pre_push,
+                force,
+            } => hook::install(pre_commit, pre_push, force),
         },
         Command::Plan {
             contract,

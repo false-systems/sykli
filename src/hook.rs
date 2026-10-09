@@ -284,3 +284,92 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
     }
     ExitCode::SUCCESS
 }
+
+/// What `install` writes: the check lives in sykli, the hook only calls it.
+/// The marker line is how a later install recognises its own file.
+const MARKER: &str = "# Installed by `sykli hook install`; the check lives in sykli.";
+
+fn script(name: &str) -> String {
+    format!("#!/bin/sh\n{MARKER}\nexec sykli hook {name} \"$@\"\n")
+}
+
+/// `sykli hook install`: thin hooks in the common git directory, so every
+/// worktree of the repository shares them.
+pub(crate) fn install(pre_commit: bool, pre_push: bool, force: bool) -> ExitCode {
+    let names = match (pre_commit, pre_push) {
+        (false, false) => vec!["pre-commit", "pre-push"],
+        _ => [("pre-commit", pre_commit), ("pre-push", pre_push)]
+            .into_iter()
+            .filter_map(|(name, chosen)| chosen.then_some(name))
+            .collect(),
+    };
+    let located =
+        git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).and_then(|common| {
+            let active = git(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+            Ok((PathBuf::from(common).join("hooks"), PathBuf::from(active)))
+        });
+    let (directory, active) = match located {
+        Ok(found) => found,
+        Err(_) => {
+            eprintln!("sykli hook install: not inside a git repository");
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
+    };
+    if active != directory {
+        eprintln!(
+            "sykli hook install: refusing: core.hooksPath sends git to {}, so hooks in {} would never run; \
+             unset it, or call `sykli hook NAME \"$@\"` from the hooks there",
+            active.display(),
+            directory.display()
+        );
+        return ExitCode::from(REFUSED);
+    }
+    // Decide every hook before writing any, so a refusal changes nothing.
+    let mut plan = Vec::new();
+    for name in names {
+        let path = directory.join(name);
+        let wanted = script(name);
+        let state = match std::fs::read(&path) {
+            Err(_) => "installed",
+            Ok(existing) if existing == wanted.as_bytes() => "unchanged",
+            Ok(existing) if String::from_utf8_lossy(&existing).contains(MARKER) => "updated",
+            Ok(_) if force => "replaced",
+            Ok(_) => {
+                eprintln!(
+                    "sykli hook install: refusing: {} exists and sykli did not write it; pass --force to replace it",
+                    path.display()
+                );
+                return ExitCode::from(REFUSED);
+            }
+        };
+        plan.push((path, wanted, state));
+    }
+    for (path, wanted, state) in plan {
+        let written = if state == "unchanged" {
+            Ok(())
+        } else {
+            std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(&path, wanted))
+        };
+        if let Err(error) = written.and_then(|_| executable(&path)) {
+            eprintln!(
+                "sykli hook install: cannot write {}: {error}",
+                path.display()
+            );
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
+        println!("{state}: {}", path.display());
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(unix)]
+fn executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+/// Git for Windows runs hooks through its own `sh` without an executable bit.
+#[cfg(not(unix))]
+fn executable(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
