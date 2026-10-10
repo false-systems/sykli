@@ -49,11 +49,13 @@ jobs:
         continue-on-error: true
         timeout-minutes: 12
         env:
+          # The Action built sykli here, so the experiment builds on top of it.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/sykli-bin/target
           SHADOW_BASE: ${{ github.event.pull_request.base.sha }}
           SHADOW_PR_HEAD: ${{ github.event.pull_request.head.sha }}
           FULL_RECEIPT: ${{ steps.full.outputs.receipt }}
         run: |
-          python3 scripts/ci_shadow.py \
+          cargo run --quiet --locked --example ci_shadow -- \
             --base "$SHADOW_BASE" --pr-head "$SHADOW_PR_HEAD" \
             --binary "$RUNNER_TEMP/sykli-bin/target/debug/sykli" \
             --receipt "$FULL_RECEIPT" --output "$RUNNER_TEMP/sykli-shadow"

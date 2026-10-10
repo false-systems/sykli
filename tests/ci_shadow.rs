@@ -1,5 +1,12 @@
 //! The experiment is Linux CI glue; exercise it with real Git points and Sykli.
+//! Its source is an example, so CI runs it with `cargo run --example
+//! ci_shadow` and `cargo install` never ships it. Included here, its own unit
+//! tests run with this suite.
 #![cfg(unix)]
+
+#[allow(dead_code)]
+#[path = "../examples/ci_shadow.rs"]
+mod ci_shadow;
 
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -51,26 +58,19 @@ fn full_run(root: &Path) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// The experiment as CI runs it (`cargo run --example ci_shadow`), called in
+/// place so it can use this build's `sykli`; 0 observed, 2 unavailable.
 fn shadow(root: &Path, base: &str, name: &str, expected_code: i32) -> Value {
     let output = root.join(".sykli").join(name);
-    let out = Command::new("python3")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ci_shadow.py"))
-        .args(["--base", base, "--binary", env!("CARGO_BIN_EXE_sykli")])
-        .arg("--receipt")
-        .arg(root.join(".sykli/full.json"))
-        .arg("--output")
-        .arg(&output)
-        .env_remove("GITHUB_STEP_SUMMARY")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(expected_code),
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let args = ci_shadow::Args {
+        base: base.into(),
+        binary: env!("CARGO_BIN_EXE_sykli").into(),
+        receipt: root.join(".sykli/full.json"),
+        output: output.clone(),
+        pr_head: None,
+    };
+    let observed = ci_shadow::observe(&args, root, None).unwrap();
+    assert_eq!(if observed { 0 } else { 2 }, expected_code, "{name}");
     serde_json::from_slice(&fs::read(output.join("report.json")).unwrap()).unwrap()
 }
 
@@ -247,6 +247,99 @@ fn shadow_reports_real_changes_false_reuse_and_unproven_comparisons() {
     assert_eq!(
         renamed["coverage"]["unresolved_paths"],
         json!(["README.md", "other.md"])
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `main` as CI calls it: exit codes, and the summary appended to
+/// `GITHUB_STEP_SUMMARY` (passed in, since the environment is process-wide).
+#[test]
+fn the_entry_point_answers_by_exit_code_and_appends_the_step_summary() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("sykli-shadow-main-{nonce}"));
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    fs::write(root.join(".gitignore"), "/.sykli/\n").unwrap();
+    fs::write(root.join("input"), "before").unwrap();
+    fs::write(
+        root.join("sykli.json"),
+        json!({"schema": "sykli-contract.v1", "tasks": [
+            {"name": "declared", "run": "cat input", "inputs": ["input"]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let base = commit(&root);
+    fs::write(root.join("input"), "after").unwrap();
+    commit(&root);
+    let run = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    fs::write(root.join(".sykli/full.json"), &run.stdout).unwrap();
+
+    let summary = root.join(".sykli/step-summary.md");
+    fs::write(&summary, "earlier step\n").unwrap();
+    let entry = |args: &[&str]| {
+        ci_shadow::run(
+            args.iter().map(|arg| arg.to_string()),
+            &root,
+            Some(&summary),
+        )
+    };
+    let sykli = env!("CARGO_BIN_EXE_sykli");
+    let observed = [
+        "--base",
+        &base,
+        "--binary",
+        sykli,
+        "--receipt",
+        ".sykli/full.json",
+        "--output",
+        ".sykli/observed",
+    ];
+    assert_eq!(entry(&observed), 0);
+    let appended = fs::read_to_string(&summary).unwrap();
+    assert!(
+        appended.starts_with("earlier step\n### Sykli CI shadow experiment"),
+        "{appended}"
+    );
+    assert!(appended.contains("Compared base <code>"), "{appended}");
+    // The output directory exists now: no report can be written, exit 1.
+    assert_eq!(entry(&observed), 1);
+    // An observation that cannot be made is reported, and exits 2.
+    let unavailable = [
+        "--base",
+        "no-such-commit",
+        "--binary",
+        sykli,
+        "--receipt",
+        ".sykli/full.json",
+        "--output",
+        ".sykli/unavailable",
+    ];
+    assert_eq!(entry(&unavailable), 2);
+    assert!(
+        fs::read_to_string(&summary)
+            .unwrap()
+            .ends_with("Observation unavailable: git rev-parse --verify --end-of-options no-such-commit^{commit} failed: exit status: 128\n"),
+    );
+    // Bad arguments exit 2; `--help` only counts as a flag, not as a value.
+    assert_eq!(entry(&["--base", "b"]), 2);
+    assert_eq!(entry(&["--help"]), 0);
+    assert_eq!(
+        entry(&["--base", "--help"]),
+        2,
+        "a value, so the other flags are missing"
     );
     fs::remove_dir_all(root).unwrap();
 }
