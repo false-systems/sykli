@@ -57,16 +57,20 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
-- `run` refuses (exit 2) when a folder holding one of a task's declared
-  inputs has a file, tracked or untracked and not ignored, that the task does
-  not declare: the task reads that folder, so such a file could change its
-  result without changing its key, and a test reading a whole fixture folder
-  kept a cached pass after a fixture was added. This applies to every graph,
-  not only Cargo graphs; the task's working directory and the repository root
-  are exempt, and subfolders are not searched. The message names each file and
-  its task; `plan --explain` reports them as `input_coverage.folder_missing_inputs`
-  (absent when empty), marks the cache states as input errors and exits 2.
-  Contracts with such gaps must declare the files, or move them, and re-lock.
+- `run` refuses (exit 2) an undeclared sibling of a declared input: a tracked
+  file (in the index) directly inside a folder holding one of a task's declared
+  inputs, which that task does not declare. Such a file could change the
+  task's result without changing its key; a test reading a whole fixture
+  folder kept a cached pass after a fixture was added. This applies to every
+  graph, not only Cargo graphs. Only the repository root is exempt; a task's
+  working directory is checked like any other folder. The message names each
+  file and its task; `plan --explain` reports them as
+  `input_coverage.folder_missing_inputs` (absent when empty), marks the cache
+  states as input errors and exits 2. It is a tripwire, not a dependency scan:
+  new subfolders, parent folders, the repository root, untracked (so editor
+  and OS scratch files never refuse a run), ignored and generated files are
+  not checked. Contracts with such gaps must declare the files, or move them,
+  and re-lock.
 - The GitHub Action verifies twice: the live check against the checkout, as
   before, and then `--commit`, by default against the pull request's head on
   `pull_request` events and against HEAD otherwise (new `commit` input; `none`

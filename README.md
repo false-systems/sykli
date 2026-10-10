@@ -57,7 +57,7 @@ test
   cache: no entry for the current key
 Input coverage against 435c318a… (plus --changed hints):
   declared input: "test.sh" -> test
-Unmapped paths are advisory except for missing Cargo inputs and undeclared files in folders a task reads, which block execution and cache reuse.
+Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse.
 
 $ sykli run --json > .sykli/receipt.json      # only the changed task runs
 cached: lint
@@ -238,9 +238,12 @@ committed changes relative to that ref. Contract and lock changes are labeled as
 evaluation metadata. In Cargo-root repositories, `run` refuses to execute or
 reuse passes when known source, configuration or test files in the current Git
 inventory are missing from every task's inputs. In every graph, it also refuses
-when a folder holding one of a task's declared inputs has a file that task does
-not declare, since the task reads that folder (the working directory and the
-repository root are exempt). Other unmapped paths are advisory.
+an undeclared sibling of a declared input: a tracked file directly inside a
+folder that holds one of a task's inputs, which that task does not declare.
+That catches a fixture added next to declared fixtures, once it is `git add`ed.
+It is a tripwire, not a dependency scan. It does not catch files in new
+subfolders or in parent folders, anything in the repository root, or
+untracked, ignored and generated files. Other unmapped paths are advisory.
 
 > [!IMPORTANT]
 > Sykli does not observe every file or tool your commands read. An undeclared

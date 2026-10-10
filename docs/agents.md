@@ -75,17 +75,25 @@ the graph declares that manifest or names `cargo` in a task command. It does
 not turn an unrelated shell-only graph into a Cargo graph. Shell wrappers that
 hide Cargo invocation must declare their Cargo manifest to opt into the check.
 
-Every graph, Cargo or not, has a second prerequisite: a task that declares an
-input in a folder reads that folder, so every file directly inside it (tracked,
-or untracked and not ignored, from the same inventory) must be one of that
-task's inputs too. A test that reads a whole fixture folder otherwise keeps its
-cached pass after a fixture is added. The task's working directory and the
-repository root are exempt, since they hold project files every task declares
-only a few of; subfolders are not searched. `run` exits 2 naming each file and
+Every graph, Cargo or not, has a second prerequisite, a tripwire for one
+pattern: no undeclared sibling of a declared input. Every tracked file (in the
+index, so a new file counts once it is `git add`ed) directly inside a folder
+that holds one of a task's declared inputs must be one of that task's inputs
+too. A test that reads a whole fixture folder otherwise keeps its cached pass
+after a fixture is added. Only the repository root is exempt; a task's working
+directory is checked like any other folder. `run` exits 2 naming each file and
 its task, and explain lists them as `folder_missing_inputs: [{path, task}]`
 under `input_coverage` (absent when there are none), marks task cache states as
 input errors and exits 2. Declare the file in that task's inputs, or move it
 out of the folder, and re-lock.
+
+It is not a dependency scan, and it does not catch: files in new subfolders of
+an input folder, or in its parent folders; anything in the repository root;
+untracked files (so editor and OS scratch files never refuse a run; the
+pre-commit hook refuses commits while untracked files exist), ignored or
+generated files; or anything outside the repository. A task that walks a
+folder tree recursively, or globs a folder in which it declares nothing, still
+needs its inputs declared by hand.
 It can require explicit inputs for unused fixtures. It does not inspect ignored
 generated files, arbitrary build-script reads, external tools or files outside
 the Git inventory, nor prove each input belongs to every task that reads it.

@@ -546,20 +546,25 @@ struct FolderInput {
     task: String,
 }
 
-/// A task that declares an input in a folder reads that folder, so a file in
-/// it the task does not declare can change the task's result without changing
-/// its key: a test that read a whole fixture folder kept its cached pass after
-/// a fixture was added. Every tracked, or untracked and not ignored, file
-/// directly inside a folder holding one of a task's declared inputs must be
-/// one of that task's inputs too, for Cargo and other graphs alike. The task's
-/// working directory and the repository root are not such folders: they hold
-/// project files every task declares only a few of. The inventory is the
-/// Cargo completeness gate's; `.sykli/` is excluded.
+/// A tripwire for one pattern: a tracked file next to a declared input that
+/// the task does not declare. A task that declares an input in a folder
+/// likely reads that folder, so such a file can change its result without
+/// changing its key: a test that read a whole fixture folder kept its cached
+/// pass after a fixture was added. Every tracked file (the index, so a new
+/// file counts once it is `git add`ed) directly inside a folder holding one
+/// of a task's declared inputs must be one of that task's inputs too, for
+/// Cargo and other graphs alike. Only the repository root is exempt; a task's
+/// working directory is a folder like any other.
+///
+/// It does not catch files in new subfolders or in parent folders of an input
+/// folder, anything in the repository root, untracked, ignored or generated
+/// files, or anything outside the repository. Untracked files are left out so
+/// editor and OS scratch files beside an input never refuse a run; the
+/// pre-commit hook already refuses a commit while untracked files exist.
 fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String> {
     let mut tasks = Vec::new();
     for task in &contract.tasks {
         let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
-        let workdir_path = absolute(workdir)?;
         let declared = task
             .inputs
             .iter()
@@ -568,7 +573,6 @@ fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String
         let folders = declared
             .iter()
             .filter_map(|path| path.parent())
-            .filter(|folder| *folder != workdir_path)
             .map(Path::to_path_buf)
             .collect::<BTreeSet<_>>();
         if !folders.is_empty() {
@@ -584,16 +588,7 @@ fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String
     for (_, _, folders) in &mut tasks {
         folders.remove(&root);
     }
-    let files = git_paths(
-        &root,
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    )?;
+    let files = git_paths(&root, &["ls-files", "--cached", "-z"])?;
     let mut missing = BTreeSet::new();
     for file in files {
         if file.starts_with(root.join(".sykli")) {
@@ -633,7 +628,7 @@ fn folder_coverage_error(missing: &[FolderInput]) -> String {
         listed.push(format!("and {} more", missing.len() - SHOWN));
     }
     format!(
-        "undeclared files in folders their tasks read: {}; add each to its task's inputs (or move it out of that folder) and re-lock before running (no cached results used)",
+        "tracked files next to a task's declared inputs that the task does not declare: {}; add each to its task's inputs (or move it out of that folder) and re-lock before running (no cached results used)",
         listed.join(", ")
     )
 }
@@ -1310,7 +1305,7 @@ fn main() -> ExitCode {
                                 }
                             }
                             println!(
-                                "Unmapped paths are advisory except for missing Cargo inputs and undeclared files in folders a task reads, which block execution and cache reuse."
+                                "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."
                             );
                         }
                     } else {
