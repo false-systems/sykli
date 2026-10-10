@@ -78,7 +78,9 @@ domains and schema meanings never change; incompatible changes are a new `.vN`.
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
 `inherit` variables (inherited values reach the task; only their digests reach
-the receipt). A task's cache key covers its declaration, input digests
+the receipt). Inside a git hook, the directory git prepends to `PATH`
+(`GIT_EXEC_PATH`) is taken off again (`without_git_prepend`), so hooked and
+manual runs share keys. A task's cache key covers its declaration, input digests
 (content plus execute bits), runtime fingerprint (for a Cargo graph, including
 the `rustc -vV`/`cargo -V` the task shell resolves: `graph_runtime`, sykli#64),
 inherited-value digests, and

@@ -79,6 +79,13 @@ contract consumer can observe; internal refactors are not listed.
   instead; this repository's CI does.
 
 ### Changed
+- A run inside a git hook shares cached results with the same run made by
+  hand. Git runs hooks with `GIT_EXEC_PATH` set and that directory prepended
+  to `PATH`, and `PATH` is part of every task's runtime fingerprint, so a
+  manual `sykli run` after a hooked commit (or the reverse) re-ran every
+  task. When `GIT_EXEC_PATH` is set and is `PATH`'s first entry, that entry
+  is dropped from the tasks' environment and their keys. Runs outside a hook
+  are unchanged; runs inside one miss the cache once.
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
   task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,
   joins the runtime fingerprint. A pass recorded under one compiler is no

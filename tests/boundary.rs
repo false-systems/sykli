@@ -1273,3 +1273,47 @@ fn re_keeping_a_receipt_makes_it_the_newest() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Inside a hook git prepends its exec path to PATH, and PATH is part of every
+/// task's runtime. A run in a hook and the same run by hand must share keys.
+#[cfg(unix)]
+#[test]
+fn a_hooked_run_and_a_manual_run_of_the_same_tree_share_the_cache() {
+    let root = repo("hookpath", READS_FILE);
+    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    assert!(
+        sykli(&root, &["hook", "install", "--pre-commit"])
+            .status
+            .success()
+    );
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    git(&root, &["add", "other.txt"]);
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(["commit", "--quiet", "-m", "through the hook"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // The same tree by hand, with the PATH the test gave git.
+    let manual = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert_eq!(manual.status.code(), Some(0), "{}", text(&manual.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&manual.stdout).unwrap();
+    for task in receipt["tasks"].as_array().unwrap() {
+        assert_eq!(task["outcome"], "cached", "{}", task["name"]);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
