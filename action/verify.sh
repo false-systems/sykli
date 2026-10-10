@@ -8,6 +8,8 @@ set -eu
 binary=${SYKLI_BINARY:?SYKLI_BINARY is required}
 contract=${SYKLI_CONTRACT:?SYKLI_CONTRACT is required}
 receipt=${SYKLI_RECEIPT:?SYKLI_RECEIPT is required}
+# The commit whose tree the receipt must be a run of; 'none' skips that check.
+commit=${SYKLI_COMMIT:-HEAD}
 output=${GITHUB_OUTPUT:-/dev/null}
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 
@@ -18,10 +20,30 @@ if [ ! -s "$receipt" ]; then
 fi
 
 set +e
+# The live check first: `run` hashes the tree before its tasks execute, so
+# only this sees a task that left a file behind. Then the commit check, which
+# reads nothing from the checkout: is this receipt evidence for that commit?
 "$binary" verify "$receipt" --contract "$contract"
 code=$?
+stage=checkout
+if [ "$code" = 0 ] && [ "$commit" != none ]; then
+  "$binary" verify "$receipt" --contract "$contract" --commit "$commit"
+  code=$?
+  stage=commit
+fi
 set -e
 echo "code=$code" >>"$output"
+
+# GitHub's default pull-request checkout is a merge commit whose second
+# parent is the head; name that case exactly.
+merge_checkout=false
+if [ "$stage" = commit ] && [ "$code" = 3 ]; then
+  head=$(git rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null || true)
+  second=$(git rev-parse --verify --quiet "HEAD^2" 2>/dev/null || true)
+  if [ -n "$head" ] && [ "$head" = "$second" ]; then
+    merge_checkout=true
+  fi
+fi
 
 # Exit-code policy. Sykli's verify codes are stages: checks run in
 # order and the first failing stage decides. This block is the only place the
@@ -40,12 +62,18 @@ case "$code" in
     ;;
   2)
     title="cannot verify"
-    hint="the receipt, contract, or git state is unreadable — this is a broken gate, not a failed one"
+    hint="the receipt, contract, or git state is unreadable, or commit $commit is not in this checkout — this is a broken gate, not a failed one"
     level=error
     ;;
   3)
     title="receipt is stale"
-    hint="the tree or declared inputs changed after the run; a task most likely wrote a file that is neither gitignored nor declared as an output"
+    if [ "$merge_checkout" = true ]; then
+      hint="this job checked out GitHub's merge commit, not the pull request head $commit: set actions/checkout's ref to github.event.pull_request.head.sha"
+    elif [ "$stage" = commit ]; then
+      hint="the receipt is not a run of commit $commit's tree: check out that commit and run the graph there"
+    else
+      hint="the tree or declared inputs changed after the run; a task most likely wrote a file that is neither gitignored nor declared as an output"
+    fi
     level=error
     ;;
   4)

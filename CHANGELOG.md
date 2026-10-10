@@ -7,6 +7,64 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Added
+- `sykli verify RECEIPT --contract FILE --commit REV` judges a
+  receipt as evidence for a commit rather than the checkout. The contract and
+  its lock pin are read from `REV`, and nothing is read from the checkout, so
+  any commit verifies from any checkout. The receipt's tree must be
+  `REV^{tree}` (with `.sykli/` excluded, as in every receipt tree). The tree
+  check alone binds the content, so the run need not be clean: the pre-commit
+  hook's run counts for the push, and `clean` is reported but does not refuse.
+  A miss exits 3, a contract or lock in `REV` that differs exits 4, and a
+  revision that names no commit, or a commit without the JSON contract, exits
+  2. Declared inputs the commit does not track are not judged. Without
+  `--commit`, verify is unchanged and still accepts a dirty receipt for the
+  tree on disk.
+- A run in a repository whose submodule has uncommitted changes (tracked or
+  untracked) is `dirty`, and its receipt's subject records
+  `submodules_modified: true`; the tree shows a submodule only as its gitlink.
+  `verify --commit` refuses such a receipt (exit 3) on its own check. The
+  field is written only when true, so other receipts are unchanged.
+- `verify` prints the first failing check to stderr as one line
+  (`refused: CHECK expected … but got …`); stdout is unchanged.
+- `sykli hook pre-commit`, a git pre-commit entrypoint that checks the tree
+  being committed rather than the files on disk. It refuses (exit 1) when a
+  tracked file has unstaged changes or an untracked file is not ignored, since
+  the run would then check another tree; otherwise it runs and verifies the
+  graph and refuses when either fails, or when the tree that ran is not the
+  tree the index will commit (`git write-tree`; `git diff` is silent for
+  assume-unchanged and skip-worktree files). It stashes nothing. No `sykli.json` or
+  `sykli.rs` at the root, or no commit yet, passes with a note.
+- `sykli hook pre-push [REMOTE [URL]]`, a git pre-push entrypoint reading
+  git's `<local ref> <local sha> <remote ref> <remote sha>` lines. A push that
+  updates the remote's default branch (`refs/remotes/REMOTE/HEAD`, else `main`
+  and `master`) is refused (exit 1) unless a receipt in this worktree,
+  `.sykli/receipt.json` or `.sykli/receipts/*.json`, passes
+  `verify --commit` for the pushed commit; the refusal names the command that
+  produces one. Deletions and other branches pass. Whether a push is gated is
+  decided from the commits: the pushed commit's own contract gates it, and a
+  commit without one is refused when the branch it replaces (the line's remote
+  sha, else `refs/remotes/REMOTE/BRANCH`) had one; `--no-verify` is the
+  deliberate way to take the gate off. A push where neither has a contract
+  passes with a one-line note, and an unknown default branch is noted with the
+  `git remote set-head` command that names it.
+- `sykli hook install [--pre-commit] [--pre-push] [--force]` writes thin
+  `#!/bin/sh` hooks (`exec sykli hook NAME "$@"`) into
+  `$(git rev-parse --git-common-dir)/hooks`, so every worktree shares them;
+  both hooks when neither flag is given. Idempotent. A hook sykli did not
+  write, or an edited sykli hook, is replaced only with `--force` (exit 1
+  otherwise, nothing written), which keeps the old file as `NAME.pre-sykli`,
+  and a `core.hooksPath` that sends git elsewhere is refused.
+
+### Breaking
+- The GitHub Action verifies twice: the live check against the checkout, as
+  before, and then `--commit`, by default against the pull request's head on
+  `pull_request` events and against HEAD otherwise (new `commit` input; `none`
+  skips the second check). **A workflow that checks out GitHub's merge commit
+  now fails verify with exit 3 on pull requests**, and the annotation says the
+  merge commit was checked out. Check out `github.event.pull_request.head.sha`
+  instead; this repository's CI does.
+
 ### Changed
 - A Cargo graph's cache keys include the Rust toolchain (sykli#64): what the
   task shell resolves `rustc -vV` and `cargo -V` to, in each task workdir,

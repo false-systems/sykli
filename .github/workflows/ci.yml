@@ -25,6 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # The pull request's head, not GitHub's merge commit: the receipt
+          # must be evidence for the commit that is merged, and the Action
+          # verifies it against that head (`sykli verify --commit`).
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # The delta plan diffs the pull request against its base commit.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
@@ -55,8 +59,11 @@ jobs:
           SHADOW_PR_HEAD: ${{ github.event.pull_request.head.sha }}
           FULL_RECEIPT: ${{ steps.full.outputs.receipt }}
         run: |
+          # The checkout is the head, not a merge commit, so compare with
+          # the merge base: the base branch's tip may have moved since.
+          base=$(git merge-base "$SHADOW_BASE" HEAD)
           cargo run --quiet --locked --example ci_shadow -- \
-            --base "$SHADOW_BASE" --pr-head "$SHADOW_PR_HEAD" \
+            --base "$base" --pr-head "$SHADOW_PR_HEAD" \
             --binary "$RUNNER_TEMP/sykli-bin/target/debug/sykli" \
             --receipt "$FULL_RECEIPT" --output "$RUNNER_TEMP/sykli-shadow"
 
@@ -79,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:

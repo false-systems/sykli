@@ -259,10 +259,15 @@ After checkout, install Sykli and your project's toolchain, then:
 mkdir -p .sykli
 sykli run --json > .sykli/receipt.json
 sykli verify .sykli/receipt.json --contract sykli.json
+sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 ```
 
-Fail the job on either command's nonzero exit and keep the receipt as an
-artifact. The included [GitHub Action](action.yml) runs and verifies the graph,
+Fail the job on any command's nonzero exit and keep the receipt as an
+artifact. On pull requests, check out the pull request's head
+(`ref: ${{ github.event.pull_request.head.sha }}` on `actions/checkout`), not
+GitHub's merge commit, so the receipt is evidence for the commit that gets
+merged. The Action verifies against that head by default; its `commit` input
+overrides that. The included [GitHub Action](action.yml) runs and verifies the graph,
 writes a job summary, uploads the receipt, and reports which tasks a pull
 request affects. It installs a release tag, so pin it with
 `uses: false-systems/sykli@vX.Y.Z` once one is published. This repository gates
@@ -284,6 +289,50 @@ could be justified later. It does not claim CI savings today, and matching
 observations do not prove that declarations are complete.
 
 </details>
+
+## Git hooks
+
+A run checks the files on disk. A commit carries what is staged. The hooks
+check what is committed:
+
+```sh
+sykli hook install            # both hooks; --pre-commit or --pre-push for one
+```
+
+`install` writes a three-line `#!/bin/sh` hook that calls `exec sykli hook NAME "$@"`.
+It writes into the repository's common git directory, so every worktree shares
+the hooks, and `sykli` must be on `PATH` wherever git runs. It does not replace
+a hook it did not write, or one of its own that was edited, unless you pass
+`--force`, which keeps the old hook as `NAME.pre-sykli`. Running it again is
+safe.
+
+- `sykli hook pre-commit` refuses the commit when a tracked file has changes
+  that are not staged, or an untracked file is not ignored, because the run
+  would then check a tree other than the commit's. Otherwise it runs and
+  verifies the graph, and last compares the tree that ran with the tree the
+  index will commit (`git write-tree`), so a file marked assume-unchanged or
+  skip-worktree cannot carry other content past it. It stashes nothing. A tool
+  that writes a temporary file beside an ignored one (`name.json.tmp-*` next to
+  an ignored `name.json`) trips the untracked-file refusal while it writes;
+  the fix belongs in that tool: write temporary files into an ignored
+  directory.
+- `sykli hook pre-push` refuses a push that moves the remote's default branch
+  unless this worktree holds a receipt that passes
+  `sykli verify --commit` for the pushed commit. It looks in
+  `.sykli/receipt.json` and `.sykli/receipts/`. The default branch is the one
+  `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. Deletions and
+  pushes to other branches pass. A refusal names the command that produces a
+  receipt: commit, then `sykli run sykli.json`. Cached tasks make that run
+  quick. The run the pre-commit hook made does not count, because HEAD had not
+  moved yet, so that run was dirty.
+- Whether a push is gated is decided from the commits, not the working tree.
+  The pushed commit's own `sykli.json` gates it. A commit without one is refused
+  when the branch it replaces had one, so taking the gate off main is a
+  deliberate `git push --no-verify`. When the remote's default branch is
+  unknown, a note says so and suggests `git remote set-head REMOTE --auto`.
+
+A commit with no `sykli.json` or `sykli.rs`, pushed where there was none
+before, passes with a note.
 
 ## Built for agents
 
@@ -361,6 +410,33 @@ declared inputs, and then the recorded outcome. It **does not** authenticate who
 wrote the receipt, and it does not prove that the declared checks are
 sufficient.
 
+A receipt binds a tree, not a commit, and a run of uncommitted work is only
+marked `dirty`. To ask whether a receipt is evidence for a commit, name it:
+
+```sh
+sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
+```
+
+With `--commit REV`, the subject is the commit, not the checkout. The
+contract and its `sykli.lock` pin are read from `REV`. The receipt's tree must
+be `REV^{tree}`. Otherwise it exits 3. The tree check is what binds the
+receipt to the commit's content, so a run need not be clean: a pre-commit run,
+made before HEAD moves, is a run of exactly the tree the commit records and
+counts for the push. Whether the run was clean is still reported. Nothing is read from the checkout,
+so any commit can be verified from any checkout, uncommitted edits or not.
+Declared inputs that the commit does not track, such as ignored files, are not
+part of a commit and are not judged. On any failure, the first failing check is
+also printed to stderr as one line.
+
+Without `--commit`, verify judges the checkout as it is now. Run both in CI: a
+run hashes its tree before its tasks execute, so only the live check notices a
+task that leaves an undeclared file behind.
+
+A tree records a submodule only as the commit it is at. When a submodule has
+uncommitted changes, tracked or untracked, the run is marked `dirty` and
+records `submodules_modified: true`, and `--commit` refuses that receipt with
+exit 3.
+
 A receipt also records **when**. `started_at_ms` on the run is when that run
 began; on a task, it is when that task was seen running. A cached task replays
 its original moment, so a receipt full of cache hits reports old task times
@@ -396,7 +472,8 @@ entry costs a re-run, never a result.
 | | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
 | | `run` | Execute the graph and record a receipt |
-| | `verify` | Check a receipt against the current tree and contract |
+| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit |
+| | `hook` | Git hook entrypoints that gate what is committed and pushed |
 | **Production** | `targets` | Discover typed artifact targets without building |
 | | `produce` | Build an artifact from captured source and run its checks |
 | | `status` · `resume` | Inspect or continue a production by ID |

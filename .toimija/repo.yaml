@@ -8,10 +8,6 @@ repo:
   - datastore
   - server
   - interpreter
-composition:
-  work: teko
-  default_worker: null
-  require_work: false
 context:
   default_budget: 8000
   important_docs:
@@ -31,7 +27,7 @@ stewardship:
   history_max_records: 500
 boundaries:
 - "Own only graph parsing, validation, planning, execution, caching, and receipts."
-- "Receipts claim what ran; Toimija verifies, Teko decides closure, Ahti stores, and Kisko runs workers."
+- "Receipts claim what ran; verifying them, deciding closure, storing them and running workers belong to other tools."
 - "Stay a local, offline, single-run CLI: no server, network service, daemon, coordination, or agent execution."
-- "Container runtime and Ahti append wait until family repositories run v0 daily."
+- "A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily."
 - "Contract growth requires a named user and the re-entry conditions in docs/adr/0005-deletions.md."

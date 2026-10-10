@@ -19,6 +19,7 @@ mod assessment;
 mod canonical;
 mod evidence;
 mod github;
+mod hook;
 mod init;
 mod inspect;
 #[cfg(unix)]
@@ -317,14 +318,82 @@ enum Command {
         0  verified\n  \
         1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
-        3  tree or input mismatch — receipt is stale; re-run sykli\n  \
-        4  contract mismatch — contract drifted from the receipt; re-lock")]
+        3  tree or input mismatch — receipt is stale; re-run sykli\n     \
+           (with --commit: not a run of that commit's tree)\n  \
+        4  contract mismatch — contract drifted from the receipt; re-lock\n     \
+           (with --commit: from the contract or lock in that commit)\n\n\
+        Without --commit the subject is the checkout: its tree and declared inputs.\n\
+        With --commit the subject is the commit, and nothing is read from the\n\
+        checkout; REV is resolved in the repository around the current directory.\n\
+        On any failure the first failing check is also printed to stderr as one line.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
         /// Path to sykli.rs or a sykli-contract.v1 JSON file
         #[arg(long, default_value = "sykli.rs")]
         contract: PathBuf,
+        /// Judge the receipt as evidence for this commit instead of the checkout:
+        /// the contract and lock are read from REV, the receipt's tree must be
+        /// REV^{tree}, and every task passed or cached (the run need not be clean)
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
+    },
+    /// Git hook entrypoints that gate what is committed and pushed
+    Hook {
+        #[command(subcommand)]
+        hook: Hook,
+    },
+}
+
+#[derive(Subcommand)]
+enum Hook {
+    /// Refuse a commit unless the graph passes on exactly the tree being committed
+    #[command(after_help = "Exit codes:\n  \
+        0  the graph passed on the staged tree, or there is no sykli.json or sykli.rs\n  \
+        1  refused: unstaged changes or untracked files, or the graph failed\n  \
+        2  could not evaluate: no git repository or an unreadable contract\n\n\
+        Runs from the repository root. A tracked file whose disk content differs\n\
+        from the index, or an untracked file that is not ignored, would make the\n\
+        run check a tree other than the commit's, so either one refuses the commit.")]
+    PreCommit,
+    /// Refuse a push to the default branch without a clean, passing receipt of the pushed commit
+    #[command(after_help = "Exit codes:\n  \
+        0  nothing pushed to the default branch, every such push has a receipt that\n     \
+           passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
+        1  refused: a push to the default branch has no such receipt\n  \
+        2  could not evaluate: no git repository or unreadable input\n\n\
+        Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
+        The default branch is the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
+        Deletions and pushes to other branches pass. Receipts are looked for in this\n\
+        worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
+        is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
+        without one is refused when the branch had one (push with --no-verify to drop it).")]
+    PrePush {
+        /// Remote name, as git passes it
+        remote: Option<String>,
+        /// Remote URL, as git passes it (unused)
+        url: Option<String>,
+    },
+    /// Install thin git hooks that call `sykli hook`, shared by every worktree
+    #[command(after_help = "Exit codes:\n  \
+        0  installed, updated, or already current\n  \
+        1  refused: a hook sykli did not write is in the way (see --force), or\n     \
+           core.hooksPath sends git elsewhere\n  \
+        2  not a git repository, or a hook could not be written\n\n\
+        Writes $(git rev-parse --git-common-dir)/hooks/<name> as\n  \
+        #!/bin/sh\n  \
+        exec sykli hook <name> \"$@\"\n\
+        so `sykli` must be on PATH wherever git runs. With neither flag, both hooks.")]
+    Install {
+        /// Install the pre-commit hook
+        #[arg(long)]
+        pre_commit: bool,
+        /// Install the pre-push hook
+        #[arg(long)]
+        pre_push: bool,
+        /// Replace a hook sykli did not write, or an edited one; the old file is kept as NAME.pre-sykli
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -963,12 +1032,21 @@ fn main() -> ExitCode {
         Command::Run { contract, json } => match load(&contract)
             .and_then(|(contract, levels, hash)| run(&contract, &levels, hash, json))
         {
-            Ok(true) => ExitCode::SUCCESS,
-            Ok(false) => ExitCode::FAILURE,
+            Ok((true, _)) => ExitCode::SUCCESS,
+            Ok((false, _)) => ExitCode::FAILURE,
             Err(error) => {
                 eprintln!("error: {error}");
                 ExitCode::from(2)
             }
+        },
+        Command::Hook { hook } => match hook {
+            Hook::PreCommit => hook::pre_commit(),
+            Hook::PrePush { remote, url: _ } => hook::pre_push(remote.as_deref()),
+            Hook::Install {
+                pre_commit,
+                pre_push,
+                force,
+            } => hook::install(pre_commit, pre_push, force),
         },
         Command::Plan {
             contract,
@@ -1205,7 +1283,11 @@ fn main() -> ExitCode {
             why.as_deref(),
             json,
         ),
-        Command::Verify { receipt, contract } => match verify(&receipt, &contract) {
+        Command::Verify {
+            receipt,
+            contract,
+            commit,
+        } => match verify(&receipt, &contract, commit.as_deref()) {
             Ok(checks) => report(&checks),
             Err(error) => {
                 eprintln!("error: {error}");
@@ -1232,26 +1314,32 @@ fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>, String> {
     if !lock_path.is_file() {
         return Ok(None);
     }
+    let bytes = fs::read(lock_path).map_err(|error| error.to_string())?;
+    parse_lock(&bytes, &lock_path.display().to_string()).map(Some)
+}
+
+fn parse_lock(bytes: &[u8], name: &str) -> Result<LockFile, String> {
     let lock: LockFile =
-        serde_json::from_slice(&fs::read(lock_path).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("invalid {}: {error}", lock_path.display()))?;
+        serde_json::from_slice(bytes).map_err(|error| format!("invalid {name}: {error}"))?;
     match lock.schema.as_str() {
         "sykli-lock.v1" if lock.contract_hash.is_some() && lock.contracts.is_empty() => {}
         "sykli-lock.v2" if lock.contract_hash.is_none() => {}
-        _ => return Err(format!("unsupported lock file {}", lock_path.display())),
+        _ => return Err(format!("unsupported lock file {name}")),
     }
-    Ok(Some(lock))
+    Ok(lock)
+}
+
+/// The hash a lock file pins for this contract, if it pins one.
+fn pinned(lock: LockFile, contract: &Path) -> Option<String> {
+    match lock.contract_hash {
+        Some(hash) => Some(hash),
+        None => lock.contracts.get(&lock_key(contract)).cloned(),
+    }
 }
 
 /// The pinned hash for this contract, if its directory's lock file has one.
 fn read_lock(path: &Path) -> Result<Option<String>, String> {
-    let Some(lock) = read_lock_file(&lock_path(path))? else {
-        return Ok(None);
-    };
-    Ok(match lock.contract_hash {
-        Some(hash) => Some(hash),
-        None => lock.contracts.get(&lock_key(path)).cloned(),
-    })
+    Ok(read_lock_file(&lock_path(path))?.and_then(|lock| pinned(lock, path)))
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
@@ -1269,8 +1357,12 @@ fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), Str
             path.display()
         ));
     };
+    parse_contract(&bytes)
+}
+
+fn parse_contract(bytes: &[u8]) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let hash = sha256(&serde_json::to_vec(&value).map_err(|error| error.to_string())?);
     let contract: Contract = serde_json::from_value(value).map_err(|error| error.to_string())?;
     let levels = validate(&contract)?;
@@ -1559,7 +1651,12 @@ struct Subject {
     tree_oid: String,
     inputs_digest: String,
     head_tree_oid: String,
+    /// The tree that ran is not HEAD's, or a submodule had uncommitted changes.
     dirty: bool,
+    /// A submodule had uncommitted changes, which its gitlink in `tree_oid`
+    /// does not show. Written only when true, so other receipts are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    submodules_modified: bool,
 }
 
 #[derive(Serialize)]
@@ -1758,12 +1855,13 @@ fn cache_entries(directory: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)>
     out
 }
 
+/// Whether every task passed or was cached, and where the receipt was written.
 fn run(
     contract: &Contract,
     levels: &[Vec<usize>],
     contract_hash: String,
     json: bool,
-) -> Result<bool, String> {
+) -> Result<(bool, PathBuf), String> {
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
@@ -1815,7 +1913,7 @@ fn run(
     } else {
         println!("receipt: {}", path.display());
     }
-    Ok(matches!(outcome, Outcome::Passed | Outcome::Cached))
+    Ok((matches!(outcome, Outcome::Passed | Outcome::Cached), path))
 }
 
 fn execute(
@@ -2854,14 +2952,53 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
     let head_tree_oid = head_tree_oid(Path::new(&repository))?;
     let tree_oid = working_tree_oid(Path::new(&repository))?;
     let inputs_digest = declared_inputs_digest(contract)?;
-    let dirty = tree_oid != head_tree_oid;
+    let submodules_modified = submodules_modified(Path::new(&repository))?;
+    let dirty = tree_oid != head_tree_oid || submodules_modified;
     Ok(Subject {
         repository,
         tree_oid,
         inputs_digest,
         head_tree_oid,
         dirty,
+        submodules_modified,
     })
+}
+
+/// Whether a submodule has uncommitted changes, tracked or untracked. A tree
+/// records each submodule as its gitlink, the commit it is at, so content the
+/// submodule has not committed is invisible to the tree that ran.
+fn submodules_modified(repository: &Path) -> Result<bool, String> {
+    if !repository.join(".gitmodules").is_file() {
+        return Ok(false);
+    }
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["status", "--porcelain=v2", "-z", "--ignore-submodules=none"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+    // Changed entries are `1 XY SUB ...`, `2 XY SUB ... PATH` followed by the
+    // original path, and `u XY SUB ...`; SUB is `S<c><m><u>` for a submodule,
+    // with `M` for tracked and `U` for untracked changes inside it.
+    let mut entries = output.stdout.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
+        let fields = entry.splitn(4, |byte| *byte == b' ').collect::<Vec<_>>();
+        if !matches!(fields.first(), Some(&(b"1" | b"2" | b"u"))) {
+            continue;
+        }
+        if let Some(&[b'S', _, tracked, untracked]) = fields.get(2).copied() {
+            if tracked == b'M' || untracked == b'U' {
+                return Ok(true);
+            }
+        }
+        if fields[0] == b"2" {
+            entries.next();
+        }
+    }
+    Ok(false)
 }
 
 /// Content-address the working tree itself: stage every non-ignored file into
@@ -2881,11 +3018,39 @@ fn working_tree_oid(repository: &Path) -> Result<String, String> {
 /// HEAD's tree with the same `.sykli` exclusion as the working tree, so a
 /// checkout that tracks its own receipts or evidence is not reported dirty.
 fn head_tree_oid(repository: &Path) -> Result<String, String> {
-    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
-    git_with_temporary_state(repository, &state, &["read-tree", "HEAD"])
+    commit_tree_oid(repository, "HEAD")
         .map_err(|_| "repository has no commits; commit once before running sykli".to_string())
+}
+
+/// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
+/// Where `.sykli` is untracked (the usual case) this is `COMMIT^{tree}`. Any
+/// tree-ish works, so the pre-commit hook passes the index's `write-tree`.
+fn commit_tree_oid(repository: &Path, commit: &str) -> Result<String, String> {
+    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    git_with_temporary_state(repository, &state, &["read-tree", commit])
         .and_then(|_| exclude_sykli(repository, &state))
         .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
+}
+
+/// Resolve a revision to the full id of the commit it names.
+fn resolve_commit(repository: &Path, rev: &str) -> Result<String, String> {
+    let spec = format!("{rev}^{{commit}}");
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("{rev:?} does not name a commit in this repository"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
 fn exclude_sykli(repository: &Path, state: &TemporaryGitState) -> Result<String, String> {
@@ -3015,6 +3180,13 @@ struct ReceiptSummary {
 struct SubjectSummary {
     tree_oid: String,
     inputs_digest: String,
+    /// Read only by `verify --commit`, which refuses a receipt without them.
+    #[serde(default)]
+    head_tree_oid: Option<String>,
+    #[serde(default)]
+    dirty: Option<bool>,
+    #[serde(default)]
+    submodules_modified: bool,
 }
 
 #[derive(Deserialize)]
@@ -3093,55 +3265,241 @@ impl Check {
 /// Verify proves consistency, not authenticity: the receipt matches this exact
 /// working tree and the pinned contract, and its outcome was success. It
 /// cannot prove the commands truly ran — that would take attestation.
-fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, String> {
+///
+/// With a commit, the subject is that commit and nothing is read from the
+/// checkout: the contract and its lock pin come from the commit, the
+/// receipt's tree must be the commit's tree, and the run must have been
+/// clean. A receipt binds a tree, so this is what ties it to a commit someone
+/// pushes, whatever is checked out or uncommitted when it is asked. Declared
+/// inputs the commit does not track are local state, like the toolchain, and
+/// are not judged.
+fn verify(
+    receipt_path: &Path,
+    contract_path: &Path,
+    commit: Option<&str>,
+) -> Result<Vec<Check>, String> {
     let receipt: ReceiptSummary =
         serde_json::from_slice(&fs::read(receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", receipt_path.display()))?;
-    let (contract, _, contract_hash) = load_unlocked(contract_path)?;
     let mut checks = vec![Check::equals(
         "schema",
         NOT_VERIFIABLE,
         "sykli-receipt.v1",
-        receipt.schema,
+        &receipt.schema,
     )];
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
-    if let Some(lock) = read_lock(contract_path)? {
+    let contract = match commit {
+        None => {
+            let (contract, _, contract_hash) = load_unlocked(contract_path)?;
+            let lock = read_lock(contract_path)?;
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+                return Ok(checks);
+            }
+            let subject = subject(&contract)?;
+            checks.extend([
+                Check::equals(
+                    "tree",
+                    TREE_MISMATCH,
+                    subject.tree_oid,
+                    &receipt.subject.tree_oid,
+                ),
+                Check::equals(
+                    "inputs",
+                    TREE_MISMATCH,
+                    subject.inputs_digest,
+                    &receipt.subject.inputs_digest,
+                ),
+            ]);
+            contract
+        }
+        Some(rev) => {
+            let repository =
+                PathBuf::from(git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
+                    "not inside a git repository; --commit names a commit".to_string()
+                })?);
+            let id = resolve_commit(&repository, rev)?;
+            let (contract, contract_hash, lock) = contract_at(&repository, &id, contract_path)?;
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+                return Ok(checks);
+            }
+            commit_checks(&mut checks, &receipt, &repository, &id)?;
+            contract
+        }
+    };
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    record_checks(&mut checks, &receipt, &contract);
+    Ok(checks)
+}
+
+/// The contract and lock stages; whether both passed.
+fn contract_checks(
+    checks: &mut Vec<Check>,
+    receipt: &ReceiptSummary,
+    contract_hash: &str,
+    lock: Option<String>,
+) -> bool {
+    if let Some(lock) = lock {
         checks.push(Check::equals(
             "contract lock",
             CONTRACT_MISMATCH,
-            &contract_hash,
+            contract_hash,
             lock,
         ));
     }
     checks.push(Check::equals(
         "contract",
         CONTRACT_MISMATCH,
-        &contract_hash,
-        receipt.contract_hash,
+        contract_hash,
+        &receipt.contract_hash,
     ));
-    if checks.iter().any(|check| !check.ok) {
-        return Ok(checks);
+    checks.iter().all(|check| check.ok)
+}
+
+/// The contract and its lock pin as `commit` has them, read from git rather
+/// than from the checkout. JSON only: an emitter would have to be run, and
+/// `sykli.rs` falls back to `sykli.json` beside it, as `run` does.
+fn contract_at(
+    repository: &Path,
+    commit: &str,
+    contract: &Path,
+) -> Result<(Contract, String, Option<String>), String> {
+    let short = &commit[..12];
+    let mut path = contract.to_path_buf();
+    let mut bytes = blob_at(repository, commit, &path)?;
+    if bytes.is_none() && path.file_name().is_some_and(|name| name == "sykli.rs") {
+        path.set_file_name("sykli.json");
+        bytes = blob_at(repository, commit, &path)?;
     }
-    let subject = subject(&contract)?;
-    checks.extend([
-        Check::equals(
-            "tree",
-            TREE_MISMATCH,
-            subject.tree_oid,
-            receipt.subject.tree_oid,
-        ),
-        Check::equals(
-            "inputs",
-            TREE_MISMATCH,
-            subject.inputs_digest,
-            receipt.subject.inputs_digest,
-        ),
-    ]);
-    if checks.iter().any(|check| !check.ok) {
-        return Ok(checks);
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        return Err(format!(
+            "verify --commit reads a JSON contract from the commit; {} is not one",
+            path.display()
+        ));
     }
+    let bytes = bytes.ok_or_else(|| format!("commit {short} has no {}", path.display()))?;
+    let (contract, _, hash) = parse_contract(&bytes)
+        .map_err(|error| format!("{} in commit {short}: {error}", path.display()))?;
+    let lock = match blob_at(repository, commit, &lock_path(&path))? {
+        Some(bytes) => pinned(
+            parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
+            &path,
+        ),
+        None => None,
+    };
+    Ok((contract, hash, lock))
+}
+
+/// A file's bytes as `commit` has them, or `None` when it has no such file.
+/// A relative path is relative to the current directory, as `--contract` is.
+fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path_text = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    let spec = if path.is_absolute() {
+        let relative = path.strip_prefix(repository).map_err(|_| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                repository.display()
+            )
+        })?;
+        format!("{commit}:{}", path_text(relative))
+    } else {
+        format!("{commit}:./{}", path_text(path))
+    };
+    let object = ProcessCommand::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !object.status.success() {
+        return Ok(None);
+    }
+    let id = String::from_utf8_lossy(&object.stdout).trim().to_string();
+    let blob = ProcessCommand::new("git")
+        .args(["cat-file", "blob", &id])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !blob.status.success() {
+        return Err(format!("{spec} is not a file"));
+    }
+    Ok(Some(blob.stdout))
+}
+
+/// Whether `verify --commit` also requires a clean run (`dirty: false`).
+///
+/// This is policy, not evidence. Once the receipt's tree is the commit's
+/// tree, the run checked exactly the commit's content whatever HEAD was; a
+/// clean run adds that the commit was checked out when it ran. Requiring it
+/// costs a second, cached run after committing, because the pre-commit hook's
+/// run happens before HEAD moves and is always dirty. So it is off: the
+/// `clean` check is still reported but does not refuse, and the pre-commit
+/// run counts for the push. Submodule changes are refused by their own check
+/// either way. Turning it on flips the end-to-end hook tests that cover the
+/// single run (`installed_hooks_gate_real_commits_and_pushes`,
+/// `pre_push_refuses_a_failing_commit_on_main` and the dirty-run
+/// `verify_commit_*` test).
+const COMMIT_REQUIRES_CLEAN_RUN: bool = false;
+
+/// The receipt's tree is the commit's, and the run was clean.
+fn commit_checks(
+    checks: &mut Vec<Check>,
+    receipt: &ReceiptSummary,
+    repository: &Path,
+    commit: &str,
+) -> Result<(), String> {
+    let tree = commit_tree_oid(repository, commit)?;
+    let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
+    check.expected = format!("{} (the tree of commit {})", check.expected, &commit[..12]);
+    checks.push(check);
+    // Refused whatever the clean rule is: the tree cannot show this content.
+    if receipt.subject.submodules_modified {
+        checks.push(Check {
+            name: "submodules",
+            expected: "submodules as the commit records them".into(),
+            actual: "a submodule had uncommitted changes when it ran".into(),
+            ok: false,
+            failure_code: TREE_MISMATCH,
+        });
+    }
+    // `dirty` alone is one editable field; HEAD's recorded tree must agree.
+    let clean = receipt.subject.dirty == Some(false)
+        && receipt.subject.head_tree_oid.as_deref() == Some(&receipt.subject.tree_oid);
+    let dirty = receipt
+        .subject
+        .dirty
+        .map_or("absent".into(), |dirty| dirty.to_string());
+    checks.push(Check {
+        name: "clean",
+        expected: "a clean run (dirty false: the tree that ran was HEAD's); reported, not required"
+            .into(),
+        actual: match receipt.subject.head_tree_oid.as_deref() {
+            _ if clean => "dirty false".into(),
+            Some(head) if head != receipt.subject.tree_oid => format!(
+                "dirty {dirty}: tree {} ran with HEAD at tree {head}",
+                receipt.subject.tree_oid
+            ),
+            Some(_) => format!("dirty {dirty}"),
+            None => format!("dirty {dirty} and no HEAD tree recorded"),
+        },
+        ok: clean || !COMMIT_REQUIRES_CLEAN_RUN,
+        failure_code: TREE_MISMATCH,
+    });
+    Ok(())
+}
+
+/// The records and outcome stages, against the contract that was judged.
+fn record_checks(checks: &mut Vec<Check>, receipt: &ReceiptSummary, contract: &Contract) {
     let contradiction = if receipt.tasks.len() != contract.tasks.len() {
         Some(format!(
             "{} task records for {} declared tasks",
@@ -3176,7 +3534,7 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
         failure_code: NOT_VERIFIABLE,
     });
     if contradiction.is_some() {
-        return Ok(checks);
+        return;
     }
     let tasks_ok = receipt
         .tasks
@@ -3193,7 +3551,6 @@ fn verify(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, Strin
         ok: matches!(receipt.outcome.as_str(), "passed" | "cached") && tasks_ok,
         failure_code: OUTCOME_FAILED,
     });
-    Ok(checks)
 }
 
 /// Verify exit codes are stages, like a CI pipeline: checks run in order and
@@ -3223,8 +3580,19 @@ fn report(checks: &[Check]) -> ExitCode {
             println!("verified: receipt matches this tree and contract");
             ExitCode::SUCCESS
         }
-        Some(first) => ExitCode::from(first.failure_code),
+        Some(first) => {
+            eprintln!("refused: {}", refusal(first));
+            ExitCode::from(first.failure_code)
+        }
     }
+}
+
+/// The first failing check as one line, for stderr and for the hooks.
+fn refusal(check: &Check) -> String {
+    format!(
+        "{} expected {} but got {}",
+        check.name, check.expected, check.actual
+    )
 }
 
 fn write_receipt(receipt: &Receipt) -> Result<PathBuf, String> {
@@ -3700,6 +4068,7 @@ mod tests {
                 inputs_digest: "test".into(),
                 head_tree_oid: "test".into(),
                 dirty: false,
+                submodules_modified: false,
             },
             tasks: first,
             outcome: Outcome::Passed,

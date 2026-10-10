@@ -1,5 +1,5 @@
 <!-- toimija:adopt:v1:begin -->
-Read `.toimija/current.md` before reading anything else in this repo; it is your workset contract. Under a toimija session your launch prompt names your live packet — that file supersedes this one.
+If your launch prompt names a workset packet, read it before anything else in this repo; it is your workset contract and supersedes this file.
 <!-- toimija:adopt:v1:end -->
 
 Product boundaries:
@@ -8,15 +8,15 @@ Product boundaries:
 - Production assessment establishes declared products and checks, not task closure or publication authority. External tools and workers remain optional consumers.
 - Stay a local CLI: no server, network service, daemon, coordination, or agent execution. The one network use is on-demand, read-only acquisition of pull-request evidence through the operator's `gh` (`sykli inspect`); it never mutates a provider, triggers work, or runs candidate code. A bounded executor may finish its attempt after its initiating client exits.
 - Candidate assessment (`sykli inspect` / `sykli assess`) establishes only the declared review-readiness predicates under a printed trust designation. It is advisory: no merge or deployment authority, no claim that GitHub's full merge policy is met.
-- Container runtime and Ahti append wait until family repositories run v0 daily.
+- A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode) do not return without one.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
 - Treat `sykli plan --json` as the agent-facing query surface; before handoff run sykli's own graph, `cargo run --quiet --locked -- run sykli.json --json` (the same run CI does).
 
 This file is the guidance for any coding agent working in this repository
 (Codex, Claude Code, Gemini, Copilot, Cursor and others read it or are pointed
-here). Under a toimija session, the packet named in your launch prompt is the
-workset contract; run `toimija verify` before committing.
+here). When your launch prompt names a workset packet, that packet is the
+workset contract; run the check it names before committing.
 
 ## Commands
 
@@ -54,9 +54,12 @@ Both contracts list files explicitly; nothing is globbed.
 
 ## Toolchain constraints
 
-- Edition 2024 with `rust-version = "1.85"` pinned in CI. Let-chains
-  (`if let … && …`) need 1.88 and do not compile in CI; use `Option::filter`,
-  `is_some_and`, or a nested `if`.
+- Edition 2024 with `rust-version = "1.85"` declared in `Cargo.toml`. CI does
+  not test 1.85: the workflow installs it, but `rust-toolchain.toml` pins 1.98
+  and overrides it, so CI builds with 1.98. Let-chains (`if let … && …`, stable
+  since 1.88) therefore compile in CI without a warning, yet break the declared
+  1.85. Keep them out (use `Option::filter`, `is_some_and`, or a nested `if`)
+  and run `cargo +1.85 check --workspace --all-targets --locked` before pushing.
 - No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls
   (`flock`, `fcntl`, `setsid`, `setpgid`, `killpg`, `signal`) are declared as
   `unsafe extern "C"` blocks, not via libc.
@@ -138,14 +141,15 @@ latched operation must feed the latch again.
 - Never push to `main`; branch, push, open a PR. Never merge without the
   owner's explicit approval of that PR. Push a branch only when it is complete
   and say so: merges here have repeatedly caught branches mid-push.
-- Validate locally before pushing (`sykli run sykli.json`, `toimija verify`);
+- Validate locally before pushing (`sykli run sykli.json`, and any workset
+  check your launch prompt names);
   CI then runs the Linux gate and the Windows tests on every pull request and
   on `main`. The repository is public, so standard hosted runners are free;
   keep to `ubuntu-latest` and `windows-latest` (macOS is the development host
   and is covered locally). Do not push a release tag (`release.yml` builds
   five targets) unless told to.
-- `.sykli/`, `.toimija/`, `.teko/` and `.claude/` are local state and ignored;
-  the production store and toimija packets live there.
+- `.sykli/` and other tools' local state directories are ignored; the
+  production store lives under `.sykli/`.
 
 ## Languages
 

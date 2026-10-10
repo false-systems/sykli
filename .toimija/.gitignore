@@ -1,0 +1,4 @@
+# Local state, except this file and the tracked repository description.
+/*
+!/.gitignore
+!/repo.yaml
