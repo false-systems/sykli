@@ -2834,7 +2834,10 @@ fn resolve_shell() -> Result<PathBuf, String> {
 
 fn shell_runtime() -> Result<ShellRuntime, String> {
     let path = resolve_shell()?;
-    let environment = inherited_environment(std::env::vars_os());
+    let environment = without_git_prepend(
+        inherited_environment(std::env::vars_os()),
+        std::env::var_os("GIT_EXEC_PATH"),
+    );
     let fingerprint = format!(
         "shell:{}:sha256:{}:env:sha256:{environment}",
         path.display(),
@@ -2935,6 +2938,39 @@ fn inherited_environment(
             })
         })
         .collect()
+}
+
+/// Git runs hooks with `GIT_EXEC_PATH` set and that directory prepended to
+/// `PATH`. Undo exactly that prepend, so a run inside a hook gives its tasks,
+/// and its cache keys, the `PATH` the same run has by hand; otherwise the two
+/// never share a cached result. Nothing changes outside a hook, or when the
+/// first `PATH` entry is not git's.
+fn without_git_prepend(
+    mut environment: Vec<(OsString, OsString)>,
+    git_exec_path: Option<OsString>,
+) -> Vec<(OsString, OsString)> {
+    let Some(exec_path) = git_exec_path.filter(|path| !path.is_empty()) else {
+        return environment;
+    };
+    for (name, value) in &mut environment {
+        let is_path = name
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("PATH"));
+        if !is_path {
+            continue;
+        }
+        let mut entries = std::env::split_paths(value).collect::<Vec<_>>();
+        if entries
+            .first()
+            .is_some_and(|first| first.as_path() == Path::new(&exec_path))
+        {
+            entries.remove(0);
+            if let Ok(joined) = std::env::join_paths(entries) {
+                *value = joined;
+            }
+        }
+    }
+    environment
 }
 
 fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
@@ -3931,6 +3967,26 @@ mod tests {
                 ("PATH".into(), "bin".into()),
                 ("HOME".into(), "home".into())
             ]
+        );
+
+        // Inside a hook, git's prepended exec path comes off PATH again.
+        let joined = |entries: &[&str]| std::env::join_paths(entries).unwrap();
+        let hooked = vec![
+            ("PATH".into(), joined(&["git-core", "bin", "git-core"])),
+            ("HOME".into(), "home".into()),
+        ];
+        assert_eq!(
+            without_git_prepend(hooked.clone(), Some("git-core".into())),
+            [
+                ("PATH".into(), joined(&["bin", "git-core"])),
+                ("HOME".into(), "home".into())
+            ]
+        );
+        assert_eq!(without_git_prepend(hooked.clone(), None), hooked);
+        let elsewhere = vec![("PATH".into(), joined(&["bin", "git-core"]))];
+        assert_eq!(
+            without_git_prepend(elsewhere.clone(), Some("git-core".into())),
+            elsewhere
         );
 
         let parse = |json| serde_json::from_str::<Contract>(json);
