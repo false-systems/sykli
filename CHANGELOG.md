@@ -52,7 +52,8 @@ contract consumer can observe; internal refactors are not listed.
   `#!/bin/sh` hooks (`exec sykli hook NAME "$@"`) into
   `$(git rev-parse --git-common-dir)/hooks`, so every worktree shares them;
   both hooks when neither flag is given. Idempotent. A hook sykli did not
-  write is replaced only with `--force` (exit 1 otherwise, nothing written),
+  write, or an edited sykli hook, is replaced only with `--force` (exit 1
+  otherwise, nothing written), which keeps the old file as `NAME.pre-sykli`,
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking

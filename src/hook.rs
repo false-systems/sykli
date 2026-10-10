@@ -64,8 +64,9 @@ fn disk_differs_from_commit() -> Result<Option<String>, String> {
     let unstaged = git_names(&["diff", "--name-only", "-z"])?;
     if !unstaged.is_empty() {
         return Ok(Some(format!(
-            "changes to {} are not staged, so a run would check content the commit does not carry; \
-             stage them (git add) or set them aside, then commit again",
+            "what is on disk for {} differs from what this commit carries (unstaged, or left out \
+             of a partial commit), so a run would check other content; stage it (git add) or set \
+             it aside, then commit again",
             listing(&unstaged)
         )));
     }
@@ -417,14 +418,20 @@ pub(crate) fn install(pre_commit: bool, pre_push: bool, force: bool) -> ExitCode
     for name in names {
         let path = directory.join(name);
         let wanted = script(name);
+        // Only sykli's exact script is its own: a file carrying the marker
+        // with other lines has been edited, and is someone's work too.
         let state = match std::fs::read(&path) {
             Err(_) => "installed",
             Ok(existing) if existing == wanted.as_bytes() => "unchanged",
-            Ok(existing) if String::from_utf8_lossy(&existing).contains(MARKER) => "updated",
             Ok(_) if force => "replaced",
-            Ok(_) => {
+            Ok(existing) => {
+                let why = if String::from_utf8_lossy(&existing).contains(MARKER) {
+                    "is a sykli hook that has been edited"
+                } else {
+                    "exists and sykli did not write it"
+                };
                 eprintln!(
-                    "sykli hook install: refusing: {} exists and sykli did not write it; pass --force to replace it",
+                    "sykli hook install: refusing: {} {why}; pass --force to replace it (it is kept beside the new one)",
                     path.display()
                 );
                 return ExitCode::from(REFUSED);
@@ -433,10 +440,13 @@ pub(crate) fn install(pre_commit: bool, pre_push: bool, force: bool) -> ExitCode
         plan.push((path, wanted, state));
     }
     for (path, wanted, state) in plan {
-        let written = if state == "unchanged" {
-            Ok(())
-        } else {
-            std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(&path, wanted))
+        let kept = (state == "replaced").then(|| kept_aside(&path));
+        let written = match (state, &kept) {
+            ("unchanged", _) => Ok(()),
+            (_, Some(kept)) => {
+                std::fs::rename(&path, kept).and_then(|_| std::fs::write(&path, wanted))
+            }
+            _ => std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(&path, wanted)),
         };
         if let Err(error) = written.and_then(|_| executable(&path)) {
             eprintln!(
@@ -445,9 +455,26 @@ pub(crate) fn install(pre_commit: bool, pre_push: bool, force: bool) -> ExitCode
             );
             return ExitCode::from(CANNOT_EVALUATE);
         }
-        println!("{state}: {}", path.display());
+        match kept {
+            Some(kept) => println!(
+                "{state}: {} (the previous hook is kept at {})",
+                path.display(),
+                kept.display()
+            ),
+            None => println!("{state}: {}", path.display()),
+        }
     }
     ExitCode::SUCCESS
+}
+
+/// Where a replaced hook is kept: `NAME.pre-sykli`, or with `.N` added when
+/// that is taken, so an earlier copy is never overwritten.
+fn kept_aside(path: &Path) -> PathBuf {
+    let base = format!("{}.pre-sykli", path.display());
+    std::iter::once(PathBuf::from(&base))
+        .chain((1..).map(|n| PathBuf::from(format!("{base}.{n}"))))
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded sequence has a free name")
 }
 
 #[cfg(unix)]

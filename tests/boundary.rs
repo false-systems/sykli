@@ -226,7 +226,10 @@ fn pre_commit_refuses_when_the_disk_is_not_what_is_staged() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let message = text(&out.stderr);
     assert!(message.contains("file.txt"), "{message}");
-    assert!(message.contains("not staged"), "{message}");
+    assert!(
+        message.contains("differs from what this commit carries"),
+        "{message}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -476,6 +479,54 @@ fn install_replaces_a_foreign_hook_only_with_force() {
             .contains("exec sykli hook pre-push")
     );
     assert!(!hooks_dir(&root).join("pre-commit").exists());
+    // The replaced hook is kept beside it, and the output says where.
+    let kept = hooks_dir(&root).join("pre-push.pre-sykli");
+    assert_eq!(fs::read_to_string(&kept).unwrap(), mine);
+    assert!(
+        text(&out.stdout).contains("pre-push.pre-sykli"),
+        "{}",
+        text(&out.stdout)
+    );
+    // A sykli hook someone has edited is not rewritten without a word.
+    let edited = format!(
+        "{}echo also mine\n",
+        fs::read_to_string(hooks_dir(&root).join("pre-push")).unwrap()
+    );
+    fs::write(hooks_dir(&root).join("pre-push"), &edited).unwrap();
+    let out = sykli(&root, &["hook", "install", "--pre-push"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("edited"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(hooks_dir(&root).join("pre-push")).unwrap(),
+        edited
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_refuses_when_core_hooks_path_points_elsewhere() {
+    let root = repo("hookspath", PASSING);
+    git(&root, &["config", "core.hooksPath", "elsewhere"]);
+    let out = sykli(&root, &["hook", "install"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("core.hooksPath"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!hooks_dir(&root).join("pre-push").exists());
+    // Pointing at the directory install writes is fine.
+    let default = fs::canonicalize(root.join(".git")).unwrap().join("hooks");
+    git(
+        &root,
+        &["config", "core.hooksPath", default.to_str().unwrap()],
+    );
+    let out = sykli(&root, &["hook", "install"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -521,7 +572,7 @@ fn installed_hooks_gate_real_commits_and_pushes() {
     let out = hooked(&["commit", "--quiet", "-m", "sneak"]);
     assert!(!out.status.success(), "{}", text(&out.stderr));
     assert!(
-        text(&out.stderr).contains("not staged"),
+        text(&out.stderr).contains("differs from what this commit carries"),
         "{}",
         text(&out.stderr)
     );
@@ -573,6 +624,9 @@ fn ci_checks_out_the_pull_request_head_not_the_merge_ref() {
         checkouts,
         "every checkout names the pull request head"
     );
+    // On the head, the shadow experiment diffs from the merge base, not the
+    // base branch's tip, which may have moved.
+    assert!(ci.contains("git merge-base \"$SHADOW_BASE\" HEAD"), "{ci}");
 }
 
 /// The Action's verify step, run as the Action runs it, with this build.

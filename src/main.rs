@@ -391,7 +391,7 @@ enum Hook {
         /// Install the pre-push hook
         #[arg(long)]
         pre_push: bool,
-        /// Replace an existing hook that sykli did not write
+        /// Replace a hook sykli did not write, or an edited one; the old file is kept as NAME.pre-sykli
         #[arg(long)]
         force: bool,
     },

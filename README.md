@@ -299,10 +299,12 @@ check what is committed:
 sykli hook install            # both hooks; --pre-commit or --pre-push for one
 ```
 
-`install` writes a two-line `#!/bin/sh` hook that calls `exec sykli hook NAME "$@"`.
+`install` writes a three-line `#!/bin/sh` hook that calls `exec sykli hook NAME "$@"`.
 It writes into the repository's common git directory, so every worktree shares
 the hooks, and `sykli` must be on `PATH` wherever git runs. It does not replace
-a hook it did not write unless you pass `--force`. Running it again is safe.
+a hook it did not write, or one of its own that was edited, unless you pass
+`--force`, which keeps the old hook as `NAME.pre-sykli`. Running it again is
+safe.
 
 - `sykli hook pre-commit` refuses the commit when a tracked file has changes
   that are not staged, or an untracked file is not ignored, because the run

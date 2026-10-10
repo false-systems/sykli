@@ -59,8 +59,11 @@ jobs:
           SHADOW_PR_HEAD: ${{ github.event.pull_request.head.sha }}
           FULL_RECEIPT: ${{ steps.full.outputs.receipt }}
         run: |
+          # The checkout is the head, not a merge commit, so compare with
+          # the merge base: the base branch's tip may have moved since.
+          base=$(git merge-base "$SHADOW_BASE" HEAD)
           cargo run --quiet --locked --example ci_shadow -- \
-            --base "$SHADOW_BASE" --pr-head "$SHADOW_PR_HEAD" \
+            --base "$base" --pr-head "$SHADOW_PR_HEAD" \
             --binary "$RUNNER_TEMP/sykli-bin/target/debug/sykli" \
             --receipt "$FULL_RECEIPT" --output "$RUNNER_TEMP/sykli-shadow"
 
