@@ -446,6 +446,22 @@ struct InputCoverage {
     base_commit: Option<String>,
     paths: Vec<CoveragePath>,
     cargo_missing_inputs: Vec<String>,
+    /// Absent when empty, so complete graphs report what they always did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folder_missing_inputs: Vec<FolderInput>,
+}
+
+impl InputCoverage {
+    /// Why `run` would refuse this graph before executing it, if it would.
+    fn refusal(&self) -> Option<String> {
+        if !self.cargo_missing_inputs.is_empty() {
+            Some(cargo_coverage_error(&self.cargo_missing_inputs))
+        } else if !self.folder_missing_inputs.is_empty() {
+            Some(folder_coverage_error(&self.folder_missing_inputs))
+        } else {
+            None
+        }
+    }
 }
 
 /// A Cargo graph: `Cargo.toml` at the root, and the graph declares it or a
@@ -524,6 +540,100 @@ fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
 fn cargo_coverage_error(missing: &[String]) -> String {
     format!(
         "Cargo inputs are undeclared: {missing:?}; add them to the affected tasks and re-lock before running (no cached results used)"
+    )
+}
+
+/// A file inside a folder a task reads that the task does not declare.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct FolderInput {
+    path: String,
+    task: String,
+}
+
+/// A tripwire for one pattern: a tracked file next to a declared input that
+/// the task does not declare. A task that declares an input in a folder
+/// likely reads that folder, so such a file can change its result without
+/// changing its key: a test that read a whole fixture folder kept its cached
+/// pass after a fixture was added. Every tracked file (the index, so a new
+/// file counts once it is `git add`ed) directly inside a folder holding one
+/// of a task's declared inputs must be one of that task's inputs too, for
+/// Cargo and other graphs alike. Only the repository root is exempt; a task's
+/// working directory is a folder like any other.
+///
+/// It does not catch files in new subfolders or in parent folders of an input
+/// folder, anything in the repository root, untracked, ignored or generated
+/// files, or anything outside the repository. Untracked files are left out so
+/// editor and OS scratch files beside an input never refuse a run; the
+/// pre-commit hook already refuses a commit while untracked files exist.
+fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String> {
+    let mut tasks = Vec::new();
+    for task in &contract.tasks {
+        let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        let declared = task
+            .inputs
+            .iter()
+            .map(|input| absolute(&workdir.join(input)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let folders = declared
+            .iter()
+            .filter_map(|path| path.parent())
+            .map(Path::to_path_buf)
+            .collect::<BTreeSet<_>>();
+        if !folders.is_empty() {
+            tasks.push((&task.name, declared, folders));
+        }
+    }
+    if tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = coverage_root().map_err(|_| {
+        "not inside a git repository; sykli binds every receipt to a git tree".to_string()
+    })?;
+    for (_, _, folders) in &mut tasks {
+        folders.remove(&root);
+    }
+    let files = git_paths(&root, &["ls-files", "--cached", "-z"])?;
+    let mut missing = BTreeSet::new();
+    for file in files {
+        if file.starts_with(root.join(".sykli")) {
+            continue;
+        }
+        let Some(folder) = file.parent() else {
+            continue;
+        };
+        for (name, declared, folders) in &tasks {
+            if !folders.contains(folder) || declared.contains(&file) {
+                continue;
+            }
+            match fs::symlink_metadata(&file) {
+                Ok(_) => {
+                    let relative = file.strip_prefix(&root).unwrap_or(&file);
+                    missing.insert(FolderInput {
+                        path: relative.to_string_lossy().replace('\\', "/"),
+                        task: (*name).clone(),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("cannot inspect {}: {error}", file.display())),
+            }
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+fn folder_coverage_error(missing: &[FolderInput]) -> String {
+    const SHOWN: usize = 10;
+    let mut listed = missing
+        .iter()
+        .take(SHOWN)
+        .map(|input| format!("{} (task {})", input.path, input.task))
+        .collect::<Vec<_>>();
+    if missing.len() > SHOWN {
+        listed.push(format!("and {} more", missing.len() - SHOWN));
+    }
+    format!(
+        "tracked files next to a task's declared inputs that the task does not declare: {}; add each to its task's inputs (or move it out of that folder) and re-lock before running (no cached results used)",
+        listed.join(", ")
     )
 }
 
@@ -653,6 +763,7 @@ fn input_coverage(
         base_commit,
         paths,
         cargo_missing_inputs: cargo_missing_inputs(contract)?,
+        folder_missing_inputs: folder_missing_inputs(contract)?,
     })
 }
 
@@ -1114,13 +1225,11 @@ fn main() -> ExitCode {
                 } else {
                     None
                 };
-                if let Some(coverage) = &input_coverage {
-                    if !coverage.cargo_missing_inputs.is_empty() {
-                        for item in explanations.iter_mut().flatten() {
-                            item.cache = CacheExplanation::InputError {
-                                message: cargo_coverage_error(&coverage.cargo_missing_inputs),
-                            };
-                        }
+                if let Some(message) = input_coverage.as_ref().and_then(InputCoverage::refusal) {
+                    for item in explanations.iter_mut().flatten() {
+                        item.cache = CacheExplanation::InputError {
+                            message: message.clone(),
+                        };
                     }
                 }
                 Ok(PlanOutput {
@@ -1136,7 +1245,7 @@ fn main() -> ExitCode {
                     let input_error = plan
                         .input_coverage
                         .as_ref()
-                        .is_some_and(|coverage| !coverage.cargo_missing_inputs.is_empty())
+                        .is_some_and(|coverage| coverage.refusal().is_some())
                         || plan.explanations.as_ref().is_some_and(|items| {
                             items.iter().any(|item| match &item.cache {
                                 CacheExplanation::InputError { .. } => true,
@@ -1176,11 +1285,8 @@ fn main() -> ExitCode {
                             println!("  cache: {}", item.cache);
                         }
                         if let Some(coverage) = &plan.input_coverage {
-                            if !coverage.cargo_missing_inputs.is_empty() {
-                                println!(
-                                    "{}",
-                                    cargo_coverage_error(&coverage.cargo_missing_inputs)
-                                );
+                            if let Some(message) = coverage.refusal() {
+                                println!("{message}");
                             }
                             println!(
                                 "Input coverage against {} (plus --changed hints):",
@@ -1203,7 +1309,7 @@ fn main() -> ExitCode {
                                 }
                             }
                             println!(
-                                "Unmapped paths are advisory except for missing Cargo inputs, which block execution and cache reuse."
+                                "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."
                             );
                         }
                     } else {
@@ -1872,6 +1978,10 @@ fn run(
     let missing = cargo_missing_inputs(contract)?;
     if !missing.is_empty() {
         return Err(cargo_coverage_error(&missing));
+    }
+    let folders = folder_missing_inputs(contract)?;
+    if !folders.is_empty() {
+        return Err(folder_coverage_error(&folders));
     }
     let subject = subject(contract)?;
     let runtime = graph_runtime(contract)?;

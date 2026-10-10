@@ -1407,3 +1407,113 @@ fn contract_preview_does_not_accept_drift_or_execute_commands() {
     assert!(!root.join("executed").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A task that declares inputs in a folder reads that folder. A file added
+/// there without being declared must refuse the run, not leave a cached pass
+/// (the case of a test reading a whole fixture folder).
+#[test]
+fn an_undeclared_file_in_a_folder_a_task_reads_refuses_the_run() {
+    let root = graph_repo(
+        "folderinputs",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"fixtures","run":"cat fixtures/*","inputs":["fixtures/a.json"]}]}"#,
+    );
+    fs::create_dir(root.join("fixtures")).unwrap();
+    fs::write(root.join("fixtures/a.json"), "{}").unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        )
+    };
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixtures"]);
+    assert_eq!(run_json(&root).0, Some(0));
+    // The working directory is not such a folder: its files are the project's.
+    fs::write(root.join("notes.txt"), "not an input").unwrap();
+    assert_eq!(run_json(&root).0, Some(0));
+
+    // Only tracked files count: editor and OS scratch files beside an input,
+    // and a new fixture not yet added, do not refuse the run.
+    fs::write(root.join("fixtures/.a.json.swp"), "swap").unwrap();
+    fs::write(root.join("fixtures/.DS_Store"), "finder").unwrap();
+    fs::write(root.join("fixtures/b.json"), "{}").unwrap();
+    assert_eq!(run_json(&root).0, Some(0));
+
+    // Once the fixture is added, it is caught.
+    git(&["add", "fixtures/b.json"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let message = String::from_utf8_lossy(&out.stderr);
+    assert!(message.contains("fixtures/b.json"), "{message}");
+    assert!(message.contains("task fixtures"), "{message}");
+    // plan --explain says the same, read-only.
+    let (code, plan) = explain_json(&root, &[]);
+    assert_eq!(code, Some(2));
+    assert_eq!(
+        plan["input_coverage"]["folder_missing_inputs"],
+        serde_json::json!([{"path": "fixtures/b.json", "task": "fixtures"}])
+    );
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "input_error");
+
+    // Declared, it runs again.
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"fixtures","run":"cat fixtures/*","inputs":["fixtures/a.json","fixtures/b.json"]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(run_json(&root).0, Some(0));
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Only the repository root is exempt: a task whose working directory is a
+/// subfolder reads that folder like a root task declaring files in it.
+#[test]
+fn a_task_working_in_a_subfolder_is_checked_like_any_other_folder() {
+    let root = graph_repo(
+        "folderworkdir",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"w","workdir":"sub","run":"cat *","inputs":["main.txt"]}]}"#,
+    );
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/main.txt"), "main").unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        )
+    };
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "sub"]);
+    assert_eq!(run_json(&root).0, Some(0));
+    fs::write(root.join("sub/extra.txt"), "extra").unwrap();
+    git(&["add", "sub/extra.txt"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&out.stderr);
+    assert!(message.contains("sub/extra.txt (task w)"), "{message}");
+    fs::remove_dir_all(root).unwrap();
+}
