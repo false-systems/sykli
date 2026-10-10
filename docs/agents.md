@@ -22,8 +22,12 @@ shared by every worktree of the repository. To check later that a pushed
 commit was verified, look there for a receipt whose `subject.tree_oid` is
 `git rev-parse COMMIT^{tree}` and run
 `sykli verify RECEIPT --contract sykli.json --commit COMMIT` from any checkout
-of the repository. The directory keeps the newest `SYKLI_RECEIPT_BUDGET`
-receipts (default 200).
+of the repository. Always run that verify: the directory confers no trust. A
+kept receipt is evidence for the commit, not proof that the commit reached the
+remote, since the hook runs before the remote answers and also for
+`git push --dry-run`; `git merge-base --is-ancestor COMMIT REMOTE/BRANCH` says
+whether it did. The directory keeps the newest `SYKLI_RECEIPT_BUDGET` receipts
+(default 200); keeping a receipt again makes it the newest.
 
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also

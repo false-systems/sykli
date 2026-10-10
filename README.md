@@ -331,9 +331,16 @@ safe.
   worktree's `.sykli/` goes with the worktree, this does not. To show later
   that a pushed commit was verified, find a kept receipt whose
   `subject.tree_oid` is `git rev-parse COMMIT^{tree}`, then run
-  `sykli verify RECEIPT --contract sykli.json --commit COMMIT`. The copy is
-  written atomically and never through a symbolic link; if it cannot be made,
-  the hook warns and the push goes ahead.
+  `sykli verify RECEIPT --contract sykli.json --commit COMMIT`. That verify is
+  required, not optional: the directory confers no trust, and anyone who can
+  write the repository can write a file there. A kept receipt is evidence for
+  the commit, not proof that the commit reached the remote: the hook runs
+  before the remote answers, and git runs it for `git push --dry-run` too.
+  To know the remote has it, check
+  `git merge-base --is-ancestor COMMIT REMOTE/BRANCH`. The copy is written
+  atomically and never through a symbolic link; if it cannot be made, the
+  hook warns and the push goes ahead. Keeping a receipt again, for a commit
+  pushed again, makes it the newest, so eviction does not take it first.
 - Whether a push is gated is decided from the commits, not the working tree.
   The pushed commit's own `sykli.json` gates it. A commit without one is refused
   when the branch it replaces had one, so taking the gate off main is a

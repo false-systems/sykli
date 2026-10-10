@@ -14,8 +14,13 @@ contract consumer can observe; internal refactors are not listed.
   `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, so it
   survives the removal of the worktree it was made in. The copy is atomic,
   never written through a symbolic link, and bounded by
-  `SYKLI_RECEIPT_BUDGET` (default 200, oldest removed first). A refused push
-  keeps nothing; a copy that fails only warns, and the push goes ahead.
+  `SYKLI_RECEIPT_BUDGET` (default 200, oldest removed first; keeping a
+  receipt again makes it the newest; stale temporary copies are removed). Two
+  first pushes at once both keep theirs. A refused push keeps nothing; a copy
+  that fails only warns, and the push goes ahead. A kept receipt is evidence
+  for the commit, not proof it reached the remote (the hook also runs for
+  `--dry-run` and before the remote answers), and it confers no trust:
+  readers must run `verify --commit` on it.
 - `sykli verify RECEIPT --contract FILE --commit REV` judges a
   receipt as evidence for a commit rather than the checkout. The contract and
   its lock pin are read from `REV`, and nothing is read from the checkout, so
