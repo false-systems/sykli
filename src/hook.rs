@@ -330,6 +330,7 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             "sykli hook {HOOK}: {remote}'s default branch is unknown here, so only main and master are gated; name it with: git remote set-head {remote} --auto"
         );
     }
+    let mut accepted = Vec::new();
     for update in pushed
         .into_iter()
         .filter(|update| defaults.contains(&update.remote_ref))
@@ -353,11 +354,14 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             continue;
         };
         match receipt_for(&contract, &update.local_sha) {
-            Ok(receipt) => eprintln!(
-                "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
-                update.remote_ref,
-                receipt.display()
-            ),
+            Ok(receipt) => {
+                eprintln!(
+                    "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
+                    update.remote_ref,
+                    receipt.display()
+                );
+                accepted.push(receipt);
+            }
             Err(reason) => {
                 eprintln!(
                     "sykli hook {HOOK}: refusing to push {short} to {}: {reason}",
@@ -371,7 +375,111 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             }
         }
     }
+    // Only once every ref is accepted: a refused push keeps nothing. Keeping
+    // evidence is a convenience, never a reason to stop the push.
+    for receipt in accepted {
+        match keep_evidence(&receipt) {
+            Ok(kept) => eprintln!(
+                "sykli hook {HOOK}: kept {} as evidence of the push",
+                kept.display()
+            ),
+            Err(error) => eprintln!(
+                "sykli hook {HOOK}: warning: the receipt was not kept as evidence ({error}); the push goes ahead"
+            ),
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Where accepted pushes' receipts are kept: `sykli/receipts/rcpt_<sha256 of
+/// the receipt's bytes>.json` in the common git directory, the scheme of
+/// `.sykli/receipts/`. A worktree's `.sykli/` goes when the worktree is
+/// removed; this outlives it, and `verify --commit` reads nothing else.
+///
+/// Bounded like `.sykli/receipts/`: past the receipt budget
+/// (`SYKLI_RECEIPT_BUDGET`, default 200, `0` keeps all) the oldest kept
+/// receipts are removed. Nothing is written through a symbolic link.
+fn keep_evidence(receipt: &Path) -> Result<PathBuf, String> {
+    let error = |what: &Path, error: std::io::Error| format!("{}: {error}", what.display());
+    let mut directory = PathBuf::from(git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ])?);
+    for part in ["sykli", "receipts"] {
+        directory.push(part);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "{} is a symbolic link; not writing through it",
+                    directory.display()
+                ));
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(format!("{} is not a directory", directory.display())),
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&directory).map_err(|e| error(&directory, e))?;
+            }
+            Err(other) => return Err(error(&directory, other)),
+        }
+    }
+    let bytes = std::fs::read(receipt).map_err(|e| error(receipt, e))?;
+    let hash = crate::sha256(&bytes);
+    let kept = directory.join(format!("rcpt_{hash}.json"));
+    match std::fs::symlink_metadata(&kept) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{} is a symbolic link; not writing through it",
+                kept.display()
+            ));
+        }
+        // Named by its content, so a file of that name already holds it.
+        Ok(_) => return Ok(kept),
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+        Err(other) => return Err(error(&kept, other)),
+    }
+    let temporary = directory.join(format!(".rcpt_{hash}.json.tmp-{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
+        .and_then(|_| std::fs::rename(&temporary, &kept));
+    if let Err(failed) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error(&kept, failed));
+    }
+    prune_evidence(&directory, &kept);
+    Ok(kept)
+}
+
+/// Drop the oldest kept receipts past the budget, never the one just kept.
+fn prune_evidence(directory: &Path, keep: &Path) {
+    let budget = crate::receipt_budget();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut kept = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("rcpt_") && name.ends_with(".json")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect::<Vec<_>>();
+    if budget == 0 || kept.len() <= budget {
+        return;
+    }
+    kept.sort();
+    let excess = kept.len() - budget;
+    for (_, path) in kept
+        .into_iter()
+        .filter(|(_, path)| path != keep)
+        .take(excess)
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// What `install` writes: the check lives in sykli, the hook only calls it.

@@ -1038,3 +1038,133 @@ fn a_modified_submodule_makes_the_run_dirty_and_is_refused_for_a_commit() {
     fs::remove_dir_all(sub).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Where accepted pushes' receipts are kept: the common git directory.
+fn kept_receipts(root: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(root.join(".git/sykli/receipts")) {
+        Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The house flow: commit in a worktree, push main through the hook, remove
+/// the worktree. The receipt that verified the push must outlive it.
+#[cfg(unix)]
+#[test]
+fn an_accepted_push_keeps_its_receipt_after_the_worktree_is_gone() {
+    let root = repo("keepevidence", READS_FILE);
+    let origin = root.with_extension("origin.git");
+    let worktree = root.with_extension("worktree");
+    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    git(
+        &root,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    assert!(
+        sykli(&root, &["hook", "install", "--pre-push"])
+            .status
+            .success()
+    );
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "work",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    fs::write(worktree.join("other.txt"), "work\n").unwrap();
+    let pushed = commit(&worktree, "work");
+    assert_eq!(
+        sykli(&worktree, &["run", "sykli.json"]).status.code(),
+        Some(0)
+    );
+    let out = Command::new("git")
+        .args(["push", "--quiet", "origin", "work:main"])
+        .current_dir(&worktree)
+        .env("PATH", &path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    git(
+        &root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert!(!worktree.exists());
+
+    let kept = kept_receipts(&root);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let name = kept[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("rcpt_") && name.ends_with(".json") && name.len() == 5 + 64 + 5,
+        "{name}"
+    );
+    let out = verify_commit(&root, &kept[0], &pushed);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(origin).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_refused_push_keeps_nothing() {
+    let root = repo("keepnothing", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    // main is accepted, master (also a default branch here) has no receipt
+    // for its commit, so the whole push is refused and nothing is kept.
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    let unverified = commit(&root, "unverified");
+    let out = pre_push(
+        &root,
+        "origin",
+        &[
+            update(&head, "refs/heads/main"),
+            update(&unverified, "refs/heads/master"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(kept_receipts(&root).is_empty());
+    assert!(!root.join(".git/sykli").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_evidence_directory_is_refused_and_the_push_still_goes() {
+    let root = repo("keeplink", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let elsewhere = root.with_extension("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join(".git/sykli")).unwrap();
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("symbolic link"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    fs::remove_dir_all(elsewhere).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}

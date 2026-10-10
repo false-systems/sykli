@@ -14,6 +14,17 @@ from the checkout. It requires a passing run of exactly `REV^{tree}` (a
 pre-commit run counts; it need not be clean), exits 3 when it is not one, and
 prints the first failing check on stderr.
 
+Evidence of accepted pushes outlives the worktree that produced it. When
+`sykli hook pre-push` accepts a push to the default branch, it copies the
+receipt that verified it to
+`$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256 of the receipt>.json`,
+shared by every worktree of the repository. To check later that a pushed
+commit was verified, look there for a receipt whose `subject.tree_oid` is
+`git rev-parse COMMIT^{tree}` and run
+`sykli verify RECEIPT --contract sykli.json --commit COMMIT` from any checkout
+of the repository. The directory keeps the newest `SYKLI_RECEIPT_BUDGET`
+receipts (default 200).
+
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
 exists; an explicit JSON path selects a different contract. Missing JSON

@@ -322,9 +322,18 @@ safe.
   `.sykli/receipt.json` and `.sykli/receipts/`. The default branch is the one
   `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. Deletions and
   pushes to other branches pass. A refusal names the command that produces a
-  receipt: commit, then `sykli run sykli.json`. Cached tasks make that run
-  quick. The run the pre-commit hook made does not count, because HEAD had not
-  moved yet, so that run was dirty.
+  receipt: `sykli run sykli.json` with the commit checked out. Cached tasks
+  make that run quick, and the run the pre-commit hook made already counts.
+- When the hook accepts a push to the default branch, it copies the receipt
+  that verified it into the repository's common git directory, as
+  `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, named
+  like `.sykli/receipts/`. That is where accepted pushes' evidence is kept: a
+  worktree's `.sykli/` goes with the worktree, this does not. To show later
+  that a pushed commit was verified, find a kept receipt whose
+  `subject.tree_oid` is `git rev-parse COMMIT^{tree}`, then run
+  `sykli verify RECEIPT --contract sykli.json --commit COMMIT`. The copy is
+  written atomically and never through a symbolic link; if it cannot be made,
+  the hook warns and the push goes ahead.
 - Whether a push is gated is decided from the commits, not the working tree.
   The pushed commit's own `sykli.json` gates it. A commit without one is refused
   when the branch it replaces had one, so taking the gate off main is a
@@ -454,6 +463,7 @@ The cache, the receipts and production scratch are bounded, and each limit is st
 |---|---|---|
 | Task cache | **1 GiB**; least recently used entries are dropped when a run would go over | `SYKLI_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
+| Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A

@@ -8,6 +8,14 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- `sykli hook pre-push` keeps the evidence of the pushes it accepts: once
+  every ref of a push to the default branch is accepted, the receipt that
+  verified each is copied to
+  `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, so it
+  survives the removal of the worktree it was made in. The copy is atomic,
+  never written through a symbolic link, and bounded by
+  `SYKLI_RECEIPT_BUDGET` (default 200, oldest removed first). A refused push
+  keeps nothing; a copy that fails only warns, and the push goes ahead.
 - `sykli verify RECEIPT --contract FILE --commit REV` judges a
   receipt as evidence for a commit rather than the checkout. The contract and
   its lock pin are read from `REV`, and nothing is read from the checkout, so
