@@ -356,7 +356,7 @@ enum Hook {
         from the index, or an untracked file that is not ignored, would make the\n\
         run check a tree other than the commit's, so either one refuses the commit.")]
     PreCommit,
-    /// Refuse a push to the default branch without a clean, passing receipt of the pushed commit
+    /// Refuse a push to the default branch without a passing receipt of the pushed commit's tree
     #[command(after_help = "Exit codes:\n  \
         0  nothing pushed to the default branch, every such push has a receipt that\n     \
            passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
