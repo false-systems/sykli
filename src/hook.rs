@@ -271,16 +271,23 @@ fn receipts_of(tree: &str) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
-/// A receipt in this worktree that passes `verify --commit COMMIT`, or why
-/// there is none.
-fn receipt_for(contract: &Path, commit: &str) -> Result<PathBuf, String> {
+/// A receipt in this worktree that passes `verify --commit COMMIT`, with the
+/// bytes that verified (read before and after, and the same), or why there is
+/// none. Kept evidence is those bytes, never a second read of the path.
+fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), String> {
     let tree = commit_tree_oid(Path::new("."), commit)?;
     let candidates = receipts_of(&tree);
     let mut newest_refusal = None;
     for receipt in candidates {
+        let before = std::fs::read(&receipt).ok();
         let refused = match verify(&receipt, contract, Some(commit)) {
             Ok(checks) => match checks.iter().find(|check| !check.ok) {
-                None => return Ok(receipt),
+                None => match before {
+                    Some(bytes) if std::fs::read(&receipt).ok().as_ref() == Some(&bytes) => {
+                        return Ok((receipt, bytes));
+                    }
+                    _ => "the receipt changed while it was verified".into(),
+                },
                 Some(failed) => refusal(failed),
             },
             Err(error) => error,
@@ -330,6 +337,7 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             "sykli hook {HOOK}: {remote}'s default branch is unknown here, so only main and master are gated; name it with: git remote set-head {remote} --auto"
         );
     }
+    let mut accepted = Vec::new();
     for update in pushed
         .into_iter()
         .filter(|update| defaults.contains(&update.remote_ref))
@@ -353,11 +361,14 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             continue;
         };
         match receipt_for(&contract, &update.local_sha) {
-            Ok(receipt) => eprintln!(
-                "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
-                update.remote_ref,
-                receipt.display()
-            ),
+            Ok((receipt, bytes)) => {
+                eprintln!(
+                    "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
+                    update.remote_ref,
+                    receipt.display()
+                );
+                accepted.push((short.to_string(), bytes));
+            }
             Err(reason) => {
                 eprintln!(
                     "sykli hook {HOOK}: refusing to push {short} to {}: {reason}",
@@ -371,7 +382,156 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             }
         }
     }
+    // Only once every ref is accepted: a refused push keeps nothing. Keeping
+    // evidence is a convenience, never a reason to stop the push.
+    // The hook runs before the remote answers, and `--dry-run` reaches it
+    // indistinguishably, so this is evidence for the commit, not proof that
+    // the commit reached the remote.
+    for (short, bytes) in accepted {
+        match keep_evidence(&bytes) {
+            Ok(kept) => eprintln!(
+                "sykli hook {HOOK}: kept {} as evidence for {short}",
+                kept.display()
+            ),
+            Err(error) => eprintln!(
+                "sykli hook {HOOK}: warning: the receipt was not kept as evidence ({error}); the push goes ahead"
+            ),
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Where accepted pushes' receipts are kept: `sykli/receipts/rcpt_<sha256 of
+/// the receipt's bytes>.json` in the common git directory, the scheme of
+/// `.sykli/receipts/`. A worktree's `.sykli/` goes when the worktree is
+/// removed; this outlives it, and `verify --commit` reads nothing else.
+///
+/// Bounded like `.sykli/receipts/`: past the receipt budget
+/// (`SYKLI_RECEIPT_BUDGET`, default 200, `0` keeps all) the oldest kept
+/// receipts are removed, and so are temporary files an interrupted copy left.
+/// Keeping a receipt again makes it the newest. Nothing is written through a
+/// symbolic link. The directory confers no trust: whoever reads a receipt
+/// from it must run `verify --commit` on it.
+fn keep_evidence(bytes: &[u8]) -> Result<PathBuf, String> {
+    let error = |what: &Path, error: std::io::Error| format!("{}: {error}", what.display());
+    let mut directory = PathBuf::from(git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ])?);
+    for part in ["sykli", "receipts"] {
+        directory.push(part);
+        ensure_directory(&directory, |path| std::fs::create_dir(path))?;
+    }
+    let hash = crate::sha256(bytes);
+    let kept = directory.join(format!("rcpt_{hash}.json"));
+    match std::fs::symlink_metadata(&kept) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{} is a symbolic link; not writing through it",
+                kept.display()
+            ));
+        }
+        // Named by its content, so a file of that name already holds it. It
+        // becomes the newest, so eviction cannot take the evidence for a
+        // commit that was just pushed again.
+        Ok(_) => {
+            std::fs::File::options()
+                .write(true)
+                .open(&kept)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+                .map_err(|e| error(&kept, e))?;
+            prune_evidence(&directory, &kept);
+            return Ok(kept);
+        }
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+        Err(other) => return Err(error(&kept, other)),
+    }
+    let temporary = directory.join(format!(".rcpt_{hash}.json.tmp-{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, bytes))
+        .and_then(|_| std::fs::rename(&temporary, &kept));
+    if let Err(failed) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error(&kept, failed));
+    }
+    prune_evidence(&directory, &kept);
+    Ok(kept)
+}
+
+/// A directory at `path`, never a symbolic link. Another push may create it
+/// between the look and `create`; losing that race is fine, so the look is
+/// repeated rather than the push's evidence dropped.
+fn ensure_directory(
+    path: &Path,
+    create: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    for _ in 0..2 {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "{} is a symbolic link; not writing through it",
+                    path.display()
+                ));
+            }
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => return Err(format!("{} is not a directory", path.display())),
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => match create(path) {
+                Ok(()) => return Ok(()),
+                Err(raced) if raced.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(failed) => return Err(format!("{}: {failed}", path.display())),
+            },
+            Err(other) => return Err(format!("{}: {other}", path.display())),
+        }
+    }
+    Err(format!("{} keeps changing; not writing", path.display()))
+}
+
+/// How old a temporary copy must be before pruning takes it for one an
+/// interrupted push left behind, rather than one a push is writing now.
+const STALE_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Drop the oldest kept receipts past the budget, never the one just kept,
+/// and temporary copies older than STALE_TEMPORARY.
+fn prune_evidence(directory: &Path, keep: &Path) {
+    let budget = crate::receipt_budget();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut kept = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(modified) = entry.metadata().ok().and_then(|meta| meta.modified().ok()) else {
+            continue;
+        };
+        if name.starts_with(".rcpt_") && name.contains(".json.tmp-") {
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age > STALE_TEMPORARY)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        } else if name.starts_with("rcpt_") && name.ends_with(".json") {
+            kept.push((modified, entry.path()));
+        }
+    }
+    if budget == 0 || kept.len() <= budget {
+        return;
+    }
+    kept.sort();
+    let excess = kept.len() - budget;
+    for (_, path) in kept
+        .into_iter()
+        .filter(|(_, path)| path != keep)
+        .take(excess)
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// What `install` writes: the check lives in sykli, the hook only calls it.
@@ -487,4 +647,39 @@ fn executable(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn executable(_: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The losing side of two first pushes: the directory is missing when
+    /// looked at and present when created. Losing that race is fine.
+    #[test]
+    fn a_directory_created_by_a_concurrent_push_is_used_not_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-hook-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let directory = root.join("sykli");
+        let other_push_first = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::create_dir(path)
+        };
+        assert_eq!(ensure_directory(&directory, other_push_first), Ok(()));
+        assert!(directory.is_dir());
+        // Still never through a symbolic link, however it appeared.
+        let linked = root.join("linked");
+        let other_links = |path: &Path| {
+            std::os::unix::fs::symlink(&root, path).unwrap();
+            std::fs::create_dir(path)
+        };
+        assert!(ensure_directory(&linked, other_links).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

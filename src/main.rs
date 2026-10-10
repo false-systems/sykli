@@ -367,7 +367,11 @@ enum Hook {
         Deletions and pushes to other branches pass. Receipts are looked for in this\n\
         worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
         is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
-        without one is refused when the branch had one (push with --no-verify to drop it).")]
+        without one is refused when the branch had one (push with --no-verify to drop it).\n\
+        An accepted push's receipts are kept in the common git directory, as\n\
+        sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
+        A kept receipt is evidence for its commit, not proof the remote has it (dry runs\n\
+        reach this hook too), and readers must still run verify --commit on it.")]
     PrePush {
         /// Remote name, as git passes it
         remote: Option<String>,

@@ -1038,3 +1038,238 @@ fn a_modified_submodule_makes_the_run_dirty_and_is_refused_for_a_commit() {
     fs::remove_dir_all(sub).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Where accepted pushes' receipts are kept: the common git directory.
+fn kept_receipts(root: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(root.join(".git/sykli/receipts")) {
+        Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The house flow: commit in a worktree, push main through the hook, remove
+/// the worktree. The receipt that verified the push must outlive it.
+#[cfg(unix)]
+#[test]
+fn an_accepted_push_keeps_its_receipt_after_the_worktree_is_gone() {
+    let root = repo("keepevidence", READS_FILE);
+    let origin = root.with_extension("origin.git");
+    let worktree = root.with_extension("worktree");
+    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    git(
+        &root,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    assert!(
+        sykli(&root, &["hook", "install", "--pre-push"])
+            .status
+            .success()
+    );
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "work",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    fs::write(worktree.join("other.txt"), "work\n").unwrap();
+    let pushed = commit(&worktree, "work");
+    assert_eq!(
+        sykli(&worktree, &["run", "sykli.json"]).status.code(),
+        Some(0)
+    );
+    let out = Command::new("git")
+        .args(["push", "--quiet", "origin", "work:main"])
+        .current_dir(&worktree)
+        .env("PATH", &path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    git(
+        &root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert!(!worktree.exists());
+
+    let kept = kept_receipts(&root);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let name = kept[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("rcpt_") && name.ends_with(".json") && name.len() == 5 + 64 + 5,
+        "{name}"
+    );
+    let out = verify_commit(&root, &kept[0], &pushed);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(origin).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_refused_push_keeps_nothing() {
+    let root = repo("keepnothing", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    // main is accepted, master (also a default branch here) has no receipt
+    // for its commit, so the whole push is refused and nothing is kept.
+    fs::write(root.join("other.txt"), "more\n").unwrap();
+    let unverified = commit(&root, "unverified");
+    let out = pre_push(
+        &root,
+        "origin",
+        &[
+            update(&head, "refs/heads/main"),
+            update(&unverified, "refs/heads/master"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(kept_receipts(&root).is_empty());
+    assert!(!root.join(".git/sykli").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_evidence_directory_is_refused_and_the_push_still_goes() {
+    let root = repo("keeplink", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let elsewhere = root.with_extension("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join(".git/sykli")).unwrap();
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("symbolic link"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    fs::remove_dir_all(elsewhere).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `sykli hook pre-push` with extra environment, for the receipt budget.
+fn pre_push_with(root: &Path, lines: &[String], env: &[(&str, &str)]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+        .envs(env.iter().copied())
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+/// Review of the kept evidence, finding 1: two first pushes at once must both
+/// keep their receipt; creating the directory races, and losing is fine.
+#[test]
+fn concurrent_first_pushes_all_keep_their_receipt() {
+    use std::io::Write;
+    let root = repo("keeprace", READS_FILE);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    for round in 0..5 {
+        let _ = fs::remove_dir_all(root.join(".git/sykli"));
+        let mut children = (0..12)
+            .map(|_| {
+                Command::new(env!("CARGO_BIN_EXE_sykli"))
+                    .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+                    .current_dir(&root)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        // Each child waits on its input, so feeding them all releases them
+        // together.
+        let line = update(&head, "refs/heads/main");
+        for child in &mut children {
+            writeln!(child.stdin.take().unwrap(), "{line}").unwrap();
+        }
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+            assert!(
+                !text(&out.stderr).contains("warning"),
+                "round {round}: {}",
+                text(&out.stderr)
+            );
+        }
+        assert_eq!(kept_receipts(&root).len(), 1, "round {round}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Finding 2: keeping a receipt again makes it the newest, so eviction never
+/// takes the only evidence for a commit just pushed again. Finding 5: stale
+/// temporary files from an interrupted copy are pruned too.
+#[test]
+fn re_keeping_a_receipt_makes_it_the_newest() {
+    let root = repo("keepagain", READS_FILE);
+    let budget = [("SYKLI_RECEIPT_BUDGET", "2")];
+    let a = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let pushed = |sha: &str| pre_push_with(&root, &[update(sha, "refs/heads/main")], &budget);
+    assert_eq!(pushed(&a).status.code(), Some(0));
+    let kept_a = kept_receipts(&root);
+    assert_eq!(kept_a.len(), 1);
+    fs::write(root.join("other.txt"), "b\n").unwrap();
+    let b = commit(&root, "b");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    assert_eq!(pushed(&b).status.code(), Some(0));
+    // A force-push back to A keeps A's receipt again.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(pushed(&a).status.code(), Some(0));
+    // A temporary file an interrupted copy left behind, long ago.
+    let stale = root.join(".git/sykli/receipts/.rcpt_0.json.tmp-1");
+    fs::write(&stale, "{").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    fs::write(root.join("other.txt"), "c\n").unwrap();
+    let c = commit(&root, "c");
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    assert_eq!(pushed(&c).status.code(), Some(0));
+    // Budget 2: B's receipt went, A's (kept again after B) stayed.
+    let kept = kept_receipts(&root);
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(kept.contains(&kept_a[0]), "{kept:?}");
+    assert!(!stale.exists(), "a stale temporary file is pruned");
+    let out = verify_commit(&root, &kept_a[0], &a);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
