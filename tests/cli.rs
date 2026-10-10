@@ -1407,3 +1407,67 @@ fn contract_preview_does_not_accept_drift_or_execute_commands() {
     assert!(!root.join("executed").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A task that declares inputs in a folder reads that folder. A file added
+/// there without being declared must refuse the run, not leave a cached pass
+/// (the case of a test reading a whole fixture folder).
+#[test]
+fn an_undeclared_file_in_a_folder_a_task_reads_refuses_the_run() {
+    let root = graph_repo(
+        "folderinputs",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"fixtures","run":"cat fixtures/*","inputs":["fixtures/a.json"]}]}"#,
+    );
+    fs::create_dir(root.join("fixtures")).unwrap();
+    fs::write(root.join("fixtures/a.json"), "{}").unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        )
+    };
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixtures"]);
+    assert_eq!(run_json(&root).0, Some(0));
+    // The working directory is not such a folder: its files are the project's.
+    fs::write(root.join("notes.txt"), "not an input").unwrap();
+    assert_eq!(run_json(&root).0, Some(0));
+
+    fs::write(root.join("fixtures/b.json"), "{}").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", "sykli.json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let message = String::from_utf8_lossy(&out.stderr);
+    assert!(message.contains("fixtures/b.json"), "{message}");
+    assert!(message.contains("task fixtures"), "{message}");
+    // plan --explain says the same, read-only.
+    let (code, plan) = explain_json(&root, &[]);
+    assert_eq!(code, Some(2));
+    assert_eq!(
+        plan["input_coverage"]["folder_missing_inputs"],
+        serde_json::json!([{"path": "fixtures/b.json", "task": "fixtures"}])
+    );
+    assert_eq!(plan["explanations"][0]["cache"]["status"], "input_error");
+
+    // Declared, it runs again.
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"fixtures","run":"cat fixtures/*","inputs":["fixtures/a.json","fixtures/b.json"]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(run_json(&root).0, Some(0));
+    fs::remove_dir_all(root).unwrap();
+}

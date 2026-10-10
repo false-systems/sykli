@@ -132,6 +132,10 @@
         "tests/boundary.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        "action/binary.sh",
+        "action/plan.sh",
+        "action/summary.sh",
         "action/verify.sh"
       ]
     }

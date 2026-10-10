@@ -57,6 +57,16 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- `run` refuses (exit 2) when a folder holding one of a task's declared
+  inputs has a file, tracked or untracked and not ignored, that the task does
+  not declare: the task reads that folder, so such a file could change its
+  result without changing its key, and a test reading a whole fixture folder
+  kept a cached pass after a fixture was added. This applies to every graph,
+  not only Cargo graphs; the task's working directory and the repository root
+  are exempt, and subfolders are not searched. The message names each file and
+  its task; `plan --explain` reports them as `input_coverage.folder_missing_inputs`
+  (absent when empty), marks the cache states as input errors and exits 2.
+  Contracts with such gaps must declare the files, or move them, and re-lock.
 - The GitHub Action verifies twice: the live check against the checkout, as
   before, and then `--commit`, by default against the pull request's head on
   `pull_request` events and against HEAD otherwise (new `commit` input; `none`

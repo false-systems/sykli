@@ -74,6 +74,18 @@ This conservative check applies when the working directory has Cargo.toml and
 the graph declares that manifest or names `cargo` in a task command. It does
 not turn an unrelated shell-only graph into a Cargo graph. Shell wrappers that
 hide Cargo invocation must declare their Cargo manifest to opt into the check.
+
+Every graph, Cargo or not, has a second prerequisite: a task that declares an
+input in a folder reads that folder, so every file directly inside it (tracked,
+or untracked and not ignored, from the same inventory) must be one of that
+task's inputs too. A test that reads a whole fixture folder otherwise keeps its
+cached pass after a fixture is added. The task's working directory and the
+repository root are exempt, since they hold project files every task declares
+only a few of; subfolders are not searched. `run` exits 2 naming each file and
+its task, and explain lists them as `folder_missing_inputs: [{path, task}]`
+under `input_coverage` (absent when there are none), marks task cache states as
+input errors and exits 2. Declare the file in that task's inputs, or move it
+out of the folder, and re-lock.
 It can require explicit inputs for unused fixtures. It does not inspect ignored
 generated files, arbitrary build-script reads, external tools or files outside
 the Git inventory, nor prove each input belongs to every task that reads it.
