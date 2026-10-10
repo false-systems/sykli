@@ -354,7 +354,7 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
         };
         match receipt_for(&contract, &update.local_sha) {
             Ok(receipt) => eprintln!(
-                "sykli hook {HOOK}: {short} to {}: {} is a clean, passing run of it",
+                "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
                 update.remote_ref,
                 receipt.display()
             ),
