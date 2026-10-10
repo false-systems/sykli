@@ -12,9 +12,9 @@ contract consumer can observe; internal refactors are not listed.
   receipt as evidence for a commit rather than the checkout. The contract and
   its lock pin are read from `REV`, and nothing is read from the checkout, so
   any commit verifies from any checkout. The receipt's tree must be
-  `REV^{tree}` (with `.sykli/` excluded, as in every receipt tree) and the run
-  clean: `dirty: false`, with HEAD's recorded tree equal to the tree that ran
-  (policy on top of the tree check, which alone binds the content).
+  `REV^{tree}` (with `.sykli/` excluded, as in every receipt tree). The tree
+  check alone binds the content, so the run need not be clean: the pre-commit
+  hook's run counts for the push, and `clean` is reported but does not refuse.
   A miss exits 3, a contract or lock in `REV` that differs exits 4, and a
   revision that names no commit, or a commit without the JSON contract, exits
   2. Declared inputs the commit does not track are not judged. Without

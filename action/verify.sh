@@ -8,7 +8,7 @@ set -eu
 binary=${SYKLI_BINARY:?SYKLI_BINARY is required}
 contract=${SYKLI_CONTRACT:?SYKLI_CONTRACT is required}
 receipt=${SYKLI_RECEIPT:?SYKLI_RECEIPT is required}
-# The commit the receipt must be a clean run of; 'none' skips that check.
+# The commit whose tree the receipt must be a run of; 'none' skips that check.
 commit=${SYKLI_COMMIT:-HEAD}
 output=${GITHUB_OUTPUT:-/dev/null}
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
@@ -70,7 +70,7 @@ case "$code" in
     if [ "$merge_checkout" = true ]; then
       hint="this job checked out GitHub's merge commit, not the pull request head $commit: set actions/checkout's ref to github.event.pull_request.head.sha"
     elif [ "$stage" = commit ]; then
-      hint="the receipt is not a clean run of commit $commit: check out that commit and run the graph there"
+      hint="the receipt is not a run of commit $commit's tree: check out that commit and run the graph there"
     else
       hint="the tree or declared inputs changed after the run; a task most likely wrote a file that is neither gitignored nor declared as an output"
     fi

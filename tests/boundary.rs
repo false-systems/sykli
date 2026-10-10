@@ -133,40 +133,22 @@ fn verify_commit_refuses_a_receipt_of_another_commit() {
 }
 
 #[test]
-fn verify_commit_refuses_a_dirty_run_even_of_the_same_tree() {
+fn verify_commit_accepts_a_dirty_run_of_the_same_tree() {
     let root = repo("dirty", PASSING);
     // Run with an uncommitted edit, then commit exactly that edit: the
-    // receipt's tree is the new commit's tree, but the run was not clean.
+    // receipt's tree is the new commit's tree, so the run checked exactly
+    // what the commit carries, though HEAD had not moved yet.
     fs::write(root.join("file.txt"), "two\n").unwrap();
     let (path, value) = receipt(&root);
     assert_eq!(value["subject"]["dirty"], true);
     commit(&root, "commit what ran");
-    assert_eq!(
-        sykli(
-            &root,
-            &["verify", path.to_str().unwrap(), "--contract", "sykli.json"]
-        )
-        .status
-        .code(),
-        Some(0),
-        "plain verify still accepts a dirty receipt for the tree on disk"
-    );
     let out = verify_commit(&root, &path, "HEAD");
-    assert_ne!(out.status.code(), Some(0));
-    let reason = text(&out.stderr);
-    assert_eq!(
-        reason.trim().lines().count(),
-        1,
-        "one-line reason: {reason}"
-    );
-    assert!(reason.contains("dirty"), "{reason}");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
-    // Relabelling it clean is not enough: HEAD's tree at the run disagrees.
-    let mut forged = value.clone();
-    forged["subject"]["dirty"] = false.into();
-    fs::write(&path, forged.to_string()).unwrap();
-    let out = verify_commit(&root, &path, "HEAD");
-    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    // The tree still binds it: the same dirty receipt is no evidence for
+    // the commit before, whose tree differs.
+    let out = verify_commit(&root, &path, "HEAD~1");
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stdout));
     let _ = fs::remove_file(path);
     fs::remove_dir_all(root).unwrap();
 }
@@ -314,7 +296,7 @@ fn update(sha: &str, remote_ref: &str) -> String {
 }
 
 #[test]
-fn pre_push_to_main_requires_a_clean_passing_receipt_of_the_pushed_commit() {
+fn pre_push_to_main_requires_a_passing_receipt_of_the_pushed_commit() {
     let root = repo("push", READS_FILE);
     let head = git(&root, &["rev-parse", "HEAD"]);
     let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
@@ -345,7 +327,7 @@ fn pre_push_to_main_requires_a_clean_passing_receipt_of_the_pushed_commit() {
 }
 
 #[test]
-fn pre_push_refuses_a_failing_or_dirty_commit_on_main() {
+fn pre_push_refuses_a_failing_commit_on_main() {
     let root = repo("pushfail", READS_FILE);
     // A failing commit, with its honest receipt.
     fs::write(root.join("file.txt"), "broken\n").unwrap();
@@ -359,13 +341,13 @@ fn pre_push_refuses_a_failing_or_dirty_commit_on_main() {
         text(&out.stderr)
     );
 
-    // A passing tree that only ever ran uncommitted.
+    // A passing tree that only ever ran uncommitted: the run checked exactly
+    // what the commit carries, so it counts.
     fs::write(root.join("file.txt"), "one\n").unwrap();
     assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
     let fixed = commit(&root, "fixed");
     let out = pre_push(&root, "origin", &[update(&fixed, "refs/heads/main")]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("dirty"), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -593,14 +575,12 @@ fn installed_hooks_gate_real_commits_and_pushes() {
     let out = hooked(&["push", "--quiet", "origin", "main:feature"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
 
-    // Fixed through the pre-commit hook, run clean once committed: accepted.
+    // Fixed through the pre-commit hook: its run is the commit's evidence,
+    // so the push is accepted without a second run.
     fs::write(root.join("file.txt"), "one\n").unwrap();
     git(&root, &["add", "file.txt"]);
     let out = hooked(&["commit", "--quiet", "-m", "fixed"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let out = hooked(&["push", "--quiet", "origin", "main"]);
-    assert!(!out.status.success(), "the pre-commit run was dirty");
-    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
     let out = hooked(&["push", "--quiet", "origin", "main"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
@@ -662,7 +642,7 @@ fn the_action_verifies_the_receipt_against_the_pull_request_head() {
     let (code, annotations) = action_verify(&merged, &head);
     assert_eq!(code.trim(), "code=3", "{annotations}");
     assert!(
-        annotations.contains("not a clean run of commit"),
+        annotations.contains("is not a run of commit"),
         "{annotations}"
     );
     // Checked out at the head itself, it is.

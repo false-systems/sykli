@@ -319,7 +319,7 @@ enum Command {
         1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
         3  tree or input mismatch — receipt is stale; re-run sykli\n     \
-           (with --commit: not a clean run of that commit's tree)\n  \
+           (with --commit: not a run of that commit's tree)\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock\n     \
            (with --commit: from the contract or lock in that commit)\n\n\
         Without --commit the subject is the checkout: its tree and declared inputs.\n\
@@ -334,7 +334,7 @@ enum Command {
         contract: PathBuf,
         /// Judge the receipt as evidence for this commit instead of the checkout:
         /// the contract and lock are read from REV, the receipt's tree must be
-        /// REV^{tree}, the run clean, and every task passed or cached
+        /// REV^{tree}, and every task passed or cached (the run need not be clean)
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
     },
@@ -3442,13 +3442,14 @@ fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8
 /// tree, the run checked exactly the commit's content whatever HEAD was; a
 /// clean run adds that the commit was checked out when it ran. Requiring it
 /// costs a second, cached run after committing, because the pre-commit hook's
-/// run happens before HEAD moves and is always dirty. `false` keeps reporting
-/// the `clean` check but stops it refusing; submodule changes are refused by
-/// their own check either way. Changing this flips the end-to-end hook tests
-/// that encode the second run (`installed_hooks_gate_real_commits_and_pushes`,
-/// `pre_push_refuses_a_failing_or_dirty_commit_on_main` and the dirty-run
+/// run happens before HEAD moves and is always dirty. So it is off: the
+/// `clean` check is still reported but does not refuse, and the pre-commit
+/// run counts for the push. Submodule changes are refused by their own check
+/// either way. Turning it on flips the end-to-end hook tests that cover the
+/// single run (`installed_hooks_gate_real_commits_and_pushes`,
+/// `pre_push_refuses_a_failing_commit_on_main` and the dirty-run
 /// `verify_commit_*` test).
-const COMMIT_REQUIRES_CLEAN_RUN: bool = true;
+const COMMIT_REQUIRES_CLEAN_RUN: bool = false;
 
 /// The receipt's tree is the commit's, and the run was clean.
 fn commit_checks(
@@ -3480,7 +3481,8 @@ fn commit_checks(
         .map_or("absent".into(), |dirty| dirty.to_string());
     checks.push(Check {
         name: "clean",
-        expected: "a clean run (dirty false: the tree that ran was HEAD's)".into(),
+        expected: "a clean run (dirty false: the tree that ran was HEAD's); reported, not required"
+            .into(),
         actual: match receipt.subject.head_tree_oid.as_deref() {
             _ if clean => "dirty false".into(),
             Some(head) if head != receipt.subject.tree_oid => format!(
