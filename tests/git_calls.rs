@@ -7,23 +7,33 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-/// `git rev-parse` once, the subject's tree, the inventory for the
-/// undeclared-file checks, and the working-tree snapshot (`read-tree`,
-/// `add`, `write-tree`).
-const RUN: usize = 6;
+// The git commands each command starts, exactly: their number is the
+// budget, and their names show the count measured something.
+
+/// `git rev-parse` once to find the repository, the inventory for the
+/// undeclared-file checks, the subject's tree from one `cat-file --batch`,
+/// and the working-tree snapshot (`read-tree`, `add`, `write-tree`).
+const RUN: &[&str] = &[
+    "rev-parse",
+    "ls-files",
+    "cat-file",
+    "read-tree",
+    "add",
+    "write-tree",
+];
 /// The same with the repository given: no discovery.
-const RUN_GIVEN: usize = 5;
+const RUN_GIVEN: &[&str] = &["ls-files", "cat-file", "read-tree", "add", "write-tree"];
 /// Discovery and one `cat-file --batch` for the commit.
-const VERIFY_COMMIT: usize = 2;
-const VERIFY_COMMIT_GIVEN: usize = 1;
+const VERIFY_COMMIT: &[&str] = &["rev-parse", "cat-file"];
+const VERIFY_COMMIT_GIVEN: &[&str] = &["cat-file"];
 /// Discovery and one `cat-file --batch` for every pushed commit.
-const PRE_PUSH: usize = 2;
-const PRE_PUSH_GIVEN: usize = 1;
+const PRE_PUSH: &[&str] = &["rev-parse", "cat-file"];
+const PRE_PUSH_GIVEN: &[&str] = &["cat-file"];
 
 const ZEROS: &str = "0000000000000000000000000000000000000000";
 
@@ -107,7 +117,7 @@ impl Scratch {
     /// Run sykli with `GIT_TRACE2_EVENT` pointed at a fresh file, and count
     /// the git processes it started. The global git config is an empty file,
     /// so nothing configured on this machine starts processes of its own.
-    fn counted(&self, args: &[&str], stdin: Option<&str>) -> (Output, usize) {
+    fn counted(&self, args: &[&str], stdin: Option<&str>) -> (Output, Vec<String>) {
         use std::io::Write;
         let trace = self.base.join(format!(
             "trace-{}.json",
@@ -129,12 +139,7 @@ impl Scratch {
         }
         drop(input);
         let out = child.wait_with_output().unwrap();
-        let started = fs::read_to_string(&trace)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains(r#""event":"start""#))
-            .count();
-        (out, started)
+        (out, started(&trace))
     }
 }
 
@@ -148,9 +153,45 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Assert a command's exit code and that it started at most `budget` git
-/// processes.
-fn within(label: &str, (out, started): (Output, usize), code: i32, budget: usize) {
+/// The git commands a trace records starting (`"event":"start"`), by
+/// name: the first word of each argv after git's own options. A trace that
+/// is missing or records nothing fails, because counting nothing would
+/// prove nothing: every command measured here starts git at least once.
+fn started(trace: &Path) -> Vec<String> {
+    let text = fs::read_to_string(trace).unwrap_or_else(|error| {
+        panic!("no GIT_TRACE2_EVENT trace at {}: {error}", trace.display())
+    });
+    let commands = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "start")
+        .map(|event| {
+            let argv = event["argv"].as_array().cloned().unwrap_or_default();
+            let mut words = argv.iter().skip(1).filter_map(|word| word.as_str());
+            while let Some(word) = words.next() {
+                match word {
+                    "-C" | "-c" => {
+                        words.next();
+                    }
+                    option if option.starts_with('-') => {}
+                    command => return command.to_string(),
+                }
+            }
+            String::new()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !commands.is_empty(),
+        "the trace at {} records no git process",
+        trace.display()
+    );
+    commands
+}
+
+/// Assert a command's exit code and that it started exactly the expected git
+/// commands: no more (the budget), no fewer, and these (the count measured
+/// what it claims to).
+fn within(label: &str, (out, started): (Output, Vec<String>), code: i32, expected: &[&str]) {
     assert_eq!(
         out.status.code(),
         Some(code),
@@ -158,10 +199,11 @@ fn within(label: &str, (out, started): (Output, usize), code: i32, budget: usize
         text(&out.stdout),
         text(&out.stderr)
     );
-    assert!(
-        started <= budget,
-        "{label}: {started} git processes, budget {budget}"
-    );
+    let mut started = started;
+    started.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
+    assert_eq!(started, expected, "{label}: the git processes started");
 }
 
 fn with<'a>(args: &[&'a str], facts: &'a [String]) -> Vec<&'a str> {
@@ -314,4 +356,26 @@ fn a_committed_contract_and_a_guessed_branch_stay_within_the_budget() {
             push,
         );
     }
+}
+
+/// The counter itself: a trace that is missing, empty, or that sykli could
+/// not write is a failure, never a count of zero within every budget.
+#[test]
+fn a_count_without_a_trace_is_a_failure_not_zero() {
+    let scratch = Scratch::new("vacuous");
+    let missing = scratch.base.join("no-such-folder").join("trace.json");
+    assert!(std::panic::catch_unwind(|| started(&missing)).is_err());
+    let empty = scratch.base.join("empty.json");
+    fs::write(&empty, "").unwrap();
+    assert!(std::panic::catch_unwind(|| started(&empty)).is_err());
+    // A real command whose trace cannot be written counts as no evidence.
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["hook", "pre-push", "--branch", "main", "origin", "/nowhere"])
+        .current_dir(&scratch.repo)
+        .env("GIT_TRACE2_EVENT", &missing)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(std::panic::catch_unwind(|| started(&missing)).is_err());
 }
