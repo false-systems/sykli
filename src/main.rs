@@ -1144,8 +1144,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Run { contract, json } => match load(&contract)
-            .and_then(|(contract, levels, hash)| run(&contract, &levels, hash, json))
+        Command::Run { contract, json } => match load_pinned(&contract)
+            .and_then(|((contract, levels, hash), lock)| run(&contract, &levels, hash, lock, json))
         {
             Ok((true, _)) => ExitCode::SUCCESS,
             Ok((false, _)) => ExitCode::FAILURE,
@@ -1407,25 +1407,36 @@ fn main() -> ExitCode {
     }
 }
 
-fn load(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
-    let loaded = load_unlocked(path)?;
-    if let Some(lock) = read_lock(path)? {
-        if lock != loaded.2 {
-            return Err(format!(
-                "contract differs from {}; run `sykli lock` to accept it",
-                lock_path(path).display()
-            ));
-        }
-    }
-    Ok(loaded)
+/// A contract, its execution levels, and its hash.
+type Loaded = (Contract, Vec<Vec<usize>>, String);
+
+fn load(path: &Path) -> Result<Loaded, String> {
+    load_pinned(path).map(|(loaded, _)| loaded)
 }
 
-fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>, String> {
+/// `load`, with the SHA-256 of the lock file it checked the contract against
+/// (None when there is none), read once so a receipt names exactly the lock
+/// that check used.
+fn load_pinned(path: &Path) -> Result<(Loaded, Option<String>), String> {
+    let loaded = load_unlocked(path)?;
+    let (pin, digest) = read_lock_digest(path)?;
+    if pin.is_some_and(|lock| lock != loaded.2) {
+        return Err(format!(
+            "contract differs from {}; run `sykli lock` to accept it",
+            lock_path(path).display()
+        ));
+    }
+    Ok((loaded, digest))
+}
+
+/// A lock file and the SHA-256 of its bytes, or None when there is none.
+fn read_lock_file(lock_path: &Path) -> Result<Option<(LockFile, String)>, String> {
     if !lock_path.is_file() {
         return Ok(None);
     }
     let bytes = fs::read(lock_path).map_err(|error| error.to_string())?;
-    parse_lock(&bytes, &lock_path.display().to_string()).map(Some)
+    let lock = parse_lock(&bytes, &lock_path.display().to_string())?;
+    Ok(Some((lock, sha256(&bytes))))
 }
 
 fn parse_lock(bytes: &[u8], name: &str) -> Result<LockFile, String> {
@@ -1449,7 +1460,16 @@ fn pinned(lock: LockFile, contract: &Path) -> Option<String> {
 
 /// The pinned hash for this contract, if its directory's lock file has one.
 fn read_lock(path: &Path) -> Result<Option<String>, String> {
-    Ok(read_lock_file(&lock_path(path))?.and_then(|lock| pinned(lock, path)))
+    read_lock_digest(path).map(|(pin, _)| pin)
+}
+
+/// The pinned hash for this contract, if its directory's lock file has one,
+/// and the SHA-256 of that file, if there is one, from a single read.
+fn read_lock_digest(path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    Ok(match read_lock_file(&lock_path(path))? {
+        Some((lock, digest)) => (pinned(lock, path), Some(digest)),
+        None => (None, None),
+    })
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
@@ -1493,7 +1513,7 @@ fn write_lock(contract: &Path) -> Result<PathBuf, String> {
     // A v1 lock could only ever pin one contract; migrating keeps that pin
     // under this contract's name and upgrades the file to v2.
     let mut contracts = read_lock_file(&path)?
-        .map(|lock| lock.contracts)
+        .map(|(lock, _)| lock.contracts)
         .unwrap_or_default();
     contracts.insert(lock_key(contract), contract_hash);
     let mut bytes = serde_json::to_vec_pretty(&LockFile {
@@ -1811,6 +1831,10 @@ struct TaskReceipt {
 struct Receipt {
     schema: &'static str,
     contract_hash: String,
+    /// SHA-256 of the bytes of the lock file beside the contract (`sykli.lock`)
+    /// as this run read it to check the contract; null when there was none.
+    /// Receipts written before the field existed do not have it.
+    lock_digest: Option<String>,
     /// When this run began. Always now, even when every task was reused: the
     /// run is what happened now, the evidence may be older.
     started_at_ms: u64,
@@ -1970,6 +1994,7 @@ fn run(
     contract: &Contract,
     levels: &[Vec<usize>],
     contract_hash: String,
+    lock_digest: Option<String>,
     json: bool,
 ) -> Result<(bool, PathBuf), String> {
     // Stamped before any task runs, so the receipt's run time brackets every
@@ -2003,6 +2028,7 @@ fn run(
     let receipt = Receipt {
         schema: "sykli-receipt.v1",
         contract_hash,
+        lock_digest,
         started_at_ms: run_started_at_ms,
         subject,
         tasks,
@@ -4231,6 +4257,7 @@ mod tests {
         let receipt = Receipt {
             schema: "sykli-receipt.v1",
             contract_hash: "test".into(),
+            lock_digest: None,
             started_at_ms: unix_time_ms(),
             subject: Subject {
                 repository: root.to_string_lossy().into(),

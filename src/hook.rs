@@ -2,7 +2,7 @@
 //! merely the files on disk, and they only refuse: nothing is staged, stashed
 //! or rewritten on the operator's behalf.
 
-use crate::{commit_tree_oid, git, load, refusal, resolve_contract, run, verify};
+use crate::{commit_tree_oid, git, load_pinned, refusal, resolve_contract, run, verify};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -117,8 +117,8 @@ pub(crate) fn pre_commit() -> ExitCode {
         Ok(Some(reason)) => return refuse(reason),
         Err(error) => return cannot(error),
     }
-    let receipt = match load(&contract)
-        .and_then(|(loaded, levels, hash)| run(&loaded, &levels, hash, false))
+    let receipt = match load_pinned(&contract)
+        .and_then(|((loaded, levels, hash), lock)| run(&loaded, &levels, hash, lock, false))
     {
         Ok((true, receipt)) => receipt,
         Ok((false, receipt)) => {
