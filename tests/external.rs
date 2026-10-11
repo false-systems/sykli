@@ -860,3 +860,34 @@ fn pre_push_refusals_name_the_step_that_helps() {
         assert!(!message.contains("sykli run"), "{message}");
     }
 }
+
+/// The lock is the one beside the path the contract is named by. A link to a
+/// contract whose lock is beside the target, not the link, runs unpinned;
+/// that is rarely meant, so it is said.
+#[cfg(unix)]
+#[test]
+fn a_linked_contract_with_its_lock_only_beside_the_target_is_warned_about() {
+    let scratch = Scratch::new("link");
+    let repo = &scratch.repo;
+    let real = scratch.contract(READS_FILE);
+    let linked = scratch.base.join("linked");
+    fs::create_dir(&linked).unwrap();
+    let link = linked.join("sykli.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let out = sykli(repo, &["run", link.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert_eq!(message.matches("warning:").count(), 1, "{message}");
+    assert!(message.contains("unpinned"), "{message}");
+
+    // Linking the lock as well pins it, and there is nothing to say.
+    std::os::unix::fs::symlink(scratch.config.join("sykli.lock"), linked.join("sykli.lock"))
+        .unwrap();
+    let out = sykli(repo, &["run", link.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("warning:"),
+        "{}",
+        text(&out.stderr)
+    );
+}

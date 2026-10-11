@@ -1610,8 +1610,34 @@ fn read_lock(path: &Path) -> Result<Option<String>, String> {
 fn read_lock_digest(path: &Path) -> Result<(Option<String>, Option<String>), String> {
     Ok(match read_lock_file(&lock_path(path))? {
         Some((lock, digest)) => (pinned(lock, path), Some(digest)),
-        None => (None, None),
+        None => {
+            warn_unpinned_link(path);
+            (None, None)
+        }
     })
+}
+
+/// A contract named through a symbolic link is pinned by the lock beside the
+/// link, as every contract is by the lock beside the path it is named by.
+/// When there is none there but the link's target has one, the contract runs
+/// unpinned, which is rarely meant: say so, once per command.
+fn warn_unpinned_link(contract: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let linked = fs::symlink_metadata(contract).is_ok_and(|meta| meta.file_type().is_symlink());
+    let Some(target) = linked.then(|| fs::canonicalize(contract).ok()).flatten() else {
+        return;
+    };
+    if lock_path(&target).is_file() {
+        WARNED.call_once(|| {
+            eprintln!(
+                "warning: {} links to {}, which has a sykli.lock beside it, but the lock is read \
+                 beside the link, where there is none, so this contract runs unpinned; link the \
+                 lock too, or name the target",
+                contract.display(),
+                target.display()
+            )
+        });
+    }
 }
 
 fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
