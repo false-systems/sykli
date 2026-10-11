@@ -326,19 +326,24 @@ enum Command {
         3  tree or input mismatch — receipt is stale; re-run sykli\n     \
            (with --commit: not a run of that commit's tree)\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock\n     \
-           (with --commit: from the contract or lock in that commit)\n\n\
+           (with --commit: from the contract or lock in that commit;\n     \
+           for a contract outside the repository: from it, or from its lock file)\n\n\
         Without --commit the subject is the checkout: its tree and declared inputs.\n\
         With --commit the subject is the commit, and nothing is read from the\n\
         checkout; REV is resolved in the repository around the current directory.\n\
+        A contract outside that repository is read from its file, with or without\n\
+        --commit, and the receipt must have run with the sykli.lock beside it\n\
+        (the receipt's lock_digest).\n\
         On any failure the first failing check is also printed to stderr as one line.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
-        /// Path to sykli.rs or a sykli-contract.v1 JSON file
+        /// Path to sykli.rs or a sykli-contract.v1 JSON file; may be outside the repository
         #[arg(long, default_value = "sykli.rs")]
         contract: PathBuf,
         /// Judge the receipt as evidence for this commit instead of the checkout:
-        /// the contract and lock are read from REV, the receipt's tree must be
+        /// the contract and lock are read from REV (from their files when the
+        /// contract is outside the repository), the receipt's tree must be
         /// REV^{tree}, and every task passed or cached (the run need not be clean)
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
@@ -3414,6 +3419,10 @@ fn git(args: &[&str]) -> Result<String, String> {
 struct ReceiptSummary {
     schema: String,
     contract_hash: String,
+    /// Checked only for a contract outside the repository; None on receipts
+    /// that ran without a lock and on receipts written before the field.
+    #[serde(default)]
+    lock_digest: Option<String>,
     subject: SubjectSummary,
     tasks: Vec<TaskSummary>,
     outcome: String,
@@ -3516,6 +3525,10 @@ impl Check {
 /// pushes, whatever is checked out or uncommitted when it is asked. Declared
 /// inputs the commit does not track are local state, like the toolchain, and
 /// are not judged.
+///
+/// A contract outside the repository is no part of any commit, so it and its
+/// lock are read from where they are, with or without a commit. It travels
+/// with its lock: the receipt must also have run with that lock file.
 fn verify(
     receipt_path: &Path,
     contract_path: &Path,
@@ -3533,11 +3546,13 @@ fn verify(
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
+    let outside = outside_repository(contract_path).is_some();
     let contract = match commit {
         None => {
             let (contract, _, contract_hash) = load_unlocked(contract_path)?;
-            let lock = read_lock(contract_path)?;
-            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+            let (lock, digest) = read_lock_digest(contract_path)?;
+            let outside = outside.then_some((contract_path, digest));
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
                 return Ok(checks);
             }
             let subject = subject(&contract)?;
@@ -3563,8 +3578,15 @@ fn verify(
                     "not inside a git repository; --commit names a commit".to_string()
                 })?);
             let id = resolve_commit(&repository, rev)?;
-            let (contract, contract_hash, lock) = contract_at(&repository, &id, contract_path)?;
-            if !contract_checks(&mut checks, &receipt, &contract_hash, lock) {
+            let (contract, contract_hash, lock, outside) = if outside {
+                let (contract, _, contract_hash) = load_unlocked(contract_path)?;
+                let (lock, digest) = read_lock_digest(contract_path)?;
+                (contract, contract_hash, lock, Some((contract_path, digest)))
+            } else {
+                let (contract, contract_hash, lock) = contract_at(&repository, &id, contract_path)?;
+                (contract, contract_hash, lock, None)
+            };
+            if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
                 return Ok(checks);
             }
             commit_checks(&mut checks, &receipt, &repository, &id)?;
@@ -3578,12 +3600,17 @@ fn verify(
     Ok(checks)
 }
 
-/// The contract and lock stages; whether both passed.
+/// The contract and lock stages; whether they passed. `outside` is a contract
+/// outside the repository and the SHA-256 of its lock file (None without one):
+/// a person's contract and its lock are one version of their gate, so the
+/// receipt must also have run with that lock file, byte for byte. A receipt
+/// from before receipts recorded their lock cannot show that.
 fn contract_checks(
     checks: &mut Vec<Check>,
     receipt: &ReceiptSummary,
     contract_hash: &str,
     lock: Option<String>,
+    outside: Option<(&Path, Option<String>)>,
 ) -> bool {
     if let Some(lock) = lock {
         checks.push(Check::equals(
@@ -3593,12 +3620,36 @@ fn contract_checks(
             lock,
         ));
     }
-    checks.push(Check::equals(
+    let mut contract = Check::equals(
         "contract",
         CONTRACT_MISMATCH,
         contract_hash,
         &receipt.contract_hash,
-    ));
+    );
+    if let Some((path, digest)) = outside {
+        if !contract.ok {
+            contract.expected =
+                format!("{} (the contract at {})", contract.expected, path.display());
+        }
+        checks.push(contract);
+        let named = |digest: Option<&str>| digest.unwrap_or("none").to_string();
+        let mut lock = Check::equals(
+            "lock",
+            CONTRACT_MISMATCH,
+            named(digest.as_deref()),
+            named(receipt.lock_digest.as_deref()),
+        );
+        if !lock.ok {
+            lock.expected = format!(
+                "{} (sha256 of {})",
+                lock.expected,
+                lock_path(path).display()
+            );
+        }
+        checks.push(lock);
+    } else {
+        checks.push(contract);
+    }
     checks.iter().all(|check| check.ok)
 }
 
@@ -3644,14 +3695,31 @@ fn contract_at(
 fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8>>, String> {
     let path_text = |path: &Path| path.to_string_lossy().replace('\\', "/");
     let spec = if path.is_absolute() {
-        let relative = path.strip_prefix(repository).map_err(|_| {
+        let outside = || {
             format!(
                 "{} is outside the repository at {}",
                 path.display(),
                 repository.display()
             )
-        })?;
-        format!("{commit}:{}", path_text(relative))
+        };
+        // Compared where both are on disk, so a spelling through a symbolic
+        // link (macOS's /var for /private/var) still names the same file.
+        let relative = match (
+            path.parent().and_then(located),
+            path.file_name(),
+            fs::canonicalize(repository),
+        ) {
+            (Some(parent), Some(name), Ok(root)) => parent
+                .join(name)
+                .strip_prefix(&root)
+                .map(Path::to_path_buf)
+                .map_err(|_| outside())?,
+            _ => path
+                .strip_prefix(repository)
+                .map(Path::to_path_buf)
+                .map_err(|_| outside())?,
+        };
+        format!("{commit}:{}", path_text(&relative))
     } else {
         format!("{commit}:./{}", path_text(path))
     };
