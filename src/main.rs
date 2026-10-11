@@ -361,23 +361,31 @@ enum Hook {
     #[command(after_help = "Exit codes:\n  \
         0  the graph passed on the staged tree, or there is no sykli.json or sykli.rs\n  \
         1  refused: unstaged changes or untracked files, or the graph failed\n  \
-        2  could not evaluate: no git repository or an unreadable contract\n\n\
+        2  could not evaluate: no git repository, or a missing or unreadable contract\n\n\
         Runs from the repository root. A tracked file whose disk content differs\n\
         from the index, or an untracked file that is not ignored, would make the\n\
-        run check a tree other than the commit's, so either one refuses the commit.")]
-    PreCommit,
+        run check a tree other than the commit's, so either one refuses the commit.\n\
+        With --contract, that contract is run instead of the repository's own.")]
+    PreCommit {
+        /// Gate with this contract instead of the repository's sykli.rs or sykli.json,
+        /// for example one kept outside the repository
+        #[arg(long)]
+        contract: Option<PathBuf>,
+    },
     /// Refuse a push to the default branch without a passing receipt of the pushed commit's tree
     #[command(after_help = "Exit codes:\n  \
         0  nothing pushed to the default branch, every such push has a receipt that\n     \
            passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
         1  refused: a push to the default branch has no such receipt\n  \
-        2  could not evaluate: no git repository or unreadable input\n\n\
+        2  could not evaluate: no git repository, unreadable input, or a missing --contract\n\n\
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
         The default branch is the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
         Deletions and pushes to other branches pass. Receipts are looked for in this\n\
         worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
         is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
         without one is refused when the branch had one (push with --no-verify to drop it).\n\
+        With --contract, that contract gates every push to the default branch instead,\n\
+        whatever the commits carry; one outside the repository is read from its file.\n\
         An accepted push's receipts are kept in the common git directory, as\n\
         sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
         A kept receipt is evidence for its commit, not proof the remote has it (dry runs\n\
@@ -387,6 +395,10 @@ enum Hook {
         remote: Option<String>,
         /// Remote URL, as git passes it (unused)
         url: Option<String>,
+        /// Gate with this contract instead of the one each pushed commit carries,
+        /// for example one kept outside the repository
+        #[arg(long)]
+        contract: Option<PathBuf>,
     },
     /// Install thin git hooks that call `sykli hook`, shared by every worktree
     #[command(after_help = "Exit codes:\n  \
@@ -1064,6 +1076,18 @@ fn main() -> ExitCode {
             target: None,
             ..
         } => enter_for_contract(contract, &mut changed.iter_mut().collect::<Vec<_>>()),
+        // A hook enters the repository root itself; the contract it was
+        // given keeps meaning what it meant where git ran the hook.
+        Command::Hook {
+            hook:
+                Hook::PreCommit {
+                    contract: Some(contract),
+                }
+                | Hook::PrePush {
+                    contract: Some(contract),
+                    ..
+                },
+        } => absolute(contract).map(|path| *contract = path),
         _ => Ok(()),
     };
     if let Err(error) = entered {
@@ -1227,8 +1251,12 @@ fn main() -> ExitCode {
             }
         },
         Command::Hook { hook } => match hook {
-            Hook::PreCommit => hook::pre_commit(),
-            Hook::PrePush { remote, url: _ } => hook::pre_push(remote.as_deref()),
+            Hook::PreCommit { contract } => hook::pre_commit(contract.as_deref()),
+            Hook::PrePush {
+                remote,
+                url: _,
+                contract,
+            } => hook::pre_push(remote.as_deref(), contract.as_deref()),
             Hook::Install {
                 pre_commit,
                 pre_push,

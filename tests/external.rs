@@ -457,3 +457,194 @@ fn a_contract_inside_the_repository_is_read_from_the_commit_however_it_is_named(
         text(&out.stderr)
     );
 }
+
+const ZEROS: &str = "0000000000000000000000000000000000000000";
+
+/// `sykli hook pre-push [--contract CONTRACT] origin URL`, fed git's line
+/// for pushing `sha` to `remote_ref`.
+fn pre_push(repo: &Path, contract: Option<&Path>, sha: &str, remote_ref: &str) -> Output {
+    use std::io::Write;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sykli"));
+    command.args(["hook", "pre-push"]);
+    if let Some(contract) = contract {
+        command.arg("--contract").arg(contract);
+    }
+    let mut child = command
+        .args(["origin", "/nowhere/origin.git"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "refs/heads/work {sha} {remote_ref} {ZEROS}").unwrap();
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn pre_push_with_a_contract_outside_the_repository_gates_the_default_branch() {
+    let scratch = Scratch::new("prepush");
+    let repo = &scratch.repo;
+    let contract = scratch.contract(READS_FILE);
+    let head = git(repo, &["rev-parse", "HEAD"]);
+    // The repository carries no contract, so without --contract nothing gates.
+    let out = pre_push(repo, None, &head, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("not gated"));
+
+    // A failing commit, with its honest receipt, is refused.
+    fs::write(repo.join("file.txt"), "broken\n").unwrap();
+    let broken = commit(repo, "broken");
+    let run = sykli(repo, &["run", contract.to_str().unwrap()]);
+    assert_eq!(run.status.code(), Some(1), "{}", text(&run.stderr));
+    let out = pre_push(repo, Some(&contract), &broken, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert!(message.contains("refusing to push"), "{message}");
+    assert!(message.contains("outcome"), "{message}");
+    assert!(
+        message.contains(&format!("sykli run {}", contract.display())),
+        "the refusal names the command that produces a receipt: {message}"
+    );
+    // Other branches are not gated.
+    let out = pre_push(repo, Some(&contract), &broken, "refs/heads/feature");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // A verified commit is accepted, and its receipt kept as evidence.
+    fs::write(repo.join("file.txt"), "one\n").unwrap();
+    let fixed = commit(repo, "fixed");
+    let run = sykli(repo, &["run", contract.to_str().unwrap()]);
+    assert_eq!(run.status.code(), Some(0), "{}", text(&run.stderr));
+    let out = pre_push(repo, Some(&contract), &fixed, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let kept = repo.join(".git/sykli/receipts");
+    let kept = names(&kept)
+        .into_iter()
+        .map(|name| kept.join(name))
+        .collect::<Vec<_>>();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let out = verify(repo, &kept[0], &contract, Some(&fixed));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+
+    // Once the person's contract changes, that receipt no longer opens the gate.
+    fs::write(&contract, READS_FILE.replace("= one", "= one && true")).unwrap();
+    assert!(
+        sykli(repo, &["lock", contract.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let out = pre_push(repo, Some(&contract), &fixed, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("contract expected"));
+
+    // A contract that is not there cannot gate anything.
+    let missing = scratch.config.join("missing.json");
+    let out = pre_push(repo, Some(&missing), &fixed, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(scratch.status(), "");
+}
+
+#[test]
+fn pre_commit_with_a_contract_outside_the_repository_checks_the_staged_tree() {
+    let scratch = Scratch::new("precommit");
+    let repo = &scratch.repo;
+    let contract = scratch.contract(READS_FILE);
+    let hook = |contract: &Path| {
+        sykli(
+            repo,
+            &[
+                "hook",
+                "pre-commit",
+                "--contract",
+                contract.to_str().unwrap(),
+            ],
+        )
+    };
+    fs::write(repo.join("file.txt"), "broken\n").unwrap();
+    git(repo, &["add", "file.txt"]);
+    let out = hook(&contract);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("refusing the commit"));
+
+    fs::write(repo.join("file.txt"), "one\n").unwrap();
+    fs::write(repo.join("other.txt"), "other\n").unwrap();
+    git(repo, &["add", "--all"]);
+    let out = hook(&contract);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("the staged tree passed"));
+    // That run is the evidence the push needs.
+    let pushed = commit(repo, "with other");
+    let out = pre_push(repo, Some(&contract), &pushed, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    let out = hook(&scratch.config.join("missing.json"));
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+}
+
+/// The demonstration of the whole idea, with real `git push`: a hook the
+/// repository never carries calls sykli with a contract it never carries.
+#[cfg(unix)]
+#[test]
+fn a_hook_with_a_contract_outside_the_repository_gates_real_pushes() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("realpush");
+    let repo = &scratch.repo;
+    let contract = scratch.contract(READS_FILE);
+    let origin = scratch.base.join("origin.git");
+    git(
+        repo,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    let hook = repo.join(".git/hooks/pre-push");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nexec '{}' hook pre-push --contract '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_sykli"),
+            contract.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let push = || {
+        Command::new("git")
+            .args(["push", "--quiet", "origin", "main"])
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+    };
+
+    fs::write(repo.join("file.txt"), "broken\n").unwrap();
+    commit(repo, "broken");
+    assert_eq!(
+        sykli(repo, &["run", contract.to_str().unwrap()])
+            .status
+            .code(),
+        Some(1)
+    );
+    let out = push();
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("refusing to push"));
+
+    fs::write(repo.join("file.txt"), "one\n").unwrap();
+    commit(repo, "fixed");
+    assert_eq!(
+        sykli(repo, &["run", contract.to_str().unwrap()])
+            .status
+            .code(),
+        Some(0)
+    );
+    let out = push();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        git(repo, &["rev-parse", "HEAD"]),
+        git(&origin, &["rev-parse", "main"])
+    );
+    assert_eq!(scratch.status(), "");
+}

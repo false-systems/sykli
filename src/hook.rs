@@ -84,19 +84,41 @@ fn disk_differs_from_commit() -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// A contract named with `--contract` (already absolute), which must exist:
+/// a gate that was asked for and is missing cannot pass for one.
+fn named_contract(hook: &str, contract: &Path) -> Result<PathBuf, ExitCode> {
+    if contract.is_file() {
+        return Ok(contract.to_path_buf());
+    }
+    eprintln!(
+        "sykli hook {hook}: cannot evaluate: the contract {} does not exist",
+        contract.display()
+    );
+    Err(ExitCode::from(CANNOT_EVALUATE))
+}
+
 /// `sykli hook pre-commit`: the graph must pass on exactly the staged tree.
-pub(crate) fn pre_commit() -> ExitCode {
+/// `contract`, when given, is run instead of the repository's own, such as
+/// a contract kept outside the repository.
+pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
     const HOOK: &str = "pre-commit";
     let root = match enter_repository(HOOK) {
         Ok(root) => root,
         Err(code) => return code,
     };
-    let Some(contract) = root_contract() else {
-        eprintln!(
-            "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; nothing to check",
-            root.display()
-        );
-        return ExitCode::SUCCESS;
+    let contract = match contract.map(|contract| named_contract(HOOK, contract)) {
+        Some(Ok(contract)) => contract,
+        Some(Err(code)) => return code,
+        None => match root_contract() {
+            Some(contract) => contract,
+            None => {
+                eprintln!(
+                    "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; nothing to check",
+                    root.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+        },
     };
     if git(&["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         eprintln!(
@@ -305,11 +327,21 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), Stri
 /// decided from the commits, never from the working tree: the pushed commit's
 /// contract gates it, and a commit that drops the contract the branch had is
 /// refused, so taking the gate off takes an explicit `--no-verify`.
-pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
+///
+/// With `contract`, that contract gates every push to the default branch,
+/// whatever the commits carry: a person's own gate, kept outside the
+/// repository, is the same for every commit, and `verify --commit` reads it
+/// from its file.
+pub(crate) fn pre_push(remote: Option<&str>, contract: Option<&Path>) -> ExitCode {
     const HOOK: &str = "pre-push";
     if let Err(code) = enter_repository(HOOK) {
         return code;
     }
+    let gate = match contract.map(|contract| named_contract(HOOK, contract)) {
+        Some(Ok(contract)) => Some(contract),
+        Some(Err(code)) => return code,
+        None => None,
+    };
     let mut input = String::new();
     let parsed = std::io::stdin()
         .read_to_string(&mut input)
@@ -343,7 +375,7 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
         .filter(|update| defaults.contains(&update.remote_ref))
     {
         let short = &update.local_sha[..update.local_sha.len().min(12)];
-        let Some(contract) = contract_in(&update.local_sha) else {
+        let Some(contract) = gate.clone().or_else(|| contract_in(&update.local_sha)) else {
             let before = remote_tip(update, remote);
             if let Some(tip) = before.filter(|tip| contract_in(tip).is_some()) {
                 eprintln!(
