@@ -3566,20 +3566,34 @@ fn object_directory_of(repository: &repo::Repository) -> Result<PathBuf, String>
     Ok(objects)
 }
 
+/// Settings git reads from the environment that change what a pathspec
+/// means. Git exports them to hooks (`git --literal-pathspecs commit` sets
+/// `GIT_LITERAL_PATHSPECS`), so the snapshot drops them: its own pathspecs
+/// (the glob that leaves `.sykli` out) must mean what they say.
+const PATHSPEC_SETTINGS: [&str; 4] = [
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+];
+
 fn git_with_temporary_state(
     repository: &Path,
     state: &TemporaryGitState,
     args: &[&str],
 ) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
+    let mut command = ProcessCommand::new("git");
+    command
         .arg("-C")
         .arg(repository)
         .args(args)
         .env("GIT_INDEX_FILE", &state.index)
         .env("GIT_OBJECT_DIRECTORY", &state.objects)
-        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &state.alternates)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &state.alternates);
+    for setting in PATHSPEC_SETTINGS {
+        command.env_remove(setting);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().into());
     }
