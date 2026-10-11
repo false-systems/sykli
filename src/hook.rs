@@ -250,12 +250,18 @@ fn default_branches(remote: Option<&str>) -> (Vec<String>, Chosen) {
 
 /// The refs `--branch` names: exactly `refs/heads/BRANCH` for each. A value
 /// that is not a branch name would gate nothing, so it is an error instead.
+/// `HEAD` and a name starting with `-` pass `git check-ref-format` as refs,
+/// but no branch can have them (`git branch` refuses both).
 fn named_branches(branches: &[String]) -> Result<Vec<String>, String> {
     branches
         .iter()
         .map(|branch| {
             let name = format!("refs/heads/{branch}");
-            if branch.starts_with("refs/") || git(&["check-ref-format", &name]).is_err() {
+            if branch.starts_with("refs/")
+                || branch == "HEAD"
+                || branch.starts_with('-')
+                || git(&["check-ref-format", &name]).is_err()
+            {
                 return Err(format!(
                     "--branch {branch:?} is not a branch name; name it as `git push REMOTE NAME` \
                      would (main, not refs/heads/main)"

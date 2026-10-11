@@ -1397,9 +1397,23 @@ fn pre_push_branch_gates_exactly_the_named_branches() {
     let out = push(&both, "refs/heads/main");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // A value that is not a branch name cannot gate anything: fail closed.
-    for bad in ["refs/heads/main", "", "two words", "main..x"] {
-        let out = push(&["--branch", bad], "refs/heads/main");
+    // `HEAD` and a leading `-` pass `git check-ref-format` as refs, yet no
+    // branch can have such a name; `git branch` refuses both too.
+    for bad in [
+        "refs/heads/main",
+        "",
+        "two words",
+        "main..x",
+        "HEAD",
+        "-dash",
+    ] {
+        let out = push(&[&format!("--branch={bad}")], "refs/heads/main");
         assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stderr).contains("is not a branch name"),
+            "{bad:?}: {}",
+            text(&out.stderr)
+        );
     }
     fs::remove_dir_all(root).unwrap();
 }
