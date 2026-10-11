@@ -430,6 +430,16 @@ exec sykli hook pre-push --contract "$HOME/.config/gates/project/sykli.json" --b
 Accepted pushes' receipts are kept in the common git directory as described
 [above](#git-hooks).
 
+A hook runs on every push, so sykli asks git as little as it can: it finds
+the repository with one `git rev-parse` per command, and `hook pre-push`
+answers everything about the pushed commits with one `git cat-file --batch`,
+reading receipts as files and building no snapshot of the working tree. A
+caller that already knows the repository can pass `--repo-root` and
+`--git-common-dir` (as `git rev-parse --path-format=absolute --show-toplevel
+--git-common-dir` prints them) to any command, and then sykli runs no git to
+find it: `hook pre-push` starts one git process in all, `verify --commit`
+one, and `run` five.
+
 ## Built for agents
 
 The CLI does the querying, and `--json` gives scripts and agents the same
