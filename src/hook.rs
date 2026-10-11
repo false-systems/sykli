@@ -232,21 +232,28 @@ enum Chosen {
 
 /// What `refs/remotes/REMOTE/HEAD` names. It is read where git's files
 /// backend keeps it, a loose file in the common directory (a symbolic ref is
-/// never packed), so no git runs; git is asked only when refs are kept
-/// another way (reftable) or the ref is a symbolic link.
+/// never packed), and parsed as git parses it: `ref:`, any whitespace, the
+/// target. No git runs for that. Git is asked whenever the file cannot be
+/// read that way: refs kept another way (reftable), a symbolic link, a file
+/// that does not parse, or a remote name that is not one by git's rules (so
+/// no path is ever built from it).
 fn remote_head(repository: &repo::Repository, remote: &str) -> Option<String> {
     let name = format!("refs/remotes/{remote}/HEAD");
-    if !repo::branch_name(remote) {
-        return None;
+    let ask_git = || git(&["symbolic-ref", "--quiet", &name]).ok();
+    if !repo::remote_name(remote) || repository.common_dir.join("reftable").is_dir() {
+        return ask_git();
     }
     let file = repository.common_dir.join(&name);
-    let linked = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
-    if linked || repository.common_dir.join("reftable").is_dir() {
-        return git(&["symbolic-ref", "--quiet", &name]).ok();
+    match std::fs::symlink_metadata(&file) {
+        Err(_) => return None,
+        Ok(meta) if meta.file_type().is_symlink() => return ask_git(),
+        Ok(_) => {}
     }
-    let text = std::fs::read_to_string(file).ok()?;
-    text.strip_prefix("ref: ")
-        .map(|target| target.trim().to_string())
+    let parsed = std::fs::read_to_string(&file).ok().and_then(|text| {
+        let target = text.strip_prefix("ref:")?.trim();
+        (!target.is_empty()).then(|| target.to_string())
+    });
+    parsed.or_else(ask_git)
 }
 
 /// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, when

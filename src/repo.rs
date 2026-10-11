@@ -258,12 +258,25 @@ fn cat(root: &Path, names: &[String]) -> Result<Vec<Option<Object>>, String> {
 }
 
 /// Whether `name` is a branch name a push can update, by git's documented
-/// rules for ref names (git-check-ref-format) applied to `refs/heads/NAME`,
-/// plus the two `git branch` refuses: `HEAD` and a leading `-`. No git runs.
+/// rules for ref names applied to `refs/heads/NAME`, plus what `git branch`
+/// refuses: `HEAD`, `@` and a leading `-`. No git runs.
 pub(crate) fn branch_name(name: &str) -> bool {
-    if name.is_empty() || name == "HEAD" || name.starts_with('-') || name.starts_with("refs/") {
-        return false;
-    }
+    !(name.is_empty()
+        || name == "HEAD"
+        || name == "@"
+        || name.starts_with('-')
+        || name.starts_with("refs/"))
+        && ref_name(&format!("refs/heads/{name}"))
+}
+
+/// Whether `name` is a remote name, by git's rule: `refs/remotes/NAME/test`
+/// is a valid ref name. `HEAD` and `@` are remote names. No git runs.
+pub(crate) fn remote_name(name: &str) -> bool {
+    !name.is_empty() && ref_name(&format!("refs/remotes/{name}/test"))
+}
+
+/// Git's documented rules for a full ref name (git-check-ref-format).
+fn ref_name(name: &str) -> bool {
     if name == "@"
         || name.contains("..")
         || name.contains("@{")
@@ -286,7 +299,7 @@ pub(crate) fn branch_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::branch_name;
+    use super::{branch_name, remote_name};
 
     #[test]
     fn branch_names_follow_gits_rules() {
@@ -328,6 +341,16 @@ mod tests {
             "del\u{7f}",
         ] {
             assert!(!branch_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn remote_names_follow_gits_rule() {
+        for good in ["origin", "HEAD", "@", "team.x/y", "up-stream"] {
+            assert!(remote_name(good), "{good}");
+        }
+        for bad in ["", "a..b", "a b", "a:b", "/x", "x/", ".x", "x.lock"] {
+            assert!(!remote_name(bad), "{bad:?}");
         }
     }
 }
