@@ -1,7 +1,3 @@
-<!-- toimija:adopt:v1:begin -->
-If your launch prompt names a workset packet, read it before anything else in this repo; it is your workset contract and supersedes this file.
-<!-- toimija:adopt:v1:end -->
-
 Product boundaries:
 
 - Own graph parsing, validation, planning, execution, caching, receipts, and local typed production.
@@ -41,8 +37,8 @@ cargo check --workspace --all-targets --target x86_64-pc-windows-msvc   # Window
 cargo run --quiet -- lock sykli.json          # re-pin after editing sykli.json
 ```
 
-`CARGO_TARGET_DIR` is `/Users/yair/.cargo-target` on this machine, so the CLI
-binary is `/Users/yair/.cargo-target/debug/sykli`; prefer `cargo run --quiet --`.
+The CLI binary lands in Cargo's target directory, which `CARGO_TARGET_DIR` or a
+Cargo config may move outside the checkout; prefer `cargo run --quiet --`.
 macOS has no `timeout`; use `perl -e 'alarm 300; exec @ARGV' -- <cmd>` to bound
 a run. `tests/production.rs` is Unix-only and takes about 25 s; a hang there
 usually means a test re-ran a FIFO-latched recipe without feeding the latch.
