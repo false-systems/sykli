@@ -1003,9 +1003,14 @@ fn resolve_contract(contract: PathBuf) -> PathBuf {
 /// how every command has always worked. Symbolic links are resolved first,
 /// so a link in the repository to a contract elsewhere is outside it.
 fn outside_repository(contract: &Path) -> Option<PathBuf> {
-    let toplevel = git(&["rev-parse", "--show-toplevel"]).ok()?;
-    let root = fs::canonicalize(&toplevel).ok()?;
-    (!located(contract)?.starts_with(root)).then(|| PathBuf::from(toplevel))
+    let root = fs::canonicalize(git(&["rev-parse", "--show-toplevel"]).ok()?).ok()?;
+    if located(contract)?.starts_with(root) {
+        return None;
+    }
+    // Spelled from the current directory, as declared paths are compared
+    // (`coverage_root`), so paths made absolute before entering agree with
+    // them: Git's own spelling can expand Windows short names.
+    coverage_root().ok()
 }
 
 /// Where `path` is on disk with symbolic links resolved, even before it
