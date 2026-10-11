@@ -190,8 +190,9 @@ binds its cache key to that dependency. Independent tasks run in parallel.
 Every path a task declares (`inputs`, `outputs`, `workdir`) is relative to the
 repository and stays inside it. Absolute paths and `..` are refused when the
 contract is validated, before anything runs, so a receipt is always a claim
-about the repository it sits in. `sykli validate` checks a contract without
-running it.
+about the repository it sits in, even when the contract is kept
+[outside it](#keep-the-contract-outside-the-repository). `sykli validate`
+checks a contract without running it.
 
 <details>
 <summary><strong>What a task sees when it runs</strong></summary>
@@ -356,6 +357,53 @@ safe.
 A commit with no `sykli.json` or `sykli.rs`, pushed where there was none
 before, passes with a note.
 
+## Keep the contract outside the repository
+
+A contract does not have to be committed. You can keep a repository's
+contract, and the `sykli.lock` that pins it, in a directory of your own, for
+example under your configuration, and name it on every command:
+
+```sh
+cd ~/src/project                       # anywhere inside the repository
+gate=~/.config/gates/project/sykli.json
+sykli init --contract "$gate"          # infer tasks from the repository; write the contract and lock there
+sykli run "$gate" --json > .sykli/receipt.json
+sykli verify .sykli/receipt.json --contract "$gate" --commit HEAD
+```
+
+When the contract lies outside the git repository around the current
+directory:
+
+- The repository is that directory's git toplevel, never the contract's
+  directory. The contract's `inputs`, `outputs` and `workdir` are paths from the
+  repository's root, as in a committed contract, and the undeclared-sibling
+  check and the Cargo completeness gate apply as usual. Paths you type, such as
+  `plan --changed`, mean what they mean where you type them.
+- The lock is the `sykli.lock` beside the contract, as always, and
+  `sykli lock "$gate"` writes it there.
+- Receipts and the cache stay in the repository's `.sykli/`. `init --contract`
+  touches nothing in the repository, so it does not add `.sykli/` to
+  `.gitignore`; ignore it in your global git ignore (`core.excludesFile`)
+  instead.
+- `verify` reads the contract and its lock from their files, with or without
+  `--commit`, since no commit carries them; the `--commit` checks on the
+  commit's tree are unchanged. Every receipt records `lock_digest`, the
+  SHA-256 of the lock file it ran with, and for a contract outside the
+  repository verify requires that it is the lock beside the contract now. A
+  receipt from another version of the contract, or of its lock, exits 4.
+- `sykli hook pre-commit --contract PATH` runs that contract on the staged
+  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates every push
+  to the default branch with it, whatever the pushed commits carry. A hook you
+  write yourself, or one shared by all your repositories, can call them:
+
+```sh
+#!/bin/sh
+exec sykli hook pre-push --contract "$HOME/.config/gates/project/sykli.json" "$@"
+```
+
+Accepted pushes' receipts are kept in the common git directory as described
+[above](#git-hooks).
+
 ## Built for agents
 
 The CLI does the querying, and `--json` gives scripts and agents the same
@@ -440,7 +488,9 @@ sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 ```
 
 With `--commit REV`, the subject is the commit, not the checkout. The
-contract and its `sykli.lock` pin are read from `REV`. The receipt's tree must
+contract and its `sykli.lock` pin are read from `REV` (from their files for a
+contract [outside the repository](#keep-the-contract-outside-the-repository),
+which no commit carries). The receipt's tree must
 be `REV^{tree}`. Otherwise it exits 3. The tree check is what binds the
 receipt to the commit's content, so a run need not be clean: a pre-commit run,
 made before HEAD moves, is a run of exactly the tree the commit records and
@@ -490,7 +540,7 @@ entry costs a re-run, never a result.
 
 | | Command | What it does |
 |---|---|---|
-| **Graph** | `init` | Detect Cargo, npm and Go; write `sykli.json` and pin it |
+| **Graph** | `init` | Detect Cargo, npm and Go; write `sykli.json` and pin it (`--contract` writes it outside the repository) |
 | | `validate` | Check a contract without executing it |
 | | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |

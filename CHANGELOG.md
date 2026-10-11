@@ -8,6 +8,37 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- Contracts kept outside the repository. `run`, `lock`, `plan`, `validate`
+  and `verify` accept a contract path outside the git repository around the
+  current directory (decided on resolved paths, so a symbolic link to a
+  contract elsewhere counts as outside). The repository is then that
+  directory's git toplevel, never the contract's directory: declared paths
+  are from its root, and the undeclared-sibling check and the Cargo
+  completeness gate apply as usual. Command-line paths (`--changed`, the
+  receipt) keep meaning what they meant where they were typed. The lock is
+  the `sykli.lock` beside the contract, and receipts and the cache stay in
+  the repository's `.sykli/`. A contract inside the repository works as
+  before.
+- `sykli init --contract PATH` writes the contract it infers from the
+  repository, and its lock, to PATH (its directory is created) and touches
+  nothing in the repository: no `.sykli/`, no `.gitignore` entry. It
+  conflicts with the positional path and with `--production`; outside any git
+  repository it exits 1.
+- `sykli hook pre-commit --contract PATH` runs that contract on the staged
+  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates every push
+  to the default branch with it, whatever the pushed commits carry. A named
+  contract that does not exist exits 2.
+- Receipts record `lock_digest`: the SHA-256 of the bytes of the lock file
+  beside the contract as the run read it, or null when there was none.
+  Receipts without the field are still read.
+- `verify` with a contract outside the repository reads it and its lock from
+  their files, with or without `--commit` (the `--commit` checks on the
+  commit's tree are unchanged), and adds a `lock` check: the receipt's
+  `lock_digest` must be the digest of that lock file now. A receipt from
+  another version of the contract (`contract`, whose reason names the
+  contract's path) or of its lock (`lock`) exits 4, as does a receipt without
+  `lock_digest` when the contract has a lock. A contract inside the
+  repository is verified as before, and its lock digest is not compared.
 - `sykli hook pre-push` keeps the evidence of the pushes it accepts: once
   every ref of a push to the default branch is accepted, the receipt that
   verified each is copied to
@@ -107,6 +138,12 @@ contract consumer can observe; internal refactors are not listed.
   entries miss once; other graphs' keys are unchanged. A Cargo graph whose
   task shell cannot run those two commands exits 2 from `run` and
   `plan --explain`.
+
+### Fixed
+- `verify --commit` with an absolute path to a contract inside the
+  repository, spelled through a symbolic link (macOS's `/var` for
+  `/private/var`), refused it as outside the repository (exit 2); it is now
+  read from the commit.
 
 ## [0.6.0] - 2026-09-09
 

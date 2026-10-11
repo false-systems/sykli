@@ -92,7 +92,14 @@ staged: schema and record consistency (2), contract lock and contract hash (4),
 tree and inputs (3), outcome (1). It proves consistency, not authorship; the
 README says so. `sykli.lock` is `sykli-lock.v2`, one entry per contract file in
 its directory. `run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a
-failed task.
+failed task. Declared paths resolve against the current directory, so a
+contract outside the git toplevel of the current directory (decided on
+resolved paths, `outside_repository`) makes `main` absolutize command-line
+paths and enter that toplevel first (`enter_for_contract`); hooks absolutize
+`--contract` and enter the root themselves. Receipts record `lock_digest`
+(SHA-256 of the lock file, read once with the pin in `load_pinned`); `verify`
+reads an outside contract and its lock from their files even with
+`--commit`, and only for such a contract compares `lock_digest` (exit 4).
 
 **Typed production (`src/production/`, Unix only).** Opt-in local artifact
 production from a `sykli-production-contract.v1`. `contract.rs` is the schema
