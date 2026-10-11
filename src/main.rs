@@ -390,7 +390,9 @@ enum Hook {
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
         With --branch, the gated branches are exactly those named (refs/heads/BRANCH for\n\
         each), and nothing is guessed. Without it, the gated branch is the default branch:\n\
-        the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
+        the one refs/remotes/REMOTE/HEAD names, else main and master. When that HEAD\n\
+        names a ref that does not exist (a renamed default branch, pruned), main and\n\
+        master are gated and a note says so.\n\
         Deletions, tags and pushes to other branches pass. Receipts are looked for in this\n\
         worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
         is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\

@@ -213,26 +213,39 @@ fn absent(sha: &str) -> bool {
     sha.bytes().all(|byte| byte == b'0')
 }
 
-/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, and
-/// `true`; else `main` and `master`, and `false`.
-fn default_branches(remote: Option<&str>) -> (Vec<String>, bool) {
-    remote
-        .and_then(|remote| {
-            git(&[
-                "symbolic-ref",
-                "--quiet",
-                &format!("refs/remotes/{remote}/HEAD"),
-            ])
-            .ok()?
-            .strip_prefix(&format!("refs/remotes/{remote}/"))
-            .map(|branch| (vec![format!("refs/heads/{branch}")], true))
-        })
-        .unwrap_or_else(|| {
-            (
-                vec!["refs/heads/main".into(), "refs/heads/master".into()],
-                false,
-            )
-        })
+/// How the gated branches were chosen.
+enum Chosen {
+    /// Named with `--branch`, or the default branch `refs/remotes/REMOTE/HEAD` names.
+    Known,
+    /// No `refs/remotes/REMOTE/HEAD`: `main` and `master` are gated.
+    Unset,
+    /// `refs/remotes/REMOTE/HEAD` names this ref, which does not exist (the
+    /// default branch was renamed or deleted, then pruned): gating it would
+    /// gate nothing, so `main` and `master` are gated instead.
+    Stale(String),
+}
+
+/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, when
+/// the ref it names exists; else `main` and `master`.
+fn default_branches(remote: Option<&str>) -> (Vec<String>, Chosen) {
+    let fallback = || vec!["refs/heads/main".into(), "refs/heads/master".into()];
+    let Some(remote) = remote else {
+        return (fallback(), Chosen::Unset);
+    };
+    let Ok(target) = git(&[
+        "symbolic-ref",
+        "--quiet",
+        &format!("refs/remotes/{remote}/HEAD"),
+    ]) else {
+        return (fallback(), Chosen::Unset);
+    };
+    let Some(branch) = target.strip_prefix(&format!("refs/remotes/{remote}/")) else {
+        return (fallback(), Chosen::Unset);
+    };
+    if git(&["rev-parse", "--verify", "--quiet", &target]).is_err() {
+        return (fallback(), Chosen::Stale(target));
+    }
+    (vec![format!("refs/heads/{branch}")], Chosen::Known)
 }
 
 /// The refs `--branch` names: exactly `refs/heads/BRANCH` for each. A value
@@ -388,24 +401,36 @@ pub(crate) fn pre_push(
             return ExitCode::from(CANNOT_EVALUATE);
         }
     };
-    let (defaults, known) = if named.is_empty() {
+    let (defaults, chosen) = if named.is_empty() {
         default_branches(remote)
     } else {
-        (named, true)
+        (named, Chosen::Known)
     };
     let pushed = updates
         .iter()
         .filter(|update| !absent(&update.local_sha))
         .collect::<Vec<_>>();
-    if !known
-        && pushed.iter().any(|update| {
-            update.remote_ref.starts_with("refs/heads/") && !defaults.contains(&update.remote_ref)
-        })
-    {
-        let remote = remote.unwrap_or("REMOTE");
-        eprintln!(
-            "sykli hook {HOOK}: {remote}'s default branch is unknown here, so only main and master are gated; name it with: git remote set-head {remote} --auto"
-        );
+    let named_remote = remote.unwrap_or("REMOTE");
+    match &chosen {
+        Chosen::Known => {}
+        // Always said: what is gated changed without anyone choosing it.
+        Chosen::Stale(target) => eprintln!(
+            "sykli hook {HOOK}: refs/remotes/{named_remote}/HEAD names {target}, which does not exist \
+             (the default branch was renamed or removed), so only main and master are gated; \
+             name the default branch with: git remote set-head {named_remote} --auto, \
+             or name the gated branches with --branch"
+        ),
+        Chosen::Unset => {
+            if pushed.iter().any(|update| {
+                update.remote_ref.starts_with("refs/heads/")
+                    && !defaults.contains(&update.remote_ref)
+            }) {
+                eprintln!(
+                    "sykli hook {HOOK}: {named_remote}'s default branch is unknown here, so only main and master are gated; \
+                     name it with: git remote set-head {named_remote} --auto, or name the gated branches with --branch"
+                );
+            }
+        }
     }
     let mut accepted = Vec::new();
     for update in pushed

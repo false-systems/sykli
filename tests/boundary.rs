@@ -1403,3 +1403,37 @@ fn pre_push_branch_gates_exactly_the_named_branches() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+/// After the host renames the default branch and a fetch prunes the old
+/// one, origin/HEAD still names it. Gating a branch that is gone would gate
+/// nothing, so the hook takes the default as unknown and says so.
+#[test]
+fn pre_push_takes_an_origin_head_naming_a_missing_ref_as_unknown() {
+    let root = repo("pushstale", READS_FILE);
+    fs::write(root.join("file.txt"), "one\n\n").unwrap();
+    let head = commit(&root, "no receipt");
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        ],
+    );
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    for said in [
+        "refs/remotes/origin/master, which does not exist",
+        "git remote set-head origin --auto",
+        "--branch",
+    ] {
+        assert!(message.contains(said), "{said}: {message}");
+    }
+    // Naming a ref that exists, it is the default branch again.
+    git(&root, &["update-ref", "refs/remotes/origin/master", &head]);
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("does not exist"));
+    fs::remove_dir_all(root).unwrap();
+}
