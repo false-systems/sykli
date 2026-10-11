@@ -237,12 +237,20 @@ enum Command {
     /// Detect the repository's ecosystems and write a declared graph
     #[command(after_help = "Exit codes:\n  \
         0  wrote the contract\n  \
-        1  nothing to declare — no Cargo.toml, package.json, or go.mod\n  \
-        2  the contract exists; pass --force to overwrite it")]
+        1  nothing to declare — no Cargo.toml, package.json, or go.mod — or, with\n     \
+           --contract, no git repository around the current directory or no way to write\n  \
+        2  the contract exists; pass --force to overwrite it\n\n\
+        With --contract PATH outside the repository, the tasks are still inferred from\n\
+        the git repository around the current directory, with paths from its root; the\n\
+        contract and its sykli.lock are written to PATH's directory (created if needed)\n\
+        and nothing in the repository is touched: no .sykli/, no .gitignore entry.")]
     Init {
         /// Where to write the sykli-contract.v1 JSON
         #[arg(default_value = "sykli.json")]
         path: PathBuf,
+        /// Write the contract (and its lock) to this path, which may be outside the repository
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["path", "production"])]
+        contract: Option<PathBuf>,
         /// Overwrite an existing contract
         #[arg(long)]
         force: bool,
@@ -1427,6 +1435,7 @@ fn main() -> ExitCode {
         }
         Command::Init {
             path,
+            contract,
             force,
             no_lock,
             production: typed,
@@ -1459,7 +1468,24 @@ fn main() -> ExitCode {
                 eprintln!("typed production requires Linux or macOS");
                 return ExitCode::from(2);
             }
-            init::run(&path, force, !no_lock, &write_lock)
+            let Some(mut contract) = contract else {
+                return init::run(&path, force, !no_lock, &write_lock);
+            };
+            if git(&["rev-parse", "--show-toplevel"]).is_err() {
+                eprintln!(
+                    "init --contract infers the tasks from the git repository around the current directory, and there is no git repository here"
+                );
+                return ExitCode::from(1);
+            }
+            // Inside the repository, it is the positional path by another name.
+            if outside_repository(&contract).is_none() {
+                return init::run(&contract, force, !no_lock, &write_lock);
+            }
+            if let Err(error) = enter_for_contract(&mut contract, &mut []) {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+            init::run_outside(&contract, force, !no_lock, &write_lock)
         }
         Command::Lock { contract } => match write_lock(&contract) {
             Ok(path) => {

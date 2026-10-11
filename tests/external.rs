@@ -648,3 +648,85 @@ fn a_hook_with_a_contract_outside_the_repository_gates_real_pushes() {
     );
     assert_eq!(scratch.status(), "");
 }
+
+#[test]
+fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
+    let scratch = Scratch::new("init");
+    let repo = &scratch.repo;
+    for (path, contents) in [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("src/main.rs", "fn main() {}\n"),
+        ("tests/it.rs", "#[test]\nfn it() {}\n"),
+    ] {
+        fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        fs::write(repo.join(path), contents).unwrap();
+    }
+    commit(repo, "crate");
+    assert_eq!(scratch.status(), "");
+    // A directory that does not exist yet, as a person's configuration
+    // might lay contracts out by repository.
+    let contract = scratch.config.join("owner").join("repo").join("sykli.json");
+    let path = contract.to_str().unwrap();
+    let out = sykli(&repo.join("src"), &["init", "--contract", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        names(contract.parent().unwrap()),
+        ["sykli.json", "sykli.lock"]
+    );
+    assert!(text(&out.stdout).contains(path), "{}", text(&out.stdout));
+
+    // Inferred from the repository as ever, with repository paths.
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&contract).unwrap()).unwrap();
+    let tasks = written["tasks"].as_array().unwrap();
+    assert_eq!(
+        tasks.iter().map(|task| &task["name"]).collect::<Vec<_>>(),
+        ["fmt", "clippy", "test"]
+    );
+    assert_eq!(
+        tasks[2]["inputs"],
+        serde_json::json!(["Cargo.toml", "src/main.rs", "tests/it.rs"])
+    );
+    // Nothing in the repository was touched: no .sykli/, no .gitignore.
+    assert_eq!(scratch.status(), "");
+    assert!(!repo.join(".sykli").exists());
+    assert!(!repo.join(".gitignore").exists());
+
+    // The contract it wrote is locked and complete for the Cargo gate, and
+    // the gate catches a source file added later.
+    let explain = |cwd: &Path| {
+        let out = sykli(cwd, &["plan", path, "--explain", "--json"]);
+        let plan: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("no plan: {}", text(&out.stderr)));
+        (
+            out.status.code(),
+            plan["input_coverage"]["cargo_missing_inputs"].clone(),
+        )
+    };
+    assert_eq!(explain(repo), (Some(0), serde_json::json!([])));
+    fs::write(repo.join("src/extra.rs"), "").unwrap();
+    git(repo, &["add", "src/extra.rs"]);
+    assert_eq!(
+        explain(repo),
+        (Some(2), serde_json::json!(["src/extra.rs"]))
+    );
+
+    // An existing contract is not overwritten without --force.
+    let out = sykli(repo, &["init", "--contract", path]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let out = sykli(repo, &["init", "--contract", path, "--force"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        fs::read_to_string(&contract)
+            .unwrap()
+            .contains("src/extra.rs")
+    );
+
+    // Without a repository there is nothing to infer from.
+    let out = sykli(&scratch.config, &["init", "--contract", "elsewhere.json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("git repository"));
+    assert!(!scratch.config.join("elsewhere.json").exists());
+}
