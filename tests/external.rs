@@ -738,3 +738,81 @@ fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
     assert!(text(&out.stderr).contains("git repository"));
     assert!(!scratch.config.join("elsewhere.json").exists());
 }
+
+/// `sykli hook pre-push --contract CONTRACT FLAGS... origin URL` for one push.
+fn pre_push_flags(repo: &Path, contract: &Path, flags: &[&str], sha: &str, to: &str) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["hook", "pre-push", "--contract"])
+        .arg(contract)
+        .args(flags)
+        .args(["origin", "/nowhere/origin.git"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "refs/heads/work {sha} {to} {ZEROS}").unwrap();
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+/// Three pushes of a commit with no receipt that the guessed default branch
+/// let through: each is refused once the caller names the branch it protects.
+#[test]
+fn naming_the_branch_refuses_the_pushes_a_guess_let_through() {
+    let scratch = Scratch::new("guess");
+    let repo = &scratch.repo;
+    let contract = scratch.contract(READS_FILE);
+    let origin = scratch.base.join("origin.git");
+    git(
+        repo,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=master",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(repo, &["push", "--quiet", "origin", "main:master"]);
+    git(repo, &["remote", "set-head", "origin", "--auto"]);
+    // The host renames master to main; after a pruning fetch, origin/HEAD
+    // still names origin/master, which is gone.
+    git(&origin, &["branch", "-m", "master", "main"]);
+    git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(repo, &["fetch", "--quiet", "--prune", "origin"]);
+    git(
+        repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        ],
+    );
+    fs::write(repo.join("file.txt"), "one\n\n").unwrap();
+    let head = commit(repo, "no receipt");
+    let push = |flags: &[&str], to: &str| pre_push_flags(repo, &contract, flags, &head, to);
+    let refused = |out: Output| {
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("refusing to push"));
+    };
+
+    // A: the renamed default branch.
+    refused(push(&["--branch", "main"], "refs/heads/main"));
+    // B: no origin/HEAD at all, and the default branch is trunk.
+    git(
+        repo,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    );
+    assert_eq!(push(&[], "refs/heads/trunk").status.code(), Some(0));
+    refused(push(&["--branch", "trunk"], "refs/heads/trunk"));
+    // C: the protected branch is release, not the default.
+    assert_eq!(push(&[], "refs/heads/release").status.code(), Some(0));
+    refused(push(&["--branch", "release"], "refs/heads/release"));
+    let out = push(&["--branch", "release"], "refs/heads/main");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}

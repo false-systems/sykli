@@ -235,6 +235,24 @@ fn default_branches(remote: Option<&str>) -> (Vec<String>, bool) {
         })
 }
 
+/// The refs `--branch` names: exactly `refs/heads/BRANCH` for each. A value
+/// that is not a branch name would gate nothing, so it is an error instead.
+fn named_branches(branches: &[String]) -> Result<Vec<String>, String> {
+    branches
+        .iter()
+        .map(|branch| {
+            let name = format!("refs/heads/{branch}");
+            if branch.starts_with("refs/") || git(&["check-ref-format", &name]).is_err() {
+                return Err(format!(
+                    "--branch {branch:?} is not a branch name; name it as `git push REMOTE NAME` \
+                     would (main, not refs/heads/main)"
+                ));
+            }
+            Ok(name)
+        })
+        .collect()
+}
+
 /// The root contract a commit carries, as the hook gates on it: `sykli.json`,
 /// else `sykli.rs` (which `verify --commit` cannot read, so it refuses).
 fn contract_in(commit: &str) -> Option<PathBuf> {
@@ -328,11 +346,20 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), Stri
 /// contract gates it, and a commit that drops the contract the branch had is
 /// refused, so taking the gate off takes an explicit `--no-verify`.
 ///
-/// With `contract`, that contract gates every push to the default branch,
+/// With `contract`, that contract gates every push to a gated branch,
 /// whatever the commits carry: a person's own gate, kept outside the
 /// repository, is the same for every commit, and `verify --commit` reads it
 /// from its file.
-pub(crate) fn pre_push(remote: Option<&str>, contract: Option<&Path>) -> ExitCode {
+///
+/// With `branches`, the gated branches are exactly those: whoever installs
+/// the hook knows which branch they protect, while `refs/remotes/REMOTE/HEAD`
+/// is a guess that a rename, an unset HEAD or a protected non-default branch
+/// gets wrong.
+pub(crate) fn pre_push(
+    remote: Option<&str>,
+    contract: Option<&Path>,
+    branches: &[String],
+) -> ExitCode {
     const HOOK: &str = "pre-push";
     if let Err(code) = enter_repository(HOOK) {
         return code;
@@ -341,6 +368,13 @@ pub(crate) fn pre_push(remote: Option<&str>, contract: Option<&Path>) -> ExitCod
         Some(Ok(contract)) => Some(contract),
         Some(Err(code)) => return code,
         None => None,
+    };
+    let named = match named_branches(branches) {
+        Ok(named) => named,
+        Err(error) => {
+            eprintln!("sykli hook {HOOK}: cannot evaluate: {error}");
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
     };
     let mut input = String::new();
     let parsed = std::io::stdin()
@@ -354,7 +388,11 @@ pub(crate) fn pre_push(remote: Option<&str>, contract: Option<&Path>) -> ExitCod
             return ExitCode::from(CANNOT_EVALUATE);
         }
     };
-    let (defaults, known) = default_branches(remote);
+    let (defaults, known) = if named.is_empty() {
+        default_branches(remote)
+    } else {
+        (named, true)
+    };
     let pushed = updates
         .iter()
         .filter(|update| !absent(&update.local_sha))

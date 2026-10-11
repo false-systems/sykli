@@ -382,17 +382,20 @@ enum Hook {
     },
     /// Refuse a push to the default branch without a passing receipt of the pushed commit's tree
     #[command(after_help = "Exit codes:\n  \
-        0  nothing pushed to the default branch, every such push has a receipt that\n     \
+        0  nothing pushed to a gated branch, every such push has a receipt that\n     \
            passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
-        1  refused: a push to the default branch has no such receipt\n  \
-        2  could not evaluate: no git repository, unreadable input, or a missing --contract\n\n\
+        1  refused: a push to a gated branch has no such receipt\n  \
+        2  could not evaluate: no git repository, unreadable input, a missing --contract,\n     \
+           or a --branch that is not a branch name\n\n\
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
-        The default branch is the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
-        Deletions and pushes to other branches pass. Receipts are looked for in this\n\
+        With --branch, the gated branches are exactly those named (refs/heads/BRANCH for\n\
+        each), and nothing is guessed. Without it, the gated branch is the default branch:\n\
+        the one refs/remotes/REMOTE/HEAD names, else main and master.\n\
+        Deletions, tags and pushes to other branches pass. Receipts are looked for in this\n\
         worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
         is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
         without one is refused when the branch had one (push with --no-verify to drop it).\n\
-        With --contract, that contract gates every push to the default branch instead,\n\
+        With --contract, that contract gates every push to a gated branch instead,\n\
         whatever the commits carry; one outside the repository is read from its file.\n\
         An accepted push's receipts are kept in the common git directory, as\n\
         sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
@@ -407,6 +410,11 @@ enum Hook {
         /// for example one kept outside the repository
         #[arg(long)]
         contract: Option<PathBuf>,
+        /// Gate pushes to this branch (repeatable) instead of the remote's default
+        /// branch; when given, exactly refs/heads/BRANCH for each is gated, and
+        /// nothing is guessed from refs/remotes/REMOTE/HEAD
+        #[arg(long = "branch", value_name = "BRANCH")]
+        branches: Vec<String>,
     },
     /// Install thin git hooks that call `sykli hook`, shared by every worktree
     #[command(after_help = "Exit codes:\n  \
@@ -1269,7 +1277,8 @@ fn main() -> ExitCode {
                 remote,
                 url: _,
                 contract,
-            } => hook::pre_push(remote.as_deref(), contract.as_deref()),
+                branches,
+            } => hook::pre_push(remote.as_deref(), contract.as_deref(), &branches),
             Hook::Install {
                 pre_commit,
                 pre_push,
