@@ -327,10 +327,18 @@ safe.
   unless this worktree holds a receipt that passes
   `sykli verify --commit` for the pushed commit. It looks in
   `.sykli/receipt.json` and `.sykli/receipts/`. The default branch is the one
-  `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. Deletions and
-  pushes to other branches pass. A refusal names the command that produces a
-  receipt: `sykli run sykli.json` with the commit checked out. Cached tasks
-  make that run quick, and the run the pre-commit hook made already counts.
+  `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. That is a
+  guess: git never moves `refs/remotes/REMOTE/HEAD` after the host renames its
+  default branch, and the branch you protect need not be the default. Name the
+  gated branches with `--branch NAME`, repeated for more than one, and the hook
+  gates exactly `refs/heads/NAME` for each and guesses nothing. Without
+  `--branch`, a `refs/remotes/REMOTE/HEAD` that names a ref that no longer
+  exists counts as unknown: `main` and `master` are gated, and a note says so.
+  Deletions, tags and pushes to other branches pass. A refusal names the
+  command that produces a receipt: `sykli run sykli.json` with the commit
+  checked out, or `sykli lock` first when the contract differs from its lock.
+  Cached tasks make that run quick, and the run the pre-commit hook made
+  already counts.
 - When the hook accepts a push to the default branch, it copies the receipt
   that verified it into the repository's common git directory, as
   `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, named
@@ -367,6 +375,7 @@ example under your configuration, and name it on every command:
 cd ~/src/project                       # anywhere inside the repository
 gate=~/.config/gates/project/sykli.json
 sykli init --contract "$gate"          # infer tasks from the repository; write the contract and lock there
+mkdir -p .sykli                        # init --contract creates nothing in the repository
 sykli run "$gate" --json > .sykli/receipt.json
 sykli verify .sykli/receipt.json --contract "$gate" --commit HEAD
 ```
@@ -379,26 +388,43 @@ directory:
   repository's root, as in a committed contract, and the undeclared-sibling
   check and the Cargo completeness gate apply as usual. Paths you type, such as
   `plan --changed`, mean what they mean where you type them.
-- The lock is the `sykli.lock` beside the contract, as always, and
-  `sykli lock "$gate"` writes it there.
+- A task may depend only on files in the repository, which it declares, and
+  on tools it finds on `PATH`. Files kept beside an outside contract, such as
+  a helper script a task runs, cannot be declared and are not hashed, so
+  changing one does not invalidate a cached pass. Keep such helpers in the
+  repository and declare them, or install them as tools.
+- The lock is the `sykli.lock` beside the contract as you name it, as always,
+  and `sykli lock "$gate"` writes it there. For a contract named through a
+  symbolic link that is the lock beside the link: when there is none there but
+  the link's target has one, the contract runs unpinned and sykli warns.
 - Receipts and the cache stay in the repository's `.sykli/`. `init --contract`
-  touches nothing in the repository, so it does not add `.sykli/` to
-  `.gitignore`; ignore it in your global git ignore (`core.excludesFile`)
-  instead.
+  touches nothing in the repository, so it neither creates `.sykli/` nor adds
+  it to `.gitignore`; ignore it in your global git ignore
+  (`core.excludesFile`) instead.
 - `verify` reads the contract and its lock from their files, with or without
   `--commit`, since no commit carries them; the `--commit` checks on the
-  commit's tree are unchanged. Every receipt records `lock_digest`, the
-  SHA-256 of the lock file it ran with, and for a contract outside the
-  repository verify requires that it is the lock beside the contract now. A
-  receipt from another version of the contract, or of its lock, exits 4.
+  commit's tree are unchanged. A receipt from another version of the contract
+  exits 4 (`contract`). Every receipt also records `lock_digest`, the SHA-256
+  of the lock file it ran with (null without one), and for a contract outside
+  the repository verify requires the receipt's `lock_digest` to match the lock
+  file beside the contract now, or exits 4 (`lock`). Without a lock on either
+  side, they match, and the contract hash alone binds the receipt. The digest
+  covers the whole lock file, which holds one entry per contract in its
+  directory, so keep one contract per directory: locking a second contract
+  beside the first changes the file and refuses the first one's receipts.
 - `sykli hook pre-commit --contract PATH` runs that contract on the staged
-  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates every push
-  to the default branch with it, whatever the pushed commits carry. A hook you
-  write yourself, or one shared by all your repositories, can call them:
+  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates pushes with
+  it, whatever the pushed commits carry. Name the branches it protects with
+  `--branch NAME` (repeat it for more than one); without it, the hook gates the
+  default branch it guesses, as described [above](#git-hooks). A contract
+  inside the worktree that the pushed commit does not carry cannot be
+  verified, and the hook says to keep it outside the worktree or commit it.
+  A hook you write yourself, or one shared by all your repositories, can call
+  them:
 
 ```sh
 #!/bin/sh
-exec sykli hook pre-push --contract "$HOME/.config/gates/project/sykli.json" "$@"
+exec sykli hook pre-push --contract "$HOME/.config/gates/project/sykli.json" --branch main "$@"
 ```
 
 Accepted pushes' receipts are kept in the common git directory as described

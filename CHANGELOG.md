@@ -16,18 +16,27 @@ contract consumer can observe; internal refactors are not listed.
   are from its root, and the undeclared-sibling check and the Cargo
   completeness gate apply as usual. Command-line paths (`--changed`, the
   receipt) keep meaning what they meant where they were typed. The lock is
-  the `sykli.lock` beside the contract, and receipts and the cache stay in
-  the repository's `.sykli/`. A contract inside the repository works as
-  before.
+  the `sykli.lock` beside the contract as it is named (beside the link, for
+  a symbolic link; a warning says when only the link's target has a lock, so
+  the contract runs unpinned), and receipts and the cache stay in the
+  repository's `.sykli/`. A task may depend only on repository files and
+  tools on `PATH`: files beside an outside contract cannot be declared and
+  are not hashed. A contract inside the repository works as before.
 - `sykli init --contract PATH` writes the contract it infers from the
   repository, and its lock, to PATH (its directory is created) and touches
   nothing in the repository: no `.sykli/`, no `.gitignore` entry. It
   conflicts with the positional path and with `--production`; outside any git
   repository it exits 1.
 - `sykli hook pre-commit --contract PATH` runs that contract on the staged
-  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates every push
-  to the default branch with it, whatever the pushed commits carry. A named
-  contract that does not exist exits 2.
+  tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates pushes
+  with it, whatever the pushed commits carry. A named contract that does not
+  exist exits 2; one inside the worktree that the pushed commit does not carry
+  is refused with a reason that says to keep it outside the worktree or commit
+  it.
+- `sykli hook pre-push --branch NAME`, repeatable, with or without
+  `--contract`: the gated branches are exactly `refs/heads/NAME` for each, and
+  nothing is guessed from `refs/remotes/REMOTE/HEAD`. A value that is not a
+  branch name exits 2. Without `--branch`, nothing changes.
 - Receipts record `lock_digest`: the SHA-256 of the bytes of the lock file
   beside the contract as the run read it, or null when there was none.
   Receipts without the field are still read.
@@ -37,8 +46,12 @@ contract consumer can observe; internal refactors are not listed.
   `lock_digest` must be the digest of that lock file now. A receipt from
   another version of the contract (`contract`, whose reason names the
   contract's path) or of its lock (`lock`) exits 4, as does a receipt without
-  `lock_digest` when the contract has a lock. A contract inside the
-  repository is verified as before, and its lock digest is not compared.
+  `lock_digest` when the contract has a lock. With no lock on either side,
+  the check passes and the contract hash alone binds the receipt. The digest
+  covers the whole lock file, so a second contract locked in the same
+  directory refuses the first one's receipts; keep one contract per
+  directory. A contract inside the repository is verified as before, and its
+  lock digest is not compared.
 - `sykli hook pre-push` keeps the evidence of the pushes it accepts: once
   every ref of a push to the default branch is accepted, the receipt that
   verified each is copied to
@@ -140,6 +153,13 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- `sykli hook pre-push` without `--branch` takes a
+  `refs/remotes/REMOTE/HEAD` that names a ref that does not exist (the host
+  renamed its default branch and a fetch pruned the old one) as unknown: it
+  gates `main` and `master` and always says so. Before, it gated the missing
+  branch, so a push to the renamed default branch passed with no word.
+- A refusal from `sykli hook pre-push` whose contract differs from its own
+  lock names `sykli lock CONTRACT`, not a run that cannot pass until then.
 - `verify --commit` with an absolute path to a contract inside the
   repository, spelled through a symbolic link (macOS's `/var` for
   `/private/var`), refused it as outside the repository (exit 2); it is now
