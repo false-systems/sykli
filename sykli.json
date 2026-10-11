@@ -31,7 +31,8 @@
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
         "tests/external.rs",
-        "tests/git_calls.rs"
+        "tests/git_calls.rs",
+        "tests/facts.rs"
       ]
     },
     {
@@ -86,7 +87,8 @@
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
         "tests/external.rs",
-        "tests/git_calls.rs"
+        "tests/git_calls.rs",
+        "tests/facts.rs"
       ]
     },
     {
@@ -139,6 +141,7 @@
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
+        "tests/facts.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",

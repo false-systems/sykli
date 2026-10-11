@@ -25,7 +25,10 @@ pub(crate) struct Repository {
 static REPOSITORY: OnceLock<Result<Repository, String>> = OnceLock::new();
 
 /// Take the caller's answers instead of asking git. Both must be absolute
-/// directories; they are trusted as git's own answers would be.
+/// directories, and the files on disk must bear them out: the root's `.git`
+/// must lead to the common directory. A root that is only a subdirectory
+/// would leave changes outside it out of every snapshot, so a receipt could
+/// pass for content that never ran.
 pub(crate) fn give(root: PathBuf, common_dir: PathBuf) -> Result<(), String> {
     for (flag, path) in [("--repo-root", &root), ("--git-common-dir", &common_dir)] {
         if !path.is_absolute() || !path.is_dir() {
@@ -35,8 +38,45 @@ pub(crate) fn give(root: PathBuf, common_dir: PathBuf) -> Result<(), String> {
             ));
         }
     }
+    if !leads_to(&root, &common_dir) {
+        return Err(format!(
+            "--repo-root {} is not the top level of the repository whose common git directory \
+             is --git-common-dir {}: its .git does not lead there; pass both as `git rev-parse \
+             --path-format=absolute --show-toplevel --git-common-dir` prints them",
+            root.display(),
+            common_dir.display()
+        ));
+    }
     let _ = REPOSITORY.set(Ok(Repository::at(root, common_dir)));
     Ok(())
+}
+
+/// Whether `root/.git` leads to `common_dir`, read from files as git reads
+/// them: the directory itself (a main checkout), or a `gitdir: PATH` file (a
+/// linked worktree, a submodule) whose directory is the common one, or names
+/// it in a `commondir` file. Relative paths are relative to the file that
+/// holds them. Compared where both are on disk, so `/tmp` and
+/// `/private/tmp`, or a trailing slash, spell the same directory.
+fn leads_to(root: &Path, common_dir: &Path) -> bool {
+    let Ok(common) = std::fs::canonicalize(common_dir) else {
+        return false;
+    };
+    let dot_git = root.join(".git");
+    let target = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Some(gitdir) = std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+            text.strip_prefix("gitdir: ")
+                .map(|rest| root.join(rest.trim_end()))
+        }) else {
+            return false;
+        };
+        match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(text) => gitdir.join(text.trim_end()),
+            Err(_) => gitdir,
+        }
+    };
+    std::fs::canonicalize(target).is_ok_and(|target| target == common)
 }
 
 /// The repository around the current directory, found once per process,
