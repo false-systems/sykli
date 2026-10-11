@@ -37,7 +37,8 @@ struct Cli {
     command: Command,
     /// The repository's top level, when the caller already knows it (as
     /// `git rev-parse --path-format=absolute --show-toplevel` prints it); with
-    /// --git-common-dir, sykli runs no git to find the repository
+    /// --git-common-dir, sykli runs no git to find the repository. Its .git
+    /// must lead to --git-common-dir (checked from files), or sykli exits 2
     #[arg(
         long,
         global = true,

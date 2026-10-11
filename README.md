@@ -437,8 +437,11 @@ reading receipts as files and building no snapshot of the working tree. A
 caller that already knows the repository can pass `--repo-root` and
 `--git-common-dir` (as `git rev-parse --path-format=absolute --show-toplevel
 --git-common-dir` prints them) to any command, and then sykli runs no git to
-find it: `hook pre-push` starts one git process in all, `verify --commit`
-one, and `run` five.
+find it. They are checked from files: the root's `.git` must lead to the
+common directory, or the command exits 2, since a subdirectory given as the
+root would leave changes outside it out of the snapshot. With them, `hook
+pre-push` starts one git process in all, `verify --commit` one, and `run`
+five.
 
 ## Built for agents
 

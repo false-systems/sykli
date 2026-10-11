@@ -65,7 +65,8 @@ not carry can never be verified, and the hook says so.
 Every command that looks for the repository accepts `--repo-root` and
 `--git-common-dir` (both, as `git rev-parse --path-format=absolute
 --show-toplevel --git-common-dir` prints them); with them sykli runs no git
-to find the repository. `hook pre-push` then starts one git process, one
+to find the repository; the root's `.git` must lead to the common directory
+(checked from files, or exit 2). `hook pre-push` then starts one git process, one
 `git cat-file --batch` for all pushed commits, `verify --commit` one, and
 `run` five; without them each starts one more.
 

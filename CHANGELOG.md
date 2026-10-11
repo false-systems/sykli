@@ -12,7 +12,10 @@ contract consumer can observe; internal refactors are not listed.
   command (given together): a caller that already knows the repository says
   so, and sykli runs no git to find it. With them, `hook pre-push` starts one
   git process, `verify --commit` one and `run` five. The receipt records the
-  root as given.
+  root as given. They are checked without git: the root's `.git` must lead to
+  the common directory (a directory, or a `gitdir:` file followed through
+  `commondir`), so a subdirectory, or another repository's common directory,
+  exits 2.
 - Contracts kept outside the repository. `run`, `lock`, `plan`, `validate`
   and `verify` accept a contract path outside the git repository around the
   current directory (decided on resolved paths, so a symbolic link to a
