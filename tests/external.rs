@@ -286,7 +286,11 @@ fn the_cargo_gate_holds_for_a_contract_outside_the_repository() {
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     let message = text(&out.stderr);
     assert!(message.contains("Cargo inputs are undeclared"), "{message}");
-    assert!(message.contains("src/extra.rs"), "{message}");
+    // Listed with the platform's separator, escaped as Rust's Debug does.
+    assert!(
+        message.replace("\\\\", "/").contains("src/extra.rs"),
+        "{message}"
+    );
 }
 
 fn verify(cwd: &Path, receipt: &Path, contract: &Path, commit: Option<&str>) -> Output {
@@ -700,10 +704,14 @@ fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
         let out = sykli(cwd, &["plan", path, "--explain", "--json"]);
         let plan: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|_| panic!("no plan: {}", text(&out.stderr)));
-        (
-            out.status.code(),
-            plan["input_coverage"]["cargo_missing_inputs"].clone(),
-        )
+        // The gate reports paths with the platform's separator.
+        let missing = plan["input_coverage"]["cargo_missing_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        (out.status.code(), serde_json::json!(missing))
     };
     assert_eq!(explain(repo), (Some(0), serde_json::json!([])));
     fs::write(repo.join("src/extra.rs"), "").unwrap();
