@@ -353,6 +353,28 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), Stri
     })
 }
 
+/// What would let a refused push through. While the contract differs from
+/// its own lock no run can pass, so that says to re-lock; otherwise, to run.
+fn next_step(contract: &Path, commit: &str, short: &str) -> String {
+    let contract_path = contract.display();
+    if !crate::contract_lock_drift(contract, commit).unwrap_or(false) {
+        return format!(
+            "to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {contract_path}"
+        );
+    }
+    if crate::outside_repository(contract).is_some() {
+        format!(
+            "the contract differs from its lock; to accept the edit, run: sykli lock {contract_path}, \
+             then check out {short} with nothing uncommitted and run: sykli run {contract_path}"
+        )
+    } else {
+        format!(
+            "the contract in {short} differs from its lock; run: sykli lock {contract_path}, \
+             commit the lock, and run: sykli run {contract_path} on that commit"
+        )
+    }
+}
+
 /// `sykli hook pre-push`: a push that moves the default branch needs a clean,
 /// passing receipt of exactly the commit it pushes. Whether a push is gated is
 /// decided from the commits, never from the working tree: the pushed commit's
@@ -455,6 +477,21 @@ pub(crate) fn pre_push(
             );
             continue;
         };
+        // A named contract inside the worktree is read from the commit, as a
+        // committed one is; one the commit does not carry can never verify.
+        if gate.is_some()
+            && crate::outside_repository(&contract).is_none()
+            && !crate::carried_by(&update.local_sha, &contract)
+        {
+            eprintln!(
+                "sykli hook {HOOK}: refusing to push {short} to {}: the contract {} is inside this \
+                 worktree, but {short} does not carry it, so `verify --commit` cannot read it and no \
+                 receipt can pass; keep the contract outside the worktree, or commit it",
+                update.remote_ref,
+                contract.display()
+            );
+            return ExitCode::from(REFUSED);
+        }
         match receipt_for(&contract, &update.local_sha) {
             Ok((receipt, bytes)) => {
                 eprintln!(
@@ -470,8 +507,8 @@ pub(crate) fn pre_push(
                     update.remote_ref
                 );
                 eprintln!(
-                    "sykli hook {HOOK}: to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {}",
-                    contract.display()
+                    "sykli hook {HOOK}: {}",
+                    next_step(&contract, &update.local_sha, short)
                 );
                 return ExitCode::from(REFUSED);
             }

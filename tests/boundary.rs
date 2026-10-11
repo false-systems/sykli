@@ -1437,3 +1437,21 @@ fn pre_push_takes_an_origin_head_naming_a_missing_ref_as_unknown() {
     assert!(!text(&out.stderr).contains("does not exist"));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A commit whose contract differs from its own lock cannot pass any run;
+/// the refusal says to re-lock, not to run.
+#[test]
+fn pre_push_names_sykli_lock_when_the_commit_contract_drifted() {
+    let root = repo("pushdrift", READS_FILE);
+    fs::write(
+        root.join("sykli.json"),
+        READS_FILE.replace("= one", "= one && true"),
+    )
+    .unwrap();
+    let head = commit(&root, "edited, not locked");
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert!(message.contains("sykli lock sykli.json"), "{message}");
+    fs::remove_dir_all(root).unwrap();
+}

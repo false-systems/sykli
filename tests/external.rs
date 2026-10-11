@@ -816,3 +816,47 @@ fn naming_the_branch_refuses_the_pushes_a_guess_let_through() {
     let out = push(&["--branch", "release"], "refs/heads/main");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
+
+/// A refusal says what would let the push through.
+#[test]
+fn pre_push_refusals_name_the_step_that_helps() {
+    let scratch = Scratch::new("hints");
+    let repo = &scratch.repo;
+    let contract = scratch.contract(READS_FILE);
+    let head = git(repo, &["rev-parse", "HEAD"]);
+
+    // Edited without re-locking: no run passes until the edit is accepted.
+    fs::write(&contract, READS_FILE.replace("= one", "= one && true")).unwrap();
+    let out = pre_push(repo, Some(&contract), &head, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert!(
+        message.contains(&format!("sykli lock {}", contract.display())),
+        "{message}"
+    );
+
+    // A contract inside the worktree that the pushed commit does not carry,
+    // ignored or untracked, can never be read by `verify --commit`.
+    let local = repo.join("local");
+    fs::create_dir(&local).unwrap();
+    let inside = local.join("sykli.json");
+    fs::write(&inside, READS_FILE).unwrap();
+    assert!(
+        sykli(repo, &["lock", inside.to_str().unwrap()])
+            .status
+            .success()
+    );
+    for ignored in [true, false] {
+        let exclude = if ignored {
+            ".sykli/\nlocal/\n"
+        } else {
+            ".sykli/\n"
+        };
+        fs::write(repo.join(".git/info/exclude"), exclude).unwrap();
+        let out = pre_push(repo, Some(&inside), &head, "refs/heads/main");
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let message = text(&out.stderr);
+        assert!(message.contains("outside the worktree"), "{message}");
+        assert!(!message.contains("sykli run"), "{message}");
+    }
+}

@@ -3723,6 +3723,29 @@ fn contract_checks(
     checks.iter().all(|check| check.ok)
 }
 
+/// Whether the contract `verify --commit COMMIT` would judge with differs from
+/// its own lock pin: then no run can pass until it is re-locked.
+fn contract_lock_drift(contract: &Path, commit: &str) -> Result<bool, String> {
+    let (hash, lock) = if outside_repository(contract).is_some() {
+        (load_unlocked(contract)?.2, read_lock(contract)?)
+    } else {
+        let repository = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+        let id = resolve_commit(&repository, commit)?;
+        let (_, hash, lock) = contract_at(&repository, &id, contract)?;
+        (hash, lock)
+    };
+    Ok(lock.is_some_and(|lock| lock != hash))
+}
+
+/// Whether `commit` carries the file at `path`, a path inside the repository.
+fn carried_by(commit: &str, path: &Path) -> bool {
+    git(&["rev-parse", "--show-toplevel"])
+        .ok()
+        .and_then(|repository| blob_at(Path::new(&repository), commit, path).ok())
+        .flatten()
+        .is_some()
+}
+
 /// The contract and its lock pin as `commit` has them, read from git rather
 /// than from the checkout. JSON only: an emitter would have to be run, and
 /// `sykli.rs` falls back to `sykli.json` beside it, as `run` does.
