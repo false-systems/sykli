@@ -43,7 +43,7 @@ enum Command {
         0  valid\n  \
         1  invalid, unreadable, or drifted from sykli.lock")]
     Validate {
-        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
         /// Print the verdict as JSON (`sykli-validate.v1`); exit 1 when invalid
@@ -55,9 +55,12 @@ enum Command {
         0  every task passed or was cached\n  \
         1  a task failed, errored, or was blocked\n  \
         2  could not evaluate: unreadable contract, lock drift, undeclared Cargo inputs, no git or sh\n\n\
-        The receipt is written to .sykli/receipts/<hash>.json; --json also prints it.")]
+        The receipt is written to .sykli/receipts/<hash>.json; --json also prints it.\n\n\
+        A contract outside the repository judges the git repository around the current\n\
+        directory: its inputs are paths from that repository's root, its lock is the\n\
+        sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.")]
     Run {
-        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
         /// Print the run receipt as JSON on stdout; progress and task output go to stderr
@@ -67,9 +70,11 @@ enum Command {
     /// Select the tasks a change requires
     #[command(after_help = "Exit codes:\n  \
         0  plan printed (all tasks when no --changed is given)\n  \
-        2  could not evaluate the contract or --explain found an input error")]
+        2  could not evaluate the contract or --explain found an input error\n\n\
+        A contract outside the repository plans for the git repository around the current\n\
+        directory; --changed paths are read from where the command is typed.")]
     Plan {
-        /// Contract path (--explain defaults to sykli.json; otherwise sykli.rs, falling back to sykli.json)
+        /// Contract path, which may be outside the repository (--explain defaults to sykli.json; otherwise sykli.rs, falling back to sykli.json)
         contract: Option<PathBuf>,
         /// Changed file path; repeat for multiple files
         #[arg(long)]
@@ -260,7 +265,7 @@ enum Command {
     /// Pin the contract's hash in sykli.lock beside it (one entry per contract file)
     #[command(after_help = "Exit codes:\n  0  locked\n  2  could not read or hash the contract")]
     Lock {
-        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists)
+        /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
     },
@@ -965,6 +970,46 @@ fn resolve_contract(contract: PathBuf) -> PathBuf {
     contract
 }
 
+/// The repository a contract outside it judges: the git toplevel of the
+/// current directory, when `contract` lies outside it. A person can keep a
+/// repository's contract in their own configuration instead of committing
+/// it; its inputs are still paths in the repository it judges. None when the
+/// contract is inside that repository, or there is no repository, which is
+/// how every command has always worked. Symbolic links are resolved first,
+/// so a link in the repository to a contract elsewhere is outside it.
+fn outside_repository(contract: &Path) -> Option<PathBuf> {
+    let toplevel = git(&["rev-parse", "--show-toplevel"]).ok()?;
+    let root = fs::canonicalize(&toplevel).ok()?;
+    (!located(contract)?.starts_with(root)).then(|| PathBuf::from(toplevel))
+}
+
+/// Where `path` is on disk with symbolic links resolved, even before it
+/// exists: its nearest existing ancestor resolved, the rest appended.
+fn located(path: &Path) -> Option<PathBuf> {
+    let path = absolute(path).ok()?;
+    path.ancestors().find_map(|ancestor| {
+        let resolved = fs::canonicalize(ancestor).ok()?;
+        Some(resolved.join(path.strip_prefix(ancestor).ok()?))
+    })
+}
+
+/// Work from the repository a contract outside it judges. Paths given on
+/// the command line are made absolute first, so they keep meaning what they
+/// meant where the command was typed; then the toplevel becomes the current
+/// directory, the root every declared path resolves against. Nothing changes
+/// for a contract inside the repository.
+fn enter_for_contract(contract: &mut PathBuf, paths: &mut [&mut PathBuf]) -> Result<(), String> {
+    let Some(root) = outside_repository(contract) else {
+        return Ok(());
+    };
+    *contract = absolute(contract)?;
+    for path in paths {
+        **path = absolute(path)?;
+    }
+    std::env::set_current_dir(&root)
+        .map_err(|error| format!("cannot enter the repository at {}: {error}", root.display()))
+}
+
 #[cfg(unix)]
 unsafe extern "C" {
     fn signal(signal: i32, handler: usize) -> usize;
@@ -1000,6 +1045,28 @@ fn main() -> ExitCode {
             *contract = resolve_contract(std::mem::take(contract));
         }
         _ => {}
+    }
+    let entered = match &mut cli.command {
+        Command::Validate { contract, .. }
+        | Command::Run { contract, .. }
+        | Command::Lock { contract } => enter_for_contract(contract, &mut []),
+        Command::Verify {
+            receipt, contract, ..
+        } => enter_for_contract(contract, &mut [receipt]),
+        Command::Plan {
+            contract: Some(contract),
+            changed,
+            target: None,
+            ..
+        } => enter_for_contract(contract, &mut changed.iter_mut().collect::<Vec<_>>()),
+        _ => Ok(()),
+    };
+    if let Err(error) = entered {
+        eprintln!("error: {error}");
+        return ExitCode::from(match cli.command {
+            Command::Validate { .. } => 1,
+            _ => 2,
+        });
     }
     match cli.command {
         #[cfg(unix)]
