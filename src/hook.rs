@@ -2,7 +2,9 @@
 //! merely the files on disk, and they only refuse: nothing is staged, stashed
 //! or rewritten on the operator's behalf.
 
-use crate::{commit_tree_oid, git, load_pinned, refusal, resolve_contract, run, verify};
+use crate::{
+    commit_tree_oid, git, judge, load_pinned, refusal, repo, resolve_contract, run, verify,
+};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -12,16 +14,19 @@ const CANNOT_EVALUATE: u8 = 2;
 
 /// Git runs hooks from the repository root; make sure of it, since the
 /// contract and receipts are looked for there.
-fn enter_repository(hook: &str) -> Result<PathBuf, ExitCode> {
-    let root = git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
+fn enter_repository(hook: &str) -> Result<&'static repo::Repository, ExitCode> {
+    let repository = repo::repository().map_err(|_| {
         eprintln!("sykli hook {hook}: not inside a git repository");
         ExitCode::from(CANNOT_EVALUATE)
     })?;
-    std::env::set_current_dir(&root).map_err(|error| {
-        eprintln!("sykli hook {hook}: cannot enter {root}: {error}");
+    std::env::set_current_dir(&repository.root).map_err(|error| {
+        eprintln!(
+            "sykli hook {hook}: cannot enter {}: {error}",
+            repository.root.display()
+        );
         ExitCode::from(CANNOT_EVALUATE)
     })?;
-    Ok(PathBuf::from(root))
+    Ok(repository)
 }
 
 /// The root's contract, as `run` would pick it: `sykli.rs`, else `sykli.json`.
@@ -114,7 +119,7 @@ pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
             None => {
                 eprintln!(
                     "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; nothing to check",
-                    root.display()
+                    root.root.display()
                 );
                 return ExitCode::SUCCESS;
             }
@@ -225,84 +230,149 @@ enum Chosen {
     Stale(String),
 }
 
+/// What `refs/remotes/REMOTE/HEAD` names. It is read where git's files
+/// backend keeps it, a loose file in the common directory (a symbolic ref is
+/// never packed), so no git runs; git is asked only when refs are kept
+/// another way (reftable) or the ref is a symbolic link.
+fn remote_head(repository: &repo::Repository, remote: &str) -> Option<String> {
+    let name = format!("refs/remotes/{remote}/HEAD");
+    if !repo::branch_name(remote) {
+        return None;
+    }
+    let file = repository.common_dir.join(&name);
+    let linked = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
+    if linked || repository.common_dir.join("reftable").is_dir() {
+        return git(&["symbolic-ref", "--quiet", &name]).ok();
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    text.strip_prefix("ref: ")
+        .map(|target| target.trim().to_string())
+}
+
 /// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, when
-/// the ref it names exists; else `main` and `master`.
-fn default_branches(remote: Option<&str>) -> (Vec<String>, Chosen) {
+/// the ref it names exists (`target` is the ref, and `exists` says whether
+/// it does, as one batch answered); else `main` and `master`.
+fn default_branches(
+    remote: Option<&str>,
+    target: Option<&str>,
+    exists: bool,
+) -> (Vec<String>, Chosen) {
     let fallback = || vec!["refs/heads/main".into(), "refs/heads/master".into()];
-    let Some(remote) = remote else {
-        return (fallback(), Chosen::Unset);
-    };
-    let Ok(target) = git(&[
-        "symbolic-ref",
-        "--quiet",
-        &format!("refs/remotes/{remote}/HEAD"),
-    ]) else {
+    let (Some(remote), Some(target)) = (remote, target) else {
         return (fallback(), Chosen::Unset);
     };
     let Some(branch) = target.strip_prefix(&format!("refs/remotes/{remote}/")) else {
         return (fallback(), Chosen::Unset);
     };
-    if git(&["rev-parse", "--verify", "--quiet", &target]).is_err() {
-        return (fallback(), Chosen::Stale(target));
+    if !exists {
+        return (fallback(), Chosen::Stale(target.to_string()));
     }
     (vec![format!("refs/heads/{branch}")], Chosen::Known)
 }
 
 /// The refs `--branch` names: exactly `refs/heads/BRANCH` for each. A value
 /// that is not a branch name would gate nothing, so it is an error instead.
-/// `HEAD` and a name starting with `-` pass `git check-ref-format` as refs,
-/// but no branch can have them (`git branch` refuses both).
+/// Checked by git's own rules for ref names, in this process
+/// (`repo::branch_name`), including the two `git branch` refuses: `HEAD` and
+/// a leading `-`.
 fn named_branches(branches: &[String]) -> Result<Vec<String>, String> {
     branches
         .iter()
         .map(|branch| {
-            let name = format!("refs/heads/{branch}");
-            if branch.starts_with("refs/")
-                || branch == "HEAD"
-                || branch.starts_with('-')
-                || git(&["check-ref-format", &name]).is_err()
-            {
+            if !repo::branch_name(branch) {
                 return Err(format!(
                     "--branch {branch:?} is not a branch name; name it as `git push REMOTE NAME` \
                      would (main, not refs/heads/main)"
                 ));
             }
-            Ok(name)
+            Ok(format!("refs/heads/{branch}"))
         })
         .collect()
 }
 
-/// The root contract a commit carries, as the hook gates on it: `sykli.json`,
-/// else `sykli.rs` (which `verify --commit` cannot read, so it refuses).
-fn contract_in(commit: &str) -> Option<PathBuf> {
-    ["sykli.json", "sykli.rs"]
+/// The root contracts a commit may carry, as the hook gates on them:
+/// `sykli.json`, else `sykli.rs` (which `verify --commit` cannot read, so it
+/// refuses).
+const ROOT_CONTRACTS: [&str; 2] = ["sykli.json", "sykli.rs"];
+
+/// The root contract `commit` carries, from the batch's answers.
+fn contract_in(answers: &crate::Answers, commit: &str) -> Option<PathBuf> {
+    ROOT_CONTRACTS
         .into_iter()
-        .find(|name| git(&["cat-file", "-e", &format!("{commit}:{name}")]).is_ok())
+        .find(|name| crate::answer(answers, &format!("{commit}:{name}")).is_some())
         .map(PathBuf::from)
+}
+
+/// The remote-tracking branch a pushed ref replaces, `refs/remotes/R/B`.
+fn tracking(update: &Update, remote: Option<&str>) -> Option<String> {
+    let branch = update.remote_ref.strip_prefix("refs/heads/")?;
+    Some(format!("refs/remotes/{}/{branch}", remote?))
 }
 
 /// What the remote's branch points at before this push, as far as this
 /// repository knows: the line's remote sha when its commit is here, else the
-/// remote-tracking branch.
-fn remote_tip(update: &Update, remote: Option<&str>) -> Option<String> {
+/// remote-tracking branch. Its id, and the name the batch asked about it by.
+fn remote_tip(
+    answers: &crate::Answers,
+    update: &Update,
+    remote: Option<&str>,
+) -> Option<(String, String)> {
     if !absent(&update.remote_sha)
-        && git(&[
-            "cat-file",
-            "-e",
-            &format!("{}^{{commit}}", update.remote_sha),
-        ])
-        .is_ok()
+        && crate::answer(answers, &format!("{}^{{commit}}", update.remote_sha)).is_some()
     {
-        return Some(update.remote_sha.clone());
+        return Some((update.remote_sha.clone(), update.remote_sha.clone()));
     }
-    let branch = update.remote_ref.strip_prefix("refs/heads/")?;
-    git(&[
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        &format!("refs/remotes/{}/{branch}", remote?),
-    ])
-    .ok()
+    let tracking = tracking(update, remote)?;
+    crate::answer(answers, &tracking).map(|object| (object.id.clone(), tracking))
+}
+
+/// Every name the push's checks need from git, asked at once: for each
+/// pushed branch, its commit and tree; the contract and lock it carries (or
+/// the named contract, when that is inside the worktree); and, when no
+/// contract is named, whether the branch it replaces had one.
+fn questions(
+    pushed: &[&Update],
+    remote: Option<&str>,
+    gate: &Option<(PathBuf, bool)>,
+    head_target: Option<&str>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    names.extend(head_target.map(str::to_string));
+    for update in pushed
+        .iter()
+        .filter(|update| update.remote_ref.starts_with("refs/heads/"))
+    {
+        let sha = &update.local_sha;
+        names.extend(crate::commit_names(sha));
+        match gate {
+            Some((_, true)) => {}
+            Some((contract, false)) => {
+                if let Ok(inside) = crate::ContractNames::new(sha, contract) {
+                    names.extend(inside.names());
+                }
+            }
+            None => {
+                for root in ROOT_CONTRACTS {
+                    if let Ok(inside) = crate::ContractNames::new(sha, Path::new(root)) {
+                        names.extend(inside.names());
+                    }
+                }
+                let mut tips = Vec::new();
+                if !absent(&update.remote_sha) {
+                    names.push(format!("{}^{{commit}}", update.remote_sha));
+                    tips.push(update.remote_sha.clone());
+                }
+                if let Some(tracking) = tracking(update, remote) {
+                    names.push(tracking.clone());
+                    tips.push(tracking);
+                }
+                for tip in tips {
+                    names.extend(ROOT_CONTRACTS.map(|name| format!("{tip}:{name}")));
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Receipts this worktree holds whose tree is `tree`, newest first: the
@@ -330,16 +400,20 @@ fn receipts_of(tree: &str) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
-/// A receipt in this worktree that passes `verify --commit COMMIT`, with the
-/// bytes that verified (read before and after, and the same), or why there is
-/// none. Kept evidence is those bytes, never a second read of the path.
-fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), String> {
-    let tree = commit_tree_oid(Path::new("."), commit)?;
-    let candidates = receipts_of(&tree);
+/// A receipt in this worktree that passes `verify --commit` for a commit,
+/// judged against facts already read, with the bytes that verified (read
+/// before and after, and the same), or why there is none. Kept evidence is
+/// those bytes, never a second read of the path.
+fn receipt_for(
+    at: Result<&crate::CommitAt, &str>,
+    judged: Result<&crate::Judged, &str>,
+) -> Result<(PathBuf, Vec<u8>), String> {
+    let at = at.map_err(str::to_string)?;
+    let candidates = receipts_of(&at.tree);
     let mut newest_refusal = None;
     for receipt in candidates {
         let before = std::fs::read(&receipt).ok();
-        let refused = match verify(&receipt, contract, Some(commit)) {
+        let refused = match judge(&receipt, judged.map(|judged| (judged, at))) {
             Ok(checks) => match checks.iter().find(|check| !check.ok) {
                 None => match before {
                     Some(bytes) if std::fs::read(&receipt).ok().as_ref() == Some(&bytes) => {
@@ -361,14 +435,14 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), Stri
 
 /// What would let a refused push through. While the contract differs from
 /// its own lock no run can pass, so that says to re-lock; otherwise, to run.
-fn next_step(contract: &Path, commit: &str, short: &str) -> String {
+fn next_step(contract: &Path, drifted: bool, outside: bool, short: &str) -> String {
     let contract_path = contract.display();
-    if !crate::contract_lock_drift(contract, commit).unwrap_or(false) {
+    if !drifted {
         return format!(
             "to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {contract_path}"
         );
     }
-    if crate::outside_repository(contract).is_some() {
+    if outside {
         format!(
             "the contract differs from its lock; to accept the edit, run: sykli lock {contract_path}, \
              then check out {short} with nothing uncommitted and run: sykli run {contract_path}"
@@ -396,17 +470,27 @@ fn next_step(contract: &Path, commit: &str, short: &str) -> String {
 /// the hook knows which branch they protect, while `refs/remotes/REMOTE/HEAD`
 /// is a guess that a rename, an unset HEAD or a protected non-default branch
 /// gets wrong.
+///
+/// The hook runs on every push, so it asks git once: one `git cat-file
+/// --batch` answers everything about every pushed commit, receipts are read
+/// as files, and nothing rebuilds a snapshot of the working tree, since the
+/// pushed commits are what is judged. With the repository given
+/// (`--repo-root`, `--git-common-dir`) that is the only git process.
 pub(crate) fn pre_push(
     remote: Option<&str>,
     contract: Option<&Path>,
     branches: &[String],
 ) -> ExitCode {
     const HOOK: &str = "pre-push";
-    if let Err(code) = enter_repository(HOOK) {
-        return code;
-    }
+    let repository = match enter_repository(HOOK) {
+        Ok(repository) => repository,
+        Err(code) => return code,
+    };
     let gate = match contract.map(|contract| named_contract(HOOK, contract)) {
-        Some(Ok(contract)) => Some(contract),
+        Some(Ok(contract)) => {
+            let outside = crate::outside_repository(&contract).is_some();
+            Some((contract, outside))
+        }
         Some(Err(code)) => return code,
         None => None,
     };
@@ -429,15 +513,33 @@ pub(crate) fn pre_push(
             return ExitCode::from(CANNOT_EVALUATE);
         }
     };
-    let (defaults, chosen) = if named.is_empty() {
-        default_branches(remote)
-    } else {
-        (named, Chosen::Known)
-    };
     let pushed = updates
         .iter()
         .filter(|update| !absent(&update.local_sha))
         .collect::<Vec<_>>();
+    let head_target = if named.is_empty() {
+        remote.and_then(|remote| remote_head(repository, remote))
+    } else {
+        None
+    };
+    let answers = match crate::ask(
+        repository,
+        questions(&pushed, remote, &gate, head_target.as_deref()),
+    ) {
+        Ok(answers) => answers,
+        Err(error) => {
+            eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
+    };
+    let (defaults, chosen) = if named.is_empty() {
+        let exists = head_target
+            .as_deref()
+            .is_some_and(|target| crate::answer(&answers, target).is_some());
+        default_branches(remote, head_target.as_deref(), exists)
+    } else {
+        (named, Chosen::Known)
+    };
     let named_remote = remote.unwrap_or("REMOTE");
     match &chosen {
         Chosen::Known => {}
@@ -460,15 +562,25 @@ pub(crate) fn pre_push(
             }
         }
     }
+    // A named contract outside the repository is the same for every commit:
+    // read once, from its file.
+    let outside_judged = match &gate {
+        Some((contract, true)) => Some(crate::Judged::from_file(contract, true)),
+        _ => None,
+    };
     let mut accepted = Vec::new();
     for update in pushed
         .into_iter()
         .filter(|update| defaults.contains(&update.remote_ref))
     {
-        let short = &update.local_sha[..update.local_sha.len().min(12)];
-        let Some(contract) = gate.clone().or_else(|| contract_in(&update.local_sha)) else {
-            let before = remote_tip(update, remote);
-            if let Some(tip) = before.filter(|tip| contract_in(tip).is_some()) {
+        let sha = &update.local_sha;
+        let short = &sha[..sha.len().min(12)];
+        let named_gate = gate.as_ref().map(|(contract, _)| contract.clone());
+        let Some(contract) = named_gate.or_else(|| contract_in(&answers, sha)) else {
+            let before = remote_tip(&answers, update, remote);
+            if let Some((tip, _)) =
+                before.filter(|(_, asked)| contract_in(&answers, asked).is_some())
+            {
                 eprintln!(
                     "sykli hook {HOOK}: refusing to push {short} to {}: it has no sykli.json or sykli.rs, but {} there does; \
                      this push would take the gate off. To do that on purpose, push with --no-verify",
@@ -483,11 +595,16 @@ pub(crate) fn pre_push(
             );
             continue;
         };
+        let outside = matches!(gate, Some((_, true)));
+        let inside = (!outside).then(|| crate::ContractNames::new(sha, &contract));
         // A named contract inside the worktree is read from the commit, as a
         // committed one is; one the commit does not carry can never verify.
         if gate.is_some()
-            && crate::outside_repository(&contract).is_none()
-            && !crate::carried_by(&update.local_sha, &contract)
+            && !outside
+            && !inside
+                .as_ref()
+                .and_then(|inside| inside.as_ref().ok())
+                .is_some_and(|inside| inside.carried(&answers))
         {
             eprintln!(
                 "sykli hook {HOOK}: refusing to push {short} to {}: the contract {} is inside this \
@@ -498,7 +615,18 @@ pub(crate) fn pre_push(
             );
             return ExitCode::from(REFUSED);
         }
-        match receipt_for(&contract, &update.local_sha) {
+        let at = crate::commit_from(sha, &answers);
+        let owned;
+        let judged = match (&outside_judged, inside) {
+            (Some(judged), _) => judged.as_ref().map_err(String::as_str),
+            (None, Some(inside)) => {
+                let id = at.as_ref().map_or(sha.as_str(), |at| at.id.as_str());
+                owned = inside.and_then(|inside| inside.judged(&answers, id));
+                owned.as_ref().map_err(String::as_str)
+            }
+            (None, None) => Err("no contract to judge by"),
+        };
+        match receipt_for(at.as_ref().map_err(String::as_str), judged) {
             Ok((receipt, bytes)) => {
                 eprintln!(
                     "sykli hook {HOOK}: {short} to {}: {} is a passing run of its tree",
@@ -512,9 +640,10 @@ pub(crate) fn pre_push(
                     "sykli hook {HOOK}: refusing to push {short} to {}: {reason}",
                     update.remote_ref
                 );
+                let drifted = judged.as_ref().is_ok_and(|judged| judged.drifted());
                 eprintln!(
                     "sykli hook {HOOK}: {}",
-                    next_step(&contract, &update.local_sha, short)
+                    next_step(&contract, drifted, outside, short)
                 );
                 return ExitCode::from(REFUSED);
             }
@@ -526,7 +655,7 @@ pub(crate) fn pre_push(
     // indistinguishably, so this is evidence for the commit, not proof that
     // the commit reached the remote.
     for (short, bytes) in accepted {
-        match keep_evidence(&bytes) {
+        match keep_evidence(&repository.common_dir, &bytes) {
             Ok(kept) => eprintln!(
                 "sykli hook {HOOK}: kept {} as evidence for {short}",
                 kept.display()
@@ -550,13 +679,9 @@ pub(crate) fn pre_push(
 /// Keeping a receipt again makes it the newest. Nothing is written through a
 /// symbolic link. The directory confers no trust: whoever reads a receipt
 /// from it must run `verify --commit` on it.
-fn keep_evidence(bytes: &[u8]) -> Result<PathBuf, String> {
+fn keep_evidence(common_dir: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     let error = |what: &Path, error: std::io::Error| format!("{}: {error}", what.display());
-    let mut directory = PathBuf::from(git(&[
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-common-dir",
-    ])?);
+    let mut directory = common_dir.to_path_buf();
     for part in ["sykli", "receipts"] {
         directory.push(part);
         ensure_directory(&directory, |path| std::fs::create_dir(path))?;

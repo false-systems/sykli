@@ -24,12 +24,14 @@
         "src/github.rs",
         "src/inspect.rs",
         "src/hook.rs",
+        "src/repo.rs",
         "tests/assess.rs",
         "tests/assess_portable.rs",
         "examples/ci_shadow.rs",
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
-        "tests/external.rs"
+        "tests/external.rs",
+        "tests/git_calls.rs"
       ]
     },
     {
@@ -77,12 +79,14 @@
         "src/github.rs",
         "src/inspect.rs",
         "src/hook.rs",
+        "src/repo.rs",
         "tests/assess.rs",
         "tests/assess_portable.rs",
         "examples/ci_shadow.rs",
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
-        "tests/external.rs"
+        "tests/external.rs",
+        "tests/git_calls.rs"
       ]
     },
     {
@@ -112,6 +116,7 @@
         "src/github.rs",
         "src/inspect.rs",
         "src/hook.rs",
+        "src/repo.rs",
         "tests/assess.rs",
         "tests/fixtures/github/pr25/commit.json",
         "tests/fixtures/github/pr25/pull.json",
@@ -133,6 +138,7 @@
         "tests/ci_shadow.rs",
         "tests/boundary.rs",
         "tests/external.rs",
+        "tests/git_calls.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
