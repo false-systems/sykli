@@ -358,12 +358,50 @@ pub fn run(
         );
         return ExitCode::from(1);
     }
+    write(path, force, lock, write_lock, Place::Repository)
+}
+
+/// `sykli init --contract PATH` for a contract outside the repository: the
+/// current directory is already the repository root, the tasks are inferred
+/// from it as ever, and the contract and lock go to PATH's directory, made if
+/// it is missing. Nothing in the repository is touched, so no `.sykli/` and
+/// no `.gitignore` entry: whoever keeps their contract outside the
+/// repository keeps sykli's state out of its history some other way, such as
+/// a global git ignore.
+pub fn run_outside(
+    path: &Path,
+    force: bool,
+    lock: bool,
+    write_lock: &dyn Fn(&Path) -> Result<PathBuf, String>,
+) -> ExitCode {
+    write(path, force, lock, write_lock, Place::Outside)
+}
+
+/// Where the contract goes, relative to the repository it is inferred from.
+#[derive(PartialEq)]
+enum Place {
+    Repository,
+    Outside,
+}
+
+/// Detect, refuse to clobber, write, lock.
+fn write(
+    path: &Path,
+    force: bool,
+    lock: bool,
+    write_lock: &dyn Fn(&Path) -> Result<PathBuf, String>,
+    place: Place,
+) -> ExitCode {
     let root = PathBuf::from(".");
     let detected = detect(&root);
     if detected.tasks.is_empty() {
         eprintln!(
-            "nothing to declare: looked for {} in the current directory",
-            detected.looked_for.join(", ")
+            "nothing to declare: looked for {} in {}",
+            detected.looked_for.join(", "),
+            match place {
+                Place::Repository => "the current directory",
+                Place::Outside => "the repository root",
+            }
         );
         for note in &detected.notes {
             eprintln!("  {note}");
@@ -395,27 +433,19 @@ pub fn run(
         print!("{text}");
         return ExitCode::from(2);
     }
+    if place == Place::Outside {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!("error: cannot create {}: {error}", parent.display());
+            return ExitCode::from(1);
+        }
+    }
     if let Err(error) = fs::write(path, &text) {
         eprintln!("error: cannot write {}: {error}", path.display());
         return ExitCode::from(1);
     }
-    // Receipts and caches live under .sykli/, which never counts as part of
-    // the tree a receipt describes; make the directory and keep it out of git
-    // so `sykli run --json > .sykli/receipt.json` verifies clean.
-    let _ = fs::create_dir_all(".sykli");
-    let ignore = fs::read_to_string(".gitignore").unwrap_or_default();
-    if !ignore
-        .lines()
-        .any(|line| matches!(line.trim(), ".sykli" | ".sykli/" | "/.sykli" | "/.sykli/"))
-    {
-        let mut ignore = ignore;
-        if !ignore.is_empty() && !ignore.ends_with('\n') {
-            ignore.push('\n');
-        }
-        ignore.push_str(".sykli/\n");
-        if let Err(error) = fs::write(".gitignore", ignore) {
-            eprintln!("note: could not add .sykli/ to .gitignore: {error}");
-        }
+    if place == Place::Repository {
+        keep_state_out_of_git();
     }
     if lock {
         match write_lock(path) {
@@ -436,4 +466,25 @@ pub fn run(
         );
     }
     ExitCode::SUCCESS
+}
+
+fn keep_state_out_of_git() {
+    // Receipts and caches live under .sykli/, which never counts as part of
+    // the tree a receipt describes; make the directory and keep it out of git
+    // so `sykli run --json > .sykli/receipt.json` verifies clean.
+    let _ = fs::create_dir_all(".sykli");
+    let ignore = fs::read_to_string(".gitignore").unwrap_or_default();
+    if !ignore
+        .lines()
+        .any(|line| matches!(line.trim(), ".sykli" | ".sykli/" | "/.sykli" | "/.sykli/"))
+    {
+        let mut ignore = ignore;
+        if !ignore.is_empty() && !ignore.ends_with('\n') {
+            ignore.push('\n');
+        }
+        ignore.push_str(".sykli/\n");
+        if let Err(error) = fs::write(".gitignore", ignore) {
+            eprintln!("note: could not add .sykli/ to .gitignore: {error}");
+        }
+    }
 }

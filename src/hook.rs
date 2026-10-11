@@ -2,7 +2,7 @@
 //! merely the files on disk, and they only refuse: nothing is staged, stashed
 //! or rewritten on the operator's behalf.
 
-use crate::{commit_tree_oid, git, load, refusal, resolve_contract, run, verify};
+use crate::{commit_tree_oid, git, load_pinned, refusal, resolve_contract, run, verify};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -84,19 +84,41 @@ fn disk_differs_from_commit() -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// A contract named with `--contract` (already absolute), which must exist:
+/// a gate that was asked for and is missing cannot pass for one.
+fn named_contract(hook: &str, contract: &Path) -> Result<PathBuf, ExitCode> {
+    if contract.is_file() {
+        return Ok(contract.to_path_buf());
+    }
+    eprintln!(
+        "sykli hook {hook}: cannot evaluate: the contract {} does not exist",
+        contract.display()
+    );
+    Err(ExitCode::from(CANNOT_EVALUATE))
+}
+
 /// `sykli hook pre-commit`: the graph must pass on exactly the staged tree.
-pub(crate) fn pre_commit() -> ExitCode {
+/// `contract`, when given, is run instead of the repository's own, such as
+/// a contract kept outside the repository.
+pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
     const HOOK: &str = "pre-commit";
     let root = match enter_repository(HOOK) {
         Ok(root) => root,
         Err(code) => return code,
     };
-    let Some(contract) = root_contract() else {
-        eprintln!(
-            "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; nothing to check",
-            root.display()
-        );
-        return ExitCode::SUCCESS;
+    let contract = match contract.map(|contract| named_contract(HOOK, contract)) {
+        Some(Ok(contract)) => contract,
+        Some(Err(code)) => return code,
+        None => match root_contract() {
+            Some(contract) => contract,
+            None => {
+                eprintln!(
+                    "sykli hook {HOOK}: no sykli.json or sykli.rs in {}; nothing to check",
+                    root.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+        },
     };
     if git(&["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         eprintln!(
@@ -117,8 +139,8 @@ pub(crate) fn pre_commit() -> ExitCode {
         Ok(Some(reason)) => return refuse(reason),
         Err(error) => return cannot(error),
     }
-    let receipt = match load(&contract)
-        .and_then(|(loaded, levels, hash)| run(&loaded, &levels, hash, false))
+    let receipt = match load_pinned(&contract)
+        .and_then(|((loaded, levels, hash), lock)| run(&loaded, &levels, hash, lock, false))
     {
         Ok((true, receipt)) => receipt,
         Ok((false, receipt)) => {
@@ -191,26 +213,63 @@ fn absent(sha: &str) -> bool {
     sha.bytes().all(|byte| byte == b'0')
 }
 
-/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, and
-/// `true`; else `main` and `master`, and `false`.
-fn default_branches(remote: Option<&str>) -> (Vec<String>, bool) {
-    remote
-        .and_then(|remote| {
-            git(&[
-                "symbolic-ref",
-                "--quiet",
-                &format!("refs/remotes/{remote}/HEAD"),
-            ])
-            .ok()?
-            .strip_prefix(&format!("refs/remotes/{remote}/"))
-            .map(|branch| (vec![format!("refs/heads/{branch}")], true))
+/// How the gated branches were chosen.
+enum Chosen {
+    /// Named with `--branch`, or the default branch `refs/remotes/REMOTE/HEAD` names.
+    Known,
+    /// No `refs/remotes/REMOTE/HEAD`: `main` and `master` are gated.
+    Unset,
+    /// `refs/remotes/REMOTE/HEAD` names this ref, which does not exist (the
+    /// default branch was renamed or deleted, then pruned): gating it would
+    /// gate nothing, so `main` and `master` are gated instead.
+    Stale(String),
+}
+
+/// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, when
+/// the ref it names exists; else `main` and `master`.
+fn default_branches(remote: Option<&str>) -> (Vec<String>, Chosen) {
+    let fallback = || vec!["refs/heads/main".into(), "refs/heads/master".into()];
+    let Some(remote) = remote else {
+        return (fallback(), Chosen::Unset);
+    };
+    let Ok(target) = git(&[
+        "symbolic-ref",
+        "--quiet",
+        &format!("refs/remotes/{remote}/HEAD"),
+    ]) else {
+        return (fallback(), Chosen::Unset);
+    };
+    let Some(branch) = target.strip_prefix(&format!("refs/remotes/{remote}/")) else {
+        return (fallback(), Chosen::Unset);
+    };
+    if git(&["rev-parse", "--verify", "--quiet", &target]).is_err() {
+        return (fallback(), Chosen::Stale(target));
+    }
+    (vec![format!("refs/heads/{branch}")], Chosen::Known)
+}
+
+/// The refs `--branch` names: exactly `refs/heads/BRANCH` for each. A value
+/// that is not a branch name would gate nothing, so it is an error instead.
+/// `HEAD` and a name starting with `-` pass `git check-ref-format` as refs,
+/// but no branch can have them (`git branch` refuses both).
+fn named_branches(branches: &[String]) -> Result<Vec<String>, String> {
+    branches
+        .iter()
+        .map(|branch| {
+            let name = format!("refs/heads/{branch}");
+            if branch.starts_with("refs/")
+                || branch == "HEAD"
+                || branch.starts_with('-')
+                || git(&["check-ref-format", &name]).is_err()
+            {
+                return Err(format!(
+                    "--branch {branch:?} is not a branch name; name it as `git push REMOTE NAME` \
+                     would (main, not refs/heads/main)"
+                ));
+            }
+            Ok(name)
         })
-        .unwrap_or_else(|| {
-            (
-                vec!["refs/heads/main".into(), "refs/heads/master".into()],
-                false,
-            )
-        })
+        .collect()
 }
 
 /// The root contract a commit carries, as the hook gates on it: `sykli.json`,
@@ -300,16 +359,64 @@ fn receipt_for(contract: &Path, commit: &str) -> Result<(PathBuf, Vec<u8>), Stri
     })
 }
 
+/// What would let a refused push through. While the contract differs from
+/// its own lock no run can pass, so that says to re-lock; otherwise, to run.
+fn next_step(contract: &Path, commit: &str, short: &str) -> String {
+    let contract_path = contract.display();
+    if !crate::contract_lock_drift(contract, commit).unwrap_or(false) {
+        return format!(
+            "to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {contract_path}"
+        );
+    }
+    if crate::outside_repository(contract).is_some() {
+        format!(
+            "the contract differs from its lock; to accept the edit, run: sykli lock {contract_path}, \
+             then check out {short} with nothing uncommitted and run: sykli run {contract_path}"
+        )
+    } else {
+        format!(
+            "the contract in {short} differs from its lock; run: sykli lock {contract_path}, \
+             commit the lock, and run: sykli run {contract_path} on that commit"
+        )
+    }
+}
+
 /// `sykli hook pre-push`: a push that moves the default branch needs a clean,
 /// passing receipt of exactly the commit it pushes. Whether a push is gated is
 /// decided from the commits, never from the working tree: the pushed commit's
 /// contract gates it, and a commit that drops the contract the branch had is
 /// refused, so taking the gate off takes an explicit `--no-verify`.
-pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
+///
+/// With `contract`, that contract gates every push to a gated branch,
+/// whatever the commits carry: a person's own gate, kept outside the
+/// repository, is the same for every commit, and `verify --commit` reads it
+/// from its file.
+///
+/// With `branches`, the gated branches are exactly those: whoever installs
+/// the hook knows which branch they protect, while `refs/remotes/REMOTE/HEAD`
+/// is a guess that a rename, an unset HEAD or a protected non-default branch
+/// gets wrong.
+pub(crate) fn pre_push(
+    remote: Option<&str>,
+    contract: Option<&Path>,
+    branches: &[String],
+) -> ExitCode {
     const HOOK: &str = "pre-push";
     if let Err(code) = enter_repository(HOOK) {
         return code;
     }
+    let gate = match contract.map(|contract| named_contract(HOOK, contract)) {
+        Some(Ok(contract)) => Some(contract),
+        Some(Err(code)) => return code,
+        None => None,
+    };
+    let named = match named_branches(branches) {
+        Ok(named) => named,
+        Err(error) => {
+            eprintln!("sykli hook {HOOK}: cannot evaluate: {error}");
+            return ExitCode::from(CANNOT_EVALUATE);
+        }
+    };
     let mut input = String::new();
     let parsed = std::io::stdin()
         .read_to_string(&mut input)
@@ -322,20 +429,36 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             return ExitCode::from(CANNOT_EVALUATE);
         }
     };
-    let (defaults, known) = default_branches(remote);
+    let (defaults, chosen) = if named.is_empty() {
+        default_branches(remote)
+    } else {
+        (named, Chosen::Known)
+    };
     let pushed = updates
         .iter()
         .filter(|update| !absent(&update.local_sha))
         .collect::<Vec<_>>();
-    if !known
-        && pushed.iter().any(|update| {
-            update.remote_ref.starts_with("refs/heads/") && !defaults.contains(&update.remote_ref)
-        })
-    {
-        let remote = remote.unwrap_or("REMOTE");
-        eprintln!(
-            "sykli hook {HOOK}: {remote}'s default branch is unknown here, so only main and master are gated; name it with: git remote set-head {remote} --auto"
-        );
+    let named_remote = remote.unwrap_or("REMOTE");
+    match &chosen {
+        Chosen::Known => {}
+        // Always said: what is gated changed without anyone choosing it.
+        Chosen::Stale(target) => eprintln!(
+            "sykli hook {HOOK}: refs/remotes/{named_remote}/HEAD names {target}, which does not exist \
+             (the default branch was renamed or removed), so only main and master are gated; \
+             name the default branch with: git remote set-head {named_remote} --auto, \
+             or name the gated branches with --branch"
+        ),
+        Chosen::Unset => {
+            if pushed.iter().any(|update| {
+                update.remote_ref.starts_with("refs/heads/")
+                    && !defaults.contains(&update.remote_ref)
+            }) {
+                eprintln!(
+                    "sykli hook {HOOK}: {named_remote}'s default branch is unknown here, so only main and master are gated; \
+                     name it with: git remote set-head {named_remote} --auto, or name the gated branches with --branch"
+                );
+            }
+        }
     }
     let mut accepted = Vec::new();
     for update in pushed
@@ -343,7 +466,7 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
         .filter(|update| defaults.contains(&update.remote_ref))
     {
         let short = &update.local_sha[..update.local_sha.len().min(12)];
-        let Some(contract) = contract_in(&update.local_sha) else {
+        let Some(contract) = gate.clone().or_else(|| contract_in(&update.local_sha)) else {
             let before = remote_tip(update, remote);
             if let Some(tip) = before.filter(|tip| contract_in(tip).is_some()) {
                 eprintln!(
@@ -360,6 +483,21 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
             );
             continue;
         };
+        // A named contract inside the worktree is read from the commit, as a
+        // committed one is; one the commit does not carry can never verify.
+        if gate.is_some()
+            && crate::outside_repository(&contract).is_none()
+            && !crate::carried_by(&update.local_sha, &contract)
+        {
+            eprintln!(
+                "sykli hook {HOOK}: refusing to push {short} to {}: the contract {} is inside this \
+                 worktree, but {short} does not carry it, so `verify --commit` cannot read it and no \
+                 receipt can pass; keep the contract outside the worktree, or commit it",
+                update.remote_ref,
+                contract.display()
+            );
+            return ExitCode::from(REFUSED);
+        }
         match receipt_for(&contract, &update.local_sha) {
             Ok((receipt, bytes)) => {
                 eprintln!(
@@ -375,8 +513,8 @@ pub(crate) fn pre_push(remote: Option<&str>) -> ExitCode {
                     update.remote_ref
                 );
                 eprintln!(
-                    "sykli hook {HOOK}: to produce a receipt, check out {short} with nothing uncommitted and run: sykli run {}",
-                    contract.display()
+                    "sykli hook {HOOK}: {}",
+                    next_step(&contract, &update.local_sha, short)
                 );
                 return ExitCode::from(REFUSED);
             }

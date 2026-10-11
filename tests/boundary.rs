@@ -1317,3 +1317,155 @@ fn a_hooked_run_and_a_manual_run_of_the_same_tree_share_the_cache() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+/// `sykli hook pre-push FLAGS... origin URL`, fed git's pre-push `lines`.
+fn pre_push_flags(root: &Path, flags: &[&str], lines: &[String]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["hook", "pre-push"])
+        .args(flags)
+        .args(["origin", "/nowhere/origin.git"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+/// The caller knows which branch it protects; `refs/remotes/origin/HEAD` is
+/// only a guess, and it can name another branch than the caller's.
+#[test]
+fn pre_push_branch_gates_exactly_the_named_branches() {
+    let root = repo("pushnamed", READS_FILE);
+    // A commit with no receipt.
+    fs::write(root.join("file.txt"), "one\n\n").unwrap();
+    let head = commit(&root, "no receipt");
+    // origin/HEAD names develop, but main is the branch to protect.
+    git(&root, &["update-ref", "refs/remotes/origin/develop", &head]);
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/develop",
+        ],
+    );
+    let push = |flags: &[&str], remote_ref: &str| {
+        pre_push_flags(&root, flags, &[update(&head, remote_ref)])
+    };
+    // The guess gates develop and lets main through.
+    assert_eq!(push(&[], "refs/heads/main").status.code(), Some(0));
+    // Named, main is gated whatever origin/HEAD says ...
+    let out = push(&["--branch", "main"], "refs/heads/main");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("refusing to push"));
+    // ... and nothing else is, with no guess and no note about one.
+    for other in ["refs/heads/develop", "refs/heads/feature"] {
+        let out = push(&["--branch", "main"], other);
+        assert_eq!(out.status.code(), Some(0), "{other}: {}", text(&out.stderr));
+        assert!(
+            !text(&out.stderr).contains("set-head"),
+            "{}",
+            text(&out.stderr)
+        );
+    }
+    // Two names gate both.
+    let both = ["--branch", "main", "--branch", "trunk2"];
+    for gated in ["refs/heads/main", "refs/heads/trunk2"] {
+        let out = push(&both, gated);
+        assert_eq!(out.status.code(), Some(1), "{gated}: {}", text(&out.stderr));
+    }
+    assert_eq!(push(&both, "refs/heads/feature").status.code(), Some(0));
+    // A deletion and a tag pass, as they always have.
+    let delete = format!("(delete) {ZEROS} refs/heads/main {head}");
+    let tag = format!("refs/tags/v1 {head} refs/tags/v1 {ZEROS}");
+    for line in [delete, tag.clone()] {
+        let out = pre_push_flags(&root, &both, std::slice::from_ref(&line));
+        assert_eq!(out.status.code(), Some(0), "{line}: {}", text(&out.stderr));
+    }
+    let out = pre_push_flags(&root, &["--branch", "v1"], &[tag]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // With a receipt of the commit, the named branch takes it.
+    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
+    let out = push(&both, "refs/heads/main");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // A value that is not a branch name cannot gate anything: fail closed.
+    // `HEAD` and a leading `-` pass `git check-ref-format` as refs, yet no
+    // branch can have such a name; `git branch` refuses both too.
+    for bad in [
+        "refs/heads/main",
+        "",
+        "two words",
+        "main..x",
+        "HEAD",
+        "-dash",
+    ] {
+        let out = push(&[&format!("--branch={bad}")], "refs/heads/main");
+        assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stderr).contains("is not a branch name"),
+            "{bad:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// After the host renames the default branch and a fetch prunes the old
+/// one, origin/HEAD still names it. Gating a branch that is gone would gate
+/// nothing, so the hook takes the default as unknown and says so.
+#[test]
+fn pre_push_takes_an_origin_head_naming_a_missing_ref_as_unknown() {
+    let root = repo("pushstale", READS_FILE);
+    fs::write(root.join("file.txt"), "one\n\n").unwrap();
+    let head = commit(&root, "no receipt");
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        ],
+    );
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    for said in [
+        "refs/remotes/origin/master, which does not exist",
+        "git remote set-head origin --auto",
+        "--branch",
+    ] {
+        assert!(message.contains(said), "{said}: {message}");
+    }
+    // Naming a ref that exists, it is the default branch again.
+    git(&root, &["update-ref", "refs/remotes/origin/master", &head]);
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("does not exist"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A commit whose contract differs from its own lock cannot pass any run;
+/// the refusal says to re-lock, not to run.
+#[test]
+fn pre_push_names_sykli_lock_when_the_commit_contract_drifted() {
+    let root = repo("pushdrift", READS_FILE);
+    fs::write(
+        root.join("sykli.json"),
+        READS_FILE.replace("= one", "= one && true"),
+    )
+    .unwrap();
+    let head = commit(&root, "edited, not locked");
+    let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let message = text(&out.stderr);
+    assert!(message.contains("sykli lock sykli.json"), "{message}");
+    fs::remove_dir_all(root).unwrap();
+}

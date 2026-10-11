@@ -29,6 +29,39 @@ remote, since the hook runs before the remote answers and also for
 whether it did. The directory keeps the newest `SYKLI_RECEIPT_BUDGET` receipts
 (default 200); keeping a receipt again makes it the newest.
 
+The contract need not be in the repository. Every command that takes one
+(`init --contract`, `run`, `lock`, `plan`, `validate`, `verify`,
+`hook pre-commit --contract`, `hook pre-push --contract`) accepts a path
+outside it, such as a person's own configuration directory. The repository is
+then the git toplevel of the current directory, never the contract's
+directory; declared paths are from that root, the lock is the `sykli.lock`
+beside the contract as it is named (beside the link, for a symbolic link;
+sykli warns when only the link's target has one), and receipts and the cache
+stay in the repository's `.sykli/`. `init --contract` touches nothing in the
+repository: it neither creates `.sykli/` (run `mkdir -p .sykli` before
+redirecting a receipt there) nor adds it to `.gitignore`. A task may depend
+only on repository files, which it declares, and tools on `PATH`: files kept
+beside an outside contract cannot be declared and are not hashed, so changing
+one leaves cached passes standing. `verify` reads such a contract and its
+lock from their files, with or without `--commit`; with `--commit` the
+commit's tree is still checked. Every receipt records `lock_digest`, the
+SHA-256 of the lock file it ran with (null without one), and for a contract
+outside the repository verify requires it to match the lock file beside the
+contract now: a receipt from another version of the contract or its lock
+exits 4. With no lock on either side they match, and the contract hash alone
+binds the receipt. The digest covers the whole lock file, one entry per
+contract in its directory, so keep one contract per directory.
+`hook pre-push --contract PATH --branch NAME REMOTE URL` gates pushes to
+exactly the named branches (repeat `--branch` for more; it also works without
+`--contract`) with that contract, whatever the pushed commits carry, and keeps
+the accepted receipts in the common git directory as above. Without
+`--branch` the hook guesses the default branch from
+`refs/remotes/REMOTE/HEAD`, else `main` and `master`, and treats a HEAD naming
+a ref that no longer exists as unknown. Inside or outside is decided on
+resolved paths, so a symbolic link in the repository to a contract elsewhere
+counts as outside; a contract inside the worktree that the pushed commit does
+not carry can never be verified, and the hook says so.
+
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
 exists; an explicit JSON path selects a different contract. Missing JSON
