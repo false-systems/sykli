@@ -379,3 +379,54 @@ fn a_count_without_a_trace_is_a_failure_not_zero() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(std::panic::catch_unwind(|| started(&missing)).is_err());
 }
+
+/// The inputs `verify --commit` recomputes come from the same single
+/// `cat-file` process: a passing receipt edited to name another commit's
+/// tree is refused for its inputs (exit 3) within the same budget, which
+/// shows the commit's input entries were read there, not skipped.
+#[test]
+fn the_inputs_check_reads_the_commit_in_the_same_process() {
+    let scratch = Scratch::new("inputs");
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let contract = contract.to_str().unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    let (out, _) = scratch.counted(&["run", contract, "--json"], None);
+    let mut receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    fs::write(scratch.repo.join("src/a.txt"), "changed\n").unwrap();
+    let other = scratch.commit("another tree");
+    let tree = scratch.git(&["rev-parse", "HEAD^{tree}"]);
+    receipt["subject"]["tree_oid"] = tree.as_str().into();
+    receipt["subject"]["head_tree_oid"] = tree.as_str().into();
+    let path = scratch.base.join("rebound.json");
+    fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let facts = scratch.facts();
+    let none: [String; 0] = [];
+    for (given, expected) in [
+        (&none[..], VERIFY_COMMIT),
+        (&facts[..], VERIFY_COMMIT_GIVEN),
+    ] {
+        let args = with(
+            &[
+                "verify",
+                path.to_str().unwrap(),
+                "--contract",
+                contract,
+                "--commit",
+                &other,
+            ],
+            given,
+        );
+        let (out, started) = scratch.counted(&args, None);
+        assert!(
+            text(&out.stderr).contains("refused: inputs"),
+            "{}",
+            text(&out.stderr)
+        );
+        within("verify --commit, rebound", (out, started), 3, expected);
+    }
+}

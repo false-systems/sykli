@@ -33,6 +33,7 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -90,6 +91,7 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -144,6 +146,7 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
         "tests/snapshot.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",

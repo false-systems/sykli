@@ -349,7 +349,7 @@ enum Command {
         1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
         3  tree or input mismatch — receipt is stale; re-run sykli\n     \
-           (with --commit: not a run of that commit's tree)\n  \
+           (with --commit: not a run of that commit's tree or declared inputs)\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock\n     \
            (with --commit: from the contract or lock in that commit;\n     \
            for a contract outside the repository: from it, or from its lock file)\n\n\
@@ -359,7 +359,16 @@ enum Command {
         A contract outside that repository is read from its file, with or without\n\
         --commit, and the receipt must have run with the sykli.lock beside it\n\
         (the receipt's lock_digest).\n\
-        On any failure the first failing check is also printed to stderr as one line.")]
+        With --commit each declared input is compared with the commit: the tree entry\n\
+        the run's snapshot had at its path (recorded in the receipt) must be the\n\
+        commit's, and the receipt's input records must hash to its inputs digest.\n\
+        On any failure the first failing check is also printed to stderr as one line.\n\n\
+        A verified receipt is consistent, not proven. Verify establishes a valid schema,\n\
+        records consistent with each other and the contract, the contract's identity,\n\
+        and the source and inputs, recomputed from the tree or commit. It does not\n\
+        establish where the receipt came from, who produced it, or that its tasks were\n\
+        observed running: receipts are unsigned, and a receipt edited consistently (an\n\
+        outcome rewritten to passed, or digests recomputed for another commit) verifies.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
@@ -369,7 +378,8 @@ enum Command {
         /// Judge the receipt as evidence for this commit instead of the checkout:
         /// the contract and lock are read from REV (from their files when the
         /// contract is outside the repository), the receipt's tree must be
-        /// REV^{tree}, and every task passed or cached (the run need not be clean)
+        /// REV^{tree}, every declared input must be what REV has at its path, and
+        /// every task passed or cached (the run need not be clean)
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
     },
@@ -2048,6 +2058,10 @@ struct Subject {
     /// does not show. Written only when true, so other receipts are unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     submodules_modified: bool,
+    /// The records `inputs_digest` was computed from, read once; each task's
+    /// go into its own receipt record.
+    #[serde(skip)]
+    inputs: InputRecords,
 }
 
 #[derive(Serialize)]
@@ -2086,6 +2100,12 @@ struct TaskReceipt {
     provenance: Option<String>,
     #[serde(skip)]
     cache_key: Option<String>,
+    /// Each declared input as the run read it, recorded so `verify --commit`
+    /// can compare every input with the commit; together they hash to the
+    /// subject's `inputs_digest`. Graph runs only; absent from receipts
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 #[derive(Serialize)]
@@ -2287,6 +2307,12 @@ fn run(
     } else {
         Outcome::Failed
     };
+    // Every task, executed or reused, records the inputs as this run read
+    // them, the same records the subject's inputs digest covers.
+    let mut tasks = tasks;
+    for record in &mut tasks {
+        record.inputs = subject.inputs.get(&record.name).cloned();
+    }
     let receipt = Receipt {
         schema: "sykli-receipt.v1",
         contract_hash,
@@ -2667,6 +2693,7 @@ fn run_task(
         error,
         provenance: None,
         cache_key: None,
+        inputs: None,
     }
 }
 
@@ -2755,24 +2782,87 @@ fn empty_task_receipt(
         error: Some(error.into()),
         provenance: None,
         cache_key: None,
+        inputs: None,
     }
 }
 
 fn input_digest(path: &Path) -> Result<String, String> {
+    input_record(path)?.digest()
+}
+
+/// What a run read of one declared input: the SHA-256 of its bytes, and the
+/// execute bits (`mode & 0o111`) on platforms that have them. Its digest
+/// (`sykli-input.v2`) is the input's part of cache keys and of the inputs
+/// digest; the record itself goes into the receipt, so `verify --commit` can
+/// compare each input with the commit.
+#[derive(Clone, Serialize, Deserialize)]
+struct InputRecord {
+    sha256: String,
+    /// Absent where files have no execute bits (Windows); the digest then
+    /// uses 0, as it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
+    /// The tree entry the run's snapshot has at this input's path, `MODE
+    /// ID` as git writes a tree: git's view of the bytes and execute bit the
+    /// run read, after its line-ending and other filters. Absent when the
+    /// path is not in that tree (an ignored or generated file). Not part of
+    /// the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object: Option<String>,
+}
+
+impl InputRecord {
+    fn digest(&self) -> Result<String, String> {
+        let bytes = serde_json::to_vec(&("sykli-input.v2", &self.sha256, self.mode.unwrap_or(0)))
+            .map_err(|error| error.to_string())?;
+        Ok(sha256(&bytes))
+    }
+}
+
+fn input_record(path: &Path) -> Result<InputRecord, String> {
     #[cfg(unix)]
-    let executable_mode = {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .map_err(|error| error.to_string())?
-            .permissions()
-            .mode()
-            & 0o111
+        Some(
+            fs::metadata(path)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o111,
+        )
     };
     #[cfg(not(unix))]
-    let executable_mode = 0_u32;
-    let bytes = serde_json::to_vec(&("sykli-input.v2", sha256_file(path)?, executable_mode))
-        .map_err(|error| error.to_string())?;
-    Ok(sha256(&bytes))
+    let mode = None;
+    Ok(InputRecord {
+        sha256: sha256_file(path)?,
+        mode,
+        object: None,
+    })
+}
+
+/// Every task's declared inputs as the run reads them: each input, as
+/// declared, with its record, or None when it cannot be read (missing).
+type InputRecords = BTreeMap<String, BTreeMap<String, Option<InputRecord>>>;
+
+/// The digest a receipt's subject records over all declared inputs: each
+/// task's inputs and their `sykli-input.v2` digests (null when missing).
+fn inputs_digest_of(records: &InputRecords) -> Result<String, String> {
+    let digests = records
+        .iter()
+        .map(|(task, inputs)| {
+            let inputs = inputs
+                .iter()
+                .map(|(input, record)| {
+                    let digest = record.as_ref().map(InputRecord::digest).transpose()?;
+                    Ok((input, digest))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
+            Ok((task, inputs))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    serde_json::to_vec(&digests)
+        .map(|bytes| sha256(&bytes))
+        .map_err(|error| error.to_string())
 }
 
 /// A task's content address: its declaration, its declared inputs' digests,
@@ -2843,23 +2933,40 @@ fn inherited_digests(task: &Task) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn declared_inputs_digest(contract: &Contract) -> Result<String, String> {
-    let inputs: BTreeMap<_, _> = contract
+/// Every task's declared inputs as the run reads them, each with the tree
+/// entry the run's snapshot has at its path (`entries`, by path from the top
+/// level, as `input_paths` gives them in `declared`).
+fn declared_input_records(
+    contract: &Contract,
+    declared: &[(String, String, String)],
+    entries: &HashMap<String, String>,
+) -> InputRecords {
+    let paths = declared
+        .iter()
+        .map(|(task, input, path)| ((task.as_str(), input.as_str()), path))
+        .collect::<HashMap<_, _>>();
+    contract
         .tasks
         .iter()
         .map(|task| {
             let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
-            let files: BTreeMap<_, _> = task
+            let files = task
                 .inputs
                 .iter()
-                .map(|input| (input, input_digest(&root.join(input)).ok()))
+                .map(|input| {
+                    let record = input_record(&root.join(input)).ok().map(|mut record| {
+                        record.object = paths
+                            .get(&(task.name.as_str(), input.as_str()))
+                            .and_then(|path| entries.get(*path))
+                            .cloned();
+                        record
+                    });
+                    (input.clone(), record)
+                })
                 .collect();
-            (&task.name, files)
+            (task.name.clone(), files)
         })
-        .collect();
-    serde_json::to_vec(&inputs)
-        .map(|bytes| sha256(&bytes))
-        .map_err(|error| error.to_string())
+        .collect()
 }
 
 impl LocalCache {
@@ -3153,6 +3260,7 @@ impl Cache for LocalCache {
             error: None,
             provenance: Some(entry.receipt),
             cache_key: None,
+            inputs: None,
         })
     }
 
@@ -3387,8 +3495,14 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
     let repository = repo::repository().map_err(|_| {
         "not inside a git repository; sykli binds every receipt to a git tree".to_string()
     })?;
-    let (tree_oid, head_tree_oid) = snapshot(repository)?;
-    let inputs_digest = declared_inputs_digest(contract)?;
+    let declared = input_paths(contract)?;
+    let paths = declared
+        .iter()
+        .map(|(_, _, path)| path.clone())
+        .collect::<Vec<_>>();
+    let (tree_oid, head_tree_oid, entries) = snapshot(repository, &paths)?;
+    let inputs = declared_input_records(contract, &declared, &entries);
+    let inputs_digest = inputs_digest_of(&inputs)?;
     let submodules_modified = submodules_modified(&repository.root)?;
     let dirty = tree_oid != head_tree_oid || submodules_modified;
     Ok(Subject {
@@ -3398,6 +3512,7 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
         head_tree_oid,
         dirty,
         submodules_modified,
+        inputs,
     })
 }
 
@@ -3450,13 +3565,29 @@ fn submodules_modified(repository: &Path) -> Result<bool, String> {
 /// HEAD; `add --all` then stages every change and deletion except under
 /// the top-level `.sykli`, and git writes the tree: three more processes, built once per
 /// snapshot. A HEAD that tracks `.sykli` costs a removal and one more write.
-fn snapshot(repository: &repo::Repository) -> Result<(String, String), String> {
+///
+/// The same `cat-file` then reads the tree entry of each of `paths` (the
+/// declared inputs) in the tree just written, from the temporary object
+/// directory: git's view of each input the run reads, its mode and blob id,
+/// for the receipt to record and `verify --commit` to compare with a
+/// commit. An input with no entry is not in the tree (ignored, generated).
+fn snapshot(
+    repository: &repo::Repository,
+    paths: &[String],
+) -> Result<(String, String, HashMap<String, String>), String> {
     let root = &repository.root;
-    let head = repository.cat(&["HEAD^{tree}".into(), "HEAD:.sykli".into()])?;
+    let state = TemporaryGitState::new(&object_directory_of(repository)?)?;
+    let mut session = repository.session(vec![
+        (
+            "GIT_OBJECT_DIRECTORY",
+            state.objects.clone().into_os_string(),
+        ),
+        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", state.alternates.clone()),
+    ]);
+    let head = session.ask(&["HEAD^{tree}".into(), "HEAD:.sykli".into()])?;
     let Some(head_tree) = &head[0] else {
         return Err("repository has no commits; commit once before running sykli".into());
     };
-    let state = TemporaryGitState::new(&object_directory_of(repository)?)?;
     git_with_temporary_state(root, &state, &["read-tree", "HEAD"])?;
     let head_tree = match head[1] {
         None => head_tree.id.clone(),
@@ -3481,7 +3612,10 @@ fn snapshot(repository: &repo::Repository) -> Result<(String, String), String> {
         ],
     )?;
     let tree = git_with_temporary_state(root, &state, &["write-tree"])?;
-    Ok((tree, head_tree))
+    let answers = ask_in(&mut session, entry_names(&tree, paths))?;
+    session.finish()?;
+    let entries = entries_from(&tree, paths, &answers);
+    Ok((tree, head_tree, entries))
 }
 
 /// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
@@ -3648,6 +3782,9 @@ struct TaskSummary {
     importable: bool,
     exit_code: Option<i32>,
     error: Option<String>,
+    /// Each declared input as the run read it; absent from older receipts.
+    #[serde(default)]
+    inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 /// A receipt's records must agree with themselves and with the contract they
@@ -3763,6 +3900,12 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
     if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
         return Ok(checks);
     }
+    // A receipt's own input records must hash to its inputs digest, the
+    // one the checkout's files are compared with below.
+    if let Some(check) = records_check(&receipt)? {
+        checks.push(check);
+        return Ok(checks);
+    }
     let subject = subject(&contract)?;
     checks.extend([
         Check::equals(
@@ -3833,20 +3976,23 @@ impl Judged {
 pub(crate) struct CommitAt {
     id: String,
     tree: String,
+    /// The contract's declared inputs as this commit stores them, read in a
+    /// second round once the contract is known.
+    inputs: Option<InputsAt>,
 }
 
 /// What one `git cat-file --batch` said about each name asked of it.
 pub(crate) type Answers = HashMap<String, Option<repo::Object>>;
 
-/// Ask every name once, in one process, and keep the answers by name.
-pub(crate) fn ask(repository: &repo::Repository, names: Vec<String>) -> Result<Answers, String> {
-    let mut unique = Vec::new();
-    for name in names {
-        if !unique.contains(&name) {
-            unique.push(name);
-        }
-    }
-    let answers = repository.cat(&unique)?;
+/// Ask every name once, as one round of a session that may be asked again,
+/// and keep the answers by name.
+pub(crate) fn ask_in(session: &mut repo::Session, names: Vec<String>) -> Result<Answers, String> {
+    let mut seen = HashSet::new();
+    let unique = names
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect::<Vec<_>>();
+    let answers = session.ask(&unique)?;
     Ok(unique.into_iter().zip(answers).collect())
 }
 
@@ -3880,7 +4026,346 @@ pub(crate) fn commit_from(rev: &str, answers: &Answers) -> Result<CommitAt, Stri
     Ok(CommitAt {
         id: commit.id.clone(),
         tree,
+        inputs: None,
     })
+}
+
+/// Every task's declared inputs as one commit stores them, read from git,
+/// never from the receipt being judged: each input's path from the top
+/// level, and its tree entry there (`MODE ID`, as git writes a tree), or
+/// None when the commit has nothing at that path.
+pub(crate) struct InputsAt {
+    tasks: BTreeMap<String, BTreeMap<String, (String, Option<String>)>>,
+    /// The SHA-256 of each regular file's bytes as stored, by object id, read
+    /// only to recompute an older receipt's inputs digest.
+    contents: std::cell::RefCell<Option<HashMap<String, String>>>,
+}
+
+/// Each declared input of `contract`: its task, the input as declared, and
+/// its path from the top level, resolved as `run` resolves it (from the
+/// current directory, through the task's workdir).
+fn input_paths(contract: &Contract) -> Result<Vec<(String, String, String)>, String> {
+    let repository = repo::repository()?;
+    let mut paths = Vec::new();
+    for task in &contract.tasks {
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        for input in &task.inputs {
+            let path = path_in_repository(repository, &root.join(input))?;
+            paths.push((task.name.clone(), input.clone(), path));
+        }
+    }
+    Ok(paths)
+}
+
+/// The name of the tree that holds `path` in `tree_ish`.
+fn parent_name(tree_ish: &str, path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((parent, _)) => format!("{tree_ish}:{parent}"),
+        None => format!("{tree_ish}^{{tree}}"),
+    }
+}
+
+/// The names to ask for the tree entries of `paths` in `tree_ish`: the
+/// trees that hold them.
+fn entry_names(tree_ish: &str, paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| parent_name(tree_ish, path))
+        .collect()
+}
+
+/// The tree entry of each of `paths` in `tree_ish`, from the answers to
+/// `entry_names`: `MODE ID`, or absent when there is nothing at that path.
+fn entries_from(tree_ish: &str, paths: &[String], answers: &Answers) -> HashMap<String, String> {
+    let mut entries = HashMap::new();
+    for path in paths {
+        let Some(parent) = answer(answers, &parent_name(tree_ish, path)) else {
+            continue;
+        };
+        if parent.kind != "tree" {
+            continue;
+        }
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let id_bytes = parent.id.len() / 2;
+        if let Some((_, entry)) = repo::tree_entries(&parent.bytes, id_bytes)
+            .into_iter()
+            .find(|(name, _)| name == file_name)
+        {
+            entries.insert(path.clone(), entry);
+        }
+    }
+    entries
+}
+
+/// The names to ask about `contract`'s declared inputs in commit `rev`.
+pub(crate) fn input_names(rev: &str, contract: &Contract) -> Result<Vec<String>, String> {
+    let paths = input_paths(contract)?
+        .into_iter()
+        .map(|(_, _, path)| path)
+        .collect::<Vec<_>>();
+    Ok(entry_names(rev, &paths))
+}
+
+/// The inputs `input_names(rev, contract)` asked about, from git's answers.
+pub(crate) fn inputs_from(
+    rev: &str,
+    contract: &Contract,
+    answers: &Answers,
+) -> Result<InputsAt, String> {
+    let declared = input_paths(contract)?;
+    let paths = declared
+        .iter()
+        .map(|(_, _, path)| path.clone())
+        .collect::<Vec<_>>();
+    let entries = entries_from(rev, &paths, answers);
+    let mut tasks: BTreeMap<String, BTreeMap<String, (String, Option<String>)>> = BTreeMap::new();
+    for (task, input, path) in declared {
+        let entry = entries.get(&path).cloned();
+        tasks.entry(task).or_default().insert(input, (path, entry));
+    }
+    Ok(InputsAt {
+        tasks,
+        contents: std::cell::RefCell::new(None),
+    })
+}
+
+impl InputsAt {
+    /// The SHA-256 of the regular file `entry` names, as git stores it: one
+    /// `git cat-file --batch` for every file of the commit, on first use.
+    fn content(&self, entry: &str) -> Result<Option<String>, String> {
+        let id = entry.split(' ').nth(1).unwrap_or_default().to_string();
+        if self.contents.borrow().is_none() {
+            let ids = self
+                .tasks
+                .values()
+                .flat_map(BTreeMap::values)
+                .filter_map(|(_, entry)| entry.as_deref().and_then(|entry| entry.split(' ').nth(1)))
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut session = repo::repository()?.session(Vec::new());
+            let blobs = session.ask(&ids)?;
+            session.finish()?;
+            let contents = ids
+                .into_iter()
+                .zip(blobs)
+                .filter_map(|(id, blob)| blob.map(|blob| (id, sha256(&blob.bytes))))
+                .collect();
+            *self.contents.borrow_mut() = Some(contents);
+        }
+        Ok(self
+            .contents
+            .borrow()
+            .as_ref()
+            .and_then(|contents| contents.get(&id).cloned()))
+    }
+}
+
+/// The `inputs` stage of `verify --commit`, recomputed from the commit,
+/// never taken from the receipt. A receipt records, for each task's declared
+/// inputs, the tree entry its run's own snapshot had at that path (`MODE
+/// ID`, git's view of the bytes and execute bit it read), or none when the
+/// path was not in that tree (an ignored or generated file, whose content a
+/// commit cannot show); each must be the commit's entry at that path, and
+/// the records must hash to the receipt's own inputs digest. An older
+/// receipt, which records only that digest, must match the digest
+/// recomputed from the commit's files; when a declared input is not a
+/// regular file in the commit, it cannot be, and the receipt is refused.
+/// A mismatch is a tree-or-input mismatch: exit 3, as without `--commit`.
+fn inputs_check(
+    receipt: &ReceiptSummary,
+    contract: &Contract,
+    at: &CommitAt,
+) -> Result<Check, String> {
+    let short = &at.id[..at.id.len().min(12)];
+    let inputs = at
+        .inputs
+        .as_ref()
+        .ok_or_else(|| format!("the inputs of commit {short} were not read"))?;
+    let refuse = |expected: String, actual: String| Check {
+        name: "inputs",
+        expected,
+        actual,
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    };
+    let recorded = receipt
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.inputs
+                .as_ref()
+                .map(|inputs| (task.name.as_str(), inputs))
+        })
+        .collect::<HashMap<_, _>>();
+    if recorded.is_empty() {
+        return older_inputs_check(receipt, contract, inputs, short);
+    }
+    for task in &contract.tasks {
+        let Some(records) = recorded.get(task.name.as_str()) else {
+            if receipt.tasks.iter().any(|record| record.name == task.name) {
+                return Ok(refuse(
+                    format!("task {}'s input records", task.name),
+                    "none recorded".into(),
+                ));
+            }
+            continue;
+        };
+        let declared = task.inputs.iter().collect::<BTreeSet<_>>();
+        if records.keys().collect::<BTreeSet<_>>() != declared {
+            return Ok(refuse(
+                format!(
+                    "task {}'s inputs as the contract declares them, {declared:?}",
+                    task.name
+                ),
+                format!("{:?}", records.keys().collect::<Vec<_>>()),
+            ));
+        }
+        for (input, (path, entry)) in inputs.tasks.get(&task.name).into_iter().flatten() {
+            let ran = records
+                .get(input)
+                .and_then(Option::as_ref)
+                .and_then(|record| record.object.as_deref());
+            if ran != entry.as_deref() {
+                let show = |entry: Option<&str>| entry.unwrap_or("nothing").to_string();
+                return Ok(refuse(
+                    format!(
+                        "task {}'s input {input} as commit {short} has {path}: {}",
+                        task.name,
+                        show(entry.as_deref())
+                    ),
+                    format!("{} in the tree the task ran", show(ran)),
+                ));
+            }
+        }
+    }
+    if let Some(check) = records_check(receipt)? {
+        return Ok(check);
+    }
+    Ok(Check::equals(
+        "inputs",
+        TREE_MISMATCH,
+        receipt.subject.inputs_digest.clone(),
+        &receipt.subject.inputs_digest,
+    ))
+}
+
+/// For a receipt with per-task input records, a failing `inputs` check when
+/// they do not hash to the receipt's own inputs digest; None when they do,
+/// or when it has none (an older receipt).
+fn records_check(receipt: &ReceiptSummary) -> Result<Option<Check>, String> {
+    let records = receipt
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.inputs
+                .clone()
+                .map(|inputs| (task.name.clone(), inputs))
+        })
+        .collect::<InputRecords>();
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let digest = inputs_digest_of(&records)?;
+    Ok((digest != receipt.subject.inputs_digest).then(|| Check {
+        name: "inputs",
+        expected: format!("{digest} (the digest of the receipt's own input records)"),
+        actual: receipt.subject.inputs_digest.clone(),
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    }))
+}
+
+/// What a verified receipt establishes, and what it cannot, printed after
+/// every successful verify and stated in `verify --help`.
+const TRUST: &str = "established: a valid receipt schema, records consistent with each other, \
+     the contract's identity, and the source and inputs, recomputed from the tree or commit; \
+     not established: where the receipt came from, who produced it, or that its tasks were \
+     observed running (receipts are unsigned, and anyone who can write one can rewrite it)";
+
+/// `inputs_check` for a receipt written before per-task input records: its
+/// inputs digest is recomputed from the bytes of the commit's files. That
+/// digest folds in each file's execute bits as the run's file system had
+/// them, which a commit records only as executable or not, so the usual
+/// checkouts are tried (`0o111`, `0o110`, `0o100`, and none, as on
+/// Windows). A file a checkout converts (line endings, smudge filters) was
+/// read converted, so such a receipt cannot be shown to match and is
+/// refused; a new run records what this check needs.
+fn older_inputs_check(
+    receipt: &ReceiptSummary,
+    contract: &Contract,
+    inputs: &InputsAt,
+    short: &str,
+) -> Result<Check, String> {
+    let refuse = |expected: String, actual: String| Check {
+        name: "inputs",
+        expected,
+        actual,
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    };
+    let mut files = InputRecords::new();
+    for task in &contract.tasks {
+        let records = files.entry(task.name.clone()).or_default();
+        for (input, (path, entry)) in inputs.tasks.get(&task.name).into_iter().flatten() {
+            let regular = entry
+                .as_deref()
+                .filter(|entry| entry.starts_with("100644 ") || entry.starts_with("100755 "));
+            let Some(entry) = regular else {
+                return Ok(refuse(
+                    format!(
+                        "task {}'s input {input} as a file in commit {short} ({path}), to recompute \
+                         the inputs of a receipt that predates per-task input records",
+                        task.name
+                    ),
+                    "not a file there; run sykli again for a receipt that records its inputs"
+                        .into(),
+                ));
+            };
+            let sha256 = inputs
+                .content(entry)?
+                .ok_or_else(|| format!("commit {short} has no object {entry}"))?;
+            // The execute bits are filled in per attempt below.
+            let mode = entry.starts_with("100755 ").then_some(1);
+            records.insert(
+                input.clone(),
+                Some(InputRecord {
+                    sha256,
+                    mode,
+                    object: None,
+                }),
+            );
+        }
+    }
+    let mut first = None;
+    for bits in [0o111, 0o110, 0o100, 0] {
+        let mut attempt = files.clone();
+        for record in attempt
+            .values_mut()
+            .flat_map(BTreeMap::values_mut)
+            .flatten()
+        {
+            record.mode = Some(if record.mode.is_some() { bits } else { 0 });
+        }
+        let digest = inputs_digest_of(&attempt)?;
+        if digest == receipt.subject.inputs_digest {
+            return Ok(Check::equals(
+                "inputs",
+                TREE_MISMATCH,
+                digest,
+                &receipt.subject.inputs_digest,
+            ));
+        }
+        first.get_or_insert(digest);
+    }
+    Ok(refuse(
+        format!(
+            "{} (recomputed from the files of commit {short})",
+            first.unwrap_or_default()
+        ),
+        receipt.subject.inputs_digest.clone(),
+    ))
 }
 
 /// A file's path in the repository, from its top level, as `REV:PATH` names
@@ -4023,12 +4508,18 @@ fn commit_facts(
     if let Some(Ok(inside)) = &inside {
         names.extend(inside.names());
     }
-    let answers = ask(repository, names)?;
-    let at = commit_from(rev, &answers)?;
+    // One process, two rounds: the commit and its contract, then the inputs
+    // that contract declares.
+    let mut session = repository.session(Vec::new());
+    let mut answers = ask_in(&mut session, names)?;
+    let mut at = commit_from(rev, &answers)?;
     let judged = match inside {
         None => Judged::from_file(contract_path, true)?,
         Some(inside) => inside?.judged(&answers, &at.id)?,
     };
+    answers.extend(ask_in(&mut session, input_names(rev, &judged.contract)?)?);
+    session.finish()?;
+    at.inputs = Some(inputs_from(rev, &judged.contract, &answers)?);
     Ok((judged, at))
 }
 
@@ -4058,6 +4549,10 @@ pub(crate) fn judge(
         return Ok(checks);
     }
     commit_checks(&mut checks, &receipt, at);
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    checks.push(inputs_check(&receipt, &judged.contract, at)?);
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
@@ -4258,6 +4753,7 @@ fn report(checks: &[Check]) -> ExitCode {
     match checks.iter().find(|check| !check.ok) {
         None => {
             println!("verified: receipt matches this tree and contract");
+            println!("{TRUST}");
             ExitCode::SUCCESS
         }
         Some(first) => {
@@ -4770,6 +5266,7 @@ mod tests {
                 head_tree_oid: "test".into(),
                 dirty: false,
                 submodules_modified: false,
+                inputs: BTreeMap::new(),
             },
             tasks: first,
             outcome: Outcome::Passed,
@@ -4829,7 +5326,7 @@ mod tests {
         git(&["commit", "--quiet", "-m", "init"]);
         let head = git(&["rev-parse", "HEAD^{tree}"]);
         let repository = repo::Repository::at(root.clone(), root.join(".git"));
-        let working_tree_oid = |_: &Path| snapshot(&repository).map(|(tree, _)| tree);
+        let working_tree_oid = |_: &Path| snapshot(&repository, &[]).map(|(tree, _, _)| tree);
 
         // A clean checkout addresses to exactly HEAD's tree.
         assert_eq!(working_tree_oid(&root).unwrap(), head);

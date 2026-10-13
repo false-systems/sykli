@@ -45,6 +45,7 @@
             "tests/cli.rs",
             "tests/external.rs",
             "tests/facts.rs",
+            "tests/forgery.rs",
             "tests/fixtures/bundle/9f7ec944f79b30aca98fe83b6f27ced93266c6a3f509824fc71fb4d9bed96cbf/diagnostics.json",
             "tests/fixtures/bundle/9f7ec944f79b30aca98fe83b6f27ced93266c6a3f509824fc71fb4d9bed96cbf/manifest.json",
             "tests/fixtures/bundle/9f7ec944f79b30aca98fe83b6f27ced93266c6a3f509824fc71fb4d9bed96cbf/objects/4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
