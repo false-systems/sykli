@@ -11,9 +11,11 @@
 //! rewritten to say "passed", with everything else left consistent,
 //! verifies, because nothing in an unsigned receipt shows who ran what.
 
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
     fs,
     path::PathBuf,
     process::{Command, Output, Stdio},
@@ -183,6 +185,7 @@ fn exits(out: &Output, code: i32, label: &str) {
     );
 }
 
+#[cfg(unix)]
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -192,7 +195,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Recompute a receipt's `inputs_digest` from its own input records, by the
 /// public formula: what a forger who edits a record's `sha256` or `mode`
-/// does so the records still hash to the digest.
+/// does so the records still hash to the digest. (Only the symbolic-link
+/// tests, which are Unix-only, need it.)
+#[cfg(unix)]
 fn redigest(receipt: &mut serde_json::Value) {
     let mut tasks = BTreeMap::new();
     for task in receipt["tasks"].as_array().unwrap() {
