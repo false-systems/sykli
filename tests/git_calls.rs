@@ -141,6 +141,23 @@ impl Scratch {
         let out = child.wait_with_output().unwrap();
         (out, started(&trace))
     }
+
+    /// Run sykli traced, and say whether it started any git process at all.
+    #[cfg(unix)]
+    fn uncounted(&self, args: &[&str]) -> (Output, bool) {
+        let trace = self.base.join(format!(
+            "trace-{}.json",
+            self.traces.fetch_add(1, Ordering::SeqCst)
+        ));
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&self.repo)
+            .env("GIT_TRACE2_EVENT", &trace)
+            .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig"))
+            .output()
+            .unwrap();
+        (out, trace.exists())
+    }
 }
 
 impl Drop for Scratch {
@@ -378,4 +395,236 @@ fn a_count_without_a_trace_is_a_failure_not_zero() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(std::panic::catch_unwind(|| started(&missing)).is_err());
+}
+
+/// The inputs `verify --commit` recomputes come from the same single
+/// `cat-file` process: a passing receipt edited to name another commit's
+/// tree is refused for its inputs (exit 3) within the same budget, which
+/// shows the commit's input entries were read there, not skipped.
+#[test]
+fn the_inputs_check_reads_the_commit_in_the_same_process() {
+    let scratch = Scratch::new("inputs");
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let contract = contract.to_str().unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    let (out, _) = scratch.counted(&["run", contract, "--json"], None);
+    let mut receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    fs::write(scratch.repo.join("src/a.txt"), "changed\n").unwrap();
+    let other = scratch.commit("another tree");
+    let tree = scratch.git(&["rev-parse", "HEAD^{tree}"]);
+    receipt["subject"]["tree_oid"] = tree.as_str().into();
+    receipt["subject"]["head_tree_oid"] = tree.as_str().into();
+    let path = scratch.base.join("rebound.json");
+    fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let facts = scratch.facts();
+    let none: [String; 0] = [];
+    for (given, expected) in [
+        (&none[..], VERIFY_COMMIT),
+        (&facts[..], VERIFY_COMMIT_GIVEN),
+    ] {
+        let args = with(
+            &[
+                "verify",
+                path.to_str().unwrap(),
+                "--contract",
+                contract,
+                "--commit",
+                &other,
+            ],
+            given,
+        );
+        let (out, started) = scratch.counted(&args, None);
+        assert!(
+            text(&out.stderr).contains("refused: inputs"),
+            "{}",
+            text(&out.stderr)
+        );
+        within("verify --commit, rebound", (out, started), 3, expected);
+    }
+}
+
+/// A contract outside the repository, locked, for the tests below.
+fn outside_contract(scratch: &Scratch) -> String {
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    contract.to_str().unwrap().to_string()
+}
+
+/// `verify --commit` and the pre-push hook for `receipt` and HEAD, the
+/// receipt being the only one in the worktree for the hook.
+fn judged_at_head(
+    scratch: &Scratch,
+    contract: &str,
+    receipt: &serde_json::Value,
+    expected: &[&str],
+    label: &str,
+) {
+    let head = scratch.git(&["rev-parse", "HEAD"]);
+    let path = scratch.base.join(format!("{label}.json"));
+    fs::write(&path, serde_json::to_vec(receipt).unwrap()).unwrap();
+    within(
+        &format!("verify --commit, {label}"),
+        scratch.counted(
+            &[
+                "verify",
+                path.to_str().unwrap(),
+                "--contract",
+                contract,
+                "--commit",
+                "HEAD",
+            ],
+            None,
+        ),
+        0,
+        expected,
+    );
+    let _ = fs::remove_dir_all(scratch.repo.join(".sykli"));
+    fs::create_dir_all(scratch.repo.join(".sykli")).unwrap();
+    fs::write(
+        scratch.repo.join(".sykli/receipt.json"),
+        serde_json::to_vec(receipt).unwrap(),
+    )
+    .unwrap();
+    within(
+        &format!("pre-push, {label}"),
+        scratch.counted(
+            &[
+                "hook",
+                "pre-push",
+                "--contract",
+                contract,
+                "--branch",
+                "main",
+                "origin",
+                "/nowhere/origin.git",
+            ],
+            Some(&format!("refs/heads/work {head} refs/heads/main {ZEROS}\n")),
+        ),
+        0,
+        expected,
+    );
+}
+
+/// A receipt written before per-task input records has its inputs digest
+/// recomputed from the commit's blobs, read in the second round of the same
+/// `cat-file` that read the entries: it costs what a new receipt costs.
+#[test]
+fn an_older_receipt_is_judged_within_the_same_budget() {
+    let scratch = Scratch::new("older");
+    let contract = outside_contract(&scratch);
+    let (out, _) = scratch.counted(&["run", &contract, "--json"], None);
+    let mut receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for task in receipt["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut().unwrap().remove("inputs");
+    }
+    judged_at_head(&scratch, &contract, &receipt, VERIFY_COMMIT, "older");
+}
+
+/// An input a checkout converts (here, line endings under `core.autocrlf`)
+/// is compared with what a checkout of its blob gives: one `cat-file
+/// --filters` for that input, and only for it.
+#[test]
+fn a_converted_input_costs_one_cat_file_of_its_own() {
+    let scratch = Scratch::new("converted");
+    let contract = outside_contract(&scratch);
+    scratch.git(&["config", "core.autocrlf", "true"]);
+    fs::write(scratch.repo.join("src/a.txt"), "a\r\n").unwrap();
+    assert_eq!(scratch.git(&["diff", "--name-only"]), "", "the same blob");
+    let (out, _) = scratch.counted(&["run", &contract, "--json"], None);
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(receipt["outcome"], "passed");
+    judged_at_head(
+        &scratch,
+        &contract,
+        &receipt,
+        &["rev-parse", "cat-file", "cat-file"],
+        "converted",
+    );
+}
+
+/// `status --run` reads a run's journal from the common git directory: one
+/// `git rev-parse` finds it, and with the repository given no git runs at
+/// all. `status --commit` reads the commit as `verify --commit` does,
+/// discovery and one `cat-file --batch`, however many receipts and runs of
+/// its tree it judges. Each answer is checked too, so the counts measured
+/// commands that did their work.
+#[cfg(unix)]
+#[test]
+fn status_queries_stay_within_their_git_budgets() {
+    let scratch = Scratch::new("status");
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let contract = contract.to_str().unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let (out, _) = scratch.counted(&["run", contract, "--json"], None);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        runs.push(receipt["run"].as_str().unwrap().to_owned());
+    }
+    let facts = scratch.facts();
+    let none: [String; 0] = [];
+    for given in [&none[..], &facts[..]] {
+        let label = if given.is_empty() { "" } else { " (given)" };
+        let status = with(&["status", "--run", &runs[0], "--json"], given);
+        let out = if given.is_empty() {
+            let (out, started) = scratch.counted(&status, None);
+            within(
+                &format!("status --run{label}"),
+                (out.clone(), started),
+                0,
+                &["rev-parse"],
+            );
+            out
+        } else {
+            let (out, traced) = scratch.uncounted(&status);
+            assert!(!traced, "status --run{label} started git");
+            out
+        };
+        let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(answer["state"], "completed", "status --run{label}");
+
+        let commit = with(
+            &[
+                "status",
+                "--commit",
+                "HEAD",
+                "--contract",
+                contract,
+                "--json",
+            ],
+            given,
+        );
+        let (out, started) = scratch.counted(&commit, None);
+        let expected: &[&str] = if given.is_empty() {
+            &["rev-parse", "cat-file"]
+        } else {
+            &["cat-file"]
+        };
+        within(
+            &format!("status --commit{label}"),
+            (out.clone(), started),
+            0,
+            expected,
+        );
+        let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(answer["verdict"], "passed", "status --commit{label}");
+        assert_eq!(answer["current"].as_array().unwrap().len(), 2);
+        assert_eq!(answer["runs"].as_array().unwrap().len(), 2);
+    }
 }

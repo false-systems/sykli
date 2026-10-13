@@ -7,9 +7,9 @@
 //! repository at all. Questions about objects go to one `git cat-file
 //! --batch` for all the names a command needs.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -214,78 +214,198 @@ pub(crate) struct Object {
 }
 
 impl Repository {
-    /// Ask one `git cat-file --batch`, run at the top level, about every
-    /// name in order: each object's id and contents, or None when the name
-    /// names no object (missing or ambiguous). Names are revision expressions
-    /// such as `REV^{tree}` or `REV:path`, paths from the top level; read from
-    /// stdin, they can never be options.
-    pub(crate) fn cat(&self, names: &[String]) -> Result<Vec<Option<Object>>, String> {
-        cat(&self.root, names)
+    /// One `git cat-file --batch` process that can be asked in rounds, where
+    /// one round's answers decide the next round's names (a contract read
+    /// from a commit names the inputs to read next). It starts on the first
+    /// question, so a session never asked starts no process. `env` is set for
+    /// it, as for a snapshot whose trees are written to a temporary object
+    /// directory: objects written there after it starts are found.
+    pub(crate) fn session(&self, env: Vec<(&'static str, std::ffi::OsString)>) -> Session {
+        Session {
+            root: self.root.clone(),
+            env,
+            process: None,
+        }
     }
 }
 
-fn cat(root: &Path, names: &[String]) -> Result<Vec<Option<Object>>, String> {
-    if names.is_empty() {
-        return Ok(Vec::new());
+/// See `Repository::session`.
+pub(crate) struct Session {
+    root: PathBuf,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+    process: Option<(Child, Option<ChildStdin>, BufReader<ChildStdout>)>,
+}
+
+impl Session {
+    /// Ask about every name in order, as `Repository::cat` does.
+    pub(crate) fn ask(&mut self, names: &[String]) -> Result<Vec<Option<Object>>, String> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(name) = names.iter().find(|name| name.contains(['\n', '\r'])) {
+            return Err(format!("{name:?} cannot be asked of git cat-file"));
+        }
+        if self.process.is_none() {
+            let mut command = git_command();
+            command
+                .arg("-C")
+                .arg(&self.root)
+                .args(["cat-file", "--batch"])
+                .envs(self.env.iter().map(|(name, value)| (*name, value)));
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let stdin = child.stdin.take().ok_or("git cat-file has no stdin")?;
+            let stdout = BufReader::new(child.stdout.take().ok_or("git cat-file has no stdout")?);
+            self.process = Some((child, Some(stdin), stdout));
+        }
+        let Some((_, stdin, stdout)) = self.process.as_mut() else {
+            return Err("git cat-file is not running".into());
+        };
+        let mut writer = stdin.take().ok_or("git cat-file's input is closed")?;
+        let mut input = names.join("\n");
+        input.push('\n');
+        // Written from another thread, so a long answer can never block it;
+        // cat-file answers each name as it reads it.
+        let writing = std::thread::spawn(move || {
+            writer.write_all(input.as_bytes())?;
+            writer.flush()?;
+            Ok::<_, std::io::Error>(writer)
+        });
+        let answers = read_answers(stdout, names);
+        let written = writing
+            .join()
+            .map_err(|_| "writing to git cat-file panicked".to_string())?;
+        match (answers, written) {
+            (Ok(answers), Ok(writer)) => {
+                if let Some((_, stdin, _)) = self.process.as_mut() {
+                    *stdin = Some(writer);
+                }
+                Ok(answers)
+            }
+            (Ok(_), Err(error)) => Err(self.failure(error.to_string())),
+            // Close the input first: cat-file waits on it, so waiting for
+            // cat-file with it open would never end.
+            (Err(error), written) => {
+                drop(written);
+                Err(self.failure(error))
+            }
+        }
     }
-    if let Some(name) = names.iter().find(|name| name.contains(['\n', '\r'])) {
-        return Err(format!("{name:?} cannot be asked of git cat-file"));
+
+    /// Close the process and check it ended well.
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        let Some((mut child, stdin, _)) = self.process.take() else {
+            return Ok(());
+        };
+        drop(stdin);
+        let status = child.wait().map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(stderr_of(&mut child))
+        }
     }
-    let mut child = git_command()
-        .arg("-C")
-        .arg(root)
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    let mut stdin = child.stdin.take().ok_or("git cat-file has no stdin")?;
-    let mut input = names.join("\n");
-    input.push('\n');
-    // Written from another thread, so a long answer can never block it.
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
-    let output = child
-        .wait_with_output()
-        .map_err(|error| error.to_string())?;
-    writer
-        .join()
-        .map_err(|_| "writing to git cat-file panicked".to_string())?
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+
+    /// Git's own reason when it stopped answering, else `error`.
+    fn failure(&mut self, error: String) -> String {
+        let Some((mut child, stdin, _)) = self.process.take() else {
+            return error;
+        };
+        drop(stdin);
+        let _ = child.wait();
+        let reason = stderr_of(&mut child);
+        if reason.is_empty() { error } else { reason }
     }
-    let mut rest = &output.stdout[..];
+}
+
+fn stderr_of(child: &mut Child) -> String {
+    let mut reason = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut reason);
+    }
+    reason.trim().to_string()
+}
+
+/// One answer per name: `<id> <type> <size>` and the contents, or
+/// `<name> missing` (or `ambiguous`).
+fn read_answers(
+    stdout: &mut BufReader<ChildStdout>,
+    names: &[String],
+) -> Result<Vec<Option<Object>>, String> {
     let mut answers = Vec::with_capacity(names.len());
     for name in names {
-        let end = rest
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .ok_or("git cat-file ended early")?;
-        let header = String::from_utf8_lossy(&rest[..end]).into_owned();
-        rest = &rest[end + 1..];
+        let mut line = Vec::new();
+        let read = stdout
+            .read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?;
+        if read == 0 || line.last() != Some(&b'\n') {
+            return Err("git cat-file ended early".into());
+        }
+        line.pop();
+        let header = String::from_utf8_lossy(&line).into_owned();
         if header == format!("{name} missing") || header == format!("{name} ambiguous") {
             answers.push(None);
             continue;
         }
         let fields = header.split(' ').collect::<Vec<_>>();
+        // A submodule's commit is named, never shown: `<id> submodule`.
+        if let [id, "submodule"] = fields[..] {
+            answers.push(Some(Object {
+                id: id.to_string(),
+                kind: "submodule".into(),
+                bytes: Vec::new(),
+            }));
+            continue;
+        }
         let [id, kind, size] = fields[..] else {
             return Err(format!("unexpected git cat-file answer {header:?}"));
         };
         let size: usize = size
             .parse()
             .map_err(|_| format!("unexpected git cat-file answer {header:?}"))?;
-        if rest.len() < size + 1 {
-            return Err("git cat-file ended early".into());
-        }
+        let mut bytes = vec![0; size + 1];
+        stdout
+            .read_exact(&mut bytes)
+            .map_err(|_| "git cat-file ended early".to_string())?;
+        bytes.pop();
         answers.push(Some(Object {
             id: id.to_string(),
             kind: kind.to_string(),
-            bytes: rest[..size].to_vec(),
+            bytes,
         }));
-        rest = &rest[size + 1..];
     }
     Ok(answers)
+}
+
+/// The entries of a tree object: each name with its entry as `MODE ID`,
+/// the mode as git writes it (`100644`, `100755`, `120000`, `160000`,
+/// `40000`) and the object id in hex. `id_bytes` is the length of an object
+/// id in this repository (20 for SHA-1, 32 for SHA-256).
+pub(crate) fn tree_entries(tree: &[u8], id_bytes: usize) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut rest = tree;
+    while let Some(space) = rest.iter().position(|byte| *byte == b' ') {
+        let mode = String::from_utf8_lossy(&rest[..space]).into_owned();
+        rest = &rest[space + 1..];
+        let Some(end) = rest.iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        let name = String::from_utf8_lossy(&rest[..end]).into_owned();
+        let Some(id) = rest.get(end + 1..end + 1 + id_bytes) else {
+            break;
+        };
+        let id = id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        rest = &rest[end + 1 + id_bytes..];
+        entries.push((name, format!("{mode} {id}")));
+    }
+    entries
 }
 
 /// Whether `name` is a branch name a push can update, by git's documented

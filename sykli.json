@@ -20,6 +20,8 @@
         "src/production/discovery.rs",
         "src/assessment.rs",
         "src/canonical.rs",
+        "src/journal.rs",
+        "src/runs.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -33,6 +35,8 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
+        "tests/runs.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -77,6 +81,8 @@
         "src/production/discovery.rs",
         "src/assessment.rs",
         "src/canonical.rs",
+        "src/journal.rs",
+        "src/runs.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -90,6 +96,8 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
+        "tests/runs.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -116,6 +124,8 @@
         "src/production/discovery.rs",
         "src/assessment.rs",
         "src/canonical.rs",
+        "src/journal.rs",
+        "src/runs.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -144,6 +154,8 @@
         "tests/external.rs",
         "tests/git_calls.rs",
         "tests/facts.rs",
+        "tests/forgery.rs",
+        "tests/runs.rs",
         "tests/snapshot.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",

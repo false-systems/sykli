@@ -2,7 +2,7 @@ Product boundaries:
 
 - Own graph parsing, validation, planning, execution, caching, receipts, and local typed production.
 - Production assessment establishes declared products and checks, not task closure or publication authority. External tools and workers remain optional consumers.
-- Stay a local CLI: no server, network service, daemon, coordination, or agent execution. The one network use is on-demand, read-only acquisition of pull-request evidence through the operator's `gh` (`sykli inspect`); it never mutates a provider, triggers work, or runs candidate code. A bounded executor may finish its attempt after its initiating client exits.
+- Stay a local CLI: no server, network service, daemon, coordination, or agent execution. The one network use is on-demand, read-only acquisition of pull-request evidence through the operator's `gh` (`sykli inspect`); it never mutates a provider, triggers work, or runs candidate code. A bounded executor (a production attempt, or the coordinator of a run started with `run --detach`) may finish its work after its initiating client exits; it is never a daemon: it ends with the attempt or run it was started for.
 - Candidate assessment (`sykli inspect` / `sykli assess`) establishes only the declared review-readiness predicates under a printed trust designation. It is advisory: no merge or deployment authority, no claim that GitHub's full merge policy is met.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode) do not return without one.
@@ -86,9 +86,26 @@ binds the git tree OID (computed from a temporary index seeded from HEAD, with
 `.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
 staged: schema and record consistency (2), contract lock and contract hash (4),
 tree and inputs (3), outcome (1). It proves consistency, not authorship; the
-README says so. `sykli.lock` is `sykli-lock.v2`, one entry per contract file in
-its directory. `run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a
-failed task. Declared paths resolve against the current directory, so a
+README says so. With `--commit` the inputs stage (`inputs_check`,
+`InputsAt::judge`) judges each declared input at its exact path (`found_at`
+walks the trees by exact bytes: `Found`, `Absence`): the run's record
+(`InputRecord`: `sha256`, `mode` as git has it, `object` from the run's own
+snapshot, read in a second round of the snapshot's `cat-file`, with a third
+only for symbolic links) must have the commit's entry, the commit's blob bytes
+(or what `git cat-file --filters` makes of them, one process per converted
+input), and the entry's execute bit; a symbolic link is followed to the
+declared input it names (`PathFacts::file_behind`). The commit's trees and
+blobs come from a second round of the verify or hook `cat-file` session
+(`repo::Session`, `input_names`, `inputs_from`). An input the run read where
+the commit has nothing is refused, unless a task declares it as an output.
+The records must hash to `inputs_digest` (`records_check`, also without
+`--commit`, where `checkout_records_check` also compares each record with the
+checkout's); older receipts are recomputed from the same blobs
+(`older_inputs_check`). Declared paths are named lexically from the top
+level (`declared_path`), never through the checkout. Exit 3. `sykli.lock` is
+`sykli-lock.v2`, one entry per contract file in its directory.
+`run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a failed task.
+Declared paths resolve against the current directory, so a
 contract outside the git toplevel of the current directory (decided on
 resolved paths, `outside_repository`) makes `main` absolutize command-line
 paths and enter that toplevel first (`enter_for_contract`); hooks absolutize
@@ -108,6 +125,38 @@ read every commit fact in one batch (`commit_names`, `ContractNames`) and
 judge receipts against them (`judge`); the pre-push hook validates branch
 names in-process and reads `refs/remotes/REMOTE/HEAD` from the common
 directory.
+
+**Durable graph runs (`src/runs.rs`, `src/journal.rs`, Unix only).** Every
+`run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
+production journal's machinery, lifted unchanged into `src/journal.rs`
+(hash-chained envelopes, exclusive synced `publish`, `journal-lock`, flock
+`Lease`); production keeps its own record type and `F_FULLFSYNC`, runs use
+`fsync(2)` (`canonical::Durability`). The first record, `requested`, holds
+the contract as run (canonical JSON), the subject with its input records,
+the runtime fingerprint and the task list, and is durable before any task is
+dispatched; the run id is its identity. Each task is then `reused`,
+`settled` (blocked, or errored before running) or attempted: `dispatched`
+(attempt lease taken first), `started` (process group), and one end:
+`finished` (exit or signal; the task record kept first as
+`outputs/<sha256>.json`), `interrupted` (sykli's signal handler stopped it)
+or `lost` (a later coordinator found it unfinished). Every record carries the
+coordinator's generation (`requested` 1, each `resumed` +1); `History::apply`
+refuses a stale generation, a second end, a pass without exit 0, a retry
+that does not supersede the last attempt, and a conclusion before every task
+is decided. The receipt is built only from accepted records (`coordinate`,
+`conclude`), so it round-trips (`TaskReceipt` is `Deserialize`) and gains
+only `run`. Tasks run in their own process group holding their attempt's
+lease (so an orphan reads as running); SIGINT/SIGTERM/SIGHUP stop every
+group (TERM, KILL after 3 s) and the run records `stopped`, exit 128+N.
+`status --run` is a pure view of the journal and leases; `resume --run`
+re-checks worktree, contract, lock, runtime and subject before taking over;
+`run --detach` hands the lease to a `setsid` coordinator
+(`__run_coordinator`). `drifted` errors a task whose declared inputs changed
+during the run. `status --commit` judges every kept receipt of a commit's
+tree with `judge`. `checkpoint(POINT)` is a debug-build test hook
+(`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
+crash window; release builds have none. On Windows `runs` is a stub of
+uninhabited types and a run is in memory, as before.
 
 **Typed production (`src/production/`, Unix only).** Opt-in local artifact
 production from a `sykli-production-contract.v1`. `contract.rs` is the schema
@@ -146,7 +195,10 @@ incomplete listing blocks the affected obligation. `inspect.rs` maps results to
 exit codes 0 established, 1 refuted, 2 tool error, 3 unproven, 4 conflict, and
 persists records beside the bundle best-effort after printing the verdict.
 
-**Tests.** `tests/assess.rs` drives `inspect` through a fake `gh` shell script
+**Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the coordinator at each
+checkpoint and of a task, SIGTERM/SIGINT, a stale coordinator, a replayed
+completion, inputs changed mid-run, concurrent cache stores; each ends on
+`nothing_unknown_passed`. Its hook tests skip under `--release`. `tests/assess.rs` drives `inspect` through a fake `gh` shell script
 on `PATH` serving `tests/fixtures/github/pr25` (real responses from this
 repository's PR #25); it is Unix-only. `tests/assess_portable.rs` replays the
 committed bundle in `tests/fixtures/bundle` on every platform. Production tests

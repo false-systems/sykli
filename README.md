@@ -258,6 +258,84 @@ matching inputs and their downstream tasks. It does not discover a Git diff and
 does not restrict a later `run`, which evaluates the whole graph and decides
 reuse from content keys.
 
+## Runs that survive a crash
+
+On Linux and macOS every `sykli run` is durable. Before any task starts, the
+run is recorded in the clone's git directory,
+`$(git rev-parse --git-common-dir)/sykli/runs/<run-id>/`, so it outlives the
+worktree that started it. Each task's attempts are then recorded as they
+happen: dispatched before its shell is spawned, started, and finished with
+its exit code or signal and its captured output. The run id is printed first
+(`run: ID`, on stderr with `--json`) and is the receipt's `run`.
+
+```sh
+sykli run sykli.json --json             # the receipt names its run
+sykli status --run RUN_ID               # what is known about the run, at any time
+sykli resume --run RUN_ID               # continue a run whose coordinator ended
+sykli run sykli.json --detach --json    # {"schema":"sykli-run.v1","run":"…"} once recorded
+```
+
+A crash leaves exactly what was observed, and nothing more:
+
+- A task whose end was recorded keeps its outcome: passed, failed, errored,
+  cached or blocked.
+- A task whose attempt was dispatched but whose end was not recorded is
+  **lost**. Its outcome is unknown and it is never passed, even if its process
+  later exited 0 with nobody watching. While that process still runs (the
+  shell and its children hold the attempt's lease), the task is **running**.
+- On SIGINT, SIGTERM or SIGHUP, the run stops each running task's process
+  group, records it **interrupted** (not failed), and exits 128+N. Each task
+  runs in its own process group, so a signal reaches it through sykli.
+- The receipt is built only from recorded outcomes and written durably, and
+  only then is the run **completed**.
+
+`sykli status --run ID --json` (`sykli-run-status.v1`) gives the run's state
+(`requested`, `running`, `completed`, `interrupted`, or `lost` when its
+coordinator ended without concluding it), its subject (tree, commit when
+clean, dirty), the contract and lock digests, each task's state and every
+attempt (id, started, finished, exit, signal, outcome, what it supersedes),
+and the receipt (path and digest) once complete. It reads the journal and
+its locks, runs no git once the repository is known, and writes nothing.
+
+`sykli resume --run ID` takes over a run whose coordinator ended. Tasks with
+a recorded outcome are kept, failed ones included. Each lost or interrupted
+task is retried as a new attempt that supersedes the old one, which stays in
+the history. Resume is refused while the run's coordinator, or a process of
+one of its attempts, is still alive, and when the worktree's source, the
+contract, its lock or the runtime is not what the run recorded: its receipt
+would then claim a tree that did not produce it. Each coordinator that takes
+a run over opens a new generation, and every record carries its generation,
+so a coordinator that lost its lease cannot later complete an attempt or
+conclude a run that a newer one has taken over.
+
+A task whose declared inputs change while the run is in progress is
+`errored` (class `input_changed`), never passed: what it read is not the
+tree the run recorded.
+
+`sykli status --commit REV --json` (`sykli-commit-status.v1`) asks whether a
+commit is validated, with the code `verify --commit` uses. Every receipt of
+`REV`'s tree that this clone keeps (this worktree's, kept ones, and those of
+runs, from any worktree) is judged for `REV`. Those that verify now, passed
+or failed, are `current`; the others of that tree are `historical`, shown but
+never current evidence: another contract or an edited record
+(`not-applicable`, `unverifiable`), or a receipt whose run this clone keeps
+but which did not conclude with it (`unconcluded`, `unrecorded`). A pass
+recorded for one commit is never current for another, and the runs of that
+tree are listed with their states.
+
+`sykli verify --json` prints the verdict as one `sykli-verify.v1` document:
+every check, the first failing stage, the exit code (unchanged), and what the
+verdict establishes (`schema`, `contract`, `source`, `consistency`,
+`outcome`) and does not (`provenance`, `producer`, `execution`).
+
+The journal is local and unsigned, trusted like the receipts, and claims no
+authenticity. Each record is synced with `fsync(2)` before it is acknowledged.
+On macOS that is not `F_FULLFSYNC`: a power cut on a drive that ignores
+`fsync` can lose the last records, a process crash or a kernel panic cannot.
+Durable runs need Unix file locks. On Windows a run keeps everything in memory
+until its receipt is written, as before, and `--detach`, `status --run` and
+`resume --run` are unavailable.
+
 ## In CI
 
 After checkout, install Sykli and your project's toolchain, then:
@@ -441,7 +519,9 @@ find it. They are checked from files: the root's `.git` must lead to the
 common directory, or the command exits 2, since a subdirectory given as the
 root would leave changes outside it out of the snapshot. With them, `hook
 pre-push` starts one git process in all, `verify --commit` one, and `run`
-five.
+five; `hook pre-push` and `verify --commit` start one more, `git cat-file
+--filters`, for each declared input a checkout converts (line endings, a
+smudge filter), and only for such an input.
 
 ## Built for agents
 
@@ -511,13 +591,51 @@ through `gh`. It never posts reviews or triggers work.
 | `0` | Receipt matches, and the work passed or was reused. |
 | `1` | The recorded work failed. |
 | `2` | The receipt cannot be verified. |
-| `3` | The tree or declared inputs changed since the run. |
+| `3` | The tree or declared inputs differ from the receipt's (changed since the run, or, with `--commit`, not that commit's), or, with `--commit`, the run read an input the commit cannot show. |
 | `4` | The contract or lock differs. |
 
-A receipt checks record consistency, contract identity, the repository tree and
-declared inputs, and then the recorded outcome. It **does not** authenticate who
-wrote the receipt, and it does not prove that the declared checks are
-sufficient.
+A receipt is a JSON file. It is not signed, and anyone who can write the
+checkout can edit it. So a successful `verify` says three different things,
+and it is worth keeping them apart:
+
+- **What verify establishes.** The receipt's schema is valid. Its records are
+  consistent with each other and with the contract (each recorded command is
+  the contract's, a passed task exited 0). The contract and lock are the ones
+  named. The tree, and every declared input's bytes and execute bit, are the
+  ones the receipt claims: read from the checkout, or with `--commit` from the
+  commit itself, never taken from the receipt. Two kinds of input are
+  established less directly, and the output says so: an input a checkout
+  converts (line endings, a smudge filter) is compared with what a checkout
+  here makes of the commit's blob, and an input a task declares as an output
+  is generated by the run, so it is established through that task's own
+  inputs.
+- **What it does not establish.** Where the receipt came from. Who produced it.
+  That its tasks were observed running, or ran at all. Anything a task read
+  that is not a declared input: the toolchain, the environment, undeclared
+  files. A receipt is a claim that is consistent with the tree and contract,
+  not evidence that the work happened. It also does not prove that the
+  declared checks are sufficient.
+- **What that leaves open.** Someone who edits a receipt and keeps it
+  consistent still passes:
+  - a failing run's receipt with its outcome rewritten to "passed", every
+    digest left as it was (a test pins this);
+  - a receipt written for a commit from scratch, with that commit's own input
+    records and digests: every digest a receipt records follows a public
+    formula, so this takes only the commit's bytes, and it claims an outcome
+    nobody observed;
+  - a converted input, which is bound only as the verifier's configuration
+    and attributes convert it. A receipt from a checkout that converts
+    differently (an autocrlf checkout on Windows, verified on Linux) is
+    refused; one that converts the same way is trusted as far as that
+    configuration is.
+
+  Editing fewer fields gets no further. The tree, and each input's entry,
+  bytes and execute bit, are read from the commit, so a passing receipt for
+  one commit with another commit's tree and entries copied in is refused.
+  Only authenticated execution evidence, a signed record from something
+  trusted to have watched the run, could tell an honest receipt from a
+  consistent forgery, and sykli has none. Treat a verified receipt as
+  consistent, not as proven.
 
 A receipt binds a tree, not a commit, and a run of uncommitted work is only
 marked `dirty`. To ask whether a receipt is evidence for a commit, name it:
@@ -529,15 +647,62 @@ sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 With `--commit REV`, the subject is the commit, not the checkout. The
 contract and its `sykli.lock` pin are read from `REV` (from their files for a
 contract [outside the repository](#keep-the-contract-outside-the-repository),
-which no commit carries). The receipt's tree must
-be `REV^{tree}`. Otherwise it exits 3. The tree check is what binds the
-receipt to the commit's content, so a run need not be clean: a pre-commit run,
-made before HEAD moves, is a run of exactly the tree the commit records and
-counts for the push. Whether the run was clean is still reported. Nothing is read from the checkout,
-so any commit can be verified from any checkout, uncommitted edits or not.
-Declared inputs that the commit does not track, such as ignored files, are not
-part of a commit and are not judged. On any failure, the first failing check is
-also printed to stderr as one line.
+which no commit carries). The receipt's tree must be `REV^{tree}`, and every
+declared input the run read must be what `REV` has at its exact path. A
+receipt records, for each task's inputs, what its run read: the SHA-256 of the
+bytes, the execute bits, and the tree entry (mode and blob) its own snapshot
+had at that path. `verify --commit` reads each input's entry and blob from the
+commit, in the same single `git cat-file` it already uses, and requires the
+recorded entry to be the commit's, the recorded bytes to be the blob's, and
+the recorded execute bit to be the entry's. Where a checkout converts the file
+(line endings, a smudge filter), the bytes the run read are not the blob's,
+and they are compared with what `git cat-file --filters` makes of the blob
+under this repository's configuration and attributes, as a checkout would:
+one more git process, only for such an input. The records must also hash to
+the receipt's inputs digest, with or without `--commit`. A receipt edited to
+name another commit's tree, with one input's record or path changed, or with
+another commit's tree and entries copied in, exits 3. No input is read from
+the checkout, so any commit can be verified from any checkout, uncommitted
+edits or not. A run need not be clean: a pre-commit run, made before HEAD
+moves, is a run of exactly the tree the commit records and counts for the
+push. Whether the run was clean is still reported. On any failure, the first
+failing check is also printed to stderr as one line.
+
+Each declared input is judged at its exact path, as `REV:PATH` names it: git
+does not fold case or Unicode normalization there, follow a symbolic link on
+the way, or look inside a submodule. The path is the declared one from the
+top level, by its names alone, never resolved through the checkout, so a
+symbolic link in the checkout cannot point a declared input at another file.
+What the commit cannot show is never passed unjudged:
+
+- A file the run read where the commit has nothing at that path (an ignored
+  or untracked file, a name spelled differently from git's, a file inside a
+  submodule or reached through a symbolic link to a directory) cannot be
+  judged, and the receipt is refused (exit 3) with the reason. Declare
+  inputs as git spells them, and keep files a commit cannot carry out of a
+  contract you verify against commits.
+- An input neither the run nor the commit has is judged absent on both sides.
+- An input a task declares as an output (or that lies under a directory it
+  declares) is generated by the run, so the commit is not expected to have
+  it. It is reported as generated, and established through the inputs of the
+  task that produces it.
+- A symbolic link is judged by its entry, the target's name, and by the
+  bytes read through it, which must be those of the declared input it names.
+  A link whose target no task declares is refused: declare both. A checkout
+  without symbolic links (`core.symlinks=false`, common on Windows) holds a
+  file with the target's name instead, other bytes than the link gives, so
+  a run that read that is refused too.
+- The execute bit is the one git has: the owner's execute bit where the file
+  system has execute bits, and the bit already in the tree where git does not
+  trust them (`core.filemode=false`) or there are none (Windows).
+
+A receipt written before per-task input records is checked by recomputing its
+inputs digest from the commit's files, trying an executable file's usual
+modes and never an execute bit the commit does not have. Where a declared
+input is not a regular file in the commit, a checkout converts it, or the
+run's file system had no execute bits for an executable file (Windows), that
+cannot be done, and it exits 3. Run sykli again for a receipt that records
+its inputs.
 
 Without `--commit`, verify judges the checkout as it is now. Run both in CI: a
 run hashes its tree before its tasks execute, so only the live check notices a
@@ -559,13 +724,14 @@ change the tree they describe.
 
 ## What Sykli keeps on disk
 
-The cache, the receipts and production scratch are bounded, and each limit is stated:
+The cache, the receipts, runs and production scratch are bounded, and each limit is stated:
 
 | State | Limit | Override |
 |---|---|---|
 | Task cache | **1 GiB**; least recently used entries are dropped when a run would go over | `SYKLI_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
+| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt); when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
@@ -583,8 +749,10 @@ entry costs a re-run, never a result.
 | | `validate` | Check a contract without executing it |
 | | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
-| | `run` | Execute the graph and record a receipt |
-| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit |
+| | `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
+| | `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
+| | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
+| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
 | | `hook` | Git hook entrypoints that gate what is committed and pushed |
 | **Production** | `targets` | Discover typed artifact targets without building |
 | | `produce` | Build an artifact from captured source and run its checks |

@@ -144,16 +144,28 @@ pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
         Ok(Some(reason)) => return refuse(reason),
         Err(error) => return cannot(error),
     }
-    let receipt = match load_pinned(&contract)
-        .and_then(|((loaded, levels, hash), lock)| run(&loaded, &levels, hash, lock, false))
-    {
-        Ok((true, receipt)) => receipt,
-        Ok((false, receipt)) => {
+    let receipt = match load_pinned(&contract).and_then(|((loaded, levels, hash), lock)| {
+        run(&contract, &loaded, &levels, hash, lock, false, false)
+    }) {
+        Ok(crate::Ran::Concluded {
+            passed: true,
+            receipt,
+        }) => receipt,
+        Ok(crate::Ran::Concluded {
+            passed: false,
+            receipt,
+        }) => {
             return refuse(format!(
                 "the graph failed on the staged tree; see {}",
                 receipt.display()
             ));
         }
+        Ok(crate::Ran::Interrupted { run, signal }) => {
+            return cannot(format!(
+                "the run was stopped by signal {signal} (run {run}); nothing was judged"
+            ));
+        }
+        Ok(crate::Ran::Detached { .. }) => unreachable!("a hook never detaches"),
         Err(error) => return cannot(error),
     };
     match verify(&receipt, &contract, None) {
@@ -440,6 +452,31 @@ fn receipt_for(
     })
 }
 
+/// What the pre-push hook does with one gated ref, decided before any
+/// verdict is printed.
+enum Step<'a> {
+    /// The pushed commit carries no contract: `tip` is the commit the branch
+    /// had when it carried one, so the push would take the gate off.
+    Ungated {
+        update: &'a Update,
+        tip: Option<String>,
+    },
+    /// A named contract inside the worktree that the commit does not carry.
+    NotCarried {
+        update: &'a Update,
+        contract: PathBuf,
+    },
+    /// A receipt must verify for the commit: its facts, and the contract
+    /// judged from the commit (`owned`) unless a named outside contract is.
+    Judge {
+        update: &'a Update,
+        contract: PathBuf,
+        outside: bool,
+        at: Box<Result<crate::CommitAt, String>>,
+        owned: Box<Option<Result<crate::Judged, String>>>,
+    },
+}
+
 /// What would let a refused push through. While the contract differs from
 /// its own lock no run can pass, so that says to re-lock; otherwise, to run.
 fn next_step(contract: &Path, drifted: bool, outside: bool, short: &str) -> String {
@@ -529,8 +566,9 @@ pub(crate) fn pre_push(
     } else {
         None
     };
-    let answers = match crate::ask(
-        repository,
+    let mut session = repository.session(Vec::new());
+    let mut answers = match crate::ask_in(
+        &mut session,
         questions(&pushed, remote, &gate, head_target.as_deref()),
     ) {
         Ok(answers) => answers,
@@ -575,31 +613,23 @@ pub(crate) fn pre_push(
         Some((contract, true)) => Some(crate::Judged::from_file(contract, true)),
         _ => None,
     };
-    let mut accepted = Vec::new();
+    // First, what each gated ref needs, printing nothing; then one more
+    // round of the same git process for the inputs each judged contract
+    // declares; then the verdicts, in order, as the hook always gave them.
+    let mut steps = Vec::new();
+    let mut input_names = Vec::new();
     for update in pushed
         .into_iter()
         .filter(|update| defaults.contains(&update.remote_ref))
     {
         let sha = &update.local_sha;
-        let short = &sha[..sha.len().min(12)];
         let named_gate = gate.as_ref().map(|(contract, _)| contract.clone());
         let Some(contract) = named_gate.or_else(|| contract_in(&answers, sha)) else {
             let before = remote_tip(&answers, update, remote);
-            if let Some((tip, _)) =
-                before.filter(|(_, asked)| contract_in(&answers, asked).is_some())
-            {
-                eprintln!(
-                    "sykli hook {HOOK}: refusing to push {short} to {}: it has no sykli.json or sykli.rs, but {} there does; \
-                     this push would take the gate off. To do that on purpose, push with --no-verify",
-                    update.remote_ref,
-                    &tip[..tip.len().min(12)]
-                );
-                return ExitCode::from(REFUSED);
-            }
-            eprintln!(
-                "sykli hook {HOOK}: {short} has no sykli.json or sykli.rs, nor did {} before; not gated",
-                update.remote_ref
-            );
+            let tip = before
+                .filter(|(_, asked)| contract_in(&answers, asked).is_some())
+                .map(|(tip, _)| tip);
+            steps.push(Step::Ungated { update, tip });
             continue;
         };
         let outside = matches!(gate, Some((_, true)));
@@ -613,26 +643,99 @@ pub(crate) fn pre_push(
                 .and_then(|inside| inside.as_ref().ok())
                 .is_some_and(|inside| inside.carried(&answers))
         {
-            eprintln!(
-                "sykli hook {HOOK}: refusing to push {short} to {}: the contract {} is inside this \
-                 worktree, but {short} does not carry it, so `verify --commit` cannot read it and no \
-                 receipt can pass; keep the contract outside the worktree, or commit it",
-                update.remote_ref,
-                contract.display()
-            );
-            return ExitCode::from(REFUSED);
+            steps.push(Step::NotCarried { update, contract });
+            continue;
         }
         let at = crate::commit_from(sha, &answers);
-        let owned;
-        let judged = match (&outside_judged, inside) {
-            (Some(judged), _) => judged.as_ref().map_err(String::as_str),
-            (None, Some(inside)) => {
-                let id = at.as_ref().map_or(sha.as_str(), |at| at.id.as_str());
-                owned = inside.and_then(|inside| inside.judged(&answers, id));
-                owned.as_ref().map_err(String::as_str)
+        let owned = inside.map(|inside| {
+            let id = at.as_ref().map_or(sha.as_str(), |at| at.id.as_str());
+            inside.and_then(|inside| inside.judged(&answers, id))
+        });
+        let judged = match (&outside_judged, &owned) {
+            (Some(judged), _) => judged.as_ref().ok(),
+            (None, Some(owned)) => owned.as_ref().ok(),
+            (None, None) => None,
+        };
+        if let (Some(judged), Ok(_)) = (judged, &at) {
+            match crate::input_names(sha, &judged.contract) {
+                Ok(names) => input_names.extend(names),
+                Err(error) => {
+                    eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
+                    return ExitCode::from(CANNOT_EVALUATE);
+                }
             }
+        }
+        steps.push(Step::Judge {
+            update,
+            contract,
+            outside,
+            at: Box::new(at),
+            owned: Box::new(owned),
+        });
+    }
+    let read = crate::ask_in(&mut session, input_names).and_then(|more| {
+        answers.extend(more);
+        session.finish()
+    });
+    if let Err(error) = read {
+        eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
+        return ExitCode::from(CANNOT_EVALUATE);
+    }
+    let mut accepted = Vec::new();
+    for step in steps {
+        let (update, contract, outside, mut at, owned) = match step {
+            Step::Ungated { update, tip } => {
+                let short = &update.local_sha[..update.local_sha.len().min(12)];
+                if let Some(tip) = tip {
+                    eprintln!(
+                        "sykli hook {HOOK}: refusing to push {short} to {}: it has no sykli.json or sykli.rs, but {} there does; \
+                         this push would take the gate off. To do that on purpose, push with --no-verify",
+                        update.remote_ref,
+                        &tip[..tip.len().min(12)]
+                    );
+                    return ExitCode::from(REFUSED);
+                }
+                eprintln!(
+                    "sykli hook {HOOK}: {short} has no sykli.json or sykli.rs, nor did {} before; not gated",
+                    update.remote_ref
+                );
+                continue;
+            }
+            Step::NotCarried { update, contract } => {
+                let short = &update.local_sha[..update.local_sha.len().min(12)];
+                eprintln!(
+                    "sykli hook {HOOK}: refusing to push {short} to {}: the contract {} is inside this \
+                     worktree, but {short} does not carry it, so `verify --commit` cannot read it and no \
+                     receipt can pass; keep the contract outside the worktree, or commit it",
+                    update.remote_ref,
+                    contract.display()
+                );
+                return ExitCode::from(REFUSED);
+            }
+            Step::Judge {
+                update,
+                contract,
+                outside,
+                at,
+                owned,
+            } => (update, contract, outside, *at, *owned),
+        };
+        let sha = &update.local_sha;
+        let short = &sha[..sha.len().min(12)];
+        let judged = match (&outside_judged, &owned) {
+            (Some(judged), _) => judged.as_ref().map_err(String::as_str),
+            (None, Some(owned)) => owned.as_ref().map_err(String::as_str),
             (None, None) => Err("no contract to judge by"),
         };
+        if let (Ok(judged), Ok(at)) = (judged, at.as_mut()) {
+            match crate::inputs_from(sha, &judged.contract, &answers) {
+                Ok(inputs) => at.inputs = Some(inputs),
+                Err(error) => {
+                    eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
+                    return ExitCode::from(CANNOT_EVALUATE);
+                }
+            }
+        }
         match receipt_for(at.as_ref().map_err(String::as_str), judged) {
             Ok((receipt, bytes)) => {
                 eprintln!(
@@ -735,7 +838,7 @@ fn keep_evidence(common_dir: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
 /// A directory at `path`, never a symbolic link. Another push may create it
 /// between the look and `create`; losing that race is fine, so the look is
 /// repeated rather than the push's evidence dropped.
-fn ensure_directory(
+pub(crate) fn ensure_directory(
     path: &Path,
     create: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {

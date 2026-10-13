@@ -23,8 +23,63 @@ mod hook;
 mod init;
 mod inspect;
 #[cfg(unix)]
+mod journal;
+#[cfg(unix)]
 mod production;
 mod repo;
+#[cfg(unix)]
+mod runs;
+
+/// Durable runs need Unix file leases. Elsewhere there is no coordinator:
+/// these types have no values, so every use of one is unreachable.
+#[cfg(not(unix))]
+mod runs {
+    use crate::{Outcome, TaskReceipt};
+
+    pub(crate) enum Coordinator {}
+    pub(crate) struct Attempt<'a>(std::convert::Infallible, std::marker::PhantomData<&'a ()>);
+
+    impl Coordinator {
+        pub(crate) fn dispatch(&self, _: &str, _: &str) -> Result<Attempt<'_>, String> {
+            match *self {}
+        }
+        pub(crate) fn reuse(&self, _: &str, _: &str, _: &TaskReceipt) -> Result<(), String> {
+            match *self {}
+        }
+        pub(crate) fn settle(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &TaskReceipt,
+        ) -> Result<(), String> {
+            match *self {}
+        }
+        pub(crate) fn conclude(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: Outcome,
+        ) -> Result<(), String> {
+            match *self {}
+        }
+    }
+
+    impl Attempt<'_> {
+        pub(crate) fn started(&self, _: i32, _: u64) -> Result<(), String> {
+            match self.0 {}
+        }
+        pub(crate) fn finished(&self, _: &TaskReceipt) -> Result<(), String> {
+            match self.0 {}
+        }
+        pub(crate) fn interrupted(&self, _: i32) -> Result<(), String> {
+            match self.0 {}
+        }
+    }
+
+    pub(crate) fn signalled() -> Option<i32> {
+        None
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -71,8 +126,18 @@ enum Command {
     #[command(after_help = "Exit codes:\n  \
         0  every task passed or was cached\n  \
         1  a task failed, errored, or was blocked\n  \
-        2  could not evaluate: unreadable contract, lock drift, undeclared Cargo inputs, no git or sh\n\n\
-        The receipt is written to .sykli/receipts/<hash>.json; --json also prints it.\n\n\
+        2  could not evaluate: unreadable contract, lock drift, undeclared Cargo inputs, no git or sh,\n     \
+           or the run's journal could not be written (nothing unrecorded is reported as passed)\n  \
+        128+N  stopped by signal N (SIGINT 130, SIGTERM 143): running tasks were stopped and\n     \
+           recorded as interrupted; `sykli resume --run ID` continues the run\n\n\
+        The receipt is written to .sykli/receipts/rcpt_<sha256>.json; --json also prints it.\n\n\
+        On Linux and macOS every run is durable: before any task starts, the run is recorded in\n\
+        $(git rev-parse --git-common-dir)/sykli/runs/<run-id>/, and each task's attempts\n\
+        (dispatched, started, finished or interrupted, with its output) as they happen; the\n\
+        run id is printed first (`run: ID`, on stderr with --json) and is the receipt's `run`.\n\
+        `sykli status --run ID` reads that record at any time, also after a crash: a task\n\
+        whose end was not recorded is lost, never passed. Each task runs in its own process\n\
+        group. Elsewhere runs are not durable and nothing changes.\n\n\
         A contract outside the repository judges the git repository around the current\n\
         directory: its inputs are paths from that repository's root, its lock is the\n\
         sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.")]
@@ -83,6 +148,11 @@ enum Command {
         /// Print the run receipt as JSON on stdout; progress and task output go to stderr
         #[arg(long)]
         json: bool,
+        /// Record the run, hand it to a coordinator that outlives this command, and print
+        /// its id once the record is durable (`{"schema":"sykli-run.v1","run":ID}` with
+        /// --json); follow it with `sykli status --run ID` (Linux and macOS)
+        #[arg(long)]
+        detach: bool,
     },
     /// Select the tasks a change requires
     #[command(after_help = "Exit codes:\n  \
@@ -155,14 +225,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect a pinned production and artifact availability
+    /// Inspect a pinned production, a graph run (--run), or what applies to a commit (--commit)
     #[cfg(unix)]
-    #[command(
-        after_help = "Exit codes:\n  0  records inspected (work may be unfinished)\n  2  unknown production or unreadable store"
-    )]
+    #[command(after_help = "Exit codes:\n  \
+        0  records inspected (work may be unfinished)\n  \
+        2  unknown production or run, unreadable store or journal, or no such commit\n\n\
+        --run ID reads a run's journal (sykli-run-status.v1): its state (requested, running,\n\
+        completed, interrupted, or lost when its coordinator ended without concluding it),\n\
+        its subject and contract, each task's state (pending, running, passed, failed,\n\
+        errored, cached, blocked, interrupted, lost) with every attempt, and its receipt once\n\
+        complete. A task whose end was not recorded is never passed. No git runs.\n\n\
+        --commit REV judges every receipt of REV's tree that this clone keeps (this worktree's\n\
+        .sykli/receipts, kept receipts, and the receipts of runs) as `verify --commit` does\n\
+        (sykli-commit-status.v1). Receipts that verify for REV now are `current`; the others\n\
+        of the same tree (another contract, a failed check) are `historical`, kept and shown\n\
+        but never current evidence. Runs of that tree are listed with their states.")]
     Status {
         /// Production ID printed by `produce`
-        production: String,
+        #[arg(required_unless_present_any = ["run", "commit"], conflicts_with_all = ["run", "commit"])]
+        production: Option<String>,
+        /// A graph run's id, as `run` printed it or its receipt's `run` names it
+        #[arg(long, conflicts_with = "commit")]
+        run: Option<String>,
+        /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
+        /// With --commit: the contract to judge by, as for `verify`
+        #[arg(long, default_value = "sykli.rs", requires = "commit")]
+        contract: PathBuf,
         /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
@@ -173,15 +263,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Continue a pinned production; failed work requires an explicit retry
+    /// Continue a pinned production, or a graph run (--run); failed work requires an explicit retry
     #[cfg(unix)]
     #[command(after_help = "Exit codes:\n  \
-        0  the artifact is available and every required check passed\n  \
-        1  unfinished or failed work\n  \
-        2  unknown production, busy production, or store failure")]
+        0  the artifact is available and every required check passed\n     \
+           (--run: the run concluded and passed)\n  \
+        1  unfinished or failed work (--run: the run concluded and a task failed)\n  \
+        2  unknown production or run, busy, or store failure (--run: also a run whose\n     \
+           source, contract or runtime changed since it was requested)\n  \
+        128+N  --run: stopped again by signal N\n\n\
+        --run ID continues a graph run whose coordinator ended (crashed, killed, or stopped\n\
+        on a signal) from its journal. Tasks with an accepted outcome are kept, failed ones\n\
+        included. Every attempt left unfinished is recorded as lost, and every lost or\n\
+        interrupted task is retried as a new attempt that supersedes the old one, which\n\
+        stays in the history. It is refused while the run's coordinator or any of its\n\
+        attempts' processes is alive, and when the worktree's source, the contract, its lock\n\
+        or the runtime is not what the run recorded. Prints the receipt like `run`.")]
     Resume {
         /// Production ID printed by `produce`
-        production: String,
+        #[arg(required_unless_present = "run", conflicts_with = "run")]
+        production: Option<String>,
+        /// A graph run's id
+        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
+        run: Option<String>,
         /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
@@ -248,6 +352,14 @@ enum Command {
         production: String,
         #[arg(long)]
         attempt: String,
+        #[arg(long)]
+        lease_fd: i32,
+    },
+    #[cfg(unix)]
+    #[command(name = "__run_coordinator", hide = true)]
+    RunCoordinator {
+        #[arg(long)]
+        run: String,
         #[arg(long)]
         lease_fd: i32,
     },
@@ -349,17 +461,36 @@ enum Command {
         1  outcome or evidence failed — the work is bad or incomplete\n  \
         2  cannot verify — not a receipt, self-contradictory records, unreadable input, git or contract error\n  \
         3  tree or input mismatch — receipt is stale; re-run sykli\n     \
-           (with --commit: not a run of that commit's tree)\n  \
+           (with --commit: not a run of that commit's tree or declared inputs,\n     \
+           or a run that read an input the commit cannot show at its path)\n  \
         4  contract mismatch — contract drifted from the receipt; re-lock\n     \
            (with --commit: from the contract or lock in that commit;\n     \
            for a contract outside the repository: from it, or from its lock file)\n\n\
         Without --commit the subject is the checkout: its tree and declared inputs.\n\
-        With --commit the subject is the commit, and nothing is read from the\n\
+        With --commit the subject is the commit, and no input is read from the\n\
         checkout; REV is resolved in the repository around the current directory.\n\
         A contract outside that repository is read from its file, with or without\n\
         --commit, and the receipt must have run with the sykli.lock beside it\n\
         (the receipt's lock_digest).\n\
-        On any failure the first failing check is also printed to stderr as one line.")]
+        With --commit each declared input is judged against the commit at its exact\n\
+        path: the tree entry, bytes and execute bit the run recorded must be the\n\
+        commit's (bytes as stored, or as a checkout here converts them by this\n\
+        repository's configuration and attributes: line endings, smudge filters),\n\
+        and the records must hash to the receipt's inputs digest.\n\
+        A symbolic link is judged with the declared input it names. A receipt whose\n\
+        run read a file where the commit has none (an ignored or untracked file,\n\
+        inside a submodule, spelled differently from git) is refused: the commit\n\
+        cannot show it. An input a task declares as an output is generated by the\n\
+        run and judged through that task's inputs.\n\
+        On any failure the first failing check is also printed to stderr as one line.\n\n\
+        A verified receipt is consistent, not proven. Verify establishes a valid\n\
+        schema, records consistent with each other and the contract, the contract's\n\
+        identity, and the tree and every declared input, read from the checkout or\n\
+        the commit, never from the receipt. It does not establish where the receipt\n\
+        came from, who produced it, or that its tasks ran: receipts are unsigned, so\n\
+        an outcome rewritten to passed, or a receipt recomputed in full for a commit\n\
+        with consistent digests, verifies. A converted input is bound only as this\n\
+        checkout's configuration converts it.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
@@ -369,9 +500,16 @@ enum Command {
         /// Judge the receipt as evidence for this commit instead of the checkout:
         /// the contract and lock are read from REV (from their files when the
         /// contract is outside the repository), the receipt's tree must be
-        /// REV^{tree}, and every task passed or cached (the run need not be clean)
+        /// REV^{tree}, every declared input the run read must be what REV has at
+        /// its exact path (entry, bytes and execute bit), and every task passed
+        /// or cached (the run need not be clean)
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
+        /// Print the verdict as one JSON document (`sykli-verify.v1`): every check, the
+        /// first failing stage, the exit code, and what the verdict establishes and does
+        /// not; the exit code is unchanged
+        #[arg(long)]
+        json: bool,
     },
     /// Git hook entrypoints that gate what is committed and pushed
     Hook {
@@ -1030,7 +1168,7 @@ fn explain_plan(
                 .collect();
             match cache_key(task, &runtime, &after) {
                 Err(message) => CacheExplanation::InputError { message },
-                Ok(key) => match cache.inspect(task, &key, &runtime) {
+                Ok(key) => match cache.inspect(task, &key, &runtime.fingerprint) {
                     Ok(entry) => {
                         // Restoring outputs can change downstream inputs, even on a cache hit.
                         if task.outputs.is_empty() {
@@ -1244,11 +1382,60 @@ fn main() -> ExitCode {
         #[cfg(unix)]
         Command::Status {
             production: id,
+            run: Some(run),
+            json,
+            ..
+        } => {
+            let _ = id;
+            match runs::status(&run) {
+                Ok(status) => {
+                    if json {
+                        println!("{status}");
+                    } else {
+                        println!("{}", describe_run(&status));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        #[cfg(unix)]
+        Command::Status {
+            commit: Some(rev),
+            contract,
+            json,
+            ..
+        } => {
+            let mut contract = resolve_contract(contract);
+            match enter_for_contract(&mut contract, &mut [])
+                .and_then(|()| commit_status(&rev, &contract))
+            {
+                Ok(status) => {
+                    if json {
+                        println!("{status}");
+                    } else {
+                        println!("{}", describe_commit(&status));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        #[cfg(unix)]
+        Command::Status {
+            production: id,
             store,
             summary,
             json,
+            ..
         } => production::report(
-            production::inspect(&store, &id)
+            production::inspect(&store, id.as_deref().unwrap_or_default())
                 .map(|v| if summary { production::compact(v) } else { v }),
             json,
             false,
@@ -1268,6 +1455,18 @@ fn main() -> ExitCode {
         } => production::report(production::inspect(&store, &id), json, true),
         #[cfg(unix)]
         Command::Resume {
+            run: Some(run),
+            json,
+            ..
+        } => match resume_run(&run, json) {
+            Ok(ran) => exit_for(ran, json),
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
+        #[cfg(unix)]
+        Command::Resume {
             production: id,
             store,
             retry,
@@ -1277,10 +1476,11 @@ fn main() -> ExitCode {
             jobs,
             summary,
             json,
+            ..
         } => production::report(
             production::resume(
                 &store,
-                &id,
+                id.as_deref().unwrap_or_default(),
                 abandon.as_deref(),
                 retry.as_deref(),
                 stop_after.as_deref(),
@@ -1291,6 +1491,14 @@ fn main() -> ExitCode {
             json,
             true,
         ),
+        #[cfg(unix)]
+        Command::RunCoordinator { run, lease_fd } => match coordinator_main(&run, lease_fd) {
+            Ok(ran) => exit_for(ran, false),
+            Err(error) => {
+                eprintln!("coordinator: {error}");
+                ExitCode::from(2)
+            }
+        },
         #[cfg(unix)]
         Command::ProductionAttempt {
             store,
@@ -1356,11 +1564,14 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Run { contract, json } => match load_pinned(&contract)
-            .and_then(|((contract, levels, hash), lock)| run(&contract, &levels, hash, lock, json))
-        {
-            Ok((true, _)) => ExitCode::SUCCESS,
-            Ok((false, _)) => ExitCode::FAILURE,
+        Command::Run {
+            contract: path,
+            json,
+            detach,
+        } => match load_pinned(&path).and_then(|((contract, levels, hash), lock)| {
+            run(&path, &contract, &levels, hash, lock, json, detach)
+        }) {
+            Ok(ran) => exit_for(ran, json),
             Err(error) => {
                 eprintln!("error: {error}");
                 ExitCode::from(2)
@@ -1632,14 +1843,461 @@ fn main() -> ExitCode {
             receipt,
             contract,
             commit,
-        } => match verify(&receipt, &contract, commit.as_deref()) {
-            Ok(checks) => report(&checks),
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(NOT_VERIFIABLE)
+            json,
+        } => {
+            let verdict = verify(&receipt, &contract, commit.as_deref());
+            if json {
+                return report_json(&receipt, commit.as_deref(), verdict);
             }
-        },
+            match verdict {
+                Ok(checks) => report(&checks),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(NOT_VERIFIABLE)
+                }
+            }
+        }
     }
+}
+
+/// What `run` and `resume --run` exit with: 0 passed, 1 failed, 128+N
+/// stopped by signal N; a detached run prints its id.
+fn exit_for(ran: Ran, json: bool) -> ExitCode {
+    match ran {
+        Ran::Concluded { passed, .. } => {
+            if passed {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ran::Interrupted { run, signal } => {
+            eprintln!(
+                "interrupted: run {run} was stopped by signal {signal}; the tasks it stopped are \
+                 recorded as interrupted, and `sykli resume --run {run}` continues it"
+            );
+            ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
+        }
+        Ran::Detached { run } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"schema": "sykli-run.v1", "run": run})
+                );
+            } else {
+                println!("run: {run}");
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// `sykli resume --run`: take over a run whose coordinator ended, once its
+/// worktree, contract, lock and runtime are shown to be what it recorded,
+/// and decide what it left undecided.
+#[cfg(unix)]
+fn resume_run(run: &str, json: bool) -> Result<Ran, String> {
+    let coordinator = runs::Coordinator::reopen(run)?;
+    let request = coordinator.request();
+    let here = repo::repository()?;
+    let same = |a: &Path, b: &Path| {
+        fs::canonicalize(a)
+            .ok()
+            .is_some_and(|a| fs::canonicalize(b).ok() == Some(a))
+    };
+    if !same(&here.root, Path::new(&request.subject.repository)) {
+        return Err(format!(
+            "run {run} ran in the worktree at {}; resume it from there",
+            request.subject.repository
+        ));
+    }
+    std::env::set_current_dir(&request.workdir).map_err(|error| {
+        format!(
+            "cannot enter {}, where run {run} ran: {error}",
+            request.workdir
+        )
+    })?;
+    let (contract, levels, _) = parse_contract(request.contract.as_bytes())?;
+    let ((_, _, hash), lock) = load_pinned(Path::new(&request.contract_path))?;
+    if hash != request.contract_hash || lock != request.lock_digest {
+        return Err(format!(
+            "the contract {} or its lock is not what run {run} recorded; start a new run",
+            request.contract_path
+        ));
+    }
+    let runtime = graph_runtime(&contract)?;
+    if runtime.fingerprint != request.runtime {
+        return Err(format!(
+            "the runtime (shell, environment or toolchain) is not what run {run} recorded; \
+             start a new run"
+        ));
+    }
+    let subject = subject(&contract)?;
+    if subject.tree_oid != request.subject.tree_oid
+        || subject.inputs_digest != request.subject.inputs_digest
+    {
+        return Err(format!(
+            "the source changed since run {run} was requested (tree {}, now {}); its receipt \
+             would claim a tree that did not produce it; start a new run",
+            request.subject.tree_oid, subject.tree_oid
+        ));
+    }
+    coordinator.take_over()?;
+    checkpoint("after-lost")?;
+    let cache = LocalCache::new(Path::new(&request.subject.repository));
+    cache.bound();
+    let progress = Progress::of(json);
+    progress.line("run", run);
+    coordinate(&coordinator, &contract, &levels, &runtime, &cache, progress)
+}
+
+/// A detached coordinator (`run --detach`): everything it needs is in the
+/// run's record. One that cannot start its run records why.
+#[cfg(unix)]
+fn coordinator_main(run: &str, fd: i32) -> Result<Ran, String> {
+    let coordinator = runs::Coordinator::received(run, fd)?;
+    let request = coordinator.request();
+    let started = (|| {
+        let (contract, levels, _) = parse_contract(request.contract.as_bytes())?;
+        let runtime = graph_runtime(&contract)?;
+        if runtime.fingerprint != request.runtime {
+            return Err("the runtime changed before the run's coordinator started".to_string());
+        }
+        Ok((contract, levels, runtime))
+    })();
+    let (contract, levels, runtime) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            coordinator.stop(None, &error)?;
+            return Err(error);
+        }
+    };
+    let cache = LocalCache::new(Path::new(&request.subject.repository));
+    checkpoint("after-record")?;
+    coordinate(
+        &coordinator,
+        &contract,
+        &levels,
+        &runtime,
+        &cache,
+        Progress::Quiet,
+    )
+}
+
+/// A run's status for a person: its state, each task's, and its receipt.
+#[cfg(unix)]
+fn describe_run(status: &serde_json::Value) -> String {
+    let mut lines = vec![format!(
+        "run {}: {}",
+        status["run"].as_str().unwrap_or("?"),
+        status["state"].as_str().unwrap_or("?")
+    )];
+    for task in status["tasks"].as_array().into_iter().flatten() {
+        let attempts = task["attempts"].as_array().map_or(0, Vec::len);
+        lines.push(format!(
+            "  {}: {}{}",
+            task["name"].as_str().unwrap_or("?"),
+            task["state"].as_str().unwrap_or("?"),
+            if attempts > 1 {
+                format!(" ({attempts} attempts)")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    match status["receipt"]["path"].as_str() {
+        Some(path) => lines.push(format!("receipt: {path}")),
+        None => lines.push("receipt: none yet".into()),
+    }
+    if matches!(status["state"].as_str(), Some("lost" | "interrupted")) {
+        lines.push(format!(
+            "continue it with: sykli resume --run {}",
+            status["run"].as_str().unwrap_or("?")
+        ));
+    }
+    lines.push("Use --json for every attempt.".into());
+    lines.join("\n")
+}
+
+/// `sykli status --commit REV`: every receipt of REV's tree this clone
+/// keeps, judged for REV by the code `verify --commit` uses, and the runs
+/// of that tree (`sykli-commit-status.v1`). A receipt that verifies for REV
+/// now, passed or failed, is current; every other receipt of that tree is
+/// historical: kept and shown, never current evidence. Git is asked once
+/// (one `cat-file --batch` for the commit, its contract and inputs), and
+/// receipts are read from disk.
+#[cfg(unix)]
+fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let repository = repo::repository()
+        .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
+    let (judged, at) = commit_facts(repository, rev, contract_path)?;
+    let runs = runs::runs_of_tree(&at.tree)?;
+    let mut candidates = vec![repository.root.join(".sykli/receipt.json")];
+    for directory in [
+        repository.root.join(".sykli/receipts"),
+        repository.common_dir.join("sykli/receipts"),
+    ] {
+        if let Ok(entries) = fs::read_dir(directory) {
+            candidates.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "json")),
+            );
+        }
+    }
+    candidates.extend(
+        runs.iter()
+            .filter_map(|run| run["receipt"]["path"].as_str().map(PathBuf::from)),
+    );
+    // A receipt whose run this clone keeps counts only once that run has
+    // concluded with it: a coordinator stopped, or fenced off, between the
+    // receipt and its conclusion did not finish the run.
+    let concluded = runs
+        .iter()
+        .filter_map(|run| Some((run["run"].as_str()?, run)))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut current = Vec::new();
+    let mut historical = Vec::new();
+    for path in candidates {
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if receipt["subject"]["tree_oid"].as_str() != Some(at.tree.as_str()) {
+            continue;
+        }
+        let digest = sha256(&bytes);
+        if !seen.insert(digest.clone()) {
+            continue;
+        }
+        let unconcluded = receipt["run"]
+            .as_str()
+            .and_then(|run| concluded.get(run))
+            .filter(|run| {
+                run["state"] != "completed" || run["receipt"]["digest"] != digest.as_str()
+            });
+        let (judgement, stage, refusal_line) = match unconcluded {
+            Some(run) if run["state"] == "completed" => (
+                "unrecorded",
+                None,
+                Some(format!(
+                    "its run {} concluded with another receipt ({})",
+                    run["run"].as_str().unwrap_or("?"),
+                    run["receipt"]["digest"].as_str().unwrap_or("?")
+                )),
+            ),
+            Some(run) => (
+                "unconcluded",
+                None,
+                Some(format!(
+                    "its run {} has not concluded with it (the run is {})",
+                    run["run"].as_str().unwrap_or("?"),
+                    run["state"].as_str().unwrap_or("?")
+                )),
+            ),
+            None => match judge(&path, Ok((&judged, &at))) {
+                Ok(checks) => match checks.iter().find(|check| !check.ok) {
+                    None => ("verified", None, None),
+                    Some(first) => (
+                        match first.failure_code {
+                            OUTCOME_FAILED => "failed",
+                            NOT_VERIFIABLE => "unverifiable",
+                            _ => "not-applicable",
+                        },
+                        Some(first.name),
+                        Some(refusal(first)),
+                    ),
+                },
+                Err(error) => ("unverifiable", None, Some(error)),
+            },
+        };
+        let entry = json!({
+            "receipt": path,
+            "digest": digest,
+            "run": receipt["run"],
+            "started_at_ms": receipt["started_at_ms"],
+            "outcome": receipt["outcome"],
+            "judgement": judgement,
+            "stage": stage,
+            "refusal": refusal_line,
+        });
+        if matches!(judgement, "verified" | "failed") {
+            current.push(entry);
+        } else {
+            historical.push(entry);
+        }
+    }
+    let newest_first = |entries: &mut Vec<serde_json::Value>| {
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry["started_at_ms"].as_u64()));
+    };
+    newest_first(&mut current);
+    newest_first(&mut historical);
+    let verdict = if current.iter().any(|entry| entry["judgement"] == "verified") {
+        "passed"
+    } else if !current.is_empty() {
+        "failed"
+    } else if runs
+        .iter()
+        .any(|run| matches!(run["state"].as_str(), Some("requested" | "running")))
+    {
+        "pending"
+    } else {
+        "none"
+    };
+    let runs = runs
+        .iter()
+        .map(|run| {
+            json!({
+                "run": run["run"],
+                "state": run["state"],
+                "outcome": run["outcome"],
+                "dirty": run["subject"]["dirty"],
+                "receipt": run["receipt"],
+                "tasks": run["tasks"].as_array().into_iter().flatten()
+                    .map(|task| json!({"name": task["name"], "state": task["state"]}))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema": "sykli-commit-status.v1",
+        "commit": at.id,
+        "tree": at.tree,
+        "contract": {"path": contract_path, "hash": judged.hash},
+        "verdict": verdict,
+        "current": current,
+        "historical": historical,
+        "runs": runs,
+        "trust": TRUST,
+    }))
+}
+
+/// `status --commit` for a person.
+#[cfg(unix)]
+fn describe_commit(status: &serde_json::Value) -> String {
+    let short = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .map(|text| text.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "?".into())
+    };
+    let mut lines = vec![format!(
+        "commit {} (tree {}): {}",
+        short(&status["commit"]),
+        short(&status["tree"]),
+        status["verdict"].as_str().unwrap_or("?")
+    )];
+    for (title, key) in [
+        ("current", "current"),
+        ("historical, not current", "historical"),
+    ] {
+        let entries = status[key].as_array().cloned().unwrap_or_default();
+        if entries.is_empty() {
+            continue;
+        }
+        lines.push(format!("{title}:"));
+        for entry in entries {
+            lines.push(format!(
+                "  {} {} ({}){}",
+                entry["judgement"].as_str().unwrap_or("?"),
+                entry["receipt"].as_str().unwrap_or("?"),
+                entry["outcome"].as_str().unwrap_or("?"),
+                entry["refusal"]
+                    .as_str()
+                    .map(|refusal| format!(": {refusal}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    for run in status["runs"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "run {}: {}",
+            short(&run["run"]),
+            run["state"].as_str().unwrap_or("?")
+        ));
+    }
+    lines.join("\n")
+}
+
+/// `verify --json`: the verdict as one `sykli-verify.v1` document, with
+/// what it establishes and what it does not; the exit code is `report`'s.
+fn report_json(
+    receipt: &Path,
+    commit: Option<&str>,
+    verdict: Result<Vec<Check>, String>,
+) -> ExitCode {
+    use serde_json::json;
+    let (checks, error) = match verdict {
+        Ok(checks) => (checks, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let first = checks.iter().find(|check| !check.ok);
+    let exit = match (&error, first) {
+        (Some(_), _) => NOT_VERIFIABLE,
+        (None, Some(first)) => first.failure_code,
+        (None, None) => 0,
+    };
+    // The tiers a passing verify establishes, each from its checks.
+    let tier = |name: &str| match name {
+        "schema" => "schema",
+        "records" => "consistency",
+        "contract lock" | "contract" | "lock" => "contract",
+        "outcome" => "outcome",
+        _ => "source",
+    };
+    let mut established = Vec::new();
+    let mut not_established = Vec::new();
+    for name in ["schema", "contract", "source", "consistency", "outcome"] {
+        let tier_checks = checks
+            .iter()
+            .filter(|check| tier(check.name) == name)
+            .collect::<Vec<_>>();
+        if !tier_checks.is_empty() && tier_checks.iter().all(|check| check.ok) {
+            established.push(name);
+        } else {
+            not_established.push(name);
+        }
+    }
+    not_established.extend(["provenance", "producer", "execution"]);
+    if let Some(first) = first {
+        eprintln!("refused: {}", refusal(first));
+    }
+    if let Some(error) = &error {
+        eprintln!("error: {error}");
+    }
+    println!(
+        "{}",
+        json!({
+            "schema": "sykli-verify.v1",
+            "receipt": receipt,
+            "subject": match commit {
+                Some(rev) => json!({"kind": "commit", "rev": rev}),
+                None => json!({"kind": "checkout"}),
+            },
+            "verified": exit == 0,
+            "exit": exit,
+            "stage": first.map(|check| check.name),
+            "refusal": first.map(refusal),
+            "error": error,
+            "checks": checks.iter().map(|check| json!({
+                "name": check.name,
+                "ok": check.ok,
+                "expected": check.expected,
+                "actual": check.actual,
+            })).collect::<Vec<_>>(),
+            "trust": {
+                "established": established,
+                "not_established": not_established,
+                "statement": TRUST,
+            },
+        })
+    );
+    ExitCode::from(exit)
 }
 
 /// A contract, its execution levels, and its hash.
@@ -1754,7 +2412,13 @@ fn load_unlocked(path: &Path) -> Result<(Contract, Vec<Vec<usize>>, String), Str
 fn parse_contract(bytes: &[u8]) -> Result<(Contract, Vec<Vec<usize>>, String), String> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    let hash = sha256(&serde_json::to_vec(&value).map_err(|error| error.to_string())?);
+    let canonical = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    let hash = sha256(&canonical);
+    let mut parsed = CANONICAL_CONTRACTS.lock().unwrap();
+    if !parsed.iter().any(|(known, _)| known == &hash) {
+        parsed.push((hash.clone(), canonical));
+    }
+    drop(parsed);
     let contract: Contract = serde_json::from_value(value).map_err(|error| error.to_string())?;
     let levels = validate(&contract)?;
     Ok((contract, levels, hash))
@@ -2025,7 +2689,7 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Outcome {
     Passed,
@@ -2048,14 +2712,32 @@ struct Subject {
     /// does not show. Written only when true, so other receipts are unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     submodules_modified: bool,
+    /// The records `inputs_digest` was computed from, read once; each task's
+    /// go into its own receipt record.
+    #[serde(skip)]
+    inputs: InputRecords,
+    /// HEAD's commit when the run began, for a run's journal: a clean run
+    /// ran exactly this commit's tree. Not part of the receipt.
+    #[serde(skip)]
+    #[cfg_attr(not(unix), allow(dead_code))]
+    head_commit: Option<String>,
 }
 
-#[derive(Serialize)]
+/// One task's record in a receipt. A durable run also keeps each one as the
+/// output of the attempt (or reuse) that produced it, and builds the receipt
+/// from those, so it round-trips: reading it back and writing it again gives
+/// the same bytes.
+#[derive(Clone, Serialize, Deserialize)]
 struct TaskReceipt {
     name: String,
     command: String,
     runtime_fingerprint: String,
     exit_code: Option<i32>,
+    /// The signal that ended the shell, where it was one (Unix). Kept in the
+    /// run's journal, not in the receipt.
+    #[serde(skip)]
+    #[cfg_attr(not(unix), allow(dead_code))]
+    signal: Option<i32>,
     /// When this task was witnessed running. On a cache hit this replays the
     /// original run's time rather than now — paired with `source: "cache"`, the
     /// receipt then says the evidence was witnessed then and reused now.
@@ -2079,13 +2761,19 @@ struct TaskReceipt {
     inherited_digests: BTreeMap<String, String>,
     outcome: Outcome,
     importable: bool,
-    class: Option<&'static str>,
+    class: Option<String>,
     retryable: bool,
-    source: &'static str,
+    source: String,
     error: Option<String>,
     provenance: Option<String>,
     #[serde(skip)]
     cache_key: Option<String>,
+    /// Each declared input as the run read it, recorded so `verify --commit`
+    /// can compare every input with the commit; together they hash to the
+    /// subject's `inputs_digest`. Graph runs only; absent from receipts
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 #[derive(Serialize)]
@@ -2102,6 +2790,11 @@ struct Receipt {
     subject: Subject,
     tasks: Vec<TaskReceipt>,
     outcome: Outcome,
+    /// The durable run that produced this receipt (`sykli status --run`),
+    /// whose journal holds each task's attempts. Absent from receipts
+    /// written before runs were journaled, and where they are not (Windows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<String>,
 }
 
 struct ShellRuntime {
@@ -2250,17 +2943,123 @@ fn cache_entries(directory: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)>
     out
 }
 
-/// Whether every task passed or was cached, and where the receipt was written.
+/// How a run ended, for its caller.
+enum Ran {
+    /// Every task was decided and the receipt is durable: whether the run
+    /// passed, and where its receipt is.
+    Concluded { passed: bool, receipt: PathBuf },
+    /// Stopped on a signal before every task was decided; `sykli resume
+    /// --run` continues it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Interrupted { run: String, signal: i32 },
+    /// Handed to a detached coordinator once its record was durable.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Detached { run: String },
+}
+
+/// Where progress lines and task output go.
+#[derive(Clone, Copy, PartialEq)]
+enum Progress {
+    /// Progress and task stdout to stdout, task stderr to stderr.
+    Human,
+    /// Everything to stderr, so stdout carries only the JSON document.
+    Json,
+    /// Nowhere: a detached coordinator has no terminal, and each task's
+    /// captured output is kept with its attempt.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Quiet,
+}
+
+impl Progress {
+    fn of(json: bool) -> Self {
+        if json {
+            Progress::Json
+        } else {
+            Progress::Human
+        }
+    }
+
+    fn line(self, status: &str, subject: &str) {
+        match self {
+            Progress::Human => println!("{status}: {subject}"),
+            Progress::Json => eprintln!("{status}: {subject}"),
+            Progress::Quiet => {}
+        }
+    }
+
+    /// Where a task's stdout is relayed.
+    fn stdout(self) -> Box<dyn Write + Send> {
+        match self {
+            Progress::Human => Box::new(io::stdout()),
+            Progress::Json => Box::new(io::stderr()),
+            Progress::Quiet => Box::new(io::sink()),
+        }
+    }
+
+    /// Where a task's stderr is relayed.
+    fn stderr(self) -> Box<dyn Write + Send> {
+        match self {
+            Progress::Quiet => Box::new(io::sink()),
+            _ => Box::new(io::stderr()),
+        }
+    }
+}
+
+/// Durable runs need the run lease (`flock`); on other platforms a run
+/// keeps everything in memory until its receipt is written, as it always
+/// did, and the commands that need a run's journal say so.
+#[cfg_attr(unix, allow(dead_code))]
+const DURABLE_RUNS_UNSUPPORTED: &str = "durable runs are unsupported on this platform (they need \
+     Unix file leases): a run is kept in memory until its receipt is written, and --detach, \
+     status --run and resume --run are unavailable";
+
+/// A test hook, compiled into debug builds only, at each point where a
+/// crash must leave the run's record true. `SYKLI_TEST_PAUSE_AT=POINT`
+/// with `SYKLI_TEST_PAUSE_DIR=DIR` makes the process write its pid to
+/// `DIR/POINT.pid` when it reaches POINT, then wait until `DIR/POINT.release`
+/// (a FIFO) is written, so a test can kill it exactly there.
+/// `SYKLI_TEST_FAIL_AT=POINT` makes the step at POINT fail, as a full disk
+/// would. Release builds have neither.
+fn checkpoint(point: &str) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("SYKLI_TEST_FAIL_AT").is_some_and(|at| at == point) {
+            return Err(format!("injected failure at {point}"));
+        }
+        if std::env::var_os("SYKLI_TEST_PAUSE_AT").is_some_and(|at| at == point) {
+            if let Some(dir) = std::env::var_os("SYKLI_TEST_PAUSE_DIR").map(PathBuf::from) {
+                let pid = dir.join(format!("{point}.pid"));
+                let partial = dir.join(format!(".{point}.pid.{}", std::process::id()));
+                let _ = fs::write(&partial, std::process::id().to_string())
+                    .and_then(|()| fs::rename(&partial, &pid));
+                let _ = fs::read(dir.join(format!("{point}.release")));
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = point;
+    Ok(())
+}
+
+/// Run a contract: record the run durably before any task is dispatched
+/// (Unix), decide every task, and write the receipt from what was accepted.
+#[allow(clippy::too_many_arguments)]
 fn run(
+    contract_path: &Path,
     contract: &Contract,
     levels: &[Vec<usize>],
     contract_hash: String,
     lock_digest: Option<String>,
     json: bool,
-) -> Result<(bool, PathBuf), String> {
+    detach: bool,
+) -> Result<Ran, String> {
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
+    #[cfg(not(unix))]
+    if detach {
+        return Err(DURABLE_RUNS_UNSUPPORTED.into());
+    }
     let inventory = Inventory::new(contract)?;
     let missing = cargo_missing_inputs(contract, &inventory)?;
     if !missing.is_empty() {
@@ -2274,8 +3073,124 @@ fn run(
     let runtime = graph_runtime(contract)?;
     let cache = LocalCache::new(Path::new(&subject.repository));
     cache.bound();
-    let tasks = execute(contract, levels, &runtime, &cache, json);
-    let outcome = if tasks.iter().any(|task| task.outcome == Outcome::Errored) {
+    let progress = Progress::of(json);
+    #[cfg(unix)]
+    {
+        checkpoint("before-record")?;
+        let request = runs::Request::new(
+            canonical_contract(&contract_hash)?,
+            contract_path,
+            contract_hash,
+            lock_digest,
+            &subject,
+            contract
+                .tasks
+                .iter()
+                .map(|task| task.name.clone())
+                .collect(),
+            runtime.fingerprint.clone(),
+            run_started_at_ms,
+            detach,
+        )?;
+        let coordinator = runs::Coordinator::create(request)?;
+        if detach {
+            return coordinator.detach().map(|run| Ran::Detached { run });
+        }
+        progress.line("run", coordinator.id());
+        checkpoint("after-record")?;
+        coordinate(&coordinator, contract, levels, &runtime, &cache, progress)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (contract_path, detach);
+        let undecided = std::iter::repeat_with(|| None)
+            .take(contract.tasks.len())
+            .collect();
+        let tasks = execute(
+            contract, levels, &runtime, &cache, progress, None, &subject, undecided,
+        )?
+        .into_iter()
+        .map(|record| record.ok_or("a task was left undecided"))
+        .collect::<Result<Vec<_>, _>>()?;
+        let receipt = Receipt {
+            schema: "sykli-receipt.v1",
+            contract_hash,
+            lock_digest,
+            started_at_ms: run_started_at_ms,
+            subject,
+            tasks,
+            outcome: Outcome::Passed,
+            run: None,
+        };
+        conclude(contract, receipt, None, &cache, progress)
+    }
+}
+
+/// Decide every task of a recorded run that is not decided yet, then
+/// conclude it, or record it stopped when a signal stopped it first. A run
+/// that is resumed or detached comes here too: everything it needs is in
+/// its record.
+#[cfg(unix)]
+fn coordinate(
+    coordinator: &runs::Coordinator,
+    contract: &Contract,
+    levels: &[Vec<usize>],
+    runtime: &ShellRuntime,
+    cache: &LocalCache,
+    progress: Progress,
+) -> Result<Ran, String> {
+    runs::handle_signals();
+    let request = coordinator.request();
+    let subject = request.subject();
+    let decided = execute(
+        contract,
+        levels,
+        runtime,
+        cache,
+        progress,
+        Some(coordinator),
+        &subject,
+        coordinator.decided()?,
+    )?;
+    if decided.iter().any(Option::is_none) {
+        let signal = runs::signalled();
+        coordinator.stop(signal, "stopped on a signal before every task was decided")?;
+        return Ok(Ran::Interrupted {
+            run: coordinator.id().into(),
+            signal: signal.unwrap_or(15),
+        });
+    }
+    // The receipt is built from the journal's accepted records alone.
+    let tasks = coordinator
+        .decided()?
+        .into_iter()
+        .map(|record| record.ok_or("a decided task has no accepted record"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let receipt = Receipt {
+        schema: "sykli-receipt.v1",
+        contract_hash: request.contract_hash.clone(),
+        lock_digest: request.lock_digest.clone(),
+        started_at_ms: request.started_at_ms,
+        subject,
+        tasks,
+        outcome: Outcome::Passed,
+        run: Some(coordinator.id().into()),
+    };
+    conclude(contract, receipt, Some(coordinator), cache, progress)
+}
+
+/// Write the receipt (its outcome follows from its tasks), record the run
+/// concluded, then store what can be cached. A run whose conclusion could
+/// not be recorded is not reported as concluded.
+fn conclude(
+    contract: &Contract,
+    mut receipt: Receipt,
+    coordinator: Option<&runs::Coordinator>,
+    cache: &LocalCache,
+    progress: Progress,
+) -> Result<Ran, String> {
+    let tasks = &receipt.tasks;
+    receipt.outcome = if tasks.iter().any(|task| task.outcome == Outcome::Errored) {
         Outcome::Errored
     } else if !tasks.is_empty() && tasks.iter().all(|task| task.outcome == Outcome::Cached) {
         Outcome::Cached
@@ -2287,16 +3202,16 @@ fn run(
     } else {
         Outcome::Failed
     };
-    let receipt = Receipt {
-        schema: "sykli-receipt.v1",
-        contract_hash,
-        lock_digest,
-        started_at_ms: run_started_at_ms,
-        subject,
-        tasks,
-        outcome,
-    };
-    let path = write_receipt(&receipt)?;
+    // Every task, executed or reused, records the inputs as this run read
+    // them, the same records the subject's inputs digest covers.
+    for record in &mut receipt.tasks {
+        record.inputs = receipt.subject.inputs.get(&record.name).cloned();
+    }
+    let (path, digest) = write_receipt(&receipt)?;
+    checkpoint("after-receipt")?;
+    if let Some(coordinator) = coordinator {
+        coordinator.conclude(&path, &digest, receipt.outcome)?;
+    }
     let receipt_name = path.file_name().unwrap().to_string_lossy();
     for (task, record) in contract.tasks.iter().zip(&receipt.tasks) {
         if cacheable(record) {
@@ -2309,84 +3224,135 @@ fn run(
     // receipt, so the answer cannot change between them, and each call would
     // otherwise re-read and re-parse `entry.json` for every entry in the cache.
     cache.prune_receipts();
-    if json {
-        serde_json::to_writer(io::stdout().lock(), &receipt).map_err(|error| error.to_string())?;
-        println!();
-    } else {
-        println!("receipt: {}", path.display());
+    match progress {
+        Progress::Json => {
+            serde_json::to_writer(io::stdout().lock(), &receipt)
+                .map_err(|error| error.to_string())?;
+            println!();
+        }
+        Progress::Human => println!("receipt: {}", path.display()),
+        Progress::Quiet => {}
     }
-    Ok((matches!(outcome, Outcome::Passed | Outcome::Cached), path))
+    Ok(Ran::Concluded {
+        passed: matches!(receipt.outcome, Outcome::Passed | Outcome::Cached),
+        receipt: path,
+    })
 }
 
+/// Contracts parsed in this process, by hash: the canonical JSON whose
+/// SHA-256 the hash is, so a run can keep exactly the contract it ran.
+static CANONICAL_CONTRACTS: std::sync::Mutex<Vec<(String, Vec<u8>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn canonical_contract(hash: &str) -> Result<String, String> {
+    CANONICAL_CONTRACTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(known, _)| known == hash)
+        .and_then(|(_, bytes)| String::from_utf8(bytes.clone()).ok())
+        .ok_or_else(|| format!("contract {hash} was not parsed by this process"))
+}
+
+/// Decide every task not yet decided (`decided`), level by level: blocked
+/// behind a failed dependency, errored before it could run, reused from the
+/// cache, or run as a new attempt. With a coordinator, each decision is
+/// journaled as it is made, and an attempt is dispatched durably before its
+/// shell is spawned. A signal stops dispatching; attempts it stopped stay
+/// undecided (None). A journal that cannot be written is an error, never a
+/// pass.
+#[allow(clippy::too_many_arguments)]
 fn execute(
     contract: &Contract,
     levels: &[Vec<usize>],
     runtime: &ShellRuntime,
     cache: &dyn Cache,
-    json: bool,
-) -> Vec<TaskReceipt> {
+    progress: Progress,
+    coordinator: Option<&runs::Coordinator>,
+    subject: &Subject,
+    mut decided: Vec<Option<TaskReceipt>>,
+) -> Result<Vec<Option<TaskReceipt>>, String> {
     let names: HashMap<_, _> = contract
         .tasks
         .iter()
         .enumerate()
         .map(|(index, task)| (task.name.as_str(), index))
         .collect();
-    let mut receipts: Vec<Option<TaskReceipt>> = std::iter::repeat_with(|| None)
-        .take(contract.tasks.len())
-        .collect();
+    let baseline = Baseline::new(contract, subject);
 
     for level in levels {
+        if runs::signalled().is_some() {
+            break;
+        }
         let mut runnable = Vec::new();
         for &index in level {
+            if decided[index].is_some() {
+                continue;
+            }
             let task = &contract.tasks[index];
+            let settle = |record: TaskReceipt, key: Option<&str>| -> Result<TaskReceipt, String> {
+                if let Some(coordinator) = coordinator {
+                    coordinator.settle(&task.name, key, &record)?;
+                }
+                Ok(record)
+            };
             if task.after.iter().any(|name| {
                 !matches!(
-                    receipts[names[name.as_str()]].as_ref().unwrap().outcome,
-                    Outcome::Passed | Outcome::Cached
+                    decided[names[name.as_str()]].as_ref().map(|r| r.outcome),
+                    Some(Outcome::Passed | Outcome::Cached)
                 )
             }) {
-                progress(json, "blocked", &task.name);
-                receipts[index] = Some(empty_task_receipt(
-                    task,
-                    runtime,
-                    Outcome::Blocked,
-                    "dependency failed",
-                    "dependency_failed",
-                    false,
-                ));
-            } else {
-                let after: BTreeMap<&str, &str> = task
-                    .after
-                    .iter()
-                    .map(|name| {
-                        let key = receipts[names[name.as_str()]]
-                            .as_ref()
-                            .and_then(|record| record.cache_key.as_deref())
-                            .unwrap_or("");
-                        (name.as_str(), key)
-                    })
-                    .collect();
-                match cache_key(task, runtime, &after) {
-                    Ok(key) => {
-                        if let Some(mut record) = cache.restore(task, &key, runtime) {
-                            progress(json, "cached", &task.name);
-                            record.cache_key = Some(key);
-                            receipts[index] = Some(record);
-                        } else {
-                            runnable.push((index, key));
+                progress.line("blocked", &task.name);
+                decided[index] = Some(settle(
+                    empty_task_receipt(
+                        task,
+                        runtime,
+                        Outcome::Blocked,
+                        "dependency failed",
+                        "dependency_failed",
+                        false,
+                    ),
+                    None,
+                )?);
+                continue;
+            }
+            let after: BTreeMap<&str, &str> = task
+                .after
+                .iter()
+                .map(|name| {
+                    let key = decided[names[name.as_str()]]
+                        .as_ref()
+                        .and_then(|record| record.cache_key.as_deref())
+                        .unwrap_or("");
+                    (name.as_str(), key)
+                })
+                .collect();
+            let errored = |error: &str, class: &'static str| {
+                eprintln!("errored: {}", task.name);
+                empty_task_receipt(task, runtime, Outcome::Errored, error, class, false)
+            };
+            // The run read its inputs once, for its subject; the task must
+            // find them unchanged, or what it decides is about another tree.
+            if let Some(changed) = baseline.drifted(task) {
+                decided[index] = Some(settle(errored(&changed, "input_changed"), None)?);
+                continue;
+            }
+            match cache_key(task, runtime, &after) {
+                Ok(key) => {
+                    if let Some(mut record) = cache.restore(task, &key, runtime) {
+                        progress.line("cached", &task.name);
+                        record.cache_key = Some(key.clone());
+                        if let Some(coordinator) = coordinator {
+                            coordinator.reuse(&task.name, &key, &record)?;
                         }
+                        decided[index] = Some(record);
+                    } else {
+                        runnable.push((index, key));
                     }
-                    Err(error) => {
-                        eprintln!("errored: {}", task.name);
-                        receipts[index] = Some(empty_task_receipt(
-                            task,
-                            runtime,
-                            Outcome::Errored,
-                            &error,
-                            "input_error",
-                            false,
-                        ));
-                    }
+                }
+                Err(error) => {
+                    decided[index] = Some(settle(errored(&error, "input_error"), None)?);
                 }
             }
         }
@@ -2396,59 +3362,188 @@ fn execute(
                 .into_iter()
                 .map(|(index, key)| {
                     let task = &contract.tasks[index];
+                    let baseline = &baseline;
                     (
                         index,
-                        key,
                         scope.spawn(move || {
-                            run_task(task, runtime, json, MAX_CAPTURE_BYTES, Isolation::Shared)
+                            attempt_task(task, key, runtime, progress, coordinator, baseline)
                         }),
                     )
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|(index, key, handle)| {
-                    let mut record = handle.join().unwrap_or_else(|_| {
-                        empty_task_receipt(
-                            &contract.tasks[index],
-                            runtime,
-                            Outcome::Errored,
-                            "task thread panicked",
-                            "runtime_error",
-                            false,
-                        )
-                    });
-                    record.cache_key = Some(key);
-                    (index, record)
+                .map(|(index, handle)| {
+                    let result = handle
+                        .join()
+                        .unwrap_or_else(|_| Err("a task's thread panicked".to_string()));
+                    (index, result)
                 })
                 .collect::<Vec<_>>()
         });
 
+        let mut failure = None;
         for (index, result) in results {
             let task = &contract.tasks[index];
-            match result.outcome {
-                Outcome::Passed => {
-                    progress(json, "passed", &task.name);
+            match result {
+                Ok(Some(record)) => {
+                    match record.outcome {
+                        Outcome::Passed => progress.line("passed", &task.name),
+                        Outcome::Failed => eprintln!("failed: {}", task.name),
+                        Outcome::Errored => eprintln!("errored: {}", task.name),
+                        Outcome::Cached | Outcome::Blocked => unreachable!(),
+                    }
+                    decided[index] = Some(record);
                 }
-                Outcome::Failed => {
-                    eprintln!("failed: {}", task.name);
+                Ok(None) => eprintln!("interrupted: {}", task.name),
+                Err(error) => {
+                    eprintln!("errored: {}: {error}", task.name);
+                    failure.get_or_insert(error);
                 }
-                Outcome::Errored => {
-                    eprintln!("errored: {}", task.name);
-                }
-                Outcome::Cached | Outcome::Blocked => unreachable!(),
             }
-            receipts[index] = Some(result);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    }
+    Ok(decided)
+}
+
+/// Run one task as a new attempt: dispatched durably, its shell in its own
+/// process group holding the attempt's lease, its start and end journaled,
+/// and its record kept before it is accepted. None when a signal stopped
+/// it: its outcome is unknown, and it is recorded as interrupted.
+#[allow(clippy::too_many_arguments)]
+fn attempt_task(
+    task: &Task,
+    key: String,
+    runtime: &ShellRuntime,
+    progress: Progress,
+    coordinator: Option<&runs::Coordinator>,
+    baseline: &Baseline<'_>,
+) -> Result<Option<TaskReceipt>, String> {
+    let attempt = coordinator
+        .map(|coordinator| coordinator.dispatch(&task.name, &key))
+        .transpose()?;
+    checkpoint("after-dispatch")?;
+    let mut record = launch(
+        task,
+        runtime,
+        progress,
+        MAX_CAPTURE_BYTES,
+        Isolation::OwnGroup,
+        attempt.as_ref(),
+    )?;
+    record.cache_key = Some(key);
+    if let Some(signal) = runs::signalled() {
+        // A pass is a pass; anything else after a stop is not a verdict.
+        if record.outcome != Outcome::Passed {
+            checkpoint("during-cancel")?;
+            if let Some(attempt) = &attempt {
+                attempt.interrupted(signal)?;
+            }
+            return Ok(None);
+        }
+    }
+    if let Some(changed) = baseline.drifted(task) {
+        record.outcome = Outcome::Errored;
+        record.importable = false;
+        record.class = Some("input_changed".into());
+        record.error = Some(changed);
+    }
+    if let Some(attempt) = &attempt {
+        attempt.finished(&record)?;
+    }
+    Ok(Some(record))
+}
+
+/// What a run's tasks must still find while it runs: the bytes of each
+/// declared input as its subject recorded them, and each input's execute
+/// bits as they were on disk when this coordinator began executing. A task
+/// that read anything else would make the receipt claim a result for a tree
+/// that did not produce it. Inputs another task declares as outputs are made
+/// during the run, and are not compared.
+struct Baseline<'a> {
+    subject: &'a Subject,
+    generated: HashSet<PathBuf>,
+    modes: HashMap<PathBuf, Option<u32>>,
+}
+
+impl<'a> Baseline<'a> {
+    fn new(contract: &Contract, subject: &'a Subject) -> Self {
+        let generated = contract
+            .tasks
+            .iter()
+            .flat_map(|task| {
+                let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+                task.outputs
+                    .iter()
+                    .filter_map(move |output| absolute(&root.join(output)).ok())
+            })
+            .collect();
+        let modes = contract
+            .tasks
+            .iter()
+            .flat_map(|task| {
+                let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+                task.inputs.iter().map(move |input| root.join(input))
+            })
+            .filter_map(|path| Some((absolute(&path).ok()?, execute_bits(&path))))
+            .collect();
+        Baseline {
+            subject,
+            generated,
+            modes,
         }
     }
 
-    receipts.into_iter().map(Option::unwrap).collect()
+    /// The task's declared inputs that changed, as an error, or None.
+    fn drifted(&self, task: &Task) -> Option<String> {
+        let recorded = self.subject.inputs.get(&task.name)?;
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        let changed = task
+            .inputs
+            .iter()
+            .filter(|input| {
+                let path = root.join(input);
+                let Ok(full) = absolute(&path) else {
+                    return true;
+                };
+                if self.generated.contains(&full) {
+                    return false;
+                }
+                let bytes = sha256_file(&path).ok();
+                let then = recorded
+                    .get(*input)
+                    .cloned()
+                    .flatten()
+                    .map(|record| record.sha256);
+                bytes != then || self.modes.get(&full).copied().flatten() != execute_bits(&path)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        (!changed.is_empty()).then(|| {
+            format!(
+                "declared input changed while the run was in progress: {}; its result is not \
+                 evidence for the tree the run recorded",
+                changed.join(", ")
+            )
+        })
+    }
 }
 
-fn progress(json: bool, status: &str, task: &str) {
-    if json {
-        eprintln!("{status}: {task}");
-    } else {
-        println!("{status}: {task}");
+/// A file's execute bits, where files have them.
+fn execute_bits(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .ok()
+            .map(|meta| meta.permissions().mode() & 0o111)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
     }
 }
 
@@ -2464,23 +3559,50 @@ unsafe extern "C" {
 
 /// How a task's shell relates to the caller's process group.
 #[derive(Clone, Copy, PartialEq)]
-#[cfg_attr(not(unix), allow(dead_code))] // only typed production, Unix-only, isolates
+#[cfg_attr(not(unix), allow(dead_code))] // Windows has no process groups here
 enum Isolation {
     /// Share the caller's group: Ctrl-C reaches the task, as a user expects.
+    #[allow(dead_code)]
     Shared,
-    /// Own group: after the shell exits, the whole group is killed, so
-    /// termination of every descendant is established, not assumed.
+    /// Own group: as soon as the shell exits, the whole group is killed, so
+    /// termination of every descendant is established, not assumed, and a
+    /// straggler holding the output pipes cannot keep the task open. A
+    /// signal to sykli reaches the group through sykli, which records it.
     OwnGroup,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn run_task(
     task: &Task,
     runtime: &ShellRuntime,
-    json: bool,
+    progress: Progress,
     capture_limit: usize,
     isolation: Isolation,
 ) -> TaskReceipt {
-    progress(json, "running", &task.name);
+    launch(task, runtime, progress, capture_limit, isolation, None).unwrap_or_else(|error| {
+        empty_task_receipt(
+            task,
+            runtime,
+            Outcome::Errored,
+            &error,
+            "runtime_error",
+            false,
+        )
+    })
+}
+
+/// Run one task's shell and record what it did. With an attempt, the shell
+/// inherits the attempt's lease and its start is journaled; a start that
+/// cannot be journaled kills it and is an error.
+fn launch(
+    task: &Task,
+    runtime: &ShellRuntime,
+    progress: Progress,
+    capture_limit: usize,
+    isolation: Isolation,
+    attempt: Option<&runs::Attempt<'_>>,
+) -> Result<TaskReceipt, String> {
+    progress.line("running", &task.name);
     // Instant for the duration, wall clock for the claim: Instant is monotonic
     // and cannot be read as a time of day, SystemTime can jump but is what a
     // freshness policy compares against.
@@ -2499,6 +3621,10 @@ fn run_task(
                 Ok(())
             });
         }
+    }
+    #[cfg(unix)]
+    if let Some(attempt) = attempt {
+        attempt.inherit(&mut command);
     }
     #[cfg(not(unix))]
     let _ = isolation;
@@ -2532,29 +3658,52 @@ fn run_task(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return empty_task_receipt(
+            return Ok(empty_task_receipt(
                 task,
                 runtime,
                 Outcome::Errored,
                 &error.to_string(),
                 "spawn_error",
                 false,
-            );
+            ));
         }
     };
+    let group = child.id() as i32;
+    #[cfg(unix)]
+    if isolation == Isolation::OwnGroup {
+        runs::register(group);
+    }
+    if let Some(attempt) = attempt {
+        if let Err(error) = attempt.started(group, started_at_ms) {
+            #[cfg(unix)]
+            // SAFETY: the group this process just created.
+            unsafe {
+                killpg(group, 9);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            #[cfg(unix)]
+            runs::unregister(group);
+            return Err(error);
+        }
+    }
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    #[cfg(unix)]
-    let group = child.id() as i32;
     let (status, stdout, stderr) = thread::scope(|scope| {
-        let stdout_writer: Box<dyn Write + Send> = if json {
-            Box::new(io::stderr())
-        } else {
-            Box::new(io::stdout())
-        };
+        let stdout_writer = progress.stdout();
+        let stderr_writer = progress.stderr();
         let stdout = scope.spawn(move || relay(stdout, stdout_writer, capture_limit));
-        let stderr = scope.spawn(move || relay(stderr, io::stderr(), capture_limit));
+        let stderr = scope.spawn(move || relay(stderr, stderr_writer, capture_limit));
         let status = child.wait().map_err(|error| error.to_string());
+        #[cfg(unix)]
+        if isolation == Isolation::OwnGroup {
+            // The leader has exited; anything left in its group is a
+            // straggler, killed now rather than waited for.
+            // SAFETY: killpg on a group id we created; ESRCH when already empty.
+            unsafe {
+                killpg(group, 9);
+            }
+        }
         let stdout = stdout.join().unwrap_or_else(|_| CapturedOutput {
             bytes: Vec::new(),
             digest: sha256(&[]),
@@ -2571,11 +3720,7 @@ fn run_task(
     });
     #[cfg(unix)]
     if isolation == Isolation::OwnGroup {
-        // The leader has exited; anything left in its group is a straggler.
-        // SAFETY: killpg on a group id we created; ESRCH when already empty.
-        unsafe {
-            killpg(group, 9);
-        }
+        runs::unregister(group);
     }
 
     let CapturedOutput {
@@ -2601,11 +3746,12 @@ fn run_task(
     let mut retryable = false;
     let capture_error = stdout_error.or(stderr_error);
     let mut error = None;
+    let signal = status.as_ref().ok().and_then(exit_signal);
     let exit_code = match status {
         Ok(status) => {
             if !status.success() {
                 outcome = Outcome::Failed;
-                class = Some("command_failed");
+                class = Some("command_failed".into());
                 error = Some(status.to_string());
             }
             status.code()
@@ -2613,7 +3759,7 @@ fn run_task(
         Err(wait_error) => {
             outcome = Outcome::Errored;
             importable = false;
-            class = Some("runtime_error");
+            class = Some("runtime_error".into());
             retryable = true;
             error = Some(wait_error);
             None
@@ -2624,7 +3770,7 @@ fn run_task(
         importable = false;
         if outcome == Outcome::Passed {
             outcome = Outcome::Errored;
-            class = Some("capture_error");
+            class = Some("capture_error".into());
             retryable = true;
             error = Some(capture_error);
         } else {
@@ -2637,17 +3783,18 @@ fn run_task(
     if let Err(output_error) = verify_outputs(task, &mut output_digests) {
         if outcome == Outcome::Passed {
             outcome = Outcome::Failed;
-            class = Some("missing_output");
+            class = Some("missing_output".into());
             error = Some(output_error);
         }
     }
 
-    TaskReceipt {
+    Ok(TaskReceipt {
         name: task.name.clone(),
         command: task.run.clone(),
         runtime_fingerprint: runtime.fingerprint.clone(),
         started_at_ms: Some(started_at_ms),
         exit_code,
+        signal,
         duration_ms,
         stdout_truncated: stdout_bytes_dropped != 0,
         stdout_bytes_dropped,
@@ -2663,10 +3810,25 @@ fn run_task(
         importable,
         class,
         retryable,
-        source: "task",
+        source: "task".into(),
         error,
         provenance: None,
         cache_key: None,
+        inputs: None,
+    })
+}
+
+/// The signal that ended a process, where there are signals.
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
     }
 }
 
@@ -2736,6 +3898,7 @@ fn empty_task_receipt(
         // The task never started, so there is no moment to witness.
         started_at_ms: None,
         exit_code: None,
+        signal: None,
         duration_ms: 0,
         stdout: String::new(),
         stdout_truncated: false,
@@ -2749,30 +3912,96 @@ fn empty_task_receipt(
         inherited_digests: inherited_digests(task),
         outcome,
         importable: outcome != Outcome::Errored,
-        class: Some(class),
+        class: Some(class.into()),
         retryable,
-        source: "task",
+        source: "task".into(),
         error: Some(error.into()),
         provenance: None,
         cache_key: None,
+        inputs: None,
     }
 }
 
 fn input_digest(path: &Path) -> Result<String, String> {
+    input_record(path)?.digest()
+}
+
+/// What a run read of one declared input: the SHA-256 of its bytes, and the
+/// execute bits (`mode & 0o111`) on platforms that have them. Its digest
+/// (`sykli-input.v2`) is the input's part of cache keys and of the inputs
+/// digest; the record itself goes into the receipt, so `verify --commit` can
+/// compare each input with the commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct InputRecord {
+    sha256: String,
+    /// The execute bits as git has them for this input: those read from
+    /// the file system when they agree with the run's tree entry (git takes
+    /// an entry's bit from the owner's), else the entry's (`0o111` or 0),
+    /// as where the file system has none (Windows) or git does not trust
+    /// them (`core.filemode=false`). Absent only for a path not in that
+    /// tree on a file system without execute bits; the digest then uses 0,
+    /// as it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
+    /// The tree entry the run's snapshot has at this input's path, `MODE
+    /// ID` as git writes a tree. Absent when the path is not in that tree
+    /// (an ignored or generated file). Not part of the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object: Option<String>,
+}
+
+impl InputRecord {
+    fn digest(&self) -> Result<String, String> {
+        let bytes = serde_json::to_vec(&("sykli-input.v2", &self.sha256, self.mode.unwrap_or(0)))
+            .map_err(|error| error.to_string())?;
+        Ok(sha256(&bytes))
+    }
+}
+
+fn input_record(path: &Path) -> Result<InputRecord, String> {
     #[cfg(unix)]
-    let executable_mode = {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .map_err(|error| error.to_string())?
-            .permissions()
-            .mode()
-            & 0o111
+        Some(
+            fs::metadata(path)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o111,
+        )
     };
     #[cfg(not(unix))]
-    let executable_mode = 0_u32;
-    let bytes = serde_json::to_vec(&("sykli-input.v2", sha256_file(path)?, executable_mode))
-        .map_err(|error| error.to_string())?;
-    Ok(sha256(&bytes))
+    let mode = None;
+    Ok(InputRecord {
+        sha256: sha256_file(path)?,
+        mode,
+        object: None,
+    })
+}
+
+/// Every task's declared inputs as the run reads them: each input, as
+/// declared, with its record, or None when it cannot be read (missing).
+type InputRecords = BTreeMap<String, BTreeMap<String, Option<InputRecord>>>;
+
+/// The digest a receipt's subject records over all declared inputs: each
+/// task's inputs and their `sykli-input.v2` digests (null when missing).
+fn inputs_digest_of(records: &InputRecords) -> Result<String, String> {
+    let digests = records
+        .iter()
+        .map(|(task, inputs)| {
+            let inputs = inputs
+                .iter()
+                .map(|(input, record)| {
+                    let digest = record.as_ref().map(InputRecord::digest).transpose()?;
+                    Ok((input, digest))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
+            Ok((task, inputs))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    serde_json::to_vec(&digests)
+        .map(|bytes| sha256(&bytes))
+        .map_err(|error| error.to_string())
 }
 
 /// A task's content address: its declaration, its declared inputs' digests,
@@ -2843,23 +4072,63 @@ fn inherited_digests(task: &Task) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn declared_inputs_digest(contract: &Contract) -> Result<String, String> {
-    let inputs: BTreeMap<_, _> = contract
+/// Every task's declared inputs as the run reads them, each with the tree
+/// entry the run's snapshot has at its path (`facts`, by path from the top
+/// level, as `input_paths` gives them in `declared`), and its execute bits
+/// as git has them: the file system's when they agree with the entry of
+/// the file the input reads (its own, or a symbolic link's declared
+/// target), else that entry's.
+fn declared_input_records(
+    contract: &Contract,
+    declared: &[(String, String, String)],
+    facts: &PathFacts,
+) -> InputRecords {
+    let paths = declared
+        .iter()
+        .map(|(task, input, path)| ((task.as_str(), input.as_str()), path))
+        .collect::<HashMap<_, _>>();
+    contract
         .tasks
         .iter()
         .map(|task| {
             let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
-            let files: BTreeMap<_, _> = task
+            let files = task
                 .inputs
                 .iter()
-                .map(|input| (input, input_digest(&root.join(input)).ok()))
+                .map(|input| {
+                    let path = paths.get(&(task.name.as_str(), input.as_str()));
+                    let record = input_record(&root.join(input)).ok().map(|mut record| {
+                        if let Some(path) = path {
+                            if let Some(Found::Entry(entry)) = facts.found.get(*path) {
+                                record.object = Some(entry.clone());
+                            }
+                            if let Ok((_, file)) = facts.file_behind(path) {
+                                record.mode = Some(git_execute_bits(record.mode, &file));
+                            }
+                        }
+                        record
+                    });
+                    (input.clone(), record)
+                })
                 .collect();
-            (&task.name, files)
+            (task.name.clone(), files)
         })
-        .collect();
-    serde_json::to_vec(&inputs)
-        .map(|bytes| sha256(&bytes))
-        .map_err(|error| error.to_string())
+        .collect()
+}
+
+/// The execute bits a run records for a file whose tree entry is `entry`:
+/// those it read (`read`) when git agrees with them, else git's own. Git
+/// takes a file's bit from its owner's execute bit, and ignores the file
+/// system where it has no execute bits or is told not to trust them
+/// (`core.filemode=false`), keeping the bit it had; the bit a commit stores
+/// is then the one to bind.
+fn git_execute_bits(read: Option<u32>, entry: &str) -> u32 {
+    let executable = entry.starts_with("100755 ");
+    match read {
+        Some(bits) if (bits & 0o100 != 0) == executable => bits,
+        _ if executable => 0o111,
+        _ => 0,
+    }
 }
 
 impl LocalCache {
@@ -2996,12 +4265,7 @@ impl LocalCache {
     }
 
     /// Validate evidence without restoring outputs or creating any files.
-    fn inspect(
-        &self,
-        task: &Task,
-        key: &str,
-        runtime: &ShellRuntime,
-    ) -> Result<CacheEntry, CacheMiss> {
+    fn inspect(&self, task: &Task, key: &str, fingerprint: &str) -> Result<CacheEntry, CacheMiss> {
         let directory = self.cache.join(key);
         let bytes = fs::read(directory.join("entry.json")).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -3021,7 +4285,7 @@ impl LocalCache {
         {
             return Err(CacheMiss::EntryInvalid);
         }
-        if !self.provenance_valid(task, &entry, runtime) {
+        if !self.provenance_valid(task, &entry, fingerprint) {
             return Err(CacheMiss::ProvenanceInvalid);
         }
         for output in &entry.outputs {
@@ -3043,7 +4307,7 @@ impl LocalCache {
         Ok(entry)
     }
 
-    fn provenance_valid(&self, task: &Task, entry: &CacheEntry, runtime: &ShellRuntime) -> bool {
+    fn provenance_valid(&self, task: &Task, entry: &CacheEntry, fingerprint: &str) -> bool {
         let Some(expected) = entry
             .receipt
             .strip_prefix("rcpt_")
@@ -3071,7 +4335,7 @@ impl LocalCache {
             tasks.iter().any(|record| {
                 record["name"] == task.name
                     && record["command"] == task.run
-                    && record["runtime_fingerprint"] == runtime.fingerprint
+                    && record["runtime_fingerprint"] == fingerprint
                     && record["outcome"] == "passed"
                     && record["importable"] == true
                     && entry
@@ -3083,7 +4347,10 @@ impl LocalCache {
     }
 }
 
-fn restore_file(source: &Path, target: &Path, suffix: &str) -> Result<(), String> {
+/// Copy a cached artifact into place. The copy is hashed before it replaces
+/// anything: the entry may be replaced between its inspection and this copy,
+/// and a restored file must be exactly the bytes its receipt names.
+fn restore_file(source: &Path, target: &Path, suffix: &str, digest: &str) -> Result<(), String> {
     let parent = target
         .parent()
         .ok_or_else(|| format!("output {} has no parent", target.display()))?;
@@ -3093,6 +4360,10 @@ fn restore_file(source: &Path, target: &Path, suffix: &str) -> Result<(), String
     if let Err(error) = fs::copy(source, &temporary) {
         let _ = fs::remove_file(&temporary);
         return Err(error.to_string());
+    }
+    if sha256_file(&temporary)? != digest {
+        let _ = fs::remove_file(&temporary);
+        return Err("the cached artifact changed while it was restored".into());
     }
     if let Err(error) = fs::rename(&temporary, target) {
         let _ = fs::remove_file(temporary);
@@ -3105,12 +4376,18 @@ impl Cache for LocalCache {
     fn restore(&self, task: &Task, key: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
         let started = Instant::now();
         let directory = self.cache.join(key);
-        let entry = self.inspect(task, key, runtime).ok()?;
+        let entry = self.inspect(task, key, &runtime.fingerprint).ok()?;
 
         let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
         for output in &entry.outputs {
             let artifact = directory.join("outputs").join(&output.artifact);
-            restore_file(&artifact, &root.join(&output.path), &output.artifact).ok()?;
+            restore_file(
+                &artifact,
+                &root.join(&output.path),
+                &output.artifact,
+                &output.digest,
+            )
+            .ok()?;
         }
 
         // Record the use. Restoring only reads the stored artifacts, so without
@@ -3134,6 +4411,7 @@ impl Cache for LocalCache {
             // then and is being reused.
             started_at_ms: entry.witnessed_at_ms,
             exit_code: None,
+            signal: None,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             stdout: String::new(),
             stdout_truncated: false,
@@ -3149,58 +4427,113 @@ impl Cache for LocalCache {
             importable: true,
             class: None,
             retryable: false,
-            source: "cache",
+            source: "cache".into(),
             error: None,
             provenance: Some(entry.receipt),
             cache_key: None,
+            inputs: None,
         })
     }
 
+    /// Store a passing task's outputs under its key, durably and without a
+    /// window in which another process can lose or corrupt the entry.
+    ///
+    /// The entry is built in a private temporary directory: each output is
+    /// copied and re-hashed (it must still be the bytes the receipt names),
+    /// then every file and directory is synced, then the directory is
+    /// renamed into place. An entry is never deleted in place: when the key
+    /// is taken, an entry whose evidence still verifies is as good as this
+    /// one and is kept; one that does not is renamed aside, atomically, and
+    /// only then removed. Readers therefore see the old entry, the new one,
+    /// or none (a miss), never a mixture.
     fn store(&self, task: &Task, record: &TaskReceipt, receipt: &str) -> Result<(), String> {
         let Some(key) = &record.cache_key else {
             return Ok(());
         };
-        fs::create_dir_all(&self.cache).map_err(|error| error.to_string())?;
-        let temporary = self
-            .cache
-            .join(format!(".{key}.tmp-{}", std::process::id()));
-        if temporary.exists() {
-            fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
+        let error = |error: std::io::Error| error.to_string();
+        fs::create_dir_all(&self.cache).map_err(error)?;
+        let unique = || {
+            format!(
+                "{}-{}",
+                std::process::id(),
+                canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        };
+        let temporary = self.cache.join(format!(".{key}.tmp-{}", unique()));
+        let built = (|| -> Result<(), String> {
+            fs::create_dir_all(temporary.join("outputs")).map_err(error)?;
+            let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+            let mut outputs = Vec::new();
+            for (index, output) in task.outputs.iter().enumerate() {
+                let digest = record
+                    .output_digests
+                    .get(output)
+                    .ok_or_else(|| format!("missing digest for output {output:?}"))?;
+                let artifact = index.to_string();
+                let copy = temporary.join("outputs").join(&artifact);
+                fs::copy(root.join(output), &copy).map_err(error)?;
+                if &sha256_file(&copy)? != digest {
+                    return Err(format!(
+                        "output {output:?} changed after the task ran; not cached"
+                    ));
+                }
+                // Writable: Windows flushes only a handle opened for writing.
+                let copied = fs::OpenOptions::new()
+                    .write(true)
+                    .open(&copy)
+                    .map_err(error)?;
+                canonical::sync(&copied, canonical::Durability::Fsync).map_err(error)?;
+                outputs.push(CacheOutput {
+                    path: output.clone(),
+                    artifact,
+                    digest: digest.clone(),
+                });
+            }
+            let entry = serde_json::to_vec_pretty(&CacheEntry {
+                receipt: receipt.into(),
+                outputs,
+                witnessed_at_ms: record.started_at_ms,
+            })
+            .map_err(|error| error.to_string())?;
+            let mut file = fs::File::create(temporary.join("entry.json")).map_err(error)?;
+            file.write_all(&entry).map_err(error)?;
+            canonical::sync(&file, canonical::Durability::Fsync).map_err(error)?;
+            canonical::sync_directory(&temporary.join("outputs"), canonical::Durability::Fsync)?;
+            canonical::sync_directory(&temporary, canonical::Durability::Fsync)?;
+            checkpoint("cache-store")
+        })();
+        if let Err(failed) = built {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(failed);
         }
-        fs::create_dir_all(temporary.join("outputs")).map_err(|error| error.to_string())?;
-
-        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
-        let mut outputs = Vec::new();
-        for (index, output) in task.outputs.iter().enumerate() {
-            let digest = record
-                .output_digests
-                .get(output)
-                .ok_or_else(|| format!("missing digest for output {output:?}"))?;
-            let artifact = index.to_string();
-            fs::copy(root.join(output), temporary.join("outputs").join(&artifact))
-                .map_err(|error| error.to_string())?;
-            outputs.push(CacheOutput {
-                path: output.clone(),
-                artifact,
-                digest: digest.clone(),
-            });
-        }
-        let entry = serde_json::to_vec_pretty(&CacheEntry {
-            receipt: receipt.into(),
-            outputs,
-            witnessed_at_ms: record.started_at_ms,
-        })
-        .map_err(|error| error.to_string())?;
-        fs::write(temporary.join("entry.json"), entry).map_err(|error| error.to_string())?;
-
         let target = self.cache.join(key);
-        // ponytail: replacement is process-racy; add per-key locks if concurrent runs need them.
-        if target.exists() {
-            fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
+        for _ in 0..3 {
+            match fs::rename(&temporary, &target) {
+                Ok(()) => {
+                    canonical::sync_directory(&self.cache, canonical::Durability::Fsync)?;
+                    self.evict(&target);
+                    return Ok(());
+                }
+                Err(_) if target.exists() => {
+                    if self.inspect(task, key, &record.runtime_fingerprint).is_ok() {
+                        let _ = fs::remove_dir_all(&temporary);
+                        return Ok(());
+                    }
+                    let aside = self.cache.join(format!(".{key}.old-{}", unique()));
+                    if fs::rename(&target, &aside).is_ok() {
+                        let _ = fs::remove_dir_all(aside);
+                    }
+                }
+                Err(failed) => {
+                    let _ = fs::remove_dir_all(&temporary);
+                    return Err(failed.to_string());
+                }
+            }
         }
-        fs::rename(temporary, &target).map_err(|error| error.to_string())?;
-        self.evict(&target);
-        Ok(())
+        let _ = fs::remove_dir_all(&temporary);
+        Err(format!(
+            "cache entry {key} kept changing while it was stored"
+        ))
     }
 }
 
@@ -3387,8 +4720,19 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
     let repository = repo::repository().map_err(|_| {
         "not inside a git repository; sykli binds every receipt to a git tree".to_string()
     })?;
-    let (tree_oid, head_tree_oid) = snapshot(repository)?;
-    let inputs_digest = declared_inputs_digest(contract)?;
+    let declared = input_paths(contract)?;
+    let paths = declared
+        .iter()
+        .map(|(_, _, path)| path.clone())
+        .collect::<Vec<_>>();
+    let Snapshot {
+        tree: tree_oid,
+        head_tree: head_tree_oid,
+        head_commit,
+        facts,
+    } = snapshot(repository, &paths)?;
+    let inputs = declared_input_records(contract, &declared, &facts);
+    let inputs_digest = inputs_digest_of(&inputs)?;
     let submodules_modified = submodules_modified(&repository.root)?;
     let dirty = tree_oid != head_tree_oid || submodules_modified;
     Ok(Subject {
@@ -3398,6 +4742,8 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
         head_tree_oid,
         dirty,
         submodules_modified,
+        inputs,
+        head_commit,
     })
 }
 
@@ -3450,13 +4796,33 @@ fn submodules_modified(repository: &Path) -> Result<bool, String> {
 /// HEAD; `add --all` then stages every change and deletion except under
 /// the top-level `.sykli`, and git writes the tree: three more processes, built once per
 /// snapshot. A HEAD that tracks `.sykli` costs a removal and one more write.
-fn snapshot(repository: &repo::Repository) -> Result<(String, String), String> {
+///
+/// The same `cat-file` then reads what the tree just written has at each
+/// of `paths` (the declared inputs), from the temporary object directory:
+/// git's view of each input the run reads, its mode and blob id, for the
+/// receipt to record and `verify --commit` to compare with a commit, and,
+/// in one more round only when some input is a symbolic link, the target
+/// each link names. An input with no entry is not in the tree (ignored,
+/// generated, or spelled differently from git).
+fn snapshot(repository: &repo::Repository, paths: &[String]) -> Result<Snapshot, String> {
     let root = &repository.root;
-    let head = repository.cat(&["HEAD^{tree}".into(), "HEAD:.sykli".into()])?;
+    let state = TemporaryGitState::new(&object_directory_of(repository)?)?;
+    let mut session = repository.session(vec![
+        (
+            "GIT_OBJECT_DIRECTORY",
+            state.objects.clone().into_os_string(),
+        ),
+        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", state.alternates.clone()),
+    ]);
+    let head = session.ask(&[
+        "HEAD^{tree}".into(),
+        "HEAD:.sykli".into(),
+        "HEAD^{commit}".into(),
+    ])?;
+    let head_commit = head[2].as_ref().map(|commit| commit.id.clone());
     let Some(head_tree) = &head[0] else {
         return Err("repository has no commits; commit once before running sykli".into());
     };
-    let state = TemporaryGitState::new(&object_directory_of(repository)?)?;
     git_with_temporary_state(root, &state, &["read-tree", "HEAD"])?;
     let head_tree = match head[1] {
         None => head_tree.id.clone(),
@@ -3481,7 +4847,35 @@ fn snapshot(repository: &repo::Repository) -> Result<(String, String), String> {
         ],
     )?;
     let tree = git_with_temporary_state(root, &state, &["write-tree"])?;
-    Ok((tree, head_tree))
+    let names = paths.iter().flat_map(|path| tree_names(&tree, path));
+    let mut answers = ask_in(&mut session, names.collect())?;
+    let mut facts = PathFacts::default();
+    for path in paths {
+        facts
+            .found
+            .insert(path.clone(), found_at(&tree, path, &answers));
+    }
+    let links = facts.links_to_read(&tree);
+    if !links.is_empty() {
+        answers.extend(ask_in(&mut session, links)?);
+        facts.read_links(&tree, &answers);
+    }
+    session.finish()?;
+    Ok(Snapshot {
+        tree,
+        head_tree,
+        head_commit,
+        facts,
+    })
+}
+
+/// What `snapshot` read: the working tree, HEAD's tree and commit, and
+/// what the tree has at each declared input.
+struct Snapshot {
+    tree: String,
+    head_tree: String,
+    head_commit: Option<String>,
+    facts: PathFacts,
 }
 
 /// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
@@ -3648,6 +5042,9 @@ struct TaskSummary {
     importable: bool,
     exit_code: Option<i32>,
     error: Option<String>,
+    /// Each declared input as the run read it; absent from older receipts.
+    #[serde(default)]
+    inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 /// A receipt's records must agree with themselves and with the contract they
@@ -3717,13 +5114,15 @@ impl Check {
 /// working tree and the pinned contract, and its outcome was success. It
 /// cannot prove the commands truly ran — that would take attestation.
 ///
-/// With a commit, the subject is that commit and nothing is read from the
+/// With a commit, the subject is that commit and no input is read from the
 /// checkout: the contract and its lock pin come from the commit, the
-/// receipt's tree must be the commit's tree, and the run must have been
-/// clean. A receipt binds a tree, so this is what ties it to a commit someone
-/// pushes, whatever is checked out or uncommitted when it is asked. Declared
-/// inputs the commit does not track are local state, like the toolchain, and
-/// are not judged.
+/// receipt's tree must be the commit's tree, and each declared input the run
+/// read must be what the commit has at its path (`inputs_check`). A receipt
+/// binds a tree, so this is what ties it to a commit someone pushes,
+/// whatever is checked out or uncommitted when it is asked. An input the
+/// commit cannot show at its path (ignored, untracked, inside a submodule,
+/// spelled differently) cannot be judged, so a receipt whose run read one is
+/// refused; an input a task outputs is generated by the run.
 ///
 /// A contract outside the repository is no part of any commit, so it and its
 /// lock are read from where they are, with or without a commit. It travels
@@ -3763,6 +5162,12 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
     if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
         return Ok(checks);
     }
+    // A receipt's own input records must hash to its inputs digest, the
+    // one the checkout's files are compared with below.
+    if let Some(check) = records_check(&receipt)? {
+        checks.push(check);
+        return Ok(checks);
+    }
     let subject = subject(&contract)?;
     checks.extend([
         Check::equals(
@@ -3781,8 +5186,54 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
+    // Each record, entry included, must be what the checkout gives now.
+    if let Some(check) = checkout_records_check(&receipt, &subject.inputs) {
+        checks.push(check);
+        return Ok(checks);
+    }
     record_checks(&mut checks, &receipt, &contract);
     Ok(checks)
+}
+
+/// For a receipt with per-task input records, judged against the checkout:
+/// a failing `inputs` check for the first record that is not what the
+/// checkout gives now (`fresh`), the tree entry included, which the inputs
+/// digest does not cover; None when every record is.
+fn checkout_records_check(receipt: &ReceiptSummary, fresh: &InputRecords) -> Option<Check> {
+    let show = |record: Option<&InputRecord>| match record {
+        Some(record) => format!(
+            "sha256 {}, mode {}, entry {}",
+            record.sha256,
+            record
+                .mode
+                .map_or("none".into(), |bits| format!("{bits:#o}")),
+            record.object.as_deref().unwrap_or("none")
+        ),
+        None => "nothing".into(),
+    };
+    for task in &receipt.tasks {
+        let Some(records) = &task.inputs else {
+            continue;
+        };
+        let now = fresh.get(&task.name);
+        for (input, record) in records {
+            let checkout = now.and_then(|now| now.get(input)).and_then(Option::as_ref);
+            if checkout != record.as_ref() {
+                return Some(Check {
+                    name: "inputs",
+                    expected: format!(
+                        "task {}'s input {input} as the checkout has it: {}",
+                        task.name,
+                        show(checkout)
+                    ),
+                    actual: format!("{} recorded by the run", show(record.as_ref())),
+                    ok: false,
+                    failure_code: TREE_MISMATCH,
+                });
+            }
+        }
+    }
+    None
 }
 
 /// A receipt and its schema check.
@@ -3833,20 +5284,23 @@ impl Judged {
 pub(crate) struct CommitAt {
     id: String,
     tree: String,
+    /// The contract's declared inputs as this commit stores them, read in a
+    /// second round once the contract is known.
+    inputs: Option<InputsAt>,
 }
 
 /// What one `git cat-file --batch` said about each name asked of it.
 pub(crate) type Answers = HashMap<String, Option<repo::Object>>;
 
-/// Ask every name once, in one process, and keep the answers by name.
-pub(crate) fn ask(repository: &repo::Repository, names: Vec<String>) -> Result<Answers, String> {
-    let mut unique = Vec::new();
-    for name in names {
-        if !unique.contains(&name) {
-            unique.push(name);
-        }
-    }
-    let answers = repository.cat(&unique)?;
+/// Ask every name once, as one round of a session that may be asked again,
+/// and keep the answers by name.
+pub(crate) fn ask_in(session: &mut repo::Session, names: Vec<String>) -> Result<Answers, String> {
+    let mut seen = HashSet::new();
+    let unique = names
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect::<Vec<_>>();
+    let answers = session.ask(&unique)?;
     Ok(unique.into_iter().zip(answers).collect())
 }
 
@@ -3880,7 +5334,756 @@ pub(crate) fn commit_from(rev: &str, answers: &Answers) -> Result<CommitAt, Stri
     Ok(CommitAt {
         id: commit.id.clone(),
         tree,
+        inputs: None,
     })
+}
+
+/// What a tree has at a path, looked up by the path's exact bytes, as
+/// `REV:PATH` names it: git never folds case or Unicode normalization, nor
+/// follows a symbolic link or enters a submodule on the way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Found {
+    /// The entry at the path, `MODE ID` as git writes a tree.
+    Entry(String),
+    /// Nothing at the path, and as far as the tree shows, why.
+    Absent(Absence),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Absence {
+    /// The directory that would hold it has no entry by that name, nor one
+    /// that differs from it only in case.
+    Nothing,
+    /// An entry whose name differs only in case: the path as git spells it.
+    Spelled(String),
+    /// A part of the path is not a directory in the tree: that part's path
+    /// and its entry, a submodule (`160000`), a symbolic link (`120000`) or a
+    /// file.
+    Under(String, String),
+}
+
+impl Absence {
+    /// Why a tree has nothing at `path`, in words.
+    fn reason(&self, path: &str) -> String {
+        match self {
+            Absence::Nothing => format!(
+                "nothing at {path}: a file it does not track (deleted, ignored, generated or \
+                 untracked), or one it spells differently (such as by Unicode normalization)"
+            ),
+            Absence::Spelled(spelled) => {
+                format!("nothing at {path}; it spells that file {spelled}")
+            }
+            Absence::Under(part, entry) => format!(
+                "nothing at {path}: {part} is {} there, which git does not look inside",
+                kind_of(entry)
+            ),
+        }
+    }
+}
+
+/// What a tree entry is, in words.
+fn kind_of(entry: &str) -> String {
+    let (mode, id) = entry.split_once(' ').unwrap_or((entry, ""));
+    match mode {
+        "160000" => format!("a submodule, recorded only as its commit {id}"),
+        "120000" => "a symbolic link".into(),
+        "40000" => "a directory".into(),
+        _ => "a file".into(),
+    }
+}
+
+/// Whether `entry` is a regular file's: `100644`, or `100755` (executable).
+fn is_file(entry: &str) -> bool {
+    entry.starts_with("100644 ") || entry.starts_with("100755 ")
+}
+
+/// The names to ask `git cat-file --batch` to find `path` in `tree_ish` by
+/// its exact bytes: the tree of every directory on the way, from the top.
+fn tree_names(tree_ish: &str, path: &str) -> Vec<String> {
+    let parts = path.split('/').collect::<Vec<_>>();
+    let mut names = vec![format!("{tree_ish}^{{tree}}")];
+    names.extend((1..parts.len()).map(|end| format!("{tree_ish}:{}", parts[..end].join("/"))));
+    names
+}
+
+/// What `tree_ish` has at `path`, from the answers to `tree_names`.
+fn found_at(tree_ish: &str, path: &str, answers: &Answers) -> Found {
+    let parts = path.split('/').collect::<Vec<_>>();
+    let mut tree = format!("{tree_ish}^{{tree}}");
+    for (index, part) in parts.iter().enumerate() {
+        let Some(object) = answer(answers, &tree).filter(|object| object.kind == "tree") else {
+            break;
+        };
+        let entries = repo::tree_entries(&object.bytes, object.id.len() / 2);
+        let Some((_, entry)) = entries.iter().find(|(name, _)| name == part) else {
+            let folded = part.to_lowercase();
+            let spelled = entries
+                .iter()
+                .find(|(name, _)| name.to_lowercase() == folded)
+                .map(|(name, _)| {
+                    let mut spelled = parts.clone();
+                    spelled[index] = name;
+                    Absence::Spelled(spelled.join("/"))
+                });
+            return Found::Absent(spelled.unwrap_or(Absence::Nothing));
+        };
+        let here = parts[..=index].join("/");
+        if index + 1 == parts.len() {
+            return Found::Entry(entry.clone());
+        }
+        if !entry.starts_with("40000 ") {
+            return Found::Absent(Absence::Under(here, entry.clone()));
+        }
+        tree = format!("{tree_ish}:{here}");
+    }
+    Found::Absent(Absence::Nothing)
+}
+
+/// Where a symbolic link at `link` naming `target` points, from the top
+/// level, by the names alone; None when that leaves the repository (an
+/// absolute target, or `..` past the top).
+fn link_target(link: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target.starts_with('/') {
+        return None;
+    }
+    let mut parts = link.split('/').collect::<Vec<_>>();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// What one tree has at every declared input's path, and the target each
+/// symbolic link among them names.
+#[derive(Default)]
+struct PathFacts {
+    found: HashMap<String, Found>,
+    links: HashMap<String, String>,
+}
+
+impl PathFacts {
+    /// The names to ask for the targets of the symbolic links found.
+    fn links_to_read(&self, tree_ish: &str) -> Vec<String> {
+        self.found
+            .iter()
+            .filter(
+                |(_, found)| matches!(found, Found::Entry(entry) if entry.starts_with("120000 ")),
+            )
+            .map(|(path, _)| format!("{tree_ish}:{path}"))
+            .collect()
+    }
+
+    /// Keep each symbolic link's target from the answers to `links_to_read`.
+    fn read_links(&mut self, tree_ish: &str, answers: &Answers) {
+        for (path, found) in &self.found {
+            let Found::Entry(entry) = found else { continue };
+            let id = entry.split(' ').nth(1).unwrap_or_default();
+            if let Some(object) = answer(answers, &format!("{tree_ish}:{path}"))
+                .filter(|object| entry.starts_with("120000 ") && object.id == id)
+            {
+                self.links.insert(
+                    path.clone(),
+                    String::from_utf8_lossy(&object.bytes).into_owned(),
+                );
+            }
+        }
+    }
+
+    /// The regular file whose bytes a read of the declared input at `path`
+    /// gives, as the tree has it: the input's own entry, or for a symbolic
+    /// link the declared input it names, followed through further declared
+    /// links. Its path and entry, or why a read of `path` cannot be traced
+    /// to a file in the tree.
+    fn file_behind(&self, path: &str) -> Result<(String, String), String> {
+        let mut at = path.to_string();
+        let mut seen = HashSet::new();
+        while seen.insert(at.clone()) {
+            let found = self
+                .found
+                .get(&at)
+                .ok_or_else(|| format!("{at} was not looked up"))?;
+            let entry = match found {
+                Found::Entry(entry) => entry,
+                Found::Absent(absence) => return Err(absence.reason(&at)),
+            };
+            if is_file(entry) {
+                return Ok((at, entry.clone()));
+            }
+            if !entry.starts_with("120000 ") {
+                return Err(format!("{at} is {}", kind_of(entry)));
+            }
+            let target = self
+                .links
+                .get(&at)
+                .ok_or_else(|| format!("the target of the symbolic link {at} was not read"))?;
+            let Some(next) = link_target(&at, target) else {
+                return Err(format!(
+                    "{at} is a symbolic link to {target}, outside the repository"
+                ));
+            };
+            if !self.found.contains_key(&next) {
+                return Err(format!(
+                    "{at} is a symbolic link to {next}, which no task declares; declare {next} \
+                     as well, so the bytes read through the link can be judged"
+                ));
+            }
+            at = next;
+        }
+        Err(format!("{path} is in a loop of symbolic links"))
+    }
+}
+
+/// Every task's declared inputs as one commit stores them, read from git,
+/// never from the receipt being judged: each input's path from the top
+/// level, what the commit has there, and the bytes of every file and
+/// symbolic link among them, all from the second round of the one
+/// `git cat-file --batch` that read the commit.
+pub(crate) struct InputsAt {
+    /// Each task's inputs, as declared, with their paths from the top level.
+    tasks: BTreeMap<String, BTreeMap<String, String>>,
+    facts: PathFacts,
+    /// The SHA-256 of the bytes the commit stores at each declared path
+    /// that is a file or a symbolic link (the target's name).
+    stored: HashMap<String, String>,
+    /// Each path a task declares as an output, by that task: an input there
+    /// is generated by the run.
+    outputs: Vec<(String, String)>,
+    /// What a checkout here gives for a blob at a path, by path and blob:
+    /// one `git cat-file --filters` each, only when the bytes the run read
+    /// are not the stored ones.
+    checkouts: std::cell::RefCell<HashMap<(String, String), String>>,
+}
+
+/// Each declared input of `contract`: its task, the input as declared, and
+/// its path from the top level (`declared_path`: from the current
+/// directory, through the task's workdir).
+fn input_paths(contract: &Contract) -> Result<Vec<(String, String, String)>, String> {
+    let repository = repo::repository()?;
+    let mut paths = Vec::new();
+    for task in &contract.tasks {
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        for input in &task.inputs {
+            let path = declared_path(repository, &root.join(input))?;
+            paths.push((task.name.clone(), input.clone(), path));
+        }
+    }
+    Ok(paths)
+}
+
+/// A declared path from the repository's top level, by its names alone:
+/// from where the current directory is in the repository, with `.` and `..`
+/// taken as names and nothing below the top level resolved on disk. A
+/// symbolic link in the checkout (a directory replaced by a link to
+/// another) therefore cannot make a declared input name another path than
+/// the one a commit is asked about.
+fn declared_path(repository: &repo::Repository, path: &Path) -> Result<String, String> {
+    let full = absolute(path)?;
+    let root = repository.root_here()?;
+    full.strip_prefix(&root)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                repository.root.display()
+            )
+        })
+}
+
+/// The names to ask about `contract`'s declared inputs in commit `rev`:
+/// the trees on the way to each, and the object at each path.
+pub(crate) fn input_names(rev: &str, contract: &Contract) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for (_, _, path) in input_paths(contract)? {
+        names.extend(tree_names(rev, &path));
+        names.push(format!("{rev}:{path}"));
+    }
+    Ok(names)
+}
+
+/// The inputs `input_names(rev, contract)` asked about, from git's answers.
+pub(crate) fn inputs_from(
+    rev: &str,
+    contract: &Contract,
+    answers: &Answers,
+) -> Result<InputsAt, String> {
+    let repository = repo::repository()?;
+    let mut facts = PathFacts::default();
+    let mut stored = HashMap::new();
+    let mut tasks: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (task, input, path) in input_paths(contract)? {
+        if !facts.found.contains_key(&path) {
+            let found = found_at(rev, &path, answers);
+            if let Found::Entry(entry) = &found {
+                let id = entry.split(' ').nth(1).unwrap_or_default();
+                if let Some(object) = answer(answers, &format!("{rev}:{path}"))
+                    .filter(|object| object.kind == "blob" && object.id == id)
+                {
+                    stored.insert(path.clone(), sha256(&object.bytes));
+                    if entry.starts_with("120000 ") {
+                        facts.links.insert(
+                            path.clone(),
+                            String::from_utf8_lossy(&object.bytes).into_owned(),
+                        );
+                    }
+                }
+            }
+            facts.found.insert(path.clone(), found);
+        }
+        tasks.entry(task).or_default().insert(input, path);
+    }
+    let mut outputs = Vec::new();
+    for task in &contract.tasks {
+        let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        for output in &task.outputs {
+            if let Ok(path) = declared_path(repository, &root.join(output)) {
+                outputs.push((path, task.name.clone()));
+            }
+        }
+    }
+    Ok(InputsAt {
+        tasks,
+        facts,
+        stored,
+        outputs,
+        checkouts: std::cell::RefCell::new(HashMap::new()),
+    })
+}
+
+/// How one declared input fared against the commit.
+enum Judgment {
+    /// What the run read there is what the commit has.
+    Judged,
+    /// What the run read there is what a checkout here makes of the
+    /// commit's blob (line endings, a smudge filter): that file's path.
+    Converted(String),
+    /// The commit has nothing there, and a task declares it as an output:
+    /// the run generated it, from inputs judged in their own right.
+    Generated(String),
+    /// Refused: what the commit has, and what the receipt says the run read.
+    Refused(String, String),
+}
+
+impl InputsAt {
+    /// The task that declares `path`, or a directory holding it, as an
+    /// output.
+    fn producer(&self, path: &str) -> Option<&str> {
+        self.outputs
+            .iter()
+            .find(|(output, _)| {
+                path == output
+                    || path
+                        .strip_prefix(output.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(_, task)| task.as_str())
+    }
+
+    /// The SHA-256 of what a checkout here gives for blob `id` at `path`:
+    /// `git cat-file --filters`, which applies the line-ending conversion
+    /// and smudge filter this repository's configuration and attributes
+    /// give that path, as a checkout would, read once per path and blob.
+    fn checked_out(&self, path: &str, id: &str) -> Result<String, String> {
+        let key = (path.to_string(), id.to_string());
+        if let Some(digest) = self.checkouts.borrow().get(&key) {
+            return Ok(digest.clone());
+        }
+        let repository = repo::repository()?;
+        let output = repo::git_command()
+            .arg("-C")
+            .arg(&repository.root)
+            .args(["cat-file", "--filters", &format!("--path={path}"), id])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "git cat-file --filters cannot check out {path}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let digest = sha256(&output.stdout);
+        self.checkouts.borrow_mut().insert(key, digest.clone());
+        Ok(digest)
+    }
+
+    /// Judge the declared input at `path` by the record a run wrote for it
+    /// (None: the run found nothing it could read there).
+    fn judge(
+        &self,
+        path: &str,
+        record: Option<&InputRecord>,
+        short: &str,
+    ) -> Result<Judgment, String> {
+        let found = self
+            .facts
+            .found
+            .get(path)
+            .ok_or_else(|| format!("{path} was not read from commit {short}"))?;
+        let Some(record) = record else {
+            return Ok(match found {
+                Found::Absent(_) => Judgment::Judged,
+                Found::Entry(entry) => Judgment::Refused(
+                    format!("{path} as commit {short} has it: {entry}"),
+                    "nothing the run could read there".into(),
+                ),
+            });
+        };
+        let entry = match found {
+            Found::Absent(Absence::Nothing) if self.producer(path).is_some() => {
+                return Ok(Judgment::Generated(
+                    self.producer(path).unwrap_or_default().to_string(),
+                ));
+            }
+            Found::Absent(absence) => {
+                return Ok(Judgment::Refused(
+                    format!(
+                        "{path} judged against commit {short}, which has {}",
+                        absence.reason(path)
+                    ),
+                    format!(
+                        "a file the run read there (sha256 {}); a commit can only vouch for an \
+                         input it has at the path declared",
+                        record.sha256
+                    ),
+                ));
+            }
+            Found::Entry(entry) => entry,
+        };
+        if record.object.as_deref() != Some(entry) {
+            return Ok(Judgment::Refused(
+                format!("{path} as commit {short} has it: {entry}"),
+                format!(
+                    "{} in the tree the task ran",
+                    record.object.as_deref().unwrap_or("nothing")
+                ),
+            ));
+        }
+        // A symbolic link is judged only by the file it leads to. A checkout
+        // without symbolic links (`core.symlinks=false`) holds a file with
+        // the target's name instead, other bytes than the link gives; such a
+        // run is refused, and the refusal says why.
+        let read = if entry.starts_with("120000 ") && self.stored.get(path) == Some(&record.sha256)
+        {
+            format!(
+                "the link's own text (sha256 {}), as a checkout without symbolic links \
+                 (core.symlinks=false) reads it",
+                record.sha256
+            )
+        } else {
+            format!("a file the run read there (sha256 {})", record.sha256)
+        };
+        let (file, file_entry) = match self.facts.file_behind(path) {
+            Ok(file) => file,
+            Err(reason) => {
+                return Ok(Judgment::Refused(
+                    format!("the file a read of {path} gives in commit {short}: {reason}"),
+                    read,
+                ));
+            }
+        };
+        let stored = self
+            .stored
+            .get(&file)
+            .ok_or_else(|| format!("the bytes of {file} were not read from commit {short}"))?;
+        let converted = stored != &record.sha256;
+        if converted {
+            let id = file_entry.split(' ').nth(1).unwrap_or_default();
+            let checked_out = self.checked_out(&file, id)?;
+            if checked_out != record.sha256 {
+                return Ok(Judgment::Refused(
+                    format!(
+                        "the bytes of {file} in commit {short}: sha256 {stored} as stored, \
+                         {checked_out} as a checkout here gives them"
+                    ),
+                    if file == path {
+                        format!("{} recorded by the run", record.sha256)
+                    } else {
+                        format!("{read}, through {path}")
+                    },
+                ));
+            }
+        }
+        let executable = file_entry.starts_with("100755 ");
+        if record
+            .mode
+            .is_none_or(|bits| (bits & 0o100 != 0) != executable)
+        {
+            return Ok(Judgment::Refused(
+                format!(
+                    "the execute bit of {file} in commit {short}: {}",
+                    if executable {
+                        "executable (100755)"
+                    } else {
+                        "not executable (100644)"
+                    }
+                ),
+                match record.mode {
+                    Some(bits) => format!("mode {bits:#o} recorded by the run"),
+                    None => "no execute bits recorded by the run".into(),
+                },
+            ));
+        }
+        Ok(if converted {
+            Judgment::Converted(file)
+        } else {
+            Judgment::Judged
+        })
+    }
+}
+
+/// The `inputs` stage of `verify --commit`, read from the commit, never
+/// taken from the receipt. A receipt records, for each task's declared
+/// inputs, what its run read: the SHA-256 of the bytes, the execute bits,
+/// and the tree entry its own snapshot had at that path. Each is judged
+/// against the commit at the input's exact path (`InputsAt::judge`): the
+/// entry must be the commit's; the bytes must be the commit's blob, or what
+/// a checkout here makes of it (line endings, smudge filters); the execute
+/// bit must be the commit's. A symbolic link is judged by its entry and by
+/// the bytes of the declared input it names. An input the commit does not
+/// have at that path cannot be judged, and a receipt whose run read a file
+/// there is refused, unless a task declares the path as an output (the run
+/// generated it). The records must hash to the receipt's inputs digest. An
+/// older receipt, which records only that digest, must match the digest
+/// recomputed from the commit's files. A mismatch is a tree-or-input
+/// mismatch: exit 3, as without `--commit`.
+fn inputs_check(
+    receipt: &ReceiptSummary,
+    contract: &Contract,
+    at: &CommitAt,
+) -> Result<Check, String> {
+    let short = &at.id[..at.id.len().min(12)];
+    let inputs = at
+        .inputs
+        .as_ref()
+        .ok_or_else(|| format!("the inputs of commit {short} were not read"))?;
+    let refuse = |expected: String, actual: String| Check {
+        name: "inputs",
+        expected,
+        actual,
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    };
+    let recorded = receipt
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.inputs
+                .as_ref()
+                .map(|inputs| (task.name.as_str(), inputs))
+        })
+        .collect::<HashMap<_, _>>();
+    if recorded.is_empty() {
+        return older_inputs_check(receipt, contract, inputs, short);
+    }
+    let mut judged = 0;
+    let mut converted = BTreeSet::new();
+    let mut generated = BTreeSet::new();
+    for task in &contract.tasks {
+        let Some(records) = recorded.get(task.name.as_str()) else {
+            if receipt.tasks.iter().any(|record| record.name == task.name) {
+                return Ok(refuse(
+                    format!("task {}'s input records", task.name),
+                    "none recorded".into(),
+                ));
+            }
+            continue;
+        };
+        let declared = task.inputs.iter().collect::<BTreeSet<_>>();
+        if records.keys().collect::<BTreeSet<_>>() != declared {
+            return Ok(refuse(
+                format!(
+                    "task {}'s inputs as the contract declares them, {declared:?}",
+                    task.name
+                ),
+                format!("{:?}", records.keys().collect::<Vec<_>>()),
+            ));
+        }
+        for (input, path) in inputs.tasks.get(&task.name).into_iter().flatten() {
+            let record = records.get(input).and_then(Option::as_ref);
+            match inputs.judge(path, record, short)? {
+                Judgment::Judged => judged += 1,
+                Judgment::Converted(file) => {
+                    judged += 1;
+                    converted.insert(file);
+                }
+                Judgment::Generated(by) => {
+                    generated.insert(format!("{path} (an output of task {by})"));
+                }
+                Judgment::Refused(expected, actual) => {
+                    return Ok(refuse(
+                        format!("task {}'s input {input}: {expected}", task.name),
+                        actual,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(check) = records_check(receipt)? {
+        return Ok(check);
+    }
+    let mut actual = format!(
+        "{}: {judged} declared input{} judged against commit {short}",
+        receipt.subject.inputs_digest,
+        if judged == 1 { "" } else { "s" }
+    );
+    if !converted.is_empty() {
+        let converted = converted.into_iter().collect::<Vec<_>>().join(", ");
+        actual.push_str(&format!(
+            "; the bytes of {converted} as a checkout here converts them, by this repository's \
+             configuration and attributes"
+        ));
+    }
+    if !generated.is_empty() {
+        let generated = generated.into_iter().collect::<Vec<_>>().join(", ");
+        actual.push_str(&format!(
+            "; generated by the run, not in the commit, and judged through the tasks that \
+             produce them: {generated}"
+        ));
+    }
+    Ok(Check {
+        name: "inputs",
+        expected: actual.clone(),
+        actual,
+        ok: true,
+        failure_code: TREE_MISMATCH,
+    })
+}
+
+/// For a receipt with per-task input records, a failing `inputs` check when
+/// they do not hash to the receipt's own inputs digest; None when they do,
+/// or when it has none (an older receipt).
+fn records_check(receipt: &ReceiptSummary) -> Result<Option<Check>, String> {
+    let records = receipt
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.inputs
+                .clone()
+                .map(|inputs| (task.name.clone(), inputs))
+        })
+        .collect::<InputRecords>();
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let digest = inputs_digest_of(&records)?;
+    Ok((digest != receipt.subject.inputs_digest).then(|| Check {
+        name: "inputs",
+        expected: format!("{digest} (the digest of the receipt's own input records)"),
+        actual: receipt.subject.inputs_digest.clone(),
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    }))
+}
+
+/// What a verified receipt establishes, and what it cannot, printed after
+/// every successful verify and stated in `verify --help`.
+const TRUST: &str = "established: a valid receipt schema; records consistent with each other and \
+     the contract; the contract's identity; the tree, and every declared input's bytes and execute \
+     bit, read from the checkout, or with --commit from the commit, never from the receipt (an \
+     input a checkout converts, as a checkout here converts it; an input a task outputs, through \
+     that task's own inputs)\n\
+     not established: where the receipt came from, who produced it, that its tasks ran, or \
+     anything they read that is not a declared input. Receipts are unsigned: an outcome rewritten \
+     to passed, or a receipt recomputed in full for a commit with consistent digests, verifies; \
+     and a converted input is bound only as this checkout's configuration converts it";
+
+/// `inputs_check` for a receipt written before per-task input records: its
+/// inputs digest is recomputed from the bytes of the commit's files. That
+/// digest folds in each file's execute bits as the run's file system had
+/// them, which a commit records only as executable or not, so the usual
+/// executable modes are tried for an executable file (`0o111`, `0o110`,
+/// `0o100`) and none for the others: never an execute bit the commit does
+/// not have. A file a checkout converts (line endings, smudge filters) was
+/// read converted, and where the run's file system had no execute bits
+/// (Windows) an executable file was read as not executable, so such a
+/// receipt cannot be shown to match and is refused, as is one with a
+/// declared input that is not a regular file in the commit; a new run
+/// records what this check needs.
+fn older_inputs_check(
+    receipt: &ReceiptSummary,
+    contract: &Contract,
+    inputs: &InputsAt,
+    short: &str,
+) -> Result<Check, String> {
+    let refuse = |expected: String, actual: String| Check {
+        name: "inputs",
+        expected,
+        actual,
+        ok: false,
+        failure_code: TREE_MISMATCH,
+    };
+    let mut files = InputRecords::new();
+    for task in &contract.tasks {
+        let records = files.entry(task.name.clone()).or_default();
+        for (input, path) in inputs.tasks.get(&task.name).into_iter().flatten() {
+            let regular = match inputs.facts.found.get(path) {
+                Some(Found::Entry(entry)) if is_file(entry) => Some(entry),
+                _ => None,
+            };
+            let Some(entry) = regular else {
+                return Ok(refuse(
+                    format!(
+                        "task {}'s input {input} as a file in commit {short} ({path}), to recompute \
+                         the inputs of a receipt that predates per-task input records",
+                        task.name
+                    ),
+                    "not a file there; run sykli again for a receipt that records its inputs"
+                        .into(),
+                ));
+            };
+            let sha256 = inputs
+                .stored
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("commit {short} has no object {entry}"))?;
+            // The execute bits are filled in per attempt below.
+            let mode = entry.starts_with("100755 ").then_some(1);
+            records.insert(
+                input.clone(),
+                Some(InputRecord {
+                    sha256,
+                    mode,
+                    object: None,
+                }),
+            );
+        }
+    }
+    let mut first = None;
+    for bits in [0o111, 0o110, 0o100] {
+        let mut attempt = files.clone();
+        for record in attempt
+            .values_mut()
+            .flat_map(BTreeMap::values_mut)
+            .flatten()
+        {
+            record.mode = Some(if record.mode.is_some() { bits } else { 0 });
+        }
+        let digest = inputs_digest_of(&attempt)?;
+        if digest == receipt.subject.inputs_digest {
+            return Ok(Check::equals(
+                "inputs",
+                TREE_MISMATCH,
+                digest,
+                &receipt.subject.inputs_digest,
+            ));
+        }
+        first.get_or_insert(digest);
+    }
+    Ok(refuse(
+        format!(
+            "{} (recomputed from the files of commit {short})",
+            first.unwrap_or_default()
+        ),
+        receipt.subject.inputs_digest.clone(),
+    ))
 }
 
 /// A file's path in the repository, from its top level, as `REV:PATH` names
@@ -4023,12 +6226,18 @@ fn commit_facts(
     if let Some(Ok(inside)) = &inside {
         names.extend(inside.names());
     }
-    let answers = ask(repository, names)?;
-    let at = commit_from(rev, &answers)?;
+    // One process, two rounds: the commit and its contract, then the inputs
+    // that contract declares.
+    let mut session = repository.session(Vec::new());
+    let mut answers = ask_in(&mut session, names)?;
+    let mut at = commit_from(rev, &answers)?;
     let judged = match inside {
         None => Judged::from_file(contract_path, true)?,
         Some(inside) => inside?.judged(&answers, &at.id)?,
     };
+    answers.extend(ask_in(&mut session, input_names(rev, &judged.contract)?)?);
+    session.finish()?;
+    at.inputs = Some(inputs_from(rev, &judged.contract, &answers)?);
     Ok((judged, at))
 }
 
@@ -4058,6 +6267,10 @@ pub(crate) fn judge(
         return Ok(checks);
     }
     commit_checks(&mut checks, &receipt, at);
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    checks.push(inputs_check(&receipt, &judged.contract, at)?);
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
@@ -4258,6 +6471,7 @@ fn report(checks: &[Check]) -> ExitCode {
     match checks.iter().find(|check| !check.ok) {
         None => {
             println!("verified: receipt matches this tree and contract");
+            println!("{TRUST}");
             ExitCode::SUCCESS
         }
         Some(first) => {
@@ -4275,7 +6489,11 @@ fn refusal(check: &Check) -> String {
     )
 }
 
-fn write_receipt(receipt: &Receipt) -> Result<PathBuf, String> {
+/// Write a receipt as `.sykli/receipts/rcpt_<sha256 of its bytes>.json`,
+/// durably: the bytes are synced in a temporary, then renamed into place,
+/// then the directory is synced. A receipt already there has these bytes, by
+/// its name. Returns its path and digest.
+fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String), String> {
     let bytes = serde_json::to_vec_pretty(receipt).map_err(|error| error.to_string())?;
     let hash = sha256(&bytes);
     let directory = Path::new(&receipt.subject.repository).join(".sykli/receipts");
@@ -4283,7 +6501,16 @@ fn write_receipt(receipt: &Receipt) -> Result<PathBuf, String> {
     let path = directory.join(format!("rcpt_{hash}.json"));
     if !path.exists() {
         let temporary = directory.join(format!(".{hash}.tmp-{}", std::process::id()));
-        fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+        let written = fs::File::create(&temporary)
+            .and_then(|mut file| {
+                file.write_all(&bytes)
+                    .and_then(|()| canonical::sync(&file, canonical::Durability::Fsync))
+            })
+            .map_err(|error| error.to_string());
+        if let Err(error) = written.and_then(|()| checkpoint("during-receipt")) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
         if let Err(error) = fs::rename(&temporary, &path) {
             if path.exists() {
                 let _ = fs::remove_file(temporary);
@@ -4291,8 +6518,9 @@ fn write_receipt(receipt: &Receipt) -> Result<PathBuf, String> {
                 return Err(error.to_string());
             }
         }
+        canonical::sync_directory(&directory, canonical::Durability::Fsync)?;
     }
-    Ok(path)
+    Ok((path, hash))
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -4317,6 +6545,42 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every task decided without a journal, as a run on Windows does.
+    fn execute_all(
+        contract: &Contract,
+        levels: &[Vec<usize>],
+        runtime: &ShellRuntime,
+        cache: &dyn Cache,
+    ) -> Vec<TaskReceipt> {
+        let subject = Subject {
+            repository: String::new(),
+            tree_oid: String::new(),
+            inputs_digest: String::new(),
+            head_tree_oid: String::new(),
+            dirty: false,
+            submodules_modified: false,
+            inputs: BTreeMap::new(),
+            head_commit: None,
+        };
+        let undecided = std::iter::repeat_with(|| None)
+            .take(contract.tasks.len())
+            .collect();
+        execute(
+            contract,
+            levels,
+            runtime,
+            cache,
+            Progress::Json,
+            None,
+            &subject,
+            undecided,
+        )
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect()
+    }
 
     #[test]
     fn the_cache_stays_inside_its_budget_and_drops_the_oldest_first() {
@@ -4675,17 +6939,16 @@ mod tests {
         let cache = LocalCache::new(
             &std::env::temp_dir().join(format!("sykli-test-{}", std::process::id())),
         );
-        let receipts = execute(
+        let receipts = execute_all(
             &failure,
             &validate(&failure).unwrap(),
             &shell_runtime().unwrap(),
             &cache,
-            false,
         );
         assert!(receipts[0].outcome == Outcome::Failed);
         assert!(receipts[1].outcome == Outcome::Blocked);
         assert!(receipts[2].outcome == Outcome::Failed);
-        assert!(receipts[2].class == Some("missing_output"));
+        assert!(receipts[2].class.as_deref() == Some("missing_output"));
 
         let captured = relay(&b"captured"[..], io::sink(), 4);
         assert_eq!(captured.bytes, b"capt");
@@ -4700,9 +6963,9 @@ mod tests {
         let truncated = run_task(
             &truncates.tasks[0],
             &shell_runtime().unwrap(),
-            true,
+            Progress::Json,
             4,
-            Isolation::Shared,
+            Isolation::OwnGroup,
         );
         assert!(truncated.stdout_truncated);
         assert_eq!(truncated.stdout_bytes_dropped, 4);
@@ -4757,7 +7020,7 @@ mod tests {
         };
         let runtime = shell_runtime().unwrap();
         let cache = LocalCache::new(&root);
-        let first = execute(&cached_contract, &[vec![0]], &runtime, &cache, false);
+        let first = execute_all(&cached_contract, &[vec![0]], &runtime, &cache);
         let receipt = Receipt {
             schema: "sykli-receipt.v1",
             contract_hash: "test".into(),
@@ -4770,11 +7033,14 @@ mod tests {
                 head_tree_oid: "test".into(),
                 dirty: false,
                 submodules_modified: false,
+                inputs: BTreeMap::new(),
+                head_commit: None,
             },
             tasks: first,
             outcome: Outcome::Passed,
+            run: None,
         };
-        let receipt_path = write_receipt(&receipt).unwrap();
+        let (receipt_path, _) = write_receipt(&receipt).unwrap();
         cache
             .store(
                 &cached_contract.tasks[0],
@@ -4783,7 +7049,7 @@ mod tests {
             )
             .unwrap();
         fs::write(root.join("result"), "stale").unwrap();
-        let second = execute(&cached_contract, &[vec![0]], &runtime, &cache, false);
+        let second = execute_all(&cached_contract, &[vec![0]], &runtime, &cache);
         assert!(second[0].outcome == Outcome::Cached);
         assert_eq!(fs::read(root.join("result")).unwrap(), b"cache");
 
@@ -4829,7 +7095,7 @@ mod tests {
         git(&["commit", "--quiet", "-m", "init"]);
         let head = git(&["rev-parse", "HEAD^{tree}"]);
         let repository = repo::Repository::at(root.clone(), root.join(".git"));
-        let working_tree_oid = |_: &Path| snapshot(&repository).map(|(tree, _)| tree);
+        let working_tree_oid = |_: &Path| snapshot(&repository, &[]).map(|snapshot| snapshot.tree);
 
         // A clean checkout addresses to exactly HEAD's tree.
         assert_eq!(working_tree_oid(&root).unwrap(), head);

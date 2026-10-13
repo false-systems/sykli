@@ -1,10 +1,8 @@
 use super::*;
-use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 
 pub use crate::canonical::{digest, now, publish};
+pub use crate::journal::Lease;
 
 pub fn checked_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
     relative(relative_path)?;
@@ -377,144 +375,6 @@ pub fn validate_bytes(ty: &ArtifactType, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-// Native advisory locks: the open file description survives controller exit
-// only in the bounded executor, avoiding PID reuse and stale lock-file deletion.
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-    fn fcntl(fd: i32, command: i32, ...) -> i32;
-}
-
-pub struct Lease(File);
-impl Lease {
-    pub fn acquire(directory: &Path) -> Result<Self, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(directory.join("lease"))
-            .map_err(err)?;
-        // SAFETY: the descriptor is owned by file; LOCK_EX | LOCK_NB on Unix.
-        if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
-            let error = std::io::Error::last_os_error();
-            // Only a held lock means another controller; ENOLCK/EOPNOTSUPP
-            // (network file systems) are a store problem, not a busy peer.
-            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                format!("production-busy: {error}")
-            } else {
-                format!("lease unavailable on this file system: {error}")
-            });
-        }
-        Ok(Self(file))
-    }
-    fn lock(file: File, mode: i32) -> Result<Self, String> {
-        // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
-        loop {
-            if unsafe { flock(file.as_raw_fd(), mode) } == 0 {
-                return Ok(Self(file));
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted {
-                return Err(err(error));
-            }
-        }
-    }
-
-    pub fn journal(directory: &Path) -> Result<Self, String> {
-        let path = directory.join("journal-lock");
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(path)
-                .map_err(err)?,
-            Err(error) => return Err(err(error)),
-        };
-        Self::lock(file, 2) // LOCK_EX; the lock file's contents are never written.
-    }
-
-    pub fn journal_read(directory: &Path) -> Result<Option<Self>, String> {
-        match File::open(directory.join("journal-lock")) {
-            Ok(file) => Self::lock(file, 1).map(Some), // LOCK_SH
-            // Older stores have no journal lock. Read their validated atomic prefix.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(err(error)),
-        }
-    }
-
-    // Observe an existing lease without creating or writing any file. Release
-    // the probe immediately: inspection must not reserve the controller lease.
-    pub fn observe(path: &Path) -> Result<bool, String> {
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(err(error)),
-        };
-        loop {
-            // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
-            if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
-                return Ok(false);
-            }
-            let error = std::io::Error::last_os_error();
-            match error.kind() {
-                std::io::ErrorKind::WouldBlock => return Ok(true),
-                std::io::ErrorKind::Interrupted => continue,
-                _ => return Err(err(error)),
-            }
-        }
-    }
-
-    pub fn attempt(directory: &Path, attempt: &str) -> Result<Self, String> {
-        digest(attempt)?;
-        let parent = directory.join("attempt-leases");
-        fs::create_dir_all(&parent).map_err(err)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(parent.join(attempt))
-            .map_err(err)?;
-        // Wait for short-lived inspection probes before claiming this attempt.
-        // A duplicate executor checks the recorded terminal outcome after locking.
-        Self::lock(file, 2)
-    }
-    pub fn inherit(&self, command: &mut ProcessCommand) -> RawFd {
-        let fd = self.0.as_raw_fd();
-        // SAFETY: fcntl is async-signal-safe; no allocation in pre_exec.
-        unsafe {
-            command.pre_exec(move || {
-                if fcntl(fd, 2, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        fd
-    }
-    pub fn received(directory: &Path, fd: RawFd) -> Result<Self, String> {
-        // SAFETY: F_GETFD only inspects whether this descriptor is valid.
-        if fd < 3 || unsafe { fcntl(fd, 1) } == -1 {
-            return Err("executor requires inherited lease".into());
-        }
-        // SAFETY: this private child entrypoint receives ownership of one inherited FD.
-        let file = unsafe { File::from_raw_fd(fd) };
-        let actual = file.metadata().map_err(err)?;
-        let expected = fs::metadata(directory.join("lease")).map_err(err)?;
-        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
-            return Err("executor lease mismatch".into());
-        }
-        // Never pass the controller lease on to arbitrary recipe processes.
-        if unsafe { fcntl(fd, 2, 1) } == -1 {
-            return Err(err(std::io::Error::last_os_error()));
-        }
-        Ok(Self(file))
-    }
-}
-
 pub fn snapshot(
     root: &Path,
     source: &Source,
@@ -547,41 +407,6 @@ pub fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canonical::NONCE;
-    use std::sync::atomic::Ordering;
-
-    #[test]
-    fn observing_a_lease_does_not_reserve_it() {
-        let directory = std::env::temp_dir().join(format!(
-            "sykli-lease-{}-{}-{}",
-            std::process::id(),
-            now(),
-            NONCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("lease");
-        assert!(!Lease::observe(&path).unwrap());
-        assert!(!path.exists(), "observation must not create a lease");
-        File::create(&path).unwrap();
-        let observed = Lease::observe(&path).unwrap();
-        // Other unit tests fork commands concurrently. A child can briefly
-        // inherit the probe's descriptor until exec closes it (CLOEXEC).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let next_controller = loop {
-            match Lease::acquire(&directory) {
-                Ok(lease) => break lease,
-                Err(error) => {
-                    assert!(std::time::Instant::now() < deadline, "{error}");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        };
-        assert!(!observed);
-        assert!(Lease::observe(&path).unwrap());
-        assert!(Lease::acquire(&directory).is_err());
-        drop(next_controller);
-        fs::remove_dir_all(directory).unwrap();
-    }
 
     /// Only a concluded attempt is swept, and only when nobody holds it.
     ///
@@ -667,7 +492,23 @@ mod tests {
         // contact-lost one stays, because no lease ever protected it — only its
         // record does.
         drop(held);
-        assert_eq!(store.sweep_concluded(), 1);
+        // Other unit tests fork commands concurrently, and a child holds a
+        // copy of the released lease's descriptor until its exec closes it
+        // (CLOEXEC), so the release can take a moment to be seen.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match store.sweep_concluded() {
+                1 => break,
+                swept => {
+                    assert_eq!(swept, 0, "only the released finished attempt");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the lease stayed held"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
         assert!(
             !request
                 .join("attempts")

@@ -6,13 +6,25 @@ and receive a `sykli-receipt.v1`, and `sykli verify RECEIPT` to check that a
 receipt still describes the tree in front of you. Exit codes are the answer:
 `run` 0 all passed or cached, 1 a task failed, 2 could not evaluate; `verify`
 0 verified, 1 the work failed, 2 cannot verify, 3 the tree or inputs changed,
-4 the contract changed. Write receipts under `.sykli/` or outside the tree;
-a receipt inside the tree changes the tree it describes. A receipt binds a
-tree, not a commit: `sykli verify RECEIPT --commit REV` judges the receipt as
-evidence for that commit, reading the contract and lock from `REV` and nothing
-from the checkout. It requires a passing run of exactly `REV^{tree}` (a
-pre-commit run counts; it need not be clean), exits 3 when it is not one, and
-prints the first failing check on stderr.
+4 the contract changed. A verified receipt is consistent, not proven: verify
+establishes a valid schema, consistent records, the contract's identity, and
+the tree and every declared input's bytes and execute bit, read from the
+checkout (or, with `--commit`, from the commit at each input's exact path,
+against what the receipt records per task under `tasks[].inputs`), never from
+the receipt; it does not establish where the receipt came from, who produced
+it, or that its tasks ran. Receipts are unsigned, so a receipt edited
+consistently, such as an outcome rewritten to passed, verifies. With
+`--commit`, a receipt whose run read an input the commit cannot show at its
+path (an ignored or untracked file, a name spelled differently from git's, a
+file inside a submodule or reached through a symbolic link to a directory, a
+symbolic link to an undeclared file) exits 3;
+declare inputs as git spells them. Write receipts under `.sykli/` or outside
+the tree; a receipt inside the tree changes the tree it describes. A receipt
+binds a tree, not a commit: `sykli verify RECEIPT --commit REV` judges the
+receipt as evidence for that commit, reading the contract, the lock and
+every input from `REV`, none from the checkout. It requires a passing run of
+exactly `REV^{tree}` (a pre-commit run counts; it need not be clean), exits 3
+when it is not one, and prints the first failing check on stderr.
 
 Evidence of accepted pushes outlives the worktree that produced it. When
 `sykli hook pre-push` accepts a push to the default branch, it copies the
@@ -202,6 +214,21 @@ execution share the same evidence validation.
 The repository's [CI shadow experiment](ci-shadow.md) compares changed-path
 selection and baseline cache evidence with an independent full run. Its
 observations never enable skipping or decide the required CI result.
+
+A run outlives the session that asked for it (Linux and macOS). Keep its id:
+`sykli run sykli.json --detach --json` answers `{"schema":"sykli-run.v1",
+"run":ID}` once the run is recorded and returns; `sykli run --json` names it
+in the receipt's `run`. Ask about it later, from any worktree of the clone,
+with `sykli status --run ID --json` (`sykli-run-status.v1`): poll while
+`state` is `requested` or `running`; `completed` names its receipt; a run that
+is `interrupted` or `lost`, and every task `lost`, `interrupted` or `running`,
+is unknown, never passed or failed. Continue such a run with `sykli resume
+--run ID --json`. To ask whether a commit is validated, use `sykli status
+--commit REV --json` (`sykli-commit-status.v1`): `current` holds the receipts
+that verify for that commit now, `historical` those of the same tree that do
+not, and `verdict` is `passed`, `failed`, `pending` or `none`. `sykli verify
+RECEIPT --commit REV --json` gives one receipt's verdict (`sykli-verify.v1`)
+with its trust tiers. Never infer a result from a receipt you parsed yourself.
 
 For typed artifact production, start with `sykli targets --json` and
 `sykli plan sykli.production.json --target TARGET --json`. Use the discovered
