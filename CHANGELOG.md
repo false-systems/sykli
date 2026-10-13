@@ -8,6 +8,14 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- `--repo-root ABS_PATH` and `--git-common-dir ABS_PATH`, accepted by every
+  command (given together): a caller that already knows the repository says
+  so, and sykli runs no git to find it. With them, `hook pre-push` starts one
+  git process, `verify --commit` one and `run` five. The receipt records the
+  root as given. They are checked without git: the root's `.git` must lead to
+  the common directory (a directory, or a `gitdir:` file followed through
+  `commondir`), so a subdirectory, or another repository's common directory,
+  exits 2.
 - Contracts kept outside the repository. `run`, `lock`, `plan`, `validate`
   and `verify` accept a contract path outside the git repository around the
   current directory (decided on resolved paths, so a symbolic link to a
@@ -137,6 +145,16 @@ contract consumer can observe; internal refactors are not listed.
   instead; this repository's CI does.
 
 ### Changed
+- sykli starts far fewer git processes. The repository is found once per
+  command (one `git rev-parse`), `hook pre-push` and `verify --commit` ask
+  everything about the commits they judge in one `git cat-file --batch` and
+  read receipts, contracts and locks as files, and `run` builds one snapshot
+  of the working tree instead of two and lists files for both undeclared-file
+  checks in one `git ls-files`. Measured on a small repository: `hook
+  pre-push` went from 17 git processes to 2, `verify --commit` from 10 to 2,
+  and `run` from 14 to 6. Exit codes, messages and receipts are unchanged;
+  `--branch` names are now checked in-process by git's documented rules
+  (and `@` alone is refused, as `git branch` refuses it).
 - A run inside a git hook shares cached results with the same run made by
   hand. Git runs hooks with `GIT_EXEC_PATH` set and that directory prepended
   to `PATH`, and `PATH` is part of every task's runtime fingerprint, so a

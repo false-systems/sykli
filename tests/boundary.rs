@@ -1469,3 +1469,56 @@ fn pre_push_names_sykli_lock_when_the_commit_contract_drifted() {
     assert!(message.contains("sykli lock sykli.json"), "{message}");
     fs::remove_dir_all(root).unwrap();
 }
+
+/// `refs/remotes/REMOTE/HEAD` is read as git reads it. Without --branch, each
+/// of these named the default branch to git, and the hook must gate it:
+/// `ref:` with no space or with a tab before the target, and remotes named
+/// `HEAD` and `@`, which git allows.
+#[test]
+fn pre_push_reads_the_remote_head_as_git_does() {
+    let root = repo("pushrefs", READS_FILE);
+    fs::write(root.join("file.txt"), "one\n\n").unwrap();
+    let head = commit(&root, "no receipt");
+    let to_trunk = || [update(&head, "refs/heads/trunk")];
+    git(&root, &["update-ref", "refs/remotes/origin/trunk", &head]);
+    for spelling in [
+        "ref:refs/remotes/origin/trunk\n",
+        "ref:\trefs/remotes/origin/trunk\n",
+    ] {
+        fs::write(root.join(".git/refs/remotes/origin/HEAD"), spelling).unwrap();
+        assert_eq!(
+            git(&root, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+            "refs/remotes/origin/trunk",
+            "git reads {spelling:?}"
+        );
+        let out = pre_push(&root, "origin", &to_trunk());
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{spelling:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    for remote in ["HEAD", "@"] {
+        git(
+            &root,
+            &["update-ref", &format!("refs/remotes/{remote}/trunk"), &head],
+        );
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                &format!("refs/remotes/{remote}/HEAD"),
+                &format!("refs/remotes/{remote}/trunk"),
+            ],
+        );
+        let out = pre_push(&root, remote, &to_trunk());
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "remote {remote}: {}",
+            text(&out.stderr)
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}

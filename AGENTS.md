@@ -96,6 +96,18 @@ paths and enter that toplevel first (`enter_for_contract`); hooks absolutize
 (SHA-256 of the lock file, read once with the pin in `load_pinned`); `verify`
 reads an outside contract and its lock from their files even with
 `--commit`, and only for such a contract compares `lock_digest` (exit 4).
+Git is asked as little as possible, and `tests/git_calls.rs` holds the
+budgets (counted through `GIT_TRACE2_EVENT`). `src/repo.rs` finds the
+repository once per process (one `git rev-parse`, or `--repo-root` and
+`--git-common-dir` from the caller, then none) and asks object questions in
+one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
+(`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
+`.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
+undeclared-file checks (`Inventory`). `verify --commit` and `hook pre-push`
+read every commit fact in one batch (`commit_names`, `ContractNames`) and
+judge receipts against them (`judge`); the pre-push hook validates branch
+names in-process and reads `refs/remotes/REMOTE/HEAD` from the common
+directory.
 
 **Typed production (`src/production/`, Unix only).** Opt-in local artifact
 production from a `sykli-production-contract.v1`. `contract.rs` is the schema

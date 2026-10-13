@@ -62,6 +62,14 @@ resolved paths, so a symbolic link in the repository to a contract elsewhere
 counts as outside; a contract inside the worktree that the pushed commit does
 not carry can never be verified, and the hook says so.
 
+Every command that looks for the repository accepts `--repo-root` and
+`--git-common-dir` (both, as `git rev-parse --path-format=absolute
+--show-toplevel --git-common-dir` prints them); with them sykli runs no git
+to find the repository; the root's `.git` must lead to the common directory
+(checked from files, or exit 2). `hook pre-push` then starts one git process, one
+`git cat-file --batch` for all pushed commits, `verify --commit` one, and
+`run` five; without them each starts one more.
+
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
 exists; an explicit JSON path selects a different contract. Missing JSON

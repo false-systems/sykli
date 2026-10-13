@@ -24,6 +24,7 @@ mod init;
 mod inspect;
 #[cfg(unix)]
 mod production;
+mod repo;
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +35,22 @@ mod production;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// The repository's top level, when the caller already knows it (as
+    /// `git rev-parse --path-format=absolute --show-toplevel` prints it); with
+    /// --git-common-dir, sykli runs no git to find the repository. Its .git
+    /// must lead to --git-common-dir (checked from files), or sykli exits 2
+    #[arg(
+        long,
+        global = true,
+        value_name = "ABS_PATH",
+        requires = "git_common_dir"
+    )]
+    repo_root: Option<PathBuf>,
+    /// The repository's common git directory, when the caller already knows it
+    /// (as `git rev-parse --path-format=absolute --git-common-dir` prints it);
+    /// given with --repo-root
+    #[arg(long, global = true, value_name = "ABS_PATH", requires = "repo_root")]
+    git_common_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -519,30 +536,95 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
     Ok(names_cargo || declared_inputs(contract)?.contains_key(&absolute(Path::new("Cargo.toml"))?))
 }
 
-fn cargo_missing_inputs(contract: &Contract) -> Result<Vec<String>, String> {
+/// What git lists for the undeclared-file checks, asked once for both. One
+/// `git ls-files --stage` lists the index; for a Cargo graph the same process
+/// also lists the untracked files that are not ignored (`--others`), which
+/// `--stage` prints without a mode and object id. Nothing runs until a check
+/// needs it.
+struct Inventory {
+    cargo: bool,
+    listed: std::cell::OnceCell<Result<Listed, String>>,
+}
+
+struct Listed {
+    root: PathBuf,
+    cached: Vec<PathBuf>,
+    others: Vec<PathBuf>,
+}
+
+impl Inventory {
+    fn new(contract: &Contract) -> Result<Self, String> {
+        Ok(Inventory {
+            cargo: is_cargo_graph(contract)?,
+            listed: std::cell::OnceCell::new(),
+        })
+    }
+
+    fn listed(&self) -> Result<&Listed, String> {
+        self.listed
+            .get_or_init(|| {
+                let root = coverage_root()?;
+                let mut args = vec!["ls-files", "--stage", "-z"];
+                if self.cargo {
+                    args.extend(["--others", "--exclude-standard"]);
+                }
+                let output = repo::git_command()
+                    .arg("-C")
+                    .arg(&root)
+                    .args(&args)
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).into());
+                }
+                let (mut cached, mut others) = (Vec::new(), Vec::new());
+                for entry in output.stdout.split(|byte| *byte == 0) {
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let entry = std::str::from_utf8(entry)
+                        .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
+                    // `<mode> <object> <stage>\t<path>` for the index.
+                    let staged = entry.split_once('\t').filter(|(stage, _)| {
+                        let fields = stage.split(' ').collect::<Vec<_>>();
+                        fields.len() == 3
+                            && fields[0].len() == 6
+                            && fields[0].bytes().all(|byte| matches!(byte, b'0'..=b'7'))
+                            && fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
+                            && matches!(fields[2], "0" | "1" | "2" | "3")
+                    });
+                    match staged {
+                        Some((_, path)) => cached.push(absolute(&root.join(path))?),
+                        None => others.push(absolute(&root.join(entry))?),
+                    }
+                }
+                Ok(Listed {
+                    root,
+                    cached,
+                    others,
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Vec<String>, String> {
     // This is checked on every invocation, before execution can reuse cached passes. Its
     // input is the current file inventory, not the contract's existing list.
-    if !is_cargo_graph(contract)? {
+    if !inventory.cargo {
         return Ok(Vec::new());
     }
-    let root = coverage_root()?;
+    let listed = inventory.listed()?;
+    let root = &listed.root;
     let declared = declared_inputs(contract)?;
-    let paths = git_paths(
-        &root,
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    )?;
     let mut missing = BTreeSet::new();
-    for path in paths {
+    for path in listed.cached.iter().chain(&listed.others) {
+        let path = path.clone();
         if path.starts_with(root.join(".sykli")) {
             continue;
         }
-        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        let relative = path.strip_prefix(root).unwrap_or(&path);
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let cargo_input = path.extension().is_some_and(|ext| ext == "rs")
             || matches!(
@@ -605,7 +687,10 @@ struct FolderInput {
 /// files, or anything outside the repository. Untracked files are left out so
 /// editor and OS scratch files beside an input never refuse a run; the
 /// pre-commit hook already refuses a commit while untracked files exist.
-fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String> {
+fn folder_missing_inputs(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<Vec<FolderInput>, String> {
     let mut tasks = Vec::new();
     for task in &contract.tasks {
         let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -626,15 +711,16 @@ fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
-    let root = coverage_root().map_err(|_| {
+    repo::repository().map_err(|_| {
         "not inside a git repository; sykli binds every receipt to a git tree".to_string()
     })?;
+    let listed = inventory.listed()?;
+    let root = &listed.root;
     for (_, _, folders) in &mut tasks {
-        folders.remove(&root);
+        folders.remove(root);
     }
-    let files = git_paths(&root, &["ls-files", "--cached", "-z"])?;
     let mut missing = BTreeSet::new();
-    for file in files {
+    for file in &listed.cached {
         if file.starts_with(root.join(".sykli")) {
             continue;
         }
@@ -642,12 +728,12 @@ fn folder_missing_inputs(contract: &Contract) -> Result<Vec<FolderInput>, String
             continue;
         };
         for (name, declared, folders) in &tasks {
-            if !folders.contains(folder) || declared.contains(&file) {
+            if !folders.contains(folder) || declared.contains(file) {
                 continue;
             }
-            match fs::symlink_metadata(&file) {
+            match fs::symlink_metadata(file) {
                 Ok(_) => {
-                    let relative = file.strip_prefix(&root).unwrap_or(&file);
+                    let relative = file.strip_prefix(root).unwrap_or(file);
                     missing.insert(FolderInput {
                         path: relative.to_string_lossy().replace('\\', "/"),
                         task: (*name).clone(),
@@ -687,11 +773,11 @@ struct CoveragePath {
 fn coverage_root() -> Result<PathBuf, String> {
     // Use the same current-directory spelling as declared paths. Git's absolute
     // root can expand Windows short names, making lexical comparisons disagree.
-    absolute(Path::new(&git(&["rev-parse", "--show-cdup"])?))
+    repo::repository()?.root_here()
 }
 
 fn git_paths(repository: &Path, args: &[&str]) -> Result<Vec<PathBuf>, String> {
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .arg("-C")
         .arg(repository)
         .args(args)
@@ -733,6 +819,7 @@ fn input_coverage(
     base: Option<&str>,
 ) -> Result<InputCoverage, String> {
     let repository = coverage_root()?;
+    let inventory = Inventory::new(contract)?;
     let base_commit = match base {
         Some(base) => Some(git(&[
             "rev-parse",
@@ -744,7 +831,7 @@ fn input_coverage(
             Ok(commit) => Some(commit),
             Err(error) => {
                 let branch = git(&["symbolic-ref", "--quiet", "HEAD"])?;
-                let exists = ProcessCommand::new("git")
+                let exists = repo::git_command()
                     .args(["show-ref", "--verify", "--quiet", &branch])
                     .output()
                     .map_err(|error| error.to_string())?;
@@ -802,8 +889,8 @@ fn input_coverage(
     Ok(InputCoverage {
         base_commit,
         paths,
-        cargo_missing_inputs: cargo_missing_inputs(contract)?,
-        folder_missing_inputs: folder_missing_inputs(contract)?,
+        cargo_missing_inputs: cargo_missing_inputs(contract, &inventory)?,
+        folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
     })
 }
 
@@ -1013,14 +1100,14 @@ fn resolve_contract(contract: PathBuf) -> PathBuf {
 /// how every command has always worked. Symbolic links are resolved first,
 /// so a link in the repository to a contract elsewhere is outside it.
 fn outside_repository(contract: &Path) -> Option<PathBuf> {
-    let root = fs::canonicalize(git(&["rev-parse", "--show-toplevel"]).ok()?).ok()?;
-    if located(contract)?.starts_with(root) {
+    let repository = repo::repository().ok()?;
+    if located(contract)?.starts_with(repository.resolved()?) {
         return None;
     }
     // Spelled from the current directory, as declared paths are compared
     // (`coverage_root`), so paths made absolute before entering agree with
     // them: Git's own spelling can expand Windows short names.
-    coverage_root().ok()
+    repository.root_here().ok()
 }
 
 /// Where `path` is on disk with symbolic links resolved, even before it
@@ -1065,6 +1152,12 @@ fn main() -> ExitCode {
         signal(13, 0);
     }
     let mut cli = Cli::parse();
+    if let (Some(root), Some(common_dir)) = (cli.repo_root.take(), cli.git_common_dir.take()) {
+        if let Err(error) = repo::give(root, common_dir) {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    }
     match &mut cli.command {
         Command::Plan {
             contract, explain, ..
@@ -2168,11 +2261,12 @@ fn run(
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
-    let missing = cargo_missing_inputs(contract)?;
+    let inventory = Inventory::new(contract)?;
+    let missing = cargo_missing_inputs(contract, &inventory)?;
     if !missing.is_empty() {
         return Err(cargo_coverage_error(&missing));
     }
-    let folders = folder_missing_inputs(contract)?;
+    let folders = folder_missing_inputs(contract, &inventory)?;
     if !folders.is_empty() {
         return Err(folder_coverage_error(&folders));
     }
@@ -3290,16 +3384,15 @@ fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
 }
 
 fn subject(contract: &Contract) -> Result<Subject, String> {
-    let repository = git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
+    let repository = repo::repository().map_err(|_| {
         "not inside a git repository; sykli binds every receipt to a git tree".to_string()
     })?;
-    let head_tree_oid = head_tree_oid(Path::new(&repository))?;
-    let tree_oid = working_tree_oid(Path::new(&repository))?;
+    let (tree_oid, head_tree_oid) = snapshot(repository)?;
     let inputs_digest = declared_inputs_digest(contract)?;
-    let submodules_modified = submodules_modified(Path::new(&repository))?;
+    let submodules_modified = submodules_modified(&repository.root)?;
     let dirty = tree_oid != head_tree_oid || submodules_modified;
     Ok(Subject {
-        repository,
+        repository: repository.root.to_string_lossy().into_owned(),
         tree_oid,
         inputs_digest,
         head_tree_oid,
@@ -3315,7 +3408,7 @@ fn submodules_modified(repository: &Path) -> Result<bool, String> {
     if !repository.join(".gitmodules").is_file() {
         return Ok(false);
     }
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .arg("-C")
         .arg(repository)
         .args(["status", "--porcelain=v2", "-z", "--ignore-submodules=none"])
@@ -3345,56 +3438,60 @@ fn submodules_modified(repository: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
-/// Content-address the working tree itself: stage every non-ignored file into
-/// an ephemeral index and let git compute the tree OID. `.sykli` is always
-/// excluded so receipts and cache entries never perturb the tree they witness.
-fn working_tree_oid(repository: &Path) -> Result<String, String> {
-    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
-    // Seed from HEAD so tracked files that also match .gitignore stay in the
-    // tree, as they do in HEAD; `add --all` then stages every change and
-    // deletion. A repository without commits starts from an empty index.
-    let _ = git_with_temporary_state(repository, &state, &["read-tree", "HEAD"]);
-    git_with_temporary_state(repository, &state, &["add", "--all"])
-        .and_then(|_| exclude_sykli(repository, &state))
-        .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
-}
-
-/// HEAD's tree with the same `.sykli` exclusion as the working tree, so a
-/// checkout that tracks its own receipts or evidence is not reported dirty.
-fn head_tree_oid(repository: &Path) -> Result<String, String> {
-    commit_tree_oid(repository, "HEAD")
-        .map_err(|_| "repository has no commits; commit once before running sykli".to_string())
+/// The working tree and HEAD's tree, as a receipt's subject records them:
+/// content-addressed, with `.sykli` always excluded so receipts and cache
+/// entries never perturb the tree they witness, and a checkout that tracks
+/// its own receipts or evidence is not reported dirty.
+///
+/// One `git cat-file --batch` gives HEAD's tree and whether HEAD tracks
+/// `.sykli` (the usual answer is no, and then HEAD's tree is the answer).
+/// The working tree is staged into an ephemeral index seeded from HEAD, so
+/// tracked files that also match .gitignore stay in the tree as they do in
+/// HEAD; `add --all` then stages every change and deletion except under
+/// the top-level `.sykli`, and git writes the tree: three more processes, built once per
+/// snapshot. A HEAD that tracks `.sykli` costs a removal and one more write.
+fn snapshot(repository: &repo::Repository) -> Result<(String, String), String> {
+    let root = &repository.root;
+    let head = repository.cat(&["HEAD^{tree}".into(), "HEAD:.sykli".into()])?;
+    let Some(head_tree) = &head[0] else {
+        return Err("repository has no commits; commit once before running sykli".into());
+    };
+    let state = TemporaryGitState::new(&object_directory_of(repository)?)?;
+    git_with_temporary_state(root, &state, &["read-tree", "HEAD"])?;
+    let head_tree = match head[1] {
+        None => head_tree.id.clone(),
+        Some(_) => {
+            exclude_sykli(root, &state)?;
+            git_with_temporary_state(root, &state, &["write-tree"])?
+        }
+    };
+    // A literal exclusion of an ignored `.sykli` makes `git add` complain
+    // that the path is ignored; the same exclusion as a glob does not, and
+    // stages exactly what `add --all` and then removing `.sykli` did.
+    git_with_temporary_state(
+        root,
+        &state,
+        &[
+            "add",
+            "--all",
+            "--",
+            ".",
+            ":(exclude,glob).syk[l]i",
+            ":(exclude,glob).syk[l]i/**",
+        ],
+    )?;
+    let tree = git_with_temporary_state(root, &state, &["write-tree"])?;
+    Ok((tree, head_tree))
 }
 
 /// A commit's tree with `.sykli` excluded, exactly as every receipt tree is.
 /// Where `.sykli` is untracked (the usual case) this is `COMMIT^{tree}`. Any
 /// tree-ish works, so the pre-commit hook passes the index's `write-tree`.
 fn commit_tree_oid(repository: &Path, commit: &str) -> Result<String, String> {
-    let state = TemporaryGitState::new(&git_object_directory(repository)?)?;
+    let state = TemporaryGitState::new(&object_directory()?)?;
     git_with_temporary_state(repository, &state, &["read-tree", commit])
         .and_then(|_| exclude_sykli(repository, &state))
         .and_then(|_| git_with_temporary_state(repository, &state, &["write-tree"]))
-}
-
-/// Resolve a revision to the full id of the commit it names.
-fn resolve_commit(repository: &Path, rev: &str) -> Result<String, String> {
-    let spec = format!("{rev}^{{commit}}");
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(format!("{rev:?} does not name a commit in this repository"));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
 fn exclude_sykli(repository: &Path, state: &TemporaryGitState) -> Result<String, String> {
@@ -3453,22 +3550,14 @@ impl Drop for TemporaryGitState {
     }
 }
 
-fn git_object_directory(repository: &Path) -> Result<PathBuf, String> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "objects",
-        ])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
-    }
-    let objects = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+/// The repository's object directory, known from finding the repository: an
+/// ephemeral index writes its trees beside it, never into it.
+fn object_directory() -> Result<PathBuf, String> {
+    object_directory_of(repo::repository()?)
+}
+
+fn object_directory_of(repository: &repo::Repository) -> Result<PathBuf, String> {
+    let objects = repository.object_directory();
     if !objects.is_dir() {
         return Err(format!(
             "Git object directory {} is unavailable",
@@ -3478,20 +3567,34 @@ fn git_object_directory(repository: &Path) -> Result<PathBuf, String> {
     Ok(objects)
 }
 
+/// Settings git reads from the environment that change what a pathspec
+/// means. Git exports them to hooks (`git --literal-pathspecs commit` sets
+/// `GIT_LITERAL_PATHSPECS`), so the snapshot drops them: its own pathspecs
+/// (the glob that leaves `.sykli` out) must mean what they say.
+const PATHSPEC_SETTINGS: [&str; 4] = [
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+];
+
 fn git_with_temporary_state(
     repository: &Path,
     state: &TemporaryGitState,
     args: &[&str],
 ) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
+    let mut command = repo::git_command();
+    command
         .arg("-C")
         .arg(repository)
         .args(args)
         .env("GIT_INDEX_FILE", &state.index)
         .env("GIT_OBJECT_DIRECTORY", &state.objects)
-        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &state.alternates)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &state.alternates);
+    for setting in PATHSPEC_SETTINGS {
+        command.env_remove(setting);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().into());
     }
@@ -3499,7 +3602,7 @@ fn git_with_temporary_state(
 }
 
 fn git(args: &[&str]) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;
@@ -3630,69 +3733,335 @@ fn verify(
     contract_path: &Path,
     commit: Option<&str>,
 ) -> Result<Vec<Check>, String> {
+    let Some(rev) = commit else {
+        return verify_checkout(receipt_path, contract_path);
+    };
+    // Everything git knows about the commit, asked before the receipt is
+    // read but reported after it, in the order verify always reported.
+    let facts = repo::repository()
+        .map_err(|_| "not inside a git repository; --commit names a commit".to_string())
+        .and_then(|repository| commit_facts(repository, rev, contract_path));
+    judge(
+        receipt_path,
+        facts
+            .as_ref()
+            .map(|(judged, at)| (judged, at))
+            .map_err(String::as_str),
+    )
+}
+
+/// `verify` without a commit: the subject is the checkout.
+fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Check>, String> {
+    let (receipt, mut checks) = read_receipt(receipt_path)?;
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    let outside = outside_repository(contract_path).is_some();
+    let (contract, _, contract_hash) = load_unlocked(contract_path)?;
+    let (lock, digest) = read_lock_digest(contract_path)?;
+    let outside = outside.then_some((contract_path, digest));
+    if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
+        return Ok(checks);
+    }
+    let subject = subject(&contract)?;
+    checks.extend([
+        Check::equals(
+            "tree",
+            TREE_MISMATCH,
+            subject.tree_oid,
+            &receipt.subject.tree_oid,
+        ),
+        Check::equals(
+            "inputs",
+            TREE_MISMATCH,
+            subject.inputs_digest,
+            &receipt.subject.inputs_digest,
+        ),
+    ]);
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    record_checks(&mut checks, &receipt, &contract);
+    Ok(checks)
+}
+
+/// A receipt and its schema check.
+fn read_receipt(receipt_path: &Path) -> Result<(ReceiptSummary, Vec<Check>), String> {
     let receipt: ReceiptSummary =
         serde_json::from_slice(&fs::read(receipt_path).map_err(|error| error.to_string())?)
             .map_err(|error| format!("invalid {}: {error}", receipt_path.display()))?;
-    let mut checks = vec![Check::equals(
+    let checks = vec![Check::equals(
         "schema",
         NOT_VERIFIABLE,
         "sykli-receipt.v1",
         &receipt.schema,
     )];
-    if checks.iter().any(|check| !check.ok) {
-        return Ok(checks);
+    Ok((receipt, checks))
+}
+
+/// The contract a receipt is judged by: its hash, its lock's pin, and for a
+/// contract outside the repository its path and lock file digest.
+pub(crate) struct Judged {
+    contract: Contract,
+    hash: String,
+    lock: Option<String>,
+    outside: Option<(PathBuf, Option<String>)>,
+}
+
+impl Judged {
+    /// A contract read from its file, with the lock beside it.
+    fn from_file(path: &Path, outside: bool) -> Result<Self, String> {
+        let (contract, _, hash) = load_unlocked(path)?;
+        let (lock, digest) = read_lock_digest(path)?;
+        Ok(Judged {
+            contract,
+            hash,
+            lock,
+            outside: outside.then(|| (path.to_path_buf(), digest)),
+        })
     }
-    let outside = outside_repository(contract_path).is_some();
-    let contract = match commit {
-        None => {
-            let (contract, _, contract_hash) = load_unlocked(contract_path)?;
-            let (lock, digest) = read_lock_digest(contract_path)?;
-            let outside = outside.then_some((contract_path, digest));
-            if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
-                return Ok(checks);
-            }
-            let subject = subject(&contract)?;
-            checks.extend([
-                Check::equals(
-                    "tree",
-                    TREE_MISMATCH,
-                    subject.tree_oid,
-                    &receipt.subject.tree_oid,
-                ),
-                Check::equals(
-                    "inputs",
-                    TREE_MISMATCH,
-                    subject.inputs_digest,
-                    &receipt.subject.inputs_digest,
-                ),
-            ]);
-            contract
+
+    /// Whether the contract differs from its own lock pin: then no run can
+    /// pass until it is re-locked.
+    pub(crate) fn drifted(&self) -> bool {
+        self.lock.as_ref().is_some_and(|lock| lock != &self.hash)
+    }
+}
+
+/// A commit as `verify --commit` judges it: its id, and its tree with
+/// `.sykli` excluded, as every receipt tree is.
+pub(crate) struct CommitAt {
+    id: String,
+    tree: String,
+}
+
+/// What one `git cat-file --batch` said about each name asked of it.
+pub(crate) type Answers = HashMap<String, Option<repo::Object>>;
+
+/// Ask every name once, in one process, and keep the answers by name.
+pub(crate) fn ask(repository: &repo::Repository, names: Vec<String>) -> Result<Answers, String> {
+    let mut unique = Vec::new();
+    for name in names {
+        if !unique.contains(&name) {
+            unique.push(name);
         }
-        Some(rev) => {
-            let repository =
-                PathBuf::from(git(&["rev-parse", "--show-toplevel"]).map_err(|_| {
-                    "not inside a git repository; --commit names a commit".to_string()
-                })?);
-            let id = resolve_commit(&repository, rev)?;
-            let (contract, contract_hash, lock, outside) = if outside {
-                let (contract, _, contract_hash) = load_unlocked(contract_path)?;
-                let (lock, digest) = read_lock_digest(contract_path)?;
-                (contract, contract_hash, lock, Some((contract_path, digest)))
-            } else {
-                let (contract, contract_hash, lock) = contract_at(&repository, &id, contract_path)?;
-                (contract, contract_hash, lock, None)
-            };
-            if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
-                return Ok(checks);
-            }
-            commit_checks(&mut checks, &receipt, &repository, &id)?;
-            contract
-        }
+    }
+    let answers = repository.cat(&unique)?;
+    Ok(unique.into_iter().zip(answers).collect())
+}
+
+/// The answer to `name`, when it was asked and names an object.
+pub(crate) fn answer<'a>(answers: &'a Answers, name: &str) -> Option<&'a repo::Object> {
+    answers.get(name).and_then(Option::as_ref)
+}
+
+/// The names to ask `git cat-file --batch` about a commit, `REV`: the commit,
+/// its tree and whether it tracks `.sykli`. Their answers give a `CommitAt`.
+pub(crate) fn commit_names(rev: &str) -> [String; 3] {
+    [
+        format!("{rev}^{{commit}}"),
+        format!("{rev}^{{tree}}"),
+        format!("{rev}:.sykli"),
+    ]
+}
+
+/// The commit `commit_names(rev)` asked about, from git's answers. Its tree
+/// is the commit's own unless it tracks `.sykli` (rare), which is then left
+/// out in an ephemeral index.
+pub(crate) fn commit_from(rev: &str, answers: &Answers) -> Result<CommitAt, String> {
+    let [commit, tree, sykli] = commit_names(rev).map(|name| answer(answers, &name));
+    let (Some(commit), Some(tree)) = (commit, tree) else {
+        return Err(format!("{rev:?} does not name a commit in this repository"));
     };
+    let tree = match sykli {
+        None => tree.id.clone(),
+        Some(_) => commit_tree_oid(&repo::repository()?.root, &commit.id)?,
+    };
+    Ok(CommitAt {
+        id: commit.id.clone(),
+        tree,
+    })
+}
+
+/// A file's path in the repository, from its top level, as `REV:PATH` names
+/// it in a commit. An absolute path is compared where it is on disk, so a
+/// spelling through a symbolic link (macOS's /var for /private/var) names
+/// the same file; a relative one is relative to the current directory, as
+/// `--contract` is.
+fn path_in_repository(repository: &repo::Repository, path: &Path) -> Result<String, String> {
+    let outside = || {
+        format!(
+            "{} is outside the repository at {}",
+            path.display(),
+            repository.root.display()
+        )
+    };
+    let full = absolute(path)?;
+    let relative = match (
+        full.parent().and_then(located),
+        full.file_name(),
+        repository.resolved(),
+    ) {
+        (Some(parent), Some(name), Some(root)) => parent
+            .join(name)
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .map_err(|_| outside())?,
+        _ => full
+            .strip_prefix(&repository.root)
+            .map(Path::to_path_buf)
+            .map_err(|_| outside())?,
+    };
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// A contract inside the repository as a commit carries it: the names to ask
+/// for the contract (and, for `sykli.rs`, the `sykli.json` beside it, as
+/// `run` falls back to it) and its lock. JSON only: an emitter would have to
+/// be run.
+pub(crate) struct ContractNames {
+    path: PathBuf,
+    contract: String,
+    fallback: Option<(PathBuf, String)>,
+    lock: String,
+}
+
+impl ContractNames {
+    pub(crate) fn new(rev: &str, contract: &Path) -> Result<Self, String> {
+        let repository = repo::repository()?;
+        let fallback = contract
+            .file_name()
+            .is_some_and(|name| name == "sykli.rs")
+            .then(|| {
+                let json = contract.with_file_name("sykli.json");
+                path_in_repository(repository, &json).map(|spec| (json, format!("{rev}:{spec}")))
+            })
+            .transpose()?;
+        Ok(ContractNames {
+            path: contract.to_path_buf(),
+            contract: format!("{rev}:{}", path_in_repository(repository, contract)?),
+            fallback,
+            lock: format!(
+                "{rev}:{}",
+                path_in_repository(repository, &lock_path(contract))?
+            ),
+        })
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        let mut names = vec![self.contract.clone(), self.lock.clone()];
+        names.extend(self.fallback.iter().map(|(_, name)| name.clone()));
+        names
+    }
+
+    /// Whether the commit carries the contract at the path it was named by.
+    pub(crate) fn carried(&self, answers: &Answers) -> bool {
+        answer(answers, &self.contract).is_some()
+    }
+
+    /// The contract the answers to `names()` give, judged as `verify --commit`
+    /// judges it, with the errors it has always given.
+    pub(crate) fn judged(&self, answers: &Answers, commit: &str) -> Result<Judged, String> {
+        let short = &commit[..commit.len().min(12)];
+        let blob = |name: &str| -> Result<Option<Vec<u8>>, String> {
+            match answer(answers, name) {
+                Some(object) if object.kind == "blob" => Ok(Some(object.bytes.clone())),
+                Some(_) => Err(format!("{name} is not a file")),
+                None => Ok(None),
+            }
+        };
+        let mut path = self.path.clone();
+        let mut bytes = blob(&self.contract)?;
+        if bytes.is_none() {
+            if let Some((json, name)) = &self.fallback {
+                path = json.clone();
+                bytes = blob(name)?;
+            }
+        }
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            return Err(format!(
+                "verify --commit reads a JSON contract from the commit; {} is not one",
+                path.display()
+            ));
+        }
+        let bytes = bytes.ok_or_else(|| format!("commit {short} has no {}", path.display()))?;
+        let (contract, _, hash) = parse_contract(&bytes)
+            .map_err(|error| format!("{} in commit {short}: {error}", path.display()))?;
+        let lock = match blob(&self.lock)? {
+            Some(bytes) => pinned(
+                parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
+                &path,
+            ),
+            None => None,
+        };
+        Ok(Judged {
+            contract,
+            hash,
+            lock,
+            outside: None,
+        })
+    }
+}
+
+/// Everything `verify --commit REV` needs from git, from one
+/// `git cat-file --batch`: the commit, its tree, and for a contract inside
+/// the repository the contract and lock the commit carries. A contract
+/// outside the repository is read from its file.
+fn commit_facts(
+    repository: &repo::Repository,
+    rev: &str,
+    contract_path: &Path,
+) -> Result<(Judged, CommitAt), String> {
+    let outside = outside_repository(contract_path).is_some();
+    // A path outside the repository named as inside cannot be asked about;
+    // that is reported after the commit, as it always was.
+    let inside = (!outside).then(|| ContractNames::new(rev, contract_path));
+    let mut names = commit_names(rev).to_vec();
+    if let Some(Ok(inside)) = &inside {
+        names.extend(inside.names());
+    }
+    let answers = ask(repository, names)?;
+    let at = commit_from(rev, &answers)?;
+    let judged = match inside {
+        None => Judged::from_file(contract_path, true)?,
+        Some(inside) => inside?.judged(&answers, &at.id)?,
+    };
+    Ok((judged, at))
+}
+
+/// A receipt judged as evidence for a commit, against facts already read:
+/// the schema, the contract and lock, the commit's tree, the records and the
+/// outcome, each stage refusing as `verify --commit` always has. A fact git
+/// could not give is an error, reported after the receipt's own.
+pub(crate) fn judge(
+    receipt_path: &Path,
+    facts: Result<(&Judged, &CommitAt), &str>,
+) -> Result<Vec<Check>, String> {
+    let (receipt, mut checks) = read_receipt(receipt_path)?;
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
-    record_checks(&mut checks, &receipt, &contract);
+    let (judged, at) = facts.map_err(str::to_string)?;
+    if !contract_checks(
+        &mut checks,
+        &receipt,
+        &judged.hash,
+        judged.lock.clone(),
+        judged
+            .outside
+            .as_ref()
+            .map(|(path, digest)| (path.as_path(), digest.clone())),
+    ) {
+        return Ok(checks);
+    }
+    commit_checks(&mut checks, &receipt, at);
+    if checks.iter().any(|check| !check.ok) {
+        return Ok(checks);
+    }
+    record_checks(&mut checks, &receipt, &judged.contract);
     Ok(checks)
 }
 
@@ -3749,123 +4118,6 @@ fn contract_checks(
     checks.iter().all(|check| check.ok)
 }
 
-/// Whether the contract `verify --commit COMMIT` would judge with differs from
-/// its own lock pin: then no run can pass until it is re-locked.
-fn contract_lock_drift(contract: &Path, commit: &str) -> Result<bool, String> {
-    let (hash, lock) = if outside_repository(contract).is_some() {
-        (load_unlocked(contract)?.2, read_lock(contract)?)
-    } else {
-        let repository = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
-        let id = resolve_commit(&repository, commit)?;
-        let (_, hash, lock) = contract_at(&repository, &id, contract)?;
-        (hash, lock)
-    };
-    Ok(lock.is_some_and(|lock| lock != hash))
-}
-
-/// Whether `commit` carries the file at `path`, a path inside the repository.
-fn carried_by(commit: &str, path: &Path) -> bool {
-    git(&["rev-parse", "--show-toplevel"])
-        .ok()
-        .and_then(|repository| blob_at(Path::new(&repository), commit, path).ok())
-        .flatten()
-        .is_some()
-}
-
-/// The contract and its lock pin as `commit` has them, read from git rather
-/// than from the checkout. JSON only: an emitter would have to be run, and
-/// `sykli.rs` falls back to `sykli.json` beside it, as `run` does.
-fn contract_at(
-    repository: &Path,
-    commit: &str,
-    contract: &Path,
-) -> Result<(Contract, String, Option<String>), String> {
-    let short = &commit[..12];
-    let mut path = contract.to_path_buf();
-    let mut bytes = blob_at(repository, commit, &path)?;
-    if bytes.is_none() && path.file_name().is_some_and(|name| name == "sykli.rs") {
-        path.set_file_name("sykli.json");
-        bytes = blob_at(repository, commit, &path)?;
-    }
-    if !path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-    {
-        return Err(format!(
-            "verify --commit reads a JSON contract from the commit; {} is not one",
-            path.display()
-        ));
-    }
-    let bytes = bytes.ok_or_else(|| format!("commit {short} has no {}", path.display()))?;
-    let (contract, _, hash) = parse_contract(&bytes)
-        .map_err(|error| format!("{} in commit {short}: {error}", path.display()))?;
-    let lock = match blob_at(repository, commit, &lock_path(&path))? {
-        Some(bytes) => pinned(
-            parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
-            &path,
-        ),
-        None => None,
-    };
-    Ok((contract, hash, lock))
-}
-
-/// A file's bytes as `commit` has them, or `None` when it has no such file.
-/// A relative path is relative to the current directory, as `--contract` is.
-fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8>>, String> {
-    let path_text = |path: &Path| path.to_string_lossy().replace('\\', "/");
-    let spec = if path.is_absolute() {
-        let outside = || {
-            format!(
-                "{} is outside the repository at {}",
-                path.display(),
-                repository.display()
-            )
-        };
-        // Compared where both are on disk, so a spelling through a symbolic
-        // link (macOS's /var for /private/var) still names the same file.
-        let relative = match (
-            path.parent().and_then(located),
-            path.file_name(),
-            fs::canonicalize(repository),
-        ) {
-            (Some(parent), Some(name), Ok(root)) => parent
-                .join(name)
-                .strip_prefix(&root)
-                .map(Path::to_path_buf)
-                .map_err(|_| outside())?,
-            _ => path
-                .strip_prefix(repository)
-                .map(Path::to_path_buf)
-                .map_err(|_| outside())?,
-        };
-        format!("{commit}:{}", path_text(&relative))
-    } else {
-        format!("{commit}:./{}", path_text(path))
-    };
-    let object = ProcessCommand::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !object.status.success() {
-        return Ok(None);
-    }
-    let id = String::from_utf8_lossy(&object.stdout).trim().to_string();
-    let blob = ProcessCommand::new("git")
-        .args(["cat-file", "blob", &id])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !blob.status.success() {
-        return Err(format!("{spec} is not a file"));
-    }
-    Ok(Some(blob.stdout))
-}
-
 /// Whether `verify --commit` also requires a clean run (`dirty: false`).
 ///
 /// This is policy, not evidence. Once the receipt's tree is the commit's
@@ -3882,15 +4134,14 @@ fn blob_at(repository: &Path, commit: &str, path: &Path) -> Result<Option<Vec<u8
 const COMMIT_REQUIRES_CLEAN_RUN: bool = false;
 
 /// The receipt's tree is the commit's, and the run was clean.
-fn commit_checks(
-    checks: &mut Vec<Check>,
-    receipt: &ReceiptSummary,
-    repository: &Path,
-    commit: &str,
-) -> Result<(), String> {
-    let tree = commit_tree_oid(repository, commit)?;
-    let mut check = Check::equals("commit", TREE_MISMATCH, tree, &receipt.subject.tree_oid);
-    check.expected = format!("{} (the tree of commit {})", check.expected, &commit[..12]);
+fn commit_checks(checks: &mut Vec<Check>, receipt: &ReceiptSummary, at: &CommitAt) {
+    let mut check = Check::equals(
+        "commit",
+        TREE_MISMATCH,
+        at.tree.clone(),
+        &receipt.subject.tree_oid,
+    );
+    check.expected = format!("{} (the tree of commit {})", check.expected, &at.id[..12]);
     checks.push(check);
     // Refused whatever the clean rule is: the tree cannot show this content.
     if receipt.subject.submodules_modified {
@@ -3925,7 +4176,6 @@ fn commit_checks(
         ok: clean || !COMMIT_REQUIRES_CLEAN_RUN,
         failure_code: TREE_MISMATCH,
     });
-    Ok(())
 }
 
 /// The records and outcome stages, against the contract that was judged.
@@ -4578,6 +4828,8 @@ mod tests {
         git(&["add", "--all"]);
         git(&["commit", "--quiet", "-m", "init"]);
         let head = git(&["rev-parse", "HEAD^{tree}"]);
+        let repository = repo::Repository::at(root.clone(), root.join(".git"));
+        let working_tree_oid = |_: &Path| snapshot(&repository).map(|(tree, _)| tree);
 
         // A clean checkout addresses to exactly HEAD's tree.
         assert_eq!(working_tree_oid(&root).unwrap(), head);
