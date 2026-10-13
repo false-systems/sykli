@@ -23,6 +23,8 @@ mod hook;
 mod init;
 mod inspect;
 #[cfg(unix)]
+mod journal;
+#[cfg(unix)]
 mod production;
 mod repo;
 

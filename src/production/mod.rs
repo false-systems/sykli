@@ -199,12 +199,44 @@ struct Record {
     fact: Fact,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    id: String,
-    record: Record,
+impl crate::journal::Record for Record {
+    type Fact = Fact;
+    const SCHEMA: &'static str = "sykli-production-record.v1";
+    const OWNER: &'static str = "production";
+    fn new(
+        production: String,
+        sequence: u64,
+        previous: Option<String>,
+        recorded_at: u64,
+        fact: Fact,
+    ) -> Self {
+        Record {
+            schema: Self::SCHEMA.into(),
+            production,
+            sequence,
+            previous,
+            recorded_at,
+            fact,
+        }
+    }
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+    fn owner(&self) -> &str {
+        &self.production
+    }
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    fn previous(&self) -> Option<&str> {
+        self.previous.as_deref()
+    }
+    fn fact(&self) -> &Fact {
+        &self.fact
+    }
 }
+
+type Envelope = crate::journal::Envelope<Record>;
 
 #[derive(Clone)]
 struct Attempt {
@@ -269,44 +301,13 @@ impl History {
     fn load_unlocked(store: &Store, request: &Request) -> Result<Self, String> {
         let production = request.id()?;
         let directory = store.production(&production)?.join("records");
-        let mut paths = Vec::new();
-        if directory.exists() {
-            for entry in fs::read_dir(&directory).map_err(err)? {
-                let path = entry.map_err(err)?.path();
-                // Temporaries and anything a file browser drops (.DS_Store)
-                // are not records; a real foreign record still fails loudly.
-                if path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.starts_with('.'))
-                {
-                    continue;
-                }
-                paths.push(path);
-            }
-        }
-        paths.sort();
         let mut history = Self {
             records: vec![],
             attempts: BTreeMap::new(),
             latest: BTreeMap::new(),
         };
-        for path in paths {
-            let envelope: Envelope = decode(&fs::read(&path).map_err(err)?)?;
-            let record = &envelope.record;
-            if record.schema != "sykli-production-record.v1"
-                || record.production != production
-                || record.sequence != history.records.len() as u64 + 1
-                || record.previous != history.records.last().map(|r| r.id.clone())
-                || envelope.id != identity("sykli-production-record.v1", record)?
-                || path.file_name().and_then(|s| s.to_str())
-                    != Some(format!("{:020}.json", record.sequence).as_str())
-            {
-                return Err("record sequence, digest or production reference mismatch".into());
-            }
-            history.apply(request, &record.fact)?;
-            history.records.push(envelope);
-        }
+        history.records =
+            crate::journal::load(&directory, &production, |fact| history.apply(request, fact))?;
         Ok(history)
     }
 
@@ -450,23 +451,11 @@ impl History {
         let _journal = Lease::journal(&store.production(&request.id()?)?)?;
         *self = Self::load_unlocked(store, request)?;
         self.apply(request, &fact)?;
-        let record = Record {
-            schema: "sykli-production-record.v1".into(),
-            production: request.id()?,
-            sequence: self.records.len() as u64 + 1,
-            previous: self.records.last().map(|r| r.id.clone()),
-            recorded_at: now(),
-            fact,
-        };
-        let envelope = Envelope {
-            id: identity("sykli-production-record.v1", &record)?,
-            record,
-        };
-        let path = store
-            .production(&request.id()?)?
-            .join("records")
-            .join(format!("{:020}.json", envelope.record.sequence));
-        publish(&path, &canonical(&envelope)?)?;
+        let envelope = crate::journal::seal(request.id()?, &self.records, fact)?;
+        crate::journal::write(
+            &store.production(&request.id()?)?.join("records"),
+            &envelope,
+        )?;
         self.records.push(envelope);
         Ok(())
     }
