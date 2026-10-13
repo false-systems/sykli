@@ -492,7 +492,23 @@ mod tests {
         // contact-lost one stays, because no lease ever protected it — only its
         // record does.
         drop(held);
-        assert_eq!(store.sweep_concluded(), 1);
+        // Other unit tests fork commands concurrently, and a child holds a
+        // copy of the released lease's descriptor until its exec closes it
+        // (CLOEXEC), so the release can take a moment to be seen.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match store.sweep_concluded() {
+                1 => break,
+                swept => {
+                    assert_eq!(swept, 0, "only the released finished attempt");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the lease stayed held"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
         assert!(
             !request
                 .join("attempts")

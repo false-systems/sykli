@@ -112,6 +112,22 @@ fn run_json_prints_one_receipt() {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("sykli-json-{nonce}"));
     fs::create_dir_all(&root).unwrap();
+    // Its own repository: a run writes its receipt and journal into the
+    // repository it runs in, never the one the tests are built from.
+    let init = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&root)
+        .output()
+        .expect("git runs");
+    assert!(init.status.success());
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "--quiet", "--allow-empty", "-m", "empty"])
+        .output()
+        .expect("git runs");
+    assert!(commit.status.success());
     let contract = root.join("contract.json");
     let output = format!("task-output-{nonce}");
     fs::write(&contract, format!(
@@ -122,6 +138,7 @@ fn run_json_prints_one_receipt() {
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .args(["run", "--json"])
         .arg(&contract)
+        .current_dir(&root)
         .env("SYKLI_TEST_SECRET", "must-not-leak")
         .output()
         .expect("binary runs");

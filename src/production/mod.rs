@@ -231,9 +231,6 @@ impl crate::journal::Record for Record {
     fn previous(&self) -> Option<&str> {
         self.previous.as_deref()
     }
-    fn fact(&self) -> &Fact {
-        &self.fact
-    }
 }
 
 type Envelope = crate::journal::Envelope<Record>;
@@ -306,8 +303,9 @@ impl History {
             attempts: BTreeMap::new(),
             latest: BTreeMap::new(),
         };
-        history.records =
-            crate::journal::load(&directory, &production, |fact| history.apply(request, fact))?;
+        history.records = crate::journal::load(&directory, &production, |record: &Record| {
+            history.apply(request, &record.fact)
+        })?;
         Ok(history)
     }
 
@@ -455,6 +453,7 @@ impl History {
         crate::journal::write(
             &store.production(&request.id()?)?.join("records"),
             &envelope,
+            crate::canonical::Durability::Full,
         )?;
         self.records.push(envelope);
         Ok(())
@@ -1217,17 +1216,17 @@ fn execute(
     let execution = super::run_task(
         &task,
         &super::shell_runtime()?,
-        true,
+        super::Progress::Json,
         super::MAX_CAPTURE_BYTES,
         super::Isolation::OwnGroup,
     );
     // Only a failed wait leaves termination unknown. The shell ran in its own
     // process group and the group was killed after it exited, so a shell that
     // died by signal is an interrupted attempt with nothing left running.
-    if execution.class == Some("runtime_error") {
+    if execution.class.as_deref() == Some("runtime_error") {
         return Ok(None);
     }
-    if execution.exit_code.is_none() && execution.class == Some("command_failed") {
+    if execution.exit_code.is_none() && execution.class.as_deref() == Some("command_failed") {
         return Ok(Some((
             ResultFact::ExecutionFailed {
                 code: "interrupted".into(),

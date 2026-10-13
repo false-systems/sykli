@@ -103,10 +103,52 @@ pub fn digest(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How hard a write is pushed to stable storage before it is acknowledged.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Durability {
+    /// `File::sync_all`: on macOS `F_FULLFSYNC`, which also empties the
+    /// drive's own write cache. Typed production's records use it.
+    Full,
+    /// `fsync(2)`: the bytes and the directory entry are handed to the
+    /// device before the write is acknowledged. On macOS the drive's own
+    /// cache is not emptied (SQLite's default there); a process crash or a
+    /// kernel panic cannot lose the write, a power cut on a drive that lies
+    /// about its cache can. Elsewhere it is `sync_all`. Graph runs use it:
+    /// each task journals several records, and `F_FULLFSYNC` costs
+    /// milliseconds each.
+    Fsync,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn fsync(fd: i32) -> i32;
+}
+
+/// Push `file` to stable storage as `durability` says.
+pub fn sync(file: &fs::File, durability: Durability) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if durability == Durability::Fsync {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fsync on a descriptor `file` owns.
+        return if unsafe { fsync(file.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+    }
+    let _ = durability;
+    file.sync_all()
+}
+
 /// Write an immutable file: a durable temporary followed by a hard link, so a
 /// torn write never becomes a record. An existing identical file is accepted;
 /// a differing one is a conflict.
 pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    publish_with(path, bytes, Durability::Full)
+}
+
+/// `publish`, synced as `durability` says.
+pub fn publish_with(path: &Path, bytes: &[u8], durability: Durability) -> Result<(), String> {
     let parent = path.parent().ok_or("missing parent")?;
     fs::create_dir_all(parent).map_err(err)?;
     let temporary = parent.join(format!(
@@ -122,7 +164,7 @@ pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(err)?;
     let written = file
         .write_all(bytes)
-        .and_then(|()| file.sync_all())
+        .and_then(|()| sync(&file, durability))
         .map_err(err);
     let linked = written.and_then(|()| match fs::hard_link(&temporary, path) {
         Ok(()) => Ok(()),
@@ -136,11 +178,17 @@ pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // The temporary never outlives this call, whatever happened.
     let _ = fs::remove_file(&temporary);
     linked?;
-    // Make the directory entry durable. Windows cannot open a directory for
-    // flushing without backup semantics, and NTFS journals the metadata.
+    sync_directory(parent, durability)
+}
+
+/// Make a directory's entries durable. Windows cannot open a directory for
+/// flushing without backup semantics, and NTFS journals the metadata.
+pub fn sync_directory(directory: &Path, durability: Durability) -> Result<(), String> {
     #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|f| f.sync_all())
+    fs::File::open(directory)
+        .and_then(|directory| sync(&directory, durability))
         .map_err(err)?;
+    #[cfg(not(unix))]
+    let _ = (directory, durability);
     Ok(())
 }

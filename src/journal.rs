@@ -11,7 +11,7 @@
 //! shared. Who may append at all is a lease: an advisory `flock` that the
 //! kernel releases when the last descriptor of its holder closes, so a dead
 //! holder never leaves a stale lock and a PID is never trusted.
-use crate::canonical::{canonical, decode, digest, identity, publish};
+use crate::canonical::{Durability, canonical, decode, digest, identity, publish_with};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -45,7 +45,6 @@ pub(crate) trait Record: Serialize + DeserializeOwned {
     fn owner(&self) -> &str;
     fn sequence(&self) -> u64;
     fn previous(&self) -> Option<&str>;
-    fn fact(&self) -> &Self::Fact;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,14 +60,14 @@ pub(crate) fn record_path(records: &Path, sequence: u64) -> PathBuf {
 }
 
 /// Every record in `records`, in order, with the chain validated and each
-/// fact handed to `apply` as it is read; `apply` refuses a fact that does
+/// record handed to `apply` as it is read; `apply` refuses a fact that does
 /// not follow from the ones before it. Temporaries and anything a file
 /// browser drops (`.DS_Store`) are not records; a real foreign record still
 /// fails loudly.
 pub(crate) fn load<R: Record>(
     records: &Path,
     owner: &str,
-    mut apply: impl FnMut(&R::Fact) -> Result<(), String>,
+    mut apply: impl FnMut(&R) -> Result<(), String>,
 ) -> Result<Vec<Envelope<R>>, String> {
     let mut paths = Vec::new();
     if records.exists() {
@@ -102,7 +101,7 @@ pub(crate) fn load<R: Record>(
                 R::OWNER
             ));
         }
-        apply(record.fact())?;
+        apply(record)?;
         loaded.push(envelope);
     }
     Ok(loaded)
@@ -130,10 +129,15 @@ pub(crate) fn seal<R: Record>(
 
 /// Publish a sealed record. An identical record already there is accepted;
 /// a different one at the same sequence is a conflict, never an overwrite.
-pub(crate) fn write<R: Record>(records: &Path, envelope: &Envelope<R>) -> Result<(), String> {
-    publish(
+pub(crate) fn write<R: Record>(
+    records: &Path,
+    envelope: &Envelope<R>,
+    durability: Durability,
+) -> Result<(), String> {
+    publish_with(
         &record_path(records, envelope.record.sequence()),
         &canonical(envelope)?,
+        durability,
     )
 }
 
