@@ -92,9 +92,12 @@ walks the trees by exact bytes: `Found`, `Absence`): the run's record
 (`InputRecord`: `sha256`, `mode` as git has it, `object` from the run's own
 snapshot, read in a second round of the snapshot's `cat-file`, with a third
 only for symbolic links) must have the commit's entry, the commit's blob bytes
-(or what `git cat-file --filters` makes of them, one process per converted
-input), and the entry's execute bit; a symbolic link is followed to the
-declared input it names (`PathFacts::file_behind`). The commit's trees and
+(or what `git --attr-source=COMMIT cat-file --filters` makes of them, by the
+commit's attributes, one process per converted input, streamed: `checked_out`),
+and the entry's execute bit; a symbolic link is followed to the declared input
+it names (`PathFacts::file_behind`; a `..` may only leave the link's own
+directories, `link_target`). Input blobs are hashed as they are read and kept
+only up to `INPUT_BLOB_KEPT` (`Session::ask_bounded`). The commit's trees and
 blobs come from a second round of the verify or hook `cat-file` session
 (`repo::Session`, `input_names`, `inputs_from`). An input the run read where
 the commit has nothing is refused, unless a task declares it as an output.

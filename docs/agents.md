@@ -17,8 +17,12 @@ consistently, such as an outcome rewritten to passed, verifies. With
 `--commit`, a receipt whose run read an input the commit cannot show at its
 path (an ignored or untracked file, a name spelled differently from git's, a
 file inside a submodule or reached through a symbolic link to a directory, a
-symbolic link to an undeclared file) exits 3;
-declare inputs as git spells them. Write receipts under `.sykli/` or outside
+symbolic link to an undeclared file or with `..` after a name in its target)
+exits 3; declare inputs as git spells them. An input a task declares as an
+output is reported as generated and not judged: its bytes are the receipt's
+claim. An input a checkout converts is compared with what a checkout of the
+commit gives, by the commit's own `.gitattributes` (git 2.40 or later).
+Write receipts under `.sykli/` or outside
 the tree; a receipt inside the tree changes the tree it describes. A receipt
 binds a tree, not a commit: `sykli verify RECEIPT --commit REV` judges the
 receipt as evidence for that commit, reading the contract, the lock and
