@@ -34,24 +34,6 @@ contract consumer can observe; internal refactors are not listed.
   stage, the exit code and the trust tiers established and not established.
   Exit codes are unchanged.
 
-### Changed
-- Every receipt written on Linux and macOS carries `run`, so its bytes, and
-  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
-  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
-  fields (including older `verify`) are unaffected.
-- On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
-  and SIGHUP reach tasks through sykli, which stops them, records them as
-  interrupted and exits 128+N, instead of dying and leaving them running
-  unrecorded. A process a task leaves behind is killed as soon as its shell
-  exits, so it can no longer hold the task open.
-- A task whose declared inputs change while the run is in progress is
-  `errored` with class `input_changed`, not passed or failed: its result is
-  not evidence for the tree the run recorded.
-- Receipts and cache entries are synced (`fsync(2)`) before they are used. A
-  cache entry is no longer deleted before its replacement is renamed into
-  place, so concurrent runs storing the same key can no longer fail ("Directory
-  not empty") or lose the entry; an entry that still verifies is kept, and a
-  restored output is hashed before it replaces anything.
 - Receipts record each task's declared inputs (`tasks[].inputs`): for each
   input, the SHA-256 of the bytes the run read, its execute bits (`mode`) and
   `object`, the tree entry (`MODE ID`) the run's own snapshot had at the
@@ -188,6 +170,23 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- `verify --commit` and `sykli hook pre-push` refuse (exit 3, and the push)
+  a receipt whose run read a declared input that the commit cannot show at
+  its declared path (sykli#78): an ignored or untracked file, a name spelled
+  differently from git's (case, Unicode normalization), a file inside a
+  submodule or reached through a symbolic link to a directory, a symbolic
+  link to an undeclared file or with a `..` after a name in its target, or
+  `.git` declared as an input and read in a linked worktree, where `.git` is
+  a file. Such inputs used to pass unjudged. To migrate, drop such paths
+  from a contract you verify against commits, declare inputs as git spells
+  them, declare a symbolic link's target as well, and declare files a task
+  generates as that task's `outputs` (reported as not judged, never
+  refused). Plain `verify`, against the checkout, is unaffected.
+- `verify --commit` and `sykli hook pre-push` need git 2.40 or later to
+  check an input that a checkout converts (line endings, a smudge filter):
+  they ask `git --attr-source=COMMIT cat-file --filters`. With an older git
+  such a receipt cannot be checked and exits 2; inputs a checkout leaves as
+  they are need no newer git.
 - `run` refuses (exit 2) an undeclared sibling of a declared input: a tracked
   file (in the index) directly inside a folder holding one of a task's declared
   inputs, which that task does not declare. Such a file could change the
@@ -211,6 +210,23 @@ contract consumer can observe; internal refactors are not listed.
   instead; this repository's CI does.
 
 ### Changed
+- Every receipt written on Linux and macOS carries `run`, so its bytes, and
+  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
+  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
+  fields (including older `verify`) are unaffected.
+- On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
+  and SIGHUP reach tasks through sykli, which stops them, records them as
+  interrupted and exits 128+N, instead of dying and leaving them running
+  unrecorded. A process a task leaves behind is killed as soon as its shell
+  exits, so it can no longer hold the task open.
+- A task whose declared inputs change while the run is in progress is
+  `errored` with class `input_changed`, not passed or failed: its result is
+  not evidence for the tree the run recorded.
+- Receipts and cache entries are synced (`fsync(2)`) before they are used. A
+  cache entry is no longer deleted before its replacement is renamed into
+  place, so concurrent runs storing the same key can no longer fail ("Directory
+  not empty") or lose the entry; an entry that still verifies is kept, and a
+  restored output is hashed before it replaces anything.
 - sykli starts far fewer git processes. The repository is found once per
   command (one `git rev-parse`), `hook pre-push` and `verify --commit` ask
   everything about the commits they judge in one `git cat-file --batch` and
@@ -237,6 +253,23 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- `verify --commit` and the pre-push hook: two forgeries the first fix for
+  sykli#78 still let through are refused.
+  - A symbolic link whose target has a `..` after a name (`sub/../x`, with
+    `sub` itself a link) was judged as the file its names give, while the
+    run read the file the file system resolved; a receipt rebound with only
+    `tree_oid` edited verified and the hook kept it. Such a link is now
+    refused; a `..` may leave only the link's own directories.
+  - An input a checkout converts was compared with the checkout's
+    `.gitattributes`, so an uncommitted attributes line could make a forged
+    receipt verify. It is now compared with what a checkout of the commit
+    gives, by the commit's own `.gitattributes`
+    (`git --attr-source=COMMIT`); `.git/info/attributes` and
+    `core.attributesFile` still apply, as configuration.
+- `verify --commit` and the pre-push hook hash each declared input's blob as
+  it is read instead of holding it, so sykli's own memory stays at a few
+  MB however large an input is (it held each blob whole: 515 MB for a
+  512 MB input). `git cat-file` itself may still load a large blob.
 - `verify --commit` and the pre-push hook bind a receipt's inputs to the
   commit (sykli#78). They checked that the receipt's `tree_oid` was the
   commit's tree, but took its inputs on trust, so a passing receipt for one
@@ -245,11 +278,11 @@ contract consumer can observe; internal refactors are not listed.
   declared input is judged against the commit at its exact path, from the
   commit's trees and blobs, read in a second round of the same single
   `git cat-file`. The path is the declared one from the top level, by its
-  names alone, never resolved through a symbolic link in the checkout,
-  which could point it at another file. The run's recorded tree entry must
-  be the commit's, its recorded bytes the commit's blob (or, where a
-  checkout converts the file, what `git cat-file --filters` makes of the
-  blob under this repository's configuration and attributes: one more git
+  names alone, never resolved through a symbolic link in the checkout, which
+  could point it at another file. The run's recorded tree entry must be the
+  commit's, its recorded bytes the commit's blob (or, where a checkout
+  converts the file, what a checkout of the commit makes of the blob, by
+  its `.gitattributes` and this repository's configuration: one more git
   process per such input, and only for it), and its recorded execute bit
   the entry's. A symbolic link is judged by its entry and by the bytes of
   the declared input it names; a run that read the link's own text, as a
@@ -261,20 +294,21 @@ contract consumer can observe; internal refactors are not listed.
   normalization, a file inside a submodule or reached through a symbolic
   link to a directory, a symbolic link to an undeclared file), since the
   commit cannot show what it read. An input neither has is judged absent,
-  and an input a task declares as an output is reported as generated. The
-  receipt's input records must also hash to its inputs digest, and without
-  `--commit` each record must be what the checkout gives now. Otherwise
-  exit 3, the documented tree-or-input mismatch. A receipt written before
-  input records is checked by recomputing its inputs digest from the same
-  blobs (no extra git process: `verify --commit` and the hook start
-  `rev-parse` and `cat-file` for it too), never with an execute bit the
-  commit does not have, and is refused (exit 3) when a declared input is
-  not a regular file in the commit, a checkout converts it, or it is
-  executable and the run's file system had no execute bits, since that
-  cannot be done; run sykli again. A receipt edited consistently (an
-  outcome rewritten to passed, or a receipt recomputed in full for a
-  commit) still verifies: receipts are unsigned, and the README and
-  `verify` now say plainly what verify establishes and what it does not.
+  and an input a task declares as an output is reported as generated and
+  not judged (its bytes are the receipt's claim). The receipt's input
+  records must also hash to its inputs digest, and without `--commit` each
+  record must be what the checkout gives now. Otherwise exit 3, the
+  documented tree-or-input mismatch. A receipt written before input records
+  is checked by recomputing its inputs digest from the same blobs (no extra
+  git process: `verify --commit` and the hook start `rev-parse` and
+  `cat-file` for it too), never with an execute bit the commit does not
+  have, and is refused (exit 3) when a declared input is not a regular file
+  in the commit, a checkout converts it, or it is executable and the run's
+  file system had no execute bits, since that cannot be done; run sykli
+  again. A receipt edited consistently (an outcome rewritten to passed, or
+  a receipt recomputed in full for a commit) still verifies: receipts are
+  unsigned, and the README and `verify` now say plainly what verify
+  establishes and what it does not.
 - `sykli hook pre-push` without `--branch` takes a
   `refs/remotes/REMOTE/HEAD` that names a ref that does not exist (the host
   renamed its default branch and a fetch pruned the old one) as unknown: it

@@ -7,6 +7,7 @@
 //! repository at all. Questions about objects go to one `git cat-file
 //! --batch` for all the names a command needs.
 
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -210,7 +211,12 @@ impl Repository {
 pub(crate) struct Object {
     pub(crate) id: String,
     pub(crate) kind: String,
+    /// The contents; empty for a blob larger than the bound it was asked
+    /// with (`Session::ask_bounded`), which is hashed as it is read instead.
     pub(crate) bytes: Vec<u8>,
+    /// For a blob, the SHA-256 of its contents in hex, whether or not they
+    /// were kept.
+    pub(crate) sha256: Option<String>,
 }
 
 impl Repository {
@@ -237,8 +243,22 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Ask about every name in order, as `Repository::cat` does.
+    /// Ask about every name in order: each object's id, kind and contents,
+    /// or None when the name names no object (missing or ambiguous). Names
+    /// are revision expressions such as `REV^{tree}` or `REV:path`, paths
+    /// from the top level; read from stdin, they can never be options.
     pub(crate) fn ask(&mut self, names: &[String]) -> Result<Vec<Option<Object>>, String> {
+        self.ask_bounded(names, usize::MAX)
+    }
+
+    /// `ask`, keeping the contents of a blob only up to `keep` bytes: a
+    /// larger blob is hashed as it is read and its contents are not held,
+    /// so memory stays bounded whatever the size of what is asked.
+    pub(crate) fn ask_bounded(
+        &mut self,
+        names: &[String],
+        keep: usize,
+    ) -> Result<Vec<Option<Object>>, String> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
@@ -275,7 +295,7 @@ impl Session {
             writer.flush()?;
             Ok::<_, std::io::Error>(writer)
         });
-        let answers = read_answers(stdout, names);
+        let answers = read_answers(stdout, names, keep);
         let written = writing
             .join()
             .map_err(|_| "writing to git cat-file panicked".to_string())?;
@@ -331,11 +351,14 @@ fn stderr_of(child: &mut Child) -> String {
 }
 
 /// One answer per name: `<id> <type> <size>` and the contents, or
-/// `<name> missing` (or `ambiguous`).
+/// `<name> missing` (or `ambiguous`). A blob's contents are hashed as they
+/// are read, in pieces, and kept only when they are at most `keep` bytes.
 fn read_answers(
     stdout: &mut BufReader<ChildStdout>,
     names: &[String],
+    keep: usize,
 ) -> Result<Vec<Option<Object>>, String> {
+    let ended = |_| "git cat-file ended early".to_string();
     let mut answers = Vec::with_capacity(names.len());
     for name in names {
         let mut line = Vec::new();
@@ -358,6 +381,7 @@ fn read_answers(
                 id: id.to_string(),
                 kind: "submodule".into(),
                 bytes: Vec::new(),
+                sha256: None,
             }));
             continue;
         }
@@ -367,15 +391,30 @@ fn read_answers(
         let size: usize = size
             .parse()
             .map_err(|_| format!("unexpected git cat-file answer {header:?}"))?;
-        let mut bytes = vec![0; size + 1];
-        stdout
-            .read_exact(&mut bytes)
-            .map_err(|_| "git cat-file ended early".to_string())?;
-        bytes.pop();
+        let blob = kind == "blob";
+        let kept = !blob || size <= keep;
+        let mut bytes = Vec::with_capacity(if kept { size } else { 0 });
+        let mut hasher = Sha256::new();
+        let mut piece = [0; 64 * 1024];
+        let mut left = size;
+        while left > 0 {
+            let part = &mut piece[..left.min(64 * 1024)];
+            stdout.read_exact(part).map_err(ended)?;
+            if blob {
+                hasher.update(&*part);
+            }
+            if kept {
+                bytes.extend_from_slice(part);
+            }
+            left -= part.len();
+        }
+        let mut newline = [0];
+        stdout.read_exact(&mut newline).map_err(ended)?;
         answers.push(Some(Object {
             id: id.to_string(),
             kind: kind.to_string(),
             bytes,
+            sha256: blob.then(|| format!("{:x}", hasher.finalize())),
         }));
     }
     Ok(answers)
@@ -450,7 +489,70 @@ fn ref_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{branch_name, remote_name};
+    use super::{Repository, branch_name, remote_name};
+    use sha2::{Digest, Sha256};
+
+    /// `verify --commit` hashes every declared input's blob. A blob larger
+    /// than the bound is hashed as it is read and never held whole, so a
+    /// large input costs time, not memory; a small one is kept (a symbolic
+    /// link's target is read from it).
+    #[test]
+    fn a_large_blob_is_hashed_as_it_is_read_and_not_kept() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sykli-repo-blobs-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let small = b"small\n".to_vec();
+        let big = (0..(1 << 20)).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        std::fs::write(root.join("small.txt"), &small).unwrap();
+        std::fs::write(root.join("big.bin"), &big).unwrap();
+        for args in [
+            &["init", "--quiet"][..],
+            &["add", "--all"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "-m",
+                "c",
+            ],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let hex = |bytes: &[u8]| {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let repository = Repository::at(root.clone(), root.join(".git"));
+        let mut session = repository.session(Vec::new());
+        let names = ["HEAD:small.txt".to_string(), "HEAD:big.bin".to_string()];
+        let answers = session.ask_bounded(&names, 64 * 1024).unwrap();
+        session.finish().unwrap();
+        let [Some(small_answer), Some(big_answer)] = &answers[..] else {
+            panic!("both blobs answered");
+        };
+        assert_eq!(small_answer.bytes, small);
+        assert_eq!(small_answer.sha256.as_deref(), Some(hex(&small).as_str()));
+        assert!(big_answer.bytes.is_empty(), "a large blob is not kept");
+        assert_eq!(big_answer.sha256.as_deref(), Some(hex(&big).as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn branch_names_follow_gits_rules() {
