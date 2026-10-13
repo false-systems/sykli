@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where the repository is.
 pub(crate) struct Repository {
@@ -23,6 +24,35 @@ pub(crate) struct Repository {
 }
 
 static REPOSITORY: OnceLock<Result<Repository, String>> = OnceLock::new();
+
+/// Whether the caller gave the repository (`give`).
+static GIVEN: AtomicBool = AtomicBool::new(false);
+
+/// Settings in the environment that point git at a repository or a work
+/// tree.
+const LOCATION_SETTINGS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
+
+/// A git command as sykli starts every one. When the caller gave the
+/// repository, `give` checked the pair from files, so nothing in the
+/// environment may swap in another repository or work tree: the settings
+/// that point git elsewhere are dropped and the command starts at the given
+/// root, where git finds the checked repository through the root's own
+/// `.git` (a linked worktree's `gitdir:` file included). `GIT_INDEX_FILE`
+/// stays, since the pre-commit hook judges the index git is about to commit.
+/// Without the facts, git finds the repository as it always did,
+/// environment included.
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    if GIVEN.load(Ordering::SeqCst) {
+        for setting in LOCATION_SETTINGS {
+            command.env_remove(setting);
+        }
+        if let Some(Ok(repository)) = REPOSITORY.get() {
+            command.current_dir(&repository.root);
+        }
+    }
+    command
+}
 
 /// Take the caller's answers instead of asking git. Both must be absolute
 /// directories, and the files on disk must bear them out: the root's `.git`
@@ -48,6 +78,7 @@ pub(crate) fn give(root: PathBuf, common_dir: PathBuf) -> Result<(), String> {
         ));
     }
     let _ = REPOSITORY.set(Ok(Repository::at(root, common_dir)));
+    GIVEN.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -200,7 +231,7 @@ fn cat(root: &Path, names: &[String]) -> Result<Vec<Option<Object>>, String> {
     if let Some(name) = names.iter().find(|name| name.contains(['\n', '\r'])) {
         return Err(format!("{name:?} cannot be asked of git cat-file"));
     }
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .arg("-C")
         .arg(root)
         .args(["cat-file", "--batch"])

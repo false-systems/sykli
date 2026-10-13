@@ -7,7 +7,7 @@ use crate::{
 };
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode};
+use std::process::ExitCode;
 
 const REFUSED: u8 = 1;
 const CANNOT_EVALUATE: u8 = 2;
@@ -37,7 +37,7 @@ fn root_contract() -> Option<PathBuf> {
 
 /// Paths a git listing prints with `-z`, for messages.
 fn git_names(args: &[&str]) -> Result<Vec<String>, String> {
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;

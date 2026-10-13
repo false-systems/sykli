@@ -568,7 +568,7 @@ impl Inventory {
                 if self.cargo {
                     args.extend(["--others", "--exclude-standard"]);
                 }
-                let output = ProcessCommand::new("git")
+                let output = repo::git_command()
                     .arg("-C")
                     .arg(&root)
                     .args(&args)
@@ -777,7 +777,7 @@ fn coverage_root() -> Result<PathBuf, String> {
 }
 
 fn git_paths(repository: &Path, args: &[&str]) -> Result<Vec<PathBuf>, String> {
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .arg("-C")
         .arg(repository)
         .args(args)
@@ -831,7 +831,7 @@ fn input_coverage(
             Ok(commit) => Some(commit),
             Err(error) => {
                 let branch = git(&["symbolic-ref", "--quiet", "HEAD"])?;
-                let exists = ProcessCommand::new("git")
+                let exists = repo::git_command()
                     .args(["show-ref", "--verify", "--quiet", &branch])
                     .output()
                     .map_err(|error| error.to_string())?;
@@ -3408,7 +3408,7 @@ fn submodules_modified(repository: &Path) -> Result<bool, String> {
     if !repository.join(".gitmodules").is_file() {
         return Ok(false);
     }
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .arg("-C")
         .arg(repository)
         .args(["status", "--porcelain=v2", "-z", "--ignore-submodules=none"])
@@ -3583,7 +3583,7 @@ fn git_with_temporary_state(
     state: &TemporaryGitState,
     args: &[&str],
 ) -> Result<String, String> {
-    let mut command = ProcessCommand::new("git");
+    let mut command = repo::git_command();
     command
         .arg("-C")
         .arg(repository)
@@ -3602,7 +3602,7 @@ fn git_with_temporary_state(
 }
 
 fn git(args: &[&str]) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
+    let output = repo::git_command()
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;
