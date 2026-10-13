@@ -215,6 +215,21 @@ The repository's [CI shadow experiment](ci-shadow.md) compares changed-path
 selection and baseline cache evidence with an independent full run. Its
 observations never enable skipping or decide the required CI result.
 
+A run outlives the session that asked for it (Linux and macOS). Keep its id:
+`sykli run sykli.json --detach --json` answers `{"schema":"sykli-run.v1",
+"run":ID}` once the run is recorded and returns; `sykli run --json` names it
+in the receipt's `run`. Ask about it later, from any worktree of the clone,
+with `sykli status --run ID --json` (`sykli-run-status.v1`): poll while
+`state` is `requested` or `running`; `completed` names its receipt; a run that
+is `interrupted` or `lost`, and every task `lost`, `interrupted` or `running`,
+is unknown, never passed or failed. Continue such a run with `sykli resume
+--run ID --json`. To ask whether a commit is validated, use `sykli status
+--commit REV --json` (`sykli-commit-status.v1`): `current` holds the receipts
+that verify for that commit now, `historical` those of the same tree that do
+not, and `verdict` is `passed`, `failed`, `pending` or `none`. `sykli verify
+RECEIPT --commit REV --json` gives one receipt's verdict (`sykli-verify.v1`)
+with its trust tiers. Never infer a result from a receipt you parsed yourself.
+
 For typed artifact production, start with `sykli targets --json` and
 `sykli plan sykli.production.json --target TARGET --json`. Use the discovered
 target name (`sykli` in this repository), not an assumed `app` alias.

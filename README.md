@@ -258,6 +258,84 @@ matching inputs and their downstream tasks. It does not discover a Git diff and
 does not restrict a later `run`, which evaluates the whole graph and decides
 reuse from content keys.
 
+## Runs that survive a crash
+
+On Linux and macOS every `sykli run` is durable. Before any task starts, the
+run is recorded in the clone's git directory,
+`$(git rev-parse --git-common-dir)/sykli/runs/<run-id>/`, so it outlives the
+worktree that started it. Each task's attempts are then recorded as they
+happen: dispatched before its shell is spawned, started, and finished with
+its exit code or signal and its captured output. The run id is printed first
+(`run: ID`, on stderr with `--json`) and is the receipt's `run`.
+
+```sh
+sykli run sykli.json --json             # the receipt names its run
+sykli status --run RUN_ID               # what is known about the run, at any time
+sykli resume --run RUN_ID               # continue a run whose coordinator ended
+sykli run sykli.json --detach --json    # {"schema":"sykli-run.v1","run":"…"} once recorded
+```
+
+A crash leaves exactly what was observed, and nothing more:
+
+- A task whose end was recorded keeps its outcome: passed, failed, errored,
+  cached or blocked.
+- A task whose attempt was dispatched but whose end was not recorded is
+  **lost**. Its outcome is unknown and it is never passed, even if its process
+  later exited 0 with nobody watching. While that process still runs (the
+  shell and its children hold the attempt's lease), the task is **running**.
+- On SIGINT, SIGTERM or SIGHUP, the run stops each running task's process
+  group, records it **interrupted** (not failed), and exits 128+N. Each task
+  runs in its own process group, so a signal reaches it through sykli.
+- The receipt is built only from recorded outcomes and written durably, and
+  only then is the run **completed**.
+
+`sykli status --run ID --json` (`sykli-run-status.v1`) gives the run's state
+(`requested`, `running`, `completed`, `interrupted`, or `lost` when its
+coordinator ended without concluding it), its subject (tree, commit when
+clean, dirty), the contract and lock digests, each task's state and every
+attempt (id, started, finished, exit, signal, outcome, what it supersedes),
+and the receipt (path and digest) once complete. It reads the journal and
+its locks, runs no git once the repository is known, and writes nothing.
+
+`sykli resume --run ID` takes over a run whose coordinator ended. Tasks with
+a recorded outcome are kept, failed ones included. Each lost or interrupted
+task is retried as a new attempt that supersedes the old one, which stays in
+the history. Resume is refused while the run's coordinator, or a process of
+one of its attempts, is still alive, and when the worktree's source, the
+contract, its lock or the runtime is not what the run recorded: its receipt
+would then claim a tree that did not produce it. Each coordinator that takes
+a run over opens a new generation, and every record carries its generation,
+so a coordinator that lost its lease cannot later complete an attempt or
+conclude a run that a newer one has taken over.
+
+A task whose declared inputs change while the run is in progress is
+`errored` (class `input_changed`), never passed: what it read is not the
+tree the run recorded.
+
+`sykli status --commit REV --json` (`sykli-commit-status.v1`) asks whether a
+commit is validated, with the code `verify --commit` uses. Every receipt of
+`REV`'s tree that this clone keeps (this worktree's, kept ones, and those of
+runs, from any worktree) is judged for `REV`. Those that verify now, passed
+or failed, are `current`; the others of that tree are `historical`, shown but
+never current evidence: another contract or an edited record
+(`not-applicable`, `unverifiable`), or a receipt whose run this clone keeps
+but which did not conclude with it (`unconcluded`, `unrecorded`). A pass
+recorded for one commit is never current for another, and the runs of that
+tree are listed with their states.
+
+`sykli verify --json` prints the verdict as one `sykli-verify.v1` document:
+every check, the first failing stage, the exit code (unchanged), and what the
+verdict establishes (`schema`, `contract`, `source`, `consistency`,
+`outcome`) and does not (`provenance`, `producer`, `execution`).
+
+The journal is local and unsigned, trusted like the receipts, and claims no
+authenticity. Each record is synced with `fsync(2)` before it is acknowledged.
+On macOS that is not `F_FULLFSYNC`: a power cut on a drive that ignores
+`fsync` can lose the last records, a process crash or a kernel panic cannot.
+Durable runs need Unix file locks. On Windows a run keeps everything in memory
+until its receipt is written, as before, and `--detach`, `status --run` and
+`resume --run` are unavailable.
+
 ## In CI
 
 After checkout, install Sykli and your project's toolchain, then:
@@ -646,13 +724,14 @@ change the tree they describe.
 
 ## What Sykli keeps on disk
 
-The cache, the receipts and production scratch are bounded, and each limit is stated:
+The cache, the receipts, runs and production scratch are bounded, and each limit is stated:
 
 | State | Limit | Override |
 |---|---|---|
 | Task cache | **1 GiB**; least recently used entries are dropped when a run would go over | `SYKLI_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
+| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt); when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
@@ -670,8 +749,10 @@ entry costs a re-run, never a result.
 | | `validate` | Check a contract without executing it |
 | | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
-| | `run` | Execute the graph and record a receipt |
-| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit |
+| | `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
+| | `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
+| | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
+| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
 | | `hook` | Git hook entrypoints that gate what is committed and pushed |
 | **Production** | `targets` | Discover typed artifact targets without building |
 | | `produce` | Build an artifact from captured source and run its checks |
