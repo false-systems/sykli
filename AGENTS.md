@@ -86,15 +86,26 @@ binds the git tree OID (computed from a temporary index seeded from HEAD, with
 `.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
 staged: schema and record consistency (2), contract lock and contract hash (4),
 tree and inputs (3), outcome (1). It proves consistency, not authorship; the
-README says so. With `--commit` the inputs stage (`inputs_check`) compares
-each task's recorded input tree entries (`InputRecord.object`, taken from the
-run's own snapshot tree in a second round of the snapshot's `cat-file`) with
-the commit's, read in a second round of the verify or hook `cat-file` session
-(`repo::Session`, `input_names`, `inputs_from`), and checks the records hash to
-`inputs_digest` (`records_check`, also without `--commit`); older receipts are
-recomputed from the commit's blobs (`older_inputs_check`). Exit 3. `sykli.lock` is `sykli-lock.v2`, one entry per contract file in
-its directory. `run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a
-failed task. Declared paths resolve against the current directory, so a
+README says so. With `--commit` the inputs stage (`inputs_check`,
+`InputsAt::judge`) judges each declared input at its exact path (`found_at`
+walks the trees by exact bytes: `Found`, `Absence`): the run's record
+(`InputRecord`: `sha256`, `mode` as git has it, `object` from the run's own
+snapshot, read in a second round of the snapshot's `cat-file`, with a third
+only for symbolic links) must have the commit's entry, the commit's blob bytes
+(or what `git cat-file --filters` makes of them, one process per converted
+input), and the entry's execute bit; a symbolic link is followed to the
+declared input it names (`PathFacts::file_behind`). The commit's trees and
+blobs come from a second round of the verify or hook `cat-file` session
+(`repo::Session`, `input_names`, `inputs_from`). An input the run read where
+the commit has nothing is refused, unless a task declares it as an output.
+The records must hash to `inputs_digest` (`records_check`, also without
+`--commit`, where `checkout_records_check` also compares each record with the
+checkout's); older receipts are recomputed from the same blobs
+(`older_inputs_check`). Declared paths are named lexically from the top
+level (`declared_path`), never through the checkout. Exit 3. `sykli.lock` is
+`sykli-lock.v2`, one entry per contract file in its directory.
+`run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a failed task.
+Declared paths resolve against the current directory, so a
 contract outside the git toplevel of the current directory (decided on
 resolved paths, `outside_repository`) makes `main` absolutize command-line
 paths and enter that toplevel first (`enter_for_contract`); hooks absolutize

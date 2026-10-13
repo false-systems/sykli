@@ -8,17 +8,23 @@ receipt still describes the tree in front of you. Exit codes are the answer:
 0 verified, 1 the work failed, 2 cannot verify, 3 the tree or inputs changed,
 4 the contract changed. A verified receipt is consistent, not proven: verify
 establishes a valid schema, consistent records, the contract's identity, and
-the source and inputs, recomputed from the tree (or, with `--commit`, from the
-commit's own tree entries for each declared input, which the receipt records
-per task under `tasks[].inputs`); it does not establish where the receipt came
-from, who produced it, or that its tasks ran. Receipts are unsigned, so a
-receipt edited consistently, such as an outcome rewritten to passed, verifies. Write receipts under `.sykli/` or outside the tree;
-a receipt inside the tree changes the tree it describes. A receipt binds a
-tree, not a commit: `sykli verify RECEIPT --commit REV` judges the receipt as
-evidence for that commit, reading the contract and lock from `REV` and nothing
-from the checkout. It requires a passing run of exactly `REV^{tree}` (a
-pre-commit run counts; it need not be clean), exits 3 when it is not one, and
-prints the first failing check on stderr.
+the tree and every declared input's bytes and execute bit, read from the
+checkout (or, with `--commit`, from the commit at each input's exact path,
+against what the receipt records per task under `tasks[].inputs`), never from
+the receipt; it does not establish where the receipt came from, who produced
+it, or that its tasks ran. Receipts are unsigned, so a receipt edited
+consistently, such as an outcome rewritten to passed, verifies. With
+`--commit`, a receipt whose run read an input the commit cannot show at its
+path (an ignored or untracked file, a name spelled differently from git's, a
+file inside a submodule or reached through a symbolic link to a directory, a
+symbolic link to an undeclared file) exits 3;
+declare inputs as git spells them. Write receipts under `.sykli/` or outside
+the tree; a receipt inside the tree changes the tree it describes. A receipt
+binds a tree, not a commit: `sykli verify RECEIPT --commit REV` judges the
+receipt as evidence for that commit, reading the contract, the lock and
+every input from `REV`, none from the checkout. It requires a passing run of
+exactly `REV^{tree}` (a pre-commit run counts; it need not be clean), exits 3
+when it is not one, and prints the first failing check on stderr.
 
 Evidence of accepted pushes outlives the worktree that produced it. When
 `sykli hook pre-push` accepts a push to the default branch, it copies the

@@ -9,23 +9,35 @@ contract consumer can observe; internal refactors are not listed.
 
 ### Added
 - Receipts record each task's declared inputs (`tasks[].inputs`): for each
-  input, the SHA-256 of the bytes the run read and its execute bits (`mode`,
-  absent on Windows), which together hash to the subject's `inputs_digest`
-  exactly as before, and `object`, the tree entry (`MODE ID`) the run's own
-  snapshot had at the input's path, absent for a path not in that tree (an
-  ignored or generated file). A missing input is `null`. Additive: the receipt
-  schema, `inputs_digest` and cache keys are unchanged, and older receipts are
-  still read.
+  input, the SHA-256 of the bytes the run read, its execute bits (`mode`) and
+  `object`, the tree entry (`MODE ID`) the run's own snapshot had at the
+  input's path, absent for a path not in that tree (an ignored or generated
+  file). A missing input is `null`. `mode` is the execute bits as git has
+  them: those read from the file system when they agree with the entry (git
+  takes an entry's bit from the owner's), else the entry's (`0o111` or 0), as
+  on Windows, which has no execute bits, and with `core.filemode=false`, where
+  git does not trust them; it is absent only on Windows, for an input whose
+  file the run's tree does not show. The records hash to the subject's
+  `inputs_digest` by the same formula as before. Additive: the receipt schema
+  and cache keys are unchanged (cache keys still use the bits on disk), and
+  older receipts are still read. `inputs_digest` changes only where the
+  recorded bit now differs from the one on disk: an executable input on
+  Windows, or with `core.filemode=false` a bit git does not have. An earlier
+  sykli's `verify` of such a receipt against the checkout exits 3; here,
+  with `core.filemode=false`, a change git ignores (a `chmod` alone) no
+  longer makes a receipt stale for `verify` against the checkout either.
 - `verify` prints what a verified receipt establishes, and what it does not,
-  after `verified:`; `verify --help` says the same.
+  after `verified:`, on two lines (`established:`, `not established:`);
+  `verify --help` says the same.
 - `--repo-root ABS_PATH` and `--git-common-dir ABS_PATH`, accepted by every
   command (given together): a caller that already knows the repository says
   so, and sykli runs no git to find it. With them, `hook pre-push` starts one
-  git process, `verify --commit` one and `run` five. The receipt records the
-  root as given. They are checked without git: the root's `.git` must lead to
-  the common directory (a directory, or a `gitdir:` file followed through
-  `commondir`), so a subdirectory, or another repository's common directory,
-  exits 2.
+  git process, `verify --commit` one and `run` five (`hook pre-push` and
+  `verify --commit` one more for each declared input a checkout converts).
+  The receipt records the root as given. They are checked without git: the
+  root's `.git` must lead to the common directory (a directory, or a
+  `gitdir:` file followed through `commondir`), so a subdirectory, or
+  another repository's common directory, exits 2.
 - Contracts kept outside the repository. `run`, `lock`, `plan`, `validate`
   and `verify` accept a contract path outside the git repository around the
   current directory (decided on resolved paths, so a symbolic link to a
@@ -185,20 +197,40 @@ contract consumer can observe; internal refactors are not listed.
   commit (sykli#78). They checked that the receipt's `tree_oid` was the
   commit's tree, but took its inputs on trust, so a passing receipt for one
   commit, edited to name a failing commit's tree, verified for it, and the
-  hook accepted the push and kept the receipt as evidence. Now each declared
-  input's tree entry recorded by the run must be the commit's entry at that
-  path, read in the same single `git cat-file` (two rounds, no extra git
-  process), and the receipt's input records must hash to its inputs digest;
-  otherwise exit 3, the documented tree-or-input mismatch, with or without
-  `--commit` for the digest. Execute bits, symbolic links, line-ending and
-  smudge filters are compared as git sees them, so a genuine receipt
-  verifies on every platform. A receipt written before input records is
-  checked by recomputing its inputs digest from the commit's files, and is
-  refused (exit 3) when a declared input is not a regular file in the commit
-  or a checkout converts it, since that cannot be done; run sykli again. A
-  receipt edited consistently (an outcome rewritten to passed, or digests
-  recomputed for another commit) still verifies: receipts are unsigned, and
-  the README now says plainly what verify establishes and what it does not.
+  hook accepted the push and kept the receipt as evidence. Now every
+  declared input is judged against the commit at its exact path, from the
+  commit's trees and blobs, read in a second round of the same single
+  `git cat-file`. The path is the declared one from the top level, by its
+  names alone, never resolved through a symbolic link in the checkout,
+  which could point it at another file. The run's recorded tree entry must
+  be the commit's, its recorded bytes the commit's blob (or, where a
+  checkout converts the file, what `git cat-file --filters` makes of the
+  blob under this repository's configuration and attributes: one more git
+  process per such input, and only for it), and its recorded execute bit
+  the entry's. A symbolic link is judged by its entry and by the bytes of
+  the declared input it names; a run that read the link's own text, as a
+  checkout without symbolic links does, is refused. A receipt with another
+  commit's tree and entries copied in, or with an execute bit (or none)
+  that the commit does not have, is refused. So is one whose run read a
+  file where the commit has nothing at the declared path (an ignored or
+  untracked file, a name spelled differently from git's by case or Unicode
+  normalization, a file inside a submodule or reached through a symbolic
+  link to a directory, a symbolic link to an undeclared file), since the
+  commit cannot show what it read. An input neither has is judged absent,
+  and an input a task declares as an output is reported as generated. The
+  receipt's input records must also hash to its inputs digest, and without
+  `--commit` each record must be what the checkout gives now. Otherwise
+  exit 3, the documented tree-or-input mismatch. A receipt written before
+  input records is checked by recomputing its inputs digest from the same
+  blobs (no extra git process: `verify --commit` and the hook start
+  `rev-parse` and `cat-file` for it too), never with an execute bit the
+  commit does not have, and is refused (exit 3) when a declared input is
+  not a regular file in the commit, a checkout converts it, or it is
+  executable and the run's file system had no execute bits, since that
+  cannot be done; run sykli again. A receipt edited consistently (an
+  outcome rewritten to passed, or a receipt recomputed in full for a
+  commit) still verifies: receipts are unsigned, and the README and
+  `verify` now say plainly what verify establishes and what it does not.
 - `sykli hook pre-push` without `--branch` takes a
   `refs/remotes/REMOTE/HEAD` that names a ref that does not exist (the host
   renamed its default branch and a fetch pruned the old one) as unknown: it
