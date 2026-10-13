@@ -606,7 +606,8 @@ fn the_two_field_forgery_is_refused_where_a_checkout_converts_line_endings() {
     let out = scratch.verify(&c1_receipt, &c1);
     exits(&out, 0, "genuine, converted");
     assert!(
-        text(&out.stdout).contains("the bytes of file.txt as a checkout here converts them"),
+        text(&out.stdout)
+            .contains("the bytes of file.txt as a checkout of the commit converts them"),
         "the output says the input was judged as converted: {}",
         text(&out.stdout)
     );
@@ -841,6 +842,190 @@ fn a_symbolic_link_is_judged_by_its_entry_and_its_declared_target() {
     assert!(refusal(&out).contains("link.txt"), "{}", refusal(&out));
 }
 
+/// A link target is followed by its names only where the names alone
+/// decide the file: a `..` may leave only the link's own directories, which
+/// the commit shows are directories. Then the link is judged through its
+/// target, so a rebind across a change to the target is refused.
+#[cfg(unix)]
+#[test]
+fn a_link_target_leaving_the_links_own_directory_is_judged() {
+    let scratch = Scratch::new(
+        "link-up",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q one dir/link","inputs":["dir/link","x"]}]}"#,
+    );
+    fs::create_dir_all(scratch.repo.join("dir")).unwrap();
+    fs::write(scratch.repo.join("x"), "one\n").unwrap();
+    std::os::unix::fs::symlink("../x", scratch.repo.join("dir/link")).unwrap();
+    let c1 = scratch.commit("c1");
+    let c1_receipt = scratch.receipt();
+    assert_eq!(c1_receipt["outcome"], "passed");
+    exits(&scratch.verify(&c1_receipt, &c1), 0, "genuine, ../x");
+    fs::write(scratch.repo.join("x"), "two\n").unwrap();
+    let c3 = scratch.commit("c3: x changes");
+    let mut forged = c1_receipt.clone();
+    forged["subject"]["tree_oid"] = scratch.tree(&c3).into();
+    exits(&scratch.verify(&forged, &c3), 3, "rebound across x");
+}
+
+/// A `..` after a name the target itself gives is resolved on disk through
+/// whatever that name is: with `sub -> deep/dir`, a link to `sub/../x`
+/// reads `deep/x`, not `x`. Its name cannot say which file was read, so it
+/// is refused both ways: a genuine receipt, and c1's receipt rebound to a
+/// commit where only `deep/x` changed (which verified, and was kept by the
+/// hook, while the link's target was taken to be `x`).
+#[cfg(unix)]
+#[test]
+fn a_link_target_with_dotdot_after_a_name_cannot_be_judged() {
+    let scratch = Scratch::new(
+        "link-dotdot",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q one link","inputs":["link","x"]}]}"#,
+    );
+    fs::create_dir_all(scratch.repo.join("deep/dir")).unwrap();
+    fs::write(scratch.repo.join("deep/dir/keep"), "keep\n").unwrap();
+    fs::write(scratch.repo.join("deep/x"), "one\n").unwrap();
+    fs::write(scratch.repo.join("x"), "one\n").unwrap();
+    std::os::unix::fs::symlink("deep/dir", scratch.repo.join("sub")).unwrap();
+    std::os::unix::fs::symlink("sub/../x", scratch.repo.join("link")).unwrap();
+    let c1 = scratch.commit("c1");
+    let c1_receipt = scratch.receipt();
+    assert_eq!(c1_receipt["outcome"], "passed");
+    let out = scratch.verify(&c1_receipt, &c1);
+    exits(&out, 3, "genuine, sub/../x");
+    assert!(refusal(&out).contains(".."), "{}", refusal(&out));
+
+    fs::write(scratch.repo.join("deep/x"), "two\n").unwrap();
+    let c3 = scratch.commit("c3: deep/x changes");
+    let c3_receipt = scratch.receipt();
+    assert_eq!(c3_receipt["outcome"], "failed", "c3 really fails");
+    exits(&scratch.verify(&c3_receipt, &c3), 3, "c3's own receipt");
+    let mut forged = c1_receipt.clone();
+    forged["subject"]["tree_oid"] = scratch.tree(&c3).into();
+    exits(&scratch.verify(&forged, &c3), 3, "rebound across deep/x");
+    exits(
+        &scratch.push(&forged, &c3),
+        1,
+        "hook, rebound across deep/x",
+    );
+    assert!(!scratch.repo.join(".git/sykli/receipts").exists());
+}
+
+/// A converted input is compared with what a checkout of the commit makes
+/// of its blob, by the commit's own attributes, not the checkout's: an
+/// uncommitted `.gitattributes` in the verifier's worktree cannot turn
+/// c3's LF blob into the CRLF bytes c1's run read. Attributes in
+/// `.git/info/attributes` (and `core.attributesFile`) still apply: they are
+/// configuration, as trusted as the filter drivers it names, and this test
+/// pins that too.
+#[cfg(unix)]
+#[test]
+fn a_converted_input_is_judged_by_the_commits_attributes() {
+    let scratch = Scratch::new(
+        "attr-source",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q \"$(printf 'one\\r')\" f.txt","inputs":["f.txt"]}]}"#,
+    );
+    fs::write(scratch.repo.join(".gitattributes"), "* -text\n").unwrap();
+    fs::write(scratch.repo.join("f.txt"), "one\r\n").unwrap();
+    let c1 = scratch.commit("c1: CRLF stored as is");
+    let c1_receipt = scratch.receipt();
+    assert_eq!(c1_receipt["outcome"], "passed");
+    exits(&scratch.verify(&c1_receipt, &c1), 0, "genuine c1");
+    fs::write(scratch.repo.join("f.txt"), "one\n").unwrap();
+    let c3 = scratch.commit("c3: LF");
+    assert_eq!(scratch.receipt()["outcome"], "failed", "c3 really fails");
+
+    let mut forged = c1_receipt.clone();
+    forged["subject"]["tree_oid"] = scratch.tree(&c3).into();
+    forged["tasks"][0]["inputs"]["f.txt"]["object"] = scratch.entry(&c3, "f.txt").into();
+    exits(&scratch.verify(&forged, &c3), 3, "committed attributes");
+    // An uncommitted line in the worktree would make a checkout write CRLF.
+    fs::write(scratch.repo.join(".gitattributes"), "f.txt text eol=crlf\n").unwrap();
+    exits(
+        &scratch.verify(&forged, &c3),
+        3,
+        "uncommitted .gitattributes",
+    );
+    exits(
+        &scratch.push(&forged, &c3),
+        1,
+        "hook, uncommitted .gitattributes",
+    );
+    assert!(!scratch.repo.join(".git/sykli/receipts").exists());
+    scratch.git(&["checkout", "--", ".gitattributes"]);
+    // The same line as configuration: trusted, as documented.
+    fs::write(
+        scratch.repo.join(".git/info/attributes"),
+        "f.txt text eol=crlf\n",
+    )
+    .unwrap();
+    exits(
+        &scratch.verify(&forged, &c3),
+        0,
+        ".git/info/attributes is configuration",
+    );
+}
+
+/// Checking a converted input against the commit's attributes needs git
+/// 2.40 (`--attr-source`). A git without it cannot do that check, and the
+/// receipt is not passed: `verify --commit` exits 2 and says what is
+/// needed. (An older git is stood in for by a wrapper that refuses the
+/// option the way such a git does.)
+#[cfg(unix)]
+#[test]
+fn a_converted_input_without_attr_source_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new(
+        "old-git",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q one file.txt","inputs":["file.txt"]}]}"#,
+    );
+    scratch.git(&["config", "core.autocrlf", "true"]);
+    fs::write(scratch.repo.join("file.txt"), "one\r\n").unwrap();
+    let head = scratch.git(&["rev-parse", "HEAD"]);
+    let genuine = scratch.receipt();
+    assert_eq!(genuine["outcome"], "passed");
+    exits(&scratch.verify(&genuine, &head), 0, "with --attr-source");
+
+    let path = std::env::var_os("PATH").unwrap();
+    let git = std::env::split_paths(&path)
+        .map(|dir| dir.join("git"))
+        .find(|git| git.is_file())
+        .expect("git on PATH");
+    let bin = scratch.base.join("old-git");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --attr-source=*) \
+             echo \"unknown option: $a\" >&2; exit 129;; esac; done\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let receipt = scratch.base.join("receipt.json");
+    fs::write(&receipt, serde_json::to_vec(&genuine).unwrap()).unwrap();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&path));
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--contract",
+            "sykli.json",
+            "--commit",
+            &head,
+        ])
+        .current_dir(&scratch.repo)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .unwrap();
+    exits(&out, 2, "a git without --attr-source");
+    assert!(
+        text(&out.stderr).contains("git 2.40"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// A file whose bytes are a link's target name, replaced by that link: the
 /// two tree entries share one blob, so copying the link's entry into a
 /// receipt of the file leaves the recorded bytes equal to the blob's. A
@@ -1062,6 +1247,12 @@ fn a_verified_receipt_says_what_it_establishes_and_what_it_does_not() {
     ] {
         assert!(established.contains(claim), "{claim}: {established}");
     }
+    // A generated input's bytes are the receipt's claim, like an outcome:
+    // only the inputs of the task that produces it are established.
+    assert!(
+        !established.contains("output"),
+        "a generated input is not established: {established}"
+    );
     let not = stdout
         .lines()
         .find(|line| line.starts_with("not established: "))
@@ -1071,6 +1262,7 @@ fn a_verified_receipt_says_what_it_establishes_and_what_it_does_not() {
         "outcome rewritten",
         "recomputed",
         "converted",
+        "an input a task outputs",
     ] {
         assert!(not.contains(limit), "{limit}: {not}");
     }

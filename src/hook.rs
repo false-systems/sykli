@@ -673,10 +673,11 @@ pub(crate) fn pre_push(
             owned: Box::new(owned),
         });
     }
-    let read = crate::ask_in(&mut session, input_names).and_then(|more| {
-        answers.extend(more);
-        session.finish()
-    });
+    let read =
+        crate::ask_in_bounded(&mut session, input_names, crate::INPUT_BLOB_KEPT).and_then(|more| {
+            answers.extend(more);
+            session.finish()
+        });
     if let Err(error) = read {
         eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
         return ExitCode::from(CANNOT_EVALUATE);
