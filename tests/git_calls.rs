@@ -430,3 +430,107 @@ fn the_inputs_check_reads_the_commit_in_the_same_process() {
         within("verify --commit, rebound", (out, started), 3, expected);
     }
 }
+
+/// A contract outside the repository, locked, for the tests below.
+fn outside_contract(scratch: &Scratch) -> String {
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    contract.to_str().unwrap().to_string()
+}
+
+/// `verify --commit` and the pre-push hook for `receipt` and HEAD, the
+/// receipt being the only one in the worktree for the hook.
+fn judged_at_head(
+    scratch: &Scratch,
+    contract: &str,
+    receipt: &serde_json::Value,
+    expected: &[&str],
+    label: &str,
+) {
+    let head = scratch.git(&["rev-parse", "HEAD"]);
+    let path = scratch.base.join(format!("{label}.json"));
+    fs::write(&path, serde_json::to_vec(receipt).unwrap()).unwrap();
+    within(
+        &format!("verify --commit, {label}"),
+        scratch.counted(
+            &[
+                "verify",
+                path.to_str().unwrap(),
+                "--contract",
+                contract,
+                "--commit",
+                "HEAD",
+            ],
+            None,
+        ),
+        0,
+        expected,
+    );
+    let _ = fs::remove_dir_all(scratch.repo.join(".sykli"));
+    fs::create_dir_all(scratch.repo.join(".sykli")).unwrap();
+    fs::write(
+        scratch.repo.join(".sykli/receipt.json"),
+        serde_json::to_vec(receipt).unwrap(),
+    )
+    .unwrap();
+    within(
+        &format!("pre-push, {label}"),
+        scratch.counted(
+            &[
+                "hook",
+                "pre-push",
+                "--contract",
+                contract,
+                "--branch",
+                "main",
+                "origin",
+                "/nowhere/origin.git",
+            ],
+            Some(&format!("refs/heads/work {head} refs/heads/main {ZEROS}\n")),
+        ),
+        0,
+        expected,
+    );
+}
+
+/// A receipt written before per-task input records has its inputs digest
+/// recomputed from the commit's blobs, read in the second round of the same
+/// `cat-file` that read the entries: it costs what a new receipt costs.
+#[test]
+fn an_older_receipt_is_judged_within_the_same_budget() {
+    let scratch = Scratch::new("older");
+    let contract = outside_contract(&scratch);
+    let (out, _) = scratch.counted(&["run", &contract, "--json"], None);
+    let mut receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for task in receipt["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut().unwrap().remove("inputs");
+    }
+    judged_at_head(&scratch, &contract, &receipt, VERIFY_COMMIT, "older");
+}
+
+/// An input a checkout converts (here, line endings under `core.autocrlf`)
+/// is compared with what a checkout of its blob gives: one `cat-file
+/// --filters` for that input, and only for it.
+#[test]
+fn a_converted_input_costs_one_cat_file_of_its_own() {
+    let scratch = Scratch::new("converted");
+    let contract = outside_contract(&scratch);
+    scratch.git(&["config", "core.autocrlf", "true"]);
+    fs::write(scratch.repo.join("src/a.txt"), "a\r\n").unwrap();
+    assert_eq!(scratch.git(&["diff", "--name-only"]), "", "the same blob");
+    let (out, _) = scratch.counted(&["run", &contract, "--json"], None);
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(receipt["outcome"], "passed");
+    judged_at_head(
+        &scratch,
+        &contract,
+        &receipt,
+        &["rev-parse", "cat-file", "cat-file"],
+        "converted",
+    );
+}
