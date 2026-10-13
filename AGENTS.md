@@ -86,7 +86,13 @@ binds the git tree OID (computed from a temporary index seeded from HEAD, with
 `.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
 staged: schema and record consistency (2), contract lock and contract hash (4),
 tree and inputs (3), outcome (1). It proves consistency, not authorship; the
-README says so. `sykli.lock` is `sykli-lock.v2`, one entry per contract file in
+README says so. With `--commit` the inputs stage (`inputs_check`) compares
+each task's recorded input tree entries (`InputRecord.object`, taken from the
+run's own snapshot tree in a second round of the snapshot's `cat-file`) with
+the commit's, read in a second round of the verify or hook `cat-file` session
+(`repo::Session`, `input_names`, `inputs_from`), and checks the records hash to
+`inputs_digest` (`records_check`, also without `--commit`); older receipts are
+recomputed from the commit's blobs (`older_inputs_check`). Exit 3. `sykli.lock` is `sykli-lock.v2`, one entry per contract file in
 its directory. `run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a
 failed task. Declared paths resolve against the current directory, so a
 contract outside the git toplevel of the current directory (decided on

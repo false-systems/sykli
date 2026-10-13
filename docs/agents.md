@@ -6,7 +6,13 @@ and receive a `sykli-receipt.v1`, and `sykli verify RECEIPT` to check that a
 receipt still describes the tree in front of you. Exit codes are the answer:
 `run` 0 all passed or cached, 1 a task failed, 2 could not evaluate; `verify`
 0 verified, 1 the work failed, 2 cannot verify, 3 the tree or inputs changed,
-4 the contract changed. Write receipts under `.sykli/` or outside the tree;
+4 the contract changed. A verified receipt is consistent, not proven: verify
+establishes a valid schema, consistent records, the contract's identity, and
+the source and inputs, recomputed from the tree (or, with `--commit`, from the
+commit's own tree entries for each declared input, which the receipt records
+per task under `tasks[].inputs`); it does not establish where the receipt came
+from, who produced it, or that its tasks ran. Receipts are unsigned, so a
+receipt edited consistently, such as an outcome rewritten to passed, verifies. Write receipts under `.sykli/` or outside the tree;
 a receipt inside the tree changes the tree it describes. A receipt binds a
 tree, not a commit: `sykli verify RECEIPT --commit REV` judges the receipt as
 evidence for that commit, reading the contract and lock from `REV` and nothing

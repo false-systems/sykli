@@ -8,6 +8,16 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- Receipts record each task's declared inputs (`tasks[].inputs`): for each
+  input, the SHA-256 of the bytes the run read and its execute bits (`mode`,
+  absent on Windows), which together hash to the subject's `inputs_digest`
+  exactly as before, and `object`, the tree entry (`MODE ID`) the run's own
+  snapshot had at the input's path, absent for a path not in that tree (an
+  ignored or generated file). A missing input is `null`. Additive: the receipt
+  schema, `inputs_digest` and cache keys are unchanged, and older receipts are
+  still read.
+- `verify` prints what a verified receipt establishes, and what it does not,
+  after `verified:`; `verify --help` says the same.
 - `--repo-root ABS_PATH` and `--git-common-dir ABS_PATH`, accepted by every
   command (given together): a caller that already knows the repository says
   so, and sykli runs no git to find it. With them, `hook pre-push` starts one
@@ -171,6 +181,24 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- `verify --commit` and the pre-push hook bind a receipt's inputs to the
+  commit (sykli#78). They checked that the receipt's `tree_oid` was the
+  commit's tree, but took its inputs on trust, so a passing receipt for one
+  commit, edited to name a failing commit's tree, verified for it, and the
+  hook accepted the push and kept the receipt as evidence. Now each declared
+  input's tree entry recorded by the run must be the commit's entry at that
+  path, read in the same single `git cat-file` (two rounds, no extra git
+  process), and the receipt's input records must hash to its inputs digest;
+  otherwise exit 3, the documented tree-or-input mismatch, with or without
+  `--commit` for the digest. Execute bits, symbolic links, line-ending and
+  smudge filters are compared as git sees them, so a genuine receipt
+  verifies on every platform. A receipt written before input records is
+  checked by recomputing its inputs digest from the commit's files, and is
+  refused (exit 3) when a declared input is not a regular file in the commit
+  or a checkout converts it, since that cannot be done; run sykli again. A
+  receipt edited consistently (an outcome rewritten to passed, or digests
+  recomputed for another commit) still verifies: receipts are unsigned, and
+  the README now says plainly what verify establishes and what it does not.
 - `sykli hook pre-push` without `--branch` takes a
   `refs/remotes/REMOTE/HEAD` that names a ref that does not exist (the host
   renamed its default branch and a fetch pruned the old one) as unknown: it

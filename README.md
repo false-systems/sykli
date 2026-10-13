@@ -511,13 +511,30 @@ through `gh`. It never posts reviews or triggers work.
 | `0` | Receipt matches, and the work passed or was reused. |
 | `1` | The recorded work failed. |
 | `2` | The receipt cannot be verified. |
-| `3` | The tree or declared inputs changed since the run. |
+| `3` | The tree or declared inputs differ from the receipt's (changed since the run, or, with `--commit`, not that commit's). |
 | `4` | The contract or lock differs. |
 
-A receipt checks record consistency, contract identity, the repository tree and
-declared inputs, and then the recorded outcome. It **does not** authenticate who
-wrote the receipt, and it does not prove that the declared checks are
-sufficient.
+A receipt is a JSON file. It is not signed, and anyone who can write the
+checkout can edit it. So a successful `verify` says three different things,
+and it is worth keeping them apart:
+
+- **What verify establishes.** The receipt's schema is valid. Its records are
+  consistent with each other and with the contract (each recorded command is
+  the contract's, a passed task exited 0). The contract and lock are the ones
+  named. The source and declared inputs are the ones the receipt claims:
+  recomputed from the checkout, or with `--commit` from the commit itself,
+  never taken from the receipt.
+- **What it does not establish.** Where the receipt came from. Who produced it.
+  That its tasks were observed running, or ran at all. A receipt is a claim
+  that is consistent with the tree and contract, not evidence that the work
+  happened. It also does not prove that the declared checks are sufficient.
+- **What that leaves open.** Someone who edits a receipt and keeps it
+  consistent still passes. A failing run's receipt with its outcome rewritten
+  to "passed" verifies, and so does a receipt whose tree and inputs were
+  recomputed for another commit: every digest a receipt records follows a
+  public formula. Only authenticated execution evidence, a signed record from
+  something trusted to have watched the run, could tell these apart, and
+  sykli has none. Treat a verified receipt as consistent, not as proven.
 
 A receipt binds a tree, not a commit, and a run of uncommitted work is only
 marked `dirty`. To ask whether a receipt is evidence for a commit, name it:
@@ -529,15 +546,28 @@ sykli verify .sykli/receipt.json --contract sykli.json --commit HEAD
 With `--commit REV`, the subject is the commit, not the checkout. The
 contract and its `sykli.lock` pin are read from `REV` (from their files for a
 contract [outside the repository](#keep-the-contract-outside-the-repository),
-which no commit carries). The receipt's tree must
-be `REV^{tree}`. Otherwise it exits 3. The tree check is what binds the
-receipt to the commit's content, so a run need not be clean: a pre-commit run,
-made before HEAD moves, is a run of exactly the tree the commit records and
-counts for the push. Whether the run was clean is still reported. Nothing is read from the checkout,
-so any commit can be verified from any checkout, uncommitted edits or not.
-Declared inputs that the commit does not track, such as ignored files, are not
-part of a commit and are not judged. On any failure, the first failing check is
-also printed to stderr as one line.
+which no commit carries). The receipt's tree must be `REV^{tree}`, and every
+declared input must be what `REV` has at its path. A receipt records, for each
+task's inputs, the tree entry its run's own snapshot had (mode and blob, git's
+view of the bytes and execute bit the task read, after line-ending and other
+filters), and `verify --commit` reads the same entries from the commit, in the
+same single `git cat-file` it already uses. A receipt edited to name another
+commit's tree, or with one input's record or path changed, exits 3. The
+records must also hash to the receipt's inputs digest, with or without
+`--commit`. Nothing is read from the checkout, so any commit can be verified
+from any checkout, uncommitted edits or not. A run need not be clean: a
+pre-commit run, made before HEAD moves, is a run of exactly the tree the commit
+records and counts for the push. Whether the run was clean is still reported.
+On any failure, the first failing check is also printed to stderr as one line.
+
+A declared input that is not in the run's tree, such as an ignored or
+generated file, has no entry to compare: the commit must not have one either,
+and the file's content is not judged. A symbolic link is judged as git stores
+it, by its target's name. A receipt written before per-task input records is
+checked by recomputing its inputs digest from the commit's files; where a
+declared input is not a regular file in the commit, or a checkout converts it
+(line endings, smudge filters), that cannot be done, and it exits 3. Run sykli
+again for a receipt that records its inputs.
 
 Without `--commit`, verify judges the checkout as it is now. Run both in CI: a
 run hashes its tree before its tasks execute, so only the live check notices a
