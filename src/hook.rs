@@ -144,16 +144,28 @@ pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
         Ok(Some(reason)) => return refuse(reason),
         Err(error) => return cannot(error),
     }
-    let receipt = match load_pinned(&contract)
-        .and_then(|((loaded, levels, hash), lock)| run(&loaded, &levels, hash, lock, false))
-    {
-        Ok((true, receipt)) => receipt,
-        Ok((false, receipt)) => {
+    let receipt = match load_pinned(&contract).and_then(|((loaded, levels, hash), lock)| {
+        run(&contract, &loaded, &levels, hash, lock, false, false)
+    }) {
+        Ok(crate::Ran::Concluded {
+            passed: true,
+            receipt,
+        }) => receipt,
+        Ok(crate::Ran::Concluded {
+            passed: false,
+            receipt,
+        }) => {
             return refuse(format!(
                 "the graph failed on the staged tree; see {}",
                 receipt.display()
             ));
         }
+        Ok(crate::Ran::Interrupted { run, signal }) => {
+            return cannot(format!(
+                "the run was stopped by signal {signal} (run {run}); nothing was judged"
+            ));
+        }
+        Ok(crate::Ran::Detached { .. }) => unreachable!("a hook never detaches"),
         Err(error) => return cannot(error),
     };
     match verify(&receipt, &contract, None) {
@@ -826,7 +838,7 @@ fn keep_evidence(common_dir: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
 /// A directory at `path`, never a symbolic link. Another push may create it
 /// between the look and `create`; losing that race is fine, so the look is
 /// repeated rather than the push's evidence dropped.
-fn ensure_directory(
+pub(crate) fn ensure_directory(
     path: &Path,
     create: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {

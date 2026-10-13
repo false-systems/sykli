@@ -1144,7 +1144,8 @@ fn a_refused_push_keeps_nothing() {
     );
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(kept_receipts(&root).is_empty());
-    assert!(!root.join(".git/sykli").exists());
+    // Runs are journaled under .git/sykli/runs; nothing is kept as evidence.
+    assert!(!root.join(".git/sykli/receipts").exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1156,6 +1157,9 @@ fn a_symlinked_evidence_directory_is_refused_and_the_push_still_goes() {
     assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
     let elsewhere = root.with_extension("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
+    // The run journaled itself under .git/sykli; the push needs only its
+    // receipt, so the directory can be replaced by a link.
+    fs::remove_dir_all(root.join(".git/sykli")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, root.join(".git/sykli")).unwrap();
     let out = pre_push(&root, "origin", &[update(&head, "refs/heads/main")]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

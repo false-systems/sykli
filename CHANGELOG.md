@@ -8,6 +8,50 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- Durable graph runs (Linux and macOS). Every `run` is journaled in
+  `<git-common-dir>/sykli/runs/<run-id>/` before any task is dispatched, and
+  each task's attempts as they happen (dispatched, started, finished with exit
+  or signal and its captured output, interrupted, lost). The run id is
+  printed first (`run: ID`) and is the receipt's new `run` field. A task whose
+  end was not recorded is reported `lost`, never passed. At most 100 runs are
+  kept per clone (`SYKLI_RUN_BUDGET`, `0` keeps all).
+- `sykli status --run ID [--json]` (`sykli-run-status.v1`): the run's state
+  (`requested`, `running`, `completed`, `interrupted`, `lost`), subject,
+  contract and lock digests, each task's state and attempts, and its receipt
+  (path, digest). Pure: it reads the journal and its locks and writes nothing.
+- `sykli resume --run ID`: continue a run whose coordinator ended. Recorded
+  outcomes are kept; lost and interrupted tasks are retried as new attempts
+  that supersede the old ones. Refused while the coordinator or an attempt's
+  process is alive, and when the source, contract, lock or runtime changed.
+- `sykli run --detach [--json]`: record the run, hand it to a coordinator in
+  its own session, and print `{"schema":"sykli-run.v1","run":ID}` once the
+  record is durable.
+- `sykli status --commit REV [--contract PATH] [--json]`
+  (`sykli-commit-status.v1`): every kept receipt of `REV`'s tree judged for
+  `REV` as `verify --commit` judges it, split into `current` and `historical`,
+  with the runs of that tree.
+- `sykli verify --json` (`sykli-verify.v1`): every check, the first failing
+  stage, the exit code and the trust tiers established and not established.
+  Exit codes are unchanged.
+
+### Changed
+- Every receipt written on Linux and macOS carries `run`, so its bytes, and
+  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
+  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
+  fields (including older `verify`) are unaffected.
+- On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
+  and SIGHUP reach tasks through sykli, which stops them, records them as
+  interrupted and exits 128+N, instead of dying and leaving them running
+  unrecorded. A process a task leaves behind is killed as soon as its shell
+  exits, so it can no longer hold the task open.
+- A task whose declared inputs change while the run is in progress is
+  `errored` with class `input_changed`, not passed or failed: its result is
+  not evidence for the tree the run recorded.
+- Receipts and cache entries are synced (`fsync(2)`) before they are used. A
+  cache entry is no longer deleted before its replacement is renamed into
+  place, so concurrent runs storing the same key can no longer fail ("Directory
+  not empty") or lose the entry; an entry that still verifies is kept, and a
+  restored output is hashed before it replaces anything.
 - Receipts record each task's declared inputs (`tasks[].inputs`): for each
   input, the SHA-256 of the bytes the run read, its execute bits (`mode`) and
   `object`, the tree entry (`MODE ID`) the run's own snapshot had at the
