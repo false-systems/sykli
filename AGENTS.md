@@ -156,9 +156,10 @@ lease (so an orphan reads as running; so does one whose recorded process
 group still exists, `group_exists`, which `resume` also refuses unless
 `--assume-ended`); SIGINT/SIGTERM/SIGHUP stop every
 group (TERM, KILL after 3 s), an attempt sykli signalled is `interrupted`
-whatever it exits with, an outcome accepted less than 100 ms before
-sykli's own handler ran is `withdrawn` (`withdraw_before_stop`: the same
-stop may have reached the task first), and the run records `stopped`, exit 128+N, no
+whatever it exits with, a pass accepted less than 100 ms before
+sykli's own handler ran is `withdrawn`, with every pass decided after it
+(`withdraw_before_stop`: the same stop may have reached the task first; a run
+waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
 receipt.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
@@ -168,7 +169,9 @@ close-on-exec first (`close_inherited_on_exec`). `drifted` errors a task
 whose declared inputs changed
 during the run. `status --commit` judges every kept receipt of a commit's
 tree with `judge`; a receipt is `recorded` when its run (or the run's
-tombstone in `sykli/pruned-runs/`, left by `prune`) concluded with it, and
+tombstone in `sykli/pruned-runs/`, left by `prune`: a run is created aside and
+renamed into place with its lease held, and `remove_run` takes a lease only if
+it exists and moves the run aside before deleting it) concluded with it, and
 the verdict lets the newest recorded result decide, never an unrecorded pass
 over a recorded failure (`conflict`). `checkpoint(POINT)` is a debug-build
 test hook

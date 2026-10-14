@@ -1956,3 +1956,262 @@ fn resume_help_says_tasks_run_at_least_once() {
     let help = text(&f.output(&["resume", "--help"]).stdout);
     assert!(help.contains("at least once"), "{help}");
 }
+
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+/// A task that traps TERM and exits 0 (its "cleanup"), holding until it
+/// is stopped unless `BASE/go` exists; it counts its runs in `BASE/NAME.count`
+/// and writes its pid, its group's id, to `BASE/NAME.pid`.
+fn trapping(base: &Path, name: &str, then: &str) -> String {
+    let b = base.display();
+    format!(
+        "trap 'exit 0' TERM; echo $$ > '{b}/{name}.pid'; echo run >> '{b}/{name}.count'; \
+         if [ ! -e '{b}/go' ]; then printf ready > '{b}/{name}.ready'; sleep 30 & wait $!; fi; {then}"
+    )
+}
+
+fn pid_of(f: &Fixture, task: &str) -> i32 {
+    fs::read_to_string(f.base.join(format!("{task}.pid")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Invariant B for the last task of a run: the stop reaches its group first
+/// and sykli only later (two `kill`s, as a supervisor stopping children
+/// before their parent does). The task traps it and exits 0, and nothing else
+/// is left to run; sykli must not conclude with that pass before the window
+/// in which its own stop may still arrive is over. (The window is widened
+/// here, debug builds only, so the test does not hang on scheduling.)
+#[test]
+fn window_11_a_stop_after_the_last_task_exited_is_never_a_pass() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("w11last", "one\n", |base| {
+        vec![("t".into(), trapping(base, "t", "true"), vec![])]
+    });
+    let child = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_TEST_STOP_WINDOW_MS", "3000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    f.wait_ready("t");
+    let group = pid_of(&f, "t");
+    f.signalled_at.set(Some(now_ms()));
+    // SAFETY: plain kill(2) of the task's group.
+    unsafe {
+        kill(-group, 15);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // SAFETY: plain kill(2) of sykli, which may have exited already.
+    unsafe {
+        kill(child.id() as i32, 15);
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let run = f.run_id();
+    let status = f.status(&run);
+    nothing_unknown_passed(&f, &status);
+    assert_ne!(state(&status, "t"), "passed", "{status}");
+    assert!(f.receipts().is_empty());
+    assert_eq!(f.commit_status("HEAD")["verdict"], "none");
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert_eq!(f.count("t"), 2, "the resume ran the task again");
+}
+
+/// Invariant G: only a pass is withdrawn. A task that fails on its own just
+/// before a stop reaches sykli keeps its failure: a failure is never a false
+/// pass, and calling it an interruption would hide it.
+#[test]
+fn window_11_a_failure_just_before_a_stop_is_kept() {
+    let f = Fixture::new("w11fail", "one\n", |base| {
+        let b = base.display();
+        vec![
+            ("a".into(), format!("touch '{b}/a.failing'; exit 1"), vec![]),
+            ("t".into(), trapping(base, "t", "true"), vec![]),
+        ]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    wait_until(|| f.base.join("a.failing").exists());
+    std::thread::sleep(Duration::from_millis(30));
+    f.stop(child.id(), "TERM");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let run = f.run_id();
+    let status = f.status(&run);
+    assert_eq!(state(&status, "a"), "failed", "{status}");
+    assert_eq!(attempts(&status, "a")[0]["withdrawn"], false, "{status}");
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(1), "{}", text(&resumed.stderr));
+    assert_eq!(
+        attempts(&f.status(&run), "a").len(),
+        1,
+        "a is not run again"
+    );
+}
+
+/// A withdrawn pass takes with it what was decided after it: here `b`, which
+/// runs after `a`, was reused from the cache on the strength of `a`'s pass.
+/// When the resume finds `a` failing, `b` is blocked, not left cached.
+#[test]
+fn a_withdrawn_pass_reopens_what_was_decided_after_it() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("w11dep", "one\n", |base| {
+        let b = base.display();
+        vec![
+            (
+                "a".into(),
+                trapping(base, "a", &format!("test ! -e '{b}/fail'")),
+                vec![],
+            ),
+            ("b".into(), "true".into(), vec!["a".into()]),
+        ]
+    });
+    // Both pass and are cached; then only a's entry is dropped, so a runs
+    // again and b is reused.
+    f.unlatch();
+    let first = f.output(&["run", "sykli.json", "--json"]);
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    // a's cache key, from its `dispatched` record in the first run's journal.
+    let records = f.runs_dir().join(f.run_id()).join("records");
+    let key = fs::read_dir(&records)
+        .unwrap()
+        .filter_map(|entry| {
+            let record: Value =
+                serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
+            let fact = &record["record"]["fact"];
+            (fact["kind"] == "dispatched" && fact["task"] == "a")
+                .then(|| fact["cache_key"].as_str().unwrap().to_owned())
+        })
+        .next()
+        .unwrap();
+    fs::remove_dir_all(f.repo.join(".sykli/cache").join(key)).unwrap();
+    fs::remove_file(f.base.join("go")).unwrap();
+
+    let child = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_TEST_STOP_WINDOW_MS", "5000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    f.wait_ready("a");
+    // SAFETY: plain kill(2) of a's group: it traps TERM and exits 0.
+    unsafe {
+        kill(-pid_of(&f, "a"), 15);
+    }
+    let run = loop {
+        let runs = f.runs();
+        if let Some(run) = runs.iter().find(|run| {
+            f.status(run)["tasks"].as_array().is_some_and(|tasks| {
+                tasks
+                    .iter()
+                    .any(|t| t["name"] == "b" && t["state"] == "cached")
+            })
+        }) {
+            break run.clone();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    f.signalled_at.set(Some(now_ms()));
+    f.stop(child.id(), "TERM");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let status = f.status(&run);
+    assert_ne!(state(&status, "a"), "passed", "{status}");
+    assert_ne!(state(&status, "b"), "cached", "{status}");
+
+    fs::write(f.base.join("fail"), "").unwrap();
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(1), "{}", text(&resumed.stderr));
+    let receipt: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(receipt["tasks"][0]["outcome"], "failed", "{receipt}");
+    assert_eq!(receipt["tasks"][1]["outcome"], "blocked", "{receipt}");
+}
+
+/// Concurrent runs prune concurrently. Every run directory left is a whole
+/// run (never one holding only a re-created `lease`), the count stays within
+/// the budget plus the runs in flight, and no run is pruned while it is being
+/// created (each one succeeds).
+#[test]
+fn concurrent_pruning_leaves_only_whole_runs() {
+    let f = Fixture::new("prunerace", "one\n", one_task);
+    f.unlatch();
+    for _ in 0..12 {
+        let children = (0..4)
+            .map(|_| {
+                f.sykli(&["run", "sykli.json", "--json"])
+                    .env("SYKLI_RUN_BUDGET", "2")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        }
+    }
+    let entries = fs::read_dir(f.runs_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    for path in &entries {
+        assert!(
+            path.join("records/00000000000000000001.json").is_file(),
+            "not a whole run: {} holds {:?}",
+            path.display(),
+            fs::read_dir(path).map(|e| e.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+        );
+    }
+    assert!(entries.len() <= 2 + 4, "{entries:?}");
+    let commit = f.commit_status("HEAD");
+    assert_eq!(commit["unreadable_runs"], json!([]), "{commit}");
+}
+
+/// `--assume-ended` leaves a trace: the lost record of an attempt whose
+/// process group still existed says that the override let it go.
+#[test]
+fn assume_ended_is_recorded() {
+    let f = Fixture::new("assumed", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "exec perl -MPOSIX -e 'POSIX::close($_) for 3..1023; exec @ARGV' sh -c \
+                 'echo $$ > \"{b}/t.pid\"; echo run >> \"{b}/t.count\"; \
+                 if [ ! -e \"{b}/go\" ]; then printf ready > \"{b}/t.ready\"; read token < \"{b}/t.latch\"; fi'"
+            ),
+            vec![],
+        )]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    f.stop(child.id(), "KILL");
+    child.wait_with_output().unwrap();
+    let run = f.run_id();
+    let group = pid_of(&f, "t");
+    f.unlatch();
+    let resumed = f.output(&["resume", "--run", &run, "--assume-ended", "--json"]);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    f.release("t.latch");
+    let first = &attempts(&f.status(&run), "t")[0];
+    assert_eq!(first["outcome"], "lost", "{first}");
+    let reason = first["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("--assume-ended"), "{first}");
+    assert!(reason.contains(&group.to_string()), "{first}");
+}

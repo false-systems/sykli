@@ -217,6 +217,30 @@ impl Lease {
         }
         Ok(Self(file))
     }
+    /// Take an existing lease, never creating one: None when there is no
+    /// `lease` in `directory` (it is still being set up, or already gone),
+    /// an error when another holds it. For a remover, which must never
+    /// re-create a lease inside a directory another is deleting.
+    pub fn acquire_existing(directory: &Path) -> Result<Option<Self>, String> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.join("lease"))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(err(error)),
+        };
+        // SAFETY: the descriptor is owned by file; LOCK_EX | LOCK_NB on Unix.
+        if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
+            return Err(format!(
+                "production-busy: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Some(Self(file)))
+    }
+
     fn lock(file: File, mode: i32) -> Result<Self, String> {
         // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
         loop {

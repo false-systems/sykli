@@ -3334,7 +3334,13 @@ fn coordinate(
     // A run that was signalled stops, even when every task got decided:
     // its caller asked it to, and a receipt now would answer a stop with a
     // verdict. The outcomes it accepted stay, and a resume concludes it.
-    let signal = runs::signalled();
+    let mut signal = runs::signalled();
+    if signal.is_none() && decided.iter().all(Option::is_some) {
+        // The last task may have been stopped first, by a signal that
+        // reaches sykli only now: wait out the window before concluding.
+        coordinator.wait_out_stop_window();
+        signal = runs::signalled();
+    }
     if signal.is_some() || decided.iter().any(Option::is_none) {
         coordinator.withdraw_before_stop()?;
         coordinator.stop(signal, "stopped on a signal")?;

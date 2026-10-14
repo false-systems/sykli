@@ -26,11 +26,11 @@
 //! once it runs, and exactly one end: `finished` (exit or signal, its
 //! output, the accepted outcome), `interrupted` (sykli stopped it on a
 //! signal) or `lost` (a later coordinator found it unfinished). A retry is a
-//! new attempt that `supersedes` the last; nothing is ever rewritten. An
-//! outcome accepted just before a stop reached sykli is `withdrawn` (the
-//! same stop may have reached the attempt first): its task is undecided
-//! again, and the attempt stays in the history. The
-//! run ends `concluded` (its receipt) or `stopped` (interrupted).
+//! new attempt that `supersedes` the last; nothing is ever rewritten. A
+//! pass accepted just before a stop reached sykli is `withdrawn` (the same
+//! stop may have reached the attempt first), with every pass decided after
+//! it: its task is undecided again, and the attempt stays in the history.
+//! The run ends `concluded` (its receipt) or `stopped` (interrupted).
 //!
 //! Every coordinator that takes the run's lease opens a generation
 //! (`requested` is 1, each `resumed` the next), and every fact it records
@@ -43,7 +43,10 @@
 //! run) are kept per clone. When a run is requested beyond that, the oldest
 //! runs whose coordinator is not alive are removed, concluded ones first,
 //! each leaving a tombstone in `pruned-runs/<run-id>.json` (its state, tree
-//! and receipt), at most 1000, the oldest removed first.
+//! and receipt), at most 1000, the oldest removed first. A run is
+//! created aside and renamed into place with its lease held, and a remover
+//! takes only an existing lease and moves the run aside before deleting it,
+//! so concurrent runs never prune a run being created or leave half of one.
 use crate::canonical::{Durability, NONCE, canonical, decode, digest, identity, now, publish_with};
 use crate::journal::{self, Envelope, Lease};
 use crate::{InputRecords, Outcome, Subject, TaskReceipt};
@@ -245,12 +248,15 @@ pub(crate) enum Fact {
         generation: u64,
         reason: String,
     },
-    /// An outcome this generation accepted is withdrawn: its attempt ended
-    /// so close before a stop reached sykli that the stop may have ended it
-    /// (a task the same signal reached first, which trapped it and exited).
-    /// The task is undecided again, and the attempt stays in its history.
+    /// A pass this generation accepted is withdrawn: its attempt ended so
+    /// close before a stop reached sykli that the stop may have ended it (a
+    /// task the same signal reached first, which trapped it and exited 0);
+    /// or, with no attempt, a task reused from the cache after such a pass,
+    /// which may rest on it. The task is undecided again, and an attempt
+    /// stays in its history. A failure is never withdrawn.
     Withdrawn {
-        attempt: String,
+        task: String,
+        attempt: Option<String>,
         generation: u64,
         reason: String,
     },
@@ -340,6 +346,7 @@ enum End {
     },
     Lost {
         at: u64,
+        reason: String,
     },
 }
 
@@ -353,8 +360,8 @@ struct AttemptState {
     started: Option<(i32, u64)>,
     end: Option<(End, Fact)>,
     output: Option<String>,
-    /// Its accepted outcome was withdrawn (`Withdrawn`).
-    withdrawn: bool,
+    /// Why its accepted pass was withdrawn (`Withdrawn`), if it was.
+    withdrawn: Option<String>,
 }
 
 /// How a task's outcome was accepted.
@@ -369,6 +376,7 @@ enum Decided {
         output: String,
         cache_key: Option<String>,
         provenance: Option<String>,
+        generation: u64,
     },
 }
 
@@ -519,7 +527,7 @@ impl History {
                         started: None,
                         end: None,
                         output: None,
-                        withdrawn: false,
+                        withdrawn: None,
                     },
                 );
                 self.lineage
@@ -621,6 +629,7 @@ impl History {
                         output: output.clone(),
                         cache_key: Some(cache_key.clone()),
                         provenance: Some(provenance.clone()),
+                        generation: *generation,
                     },
                 );
             }
@@ -645,6 +654,7 @@ impl History {
                         output: output.clone(),
                         cache_key: cache_key.clone(),
                         provenance: None,
+                        generation: *generation,
                     },
                 );
             }
@@ -678,7 +688,7 @@ impl History {
             Fact::Lost {
                 attempt,
                 generation,
-                ..
+                reason,
             } => {
                 self.current(*generation)?;
                 let state = self
@@ -690,31 +700,52 @@ impl History {
                         "only an unresolved attempt of an earlier generation is lost".into(),
                     );
                 }
-                state.end = Some((End::Lost { at }, fact.clone()));
+                state.end = Some((
+                    End::Lost {
+                        at,
+                        reason: reason.clone(),
+                    },
+                    fact.clone(),
+                ));
             }
             Fact::Withdrawn {
+                task,
                 attempt,
                 generation,
-                ..
+                reason,
             } => {
                 self.current(*generation)?;
                 self.open()?;
-                let state = self
-                    .attempts
-                    .get_mut(attempt)
-                    .ok_or("a withdrawal without a dispatch")?;
-                let accepted = matches!(
-                    self.decided.get(&state.task),
-                    Some(Decided::Attempt(id)) if id == attempt
-                );
-                if state.generation != *generation || state.withdrawn || !accepted {
-                    return Err(
-                        "only an outcome this generation accepted is withdrawn, once".into(),
-                    );
+                let refused = "only a pass this generation accepted is withdrawn, once";
+                match (self.decided.get(task), attempt) {
+                    (Some(Decided::Attempt(id)), Some(attempt)) if id == attempt => {
+                        let state = self.attempts.get_mut(attempt).ok_or(refused)?;
+                        let passed = matches!(
+                            state.end,
+                            Some((
+                                End::Finished {
+                                    outcome: Outcome::Passed,
+                                    ..
+                                },
+                                _
+                            ))
+                        );
+                        if state.generation != *generation || state.withdrawn.is_some() || !passed {
+                            return Err(refused.into());
+                        }
+                        state.withdrawn = Some(reason.clone());
+                    }
+                    (
+                        Some(Decided::Without {
+                            outcome: Outcome::Cached,
+                            generation: decided_in,
+                            ..
+                        }),
+                        None,
+                    ) if decided_in == generation => {}
+                    _ => return Err(refused.into()),
                 }
-                state.withdrawn = true;
-                let task = state.task.clone();
-                self.decided.remove(&task);
+                self.decided.remove(task);
             }
             Fact::Stopped {
                 generation,
@@ -780,9 +811,13 @@ pub(crate) struct Coordinator {
     id: String,
     lease: Lease,
     history: Mutex<History>,
-    /// When this process saw each attempt it accepted end, for a stop that
-    /// comes right after (`withdraw_before_stop`).
-    ended: Mutex<Vec<(String, Instant)>>,
+    /// Each pass this process accepted, when it was decided: an attempt's,
+    /// at its end, or a reuse from the cache, at its decision. For a stop
+    /// that comes right after (`withdraw_before_stop`).
+    passes: Mutex<Vec<Pass>>,
+    /// Attempts whose process group still existed when `--assume-ended` let
+    /// this coordinator take the run over, with that group.
+    assumed: Vec<(String, i32)>,
     /// The generation this coordinator holds, fixed when it creates, receives
     /// or takes over the run; every fact it records carries it.
     generation: AtomicU64,
@@ -791,10 +826,19 @@ pub(crate) struct Coordinator {
     fenced: AtomicBool,
 }
 
+/// A pass a coordinator accepted, and when.
+struct Pass {
+    task: String,
+    /// The attempt that passed; none for a task reused from the cache.
+    attempt: Option<String>,
+    at: Instant,
+}
+
 /// One attempt, dispatched: its id and its lease, which its shell inherits.
 pub(crate) struct Attempt<'a> {
     coordinator: &'a Coordinator,
     id: String,
+    task: String,
     generation: u64,
     lease: Lease,
 }
@@ -814,20 +858,38 @@ impl Coordinator {
         }
         prune(&common, &id);
         let directory = run_directory(&common, &id)?;
-        fs::create_dir(&directory).map_err(err)?;
-        fs::create_dir(directory.join("records")).map_err(err)?;
+        // Made aside and renamed into place with its lease already held, so
+        // no one (a pruner) ever sees the run without a holder while it is
+        // being created.
+        let staging = parent.join(format!(".creating-{id}-{}", std::process::id()));
+        fs::create_dir(&staging).map_err(err)?;
+        let staged = fs::create_dir(staging.join("records"))
+            .map_err(err)
+            .and_then(|()| Lease::acquire(&staging))
+            .and_then(|lease| {
+                fs::rename(&staging, &directory)
+                    .map_err(|e| format!("{}: {e}", directory.display()))?;
+                Ok(lease)
+            });
+        let lease = match staged {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
         // The directories' own entries, so the first record cannot be
         // orphaned by a power cut.
         for synced in [&directory, &parent, &common.join("sykli"), &common] {
             crate::canonical::sync_directory(synced, Durability::Fsync)?;
         }
-        let lease = Lease::acquire(&directory)?;
         let coordinator = Coordinator {
             directory,
             id: id.clone(),
             lease,
             history: Mutex::new(History::new(&id)),
-            ended: Mutex::new(Vec::new()),
+            passes: Mutex::new(Vec::new()),
+            assumed: Vec::new(),
             generation: AtomicU64::new(1),
             fenced: AtomicBool::new(false),
         };
@@ -851,7 +913,8 @@ impl Coordinator {
             id: run.into(),
             lease,
             history: Mutex::new(history),
-            ended: Mutex::new(Vec::new()),
+            passes: Mutex::new(Vec::new()),
+            assumed: Vec::new(),
             generation: AtomicU64::new(1),
             fenced: AtomicBool::new(false),
         })
@@ -885,18 +948,21 @@ impl Coordinator {
                 "run {run} is concluded; there is nothing to resume"
             ));
         }
+        let mut assumed = Vec::new();
         for attempt in history.attempts.values().filter(|a| a.end.is_none()) {
             let group = attempt.started.map(|(group, _)| group);
-            if !assume_ended && group.is_some_and(journal::group_exists) {
-                return Err(format!(
-                    "task {}'s attempt {} may be still running without a coordinator: its \
-                     process group {} still exists. Wait for it to end, or stop it, then \
-                     resume; if that group now belongs to an unrelated process, resume with \
-                     --assume-ended",
-                    attempt.task,
-                    attempt.id,
-                    group.unwrap_or_default()
-                ));
+            if let Some(group) = group.filter(|group| journal::group_exists(*group)) {
+                if !assume_ended {
+                    return Err(format!(
+                        "task {}'s attempt {} may be still running without a coordinator: its \
+                         process group {group} still exists. Wait for it to end, or stop it, \
+                         then resume; if that group now belongs to an unrelated process, \
+                         resume with --assume-ended",
+                        attempt.task, attempt.id,
+                    ));
+                }
+                // Taken on the caller's word; the lease below still counts.
+                assumed.push((attempt.id.clone(), group));
             }
             if Lease::observe(&directory.join("attempt-leases").join(&attempt.id))? {
                 return Err(format!(
@@ -916,7 +982,8 @@ impl Coordinator {
             id: run.into(),
             lease,
             history: Mutex::new(history),
-            ended: Mutex::new(Vec::new()),
+            passes: Mutex::new(Vec::new()),
+            assumed,
             generation: AtomicU64::new(generation),
             fenced: AtomicBool::new(false),
         })
@@ -938,12 +1005,21 @@ impl Coordinator {
                 .collect::<Vec<_>>()
         };
         for attempt in unresolved {
+            let reason = match self.assumed.iter().find(|(id, _)| *id == attempt) {
+                // The override leaves its trace: lost on the caller's word.
+                Some((_, group)) => format!(
+                    "its process group {group} still existed when `resume --assume-ended` took \
+                     the run over; taken as ended on that word, whether it ran to completion \
+                     is unknown"
+                ),
+                None => "its coordinator ended without recording its outcome; whether it ran \
+                         to completion is unknown"
+                    .into(),
+            };
             self.append(Fact::Lost {
                 attempt,
                 generation,
-                reason: "its coordinator ended without recording its outcome; whether it ran \
-                         to completion is unknown"
-                    .into(),
+                reason,
             })?;
         }
         Ok(())
@@ -1077,6 +1153,7 @@ impl Coordinator {
         Ok(Attempt {
             coordinator: self,
             id,
+            task: task.into(),
             generation,
             lease,
         })
@@ -1096,7 +1173,13 @@ impl Coordinator {
             cache_key: cache_key.into(),
             provenance: record.provenance.clone().unwrap_or_default(),
             output,
-        })
+        })?;
+        self.passes.lock().unwrap().push(Pass {
+            task: task.into(),
+            attempt: None,
+            at: Instant::now(),
+        });
+        Ok(())
     }
 
     /// A task decided without running: blocked, or errored before it could.
@@ -1147,30 +1230,75 @@ impl Coordinator {
             .collect()
     }
 
-    /// A stop reached sykli: withdraw every outcome this process accepted
-    /// for an attempt it saw end less than `STOP_WINDOW` before its handler
-    /// ran. The same stop may have reached that attempt first (a signal to
-    /// a process group or a whole service holding both), and a task that
-    /// trapped it and exited 0 never finished its work. A resume runs it
-    /// again: at least once, never a pass the stop produced.
+    /// A stop reached sykli: withdraw every pass this process accepted for
+    /// an attempt it saw end less than the stop window (100 ms) before its
+    /// handler ran. The same stop may have reached that attempt first (a
+    /// signal to a process group or a whole service holding both), and a
+    /// task that trapped it and exited 0 never finished its work. Every pass
+    /// decided after the first of those (a dependent reused from the cache)
+    /// may rest on it, and is withdrawn with it. A failure is never
+    /// withdrawn: it is never a false pass. A resume runs what was
+    /// withdrawn again: at least once, never a pass the stop produced.
     pub(crate) fn withdraw_before_stop(&self) -> Result<(), String> {
-        let Some(cutoff) = signalled_at().map(|at| at.checked_sub(STOP_WINDOW).unwrap_or(at))
+        let window = stop_window();
+        let Some(cutoff) = signalled_at().map(|at| at.checked_sub(window).unwrap_or(at)) else {
+            return Ok(());
+        };
+        let passes = std::mem::take(&mut *self.passes.lock().unwrap());
+        let Some(first) = passes
+            .iter()
+            .filter(|pass| pass.attempt.is_some() && pass.at >= cutoff)
+            .map(|pass| pass.at)
+            .min()
         else {
             return Ok(());
         };
-        let ended = std::mem::take(&mut *self.ended.lock().unwrap());
-        for (attempt, _) in ended.into_iter().filter(|(_, at)| *at >= cutoff) {
-            self.append(Fact::Withdrawn {
-                attempt,
-                generation: self.generation(),
-                reason: format!(
-                    "it ended less than {} ms before a stop reached sykli, which may have ended \
-                     it",
-                    STOP_WINDOW.as_millis()
+        for pass in passes.into_iter().filter(|pass| pass.at >= first) {
+            let reason = match &pass.attempt {
+                Some(_) => format!(
+                    "it ended less than {} ms before a stop reached sykli, which may have \
+                     ended it",
+                    window.as_millis()
                 ),
+                None => "it was reused from the cache after a pass that is withdrawn, on \
+                          which it may rest"
+                    .to_string(),
+            };
+            self.append(Fact::Withdrawn {
+                task: pass.task,
+                attempt: pass.attempt,
+                generation: self.generation(),
+                reason,
             })?;
         }
         Ok(())
+    }
+
+    /// Before a run concludes: wait until the stop window has passed since
+    /// the last pass an attempt of this process produced, so that a stop
+    /// which reached that attempt first, and sykli only now, is still seen
+    /// (and the pass withdrawn) even when nothing else is left to run.
+    /// Returns as soon as a signal arrives. At most the window, once per run,
+    /// and nothing when no attempt passed.
+    pub(crate) fn wait_out_stop_window(&self) {
+        let last = self
+            .passes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|pass| pass.attempt.is_some())
+            .map(|pass| pass.at)
+            .max();
+        let Some(until) = last.map(|last| last + stop_window()) else {
+            return;
+        };
+        while signalled().is_none() {
+            let now = Instant::now();
+            if now >= until {
+                break;
+            }
+            std::thread::sleep((until - now).min(Duration::from_millis(5)));
+        }
     }
 
     /// The run stopped on a signal: every attempt has ended.
@@ -1303,11 +1431,14 @@ impl Attempt<'_> {
             outcome: record.outcome,
             output,
         })?;
-        self.coordinator
-            .ended
-            .lock()
-            .unwrap()
-            .push((self.id.clone(), ended));
+        // Only a pass can be a false one; a failure stands whatever comes.
+        if record.outcome == Outcome::Passed {
+            self.coordinator.passes.lock().unwrap().push(Pass {
+                task: self.task.clone(),
+                attempt: Some(self.id.clone()),
+                at: ended,
+            });
+        }
         Ok(())
     }
 
@@ -1369,6 +1500,19 @@ static CLOCK: OnceLock<Instant> = OnceLock::new();
 /// How long before sykli's own handler ran an attempt's end counts as
 /// possibly caused by the same stop (`withdraw_before_stop`).
 const STOP_WINDOW: Duration = Duration::from_millis(100);
+
+/// The stop window; a debug build takes another from
+/// `SYKLI_TEST_STOP_WINDOW_MS`, so tests need not race the scheduler.
+fn stop_window() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("SYKLI_TEST_STOP_WINDOW_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    STOP_WINDOW
+}
 static REPEATED: AtomicI32 = AtomicI32::new(0);
 /// Every running attempt's process group, and whether sykli signalled it.
 static GROUPS: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
@@ -1511,7 +1655,7 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
                     *exit_code,
                     *signal,
                     // A withdrawn outcome was not kept: a stop may have caused it.
-                    Some(if attempt.withdrawn {
+                    Some(if attempt.withdrawn.is_some() {
                         json!("interrupted")
                     } else {
                         serde_json::to_value(outcome).map_err(err)?
@@ -1533,7 +1677,9 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
                     Some(json!("interrupted")),
                     Some(*signal),
                 ),
-                Some((End::Lost { at }, _)) => (Some(*at), None, None, Some(json!("lost")), None),
+                Some((End::Lost { at, .. }, _)) => {
+                    (Some(*at), None, None, Some(json!("lost")), None)
+                }
                 None => {
                     if live || attempt_alive(directory, attempt)? {
                         (None, None, None, None, None)
@@ -1554,7 +1700,12 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
                 "generation": attempt.generation,
                 "process_group": attempt.started.map(|(group, _)| group),
                 "recorded": attempt.end.is_some(),
-                "withdrawn": attempt.withdrawn,
+                "withdrawn": attempt.withdrawn.is_some(),
+                // Why it was lost, or why its pass was withdrawn.
+                "reason": match &attempt.end {
+                    Some((End::Lost { reason, .. }, _)) => Some(reason.clone()),
+                    _ => attempt.withdrawn.clone(),
+                },
             }));
         }
         let mut entry = json!({"name": task, "attempts": attempts});
@@ -1742,6 +1893,7 @@ pub(crate) fn runs_of_tree(tree: &str) -> Result<(Vec<Value>, Vec<Value>), Strin
 /// Keep at most the run budget: remove the oldest runs whose coordinator
 /// is not alive, concluded ones first. Never `keep`, never a held run.
 fn prune(common: &Path, keep: &str) {
+    sweep_leftovers(common);
     let budget = std::env::var("SYKLI_RUN_BUDGET")
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -1798,24 +1950,78 @@ fn prune(common: &Path, keep: &str) {
     candidates.sort();
     let over = runs.len() + 1 - budget;
     for (_, _, path) in candidates.into_iter().take(over) {
-        // Held while it goes, so a resume cannot take it meanwhile; and
-        // noted first, or kept: what a receipt naming it needs to know (did
-        // the run conclude with it?) must not go with it.
-        if let Ok(_lease) = Lease::acquire(&path) {
-            if note_pruned(common, &path).is_ok() {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
+        remove_run(common, &path);
     }
     bound_tombstones(common);
 }
 
+/// Remove the run in `path`, if no one holds it. Its lease is taken as it
+/// is, never re-created (another remover may be deleting the directory
+/// around it), so a run with no lease file is left alone. Held, the run is
+/// moved aside under a name no listing reads, so only one remover goes on;
+/// then its tombstone is written, unless one is there already, and only
+/// then is it deleted: what a receipt naming it needs to know (did the run
+/// conclude with it?) never goes with it.
+fn remove_run(common: &Path, path: &Path) {
+    let Some(run) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(Some(_lease)) = Lease::acquire_existing(path) else {
+        return;
+    };
+    let aside = runs_directory(common).join(format!(
+        ".pruning-{run}-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    if fs::rename(path, &aside).is_err() {
+        return;
+    }
+    if note_pruned(common, &aside, run).is_ok() {
+        let _ = fs::remove_dir_all(&aside);
+    }
+}
+
+/// What a remover that died left behind: a run moved aside to be pruned
+/// (its tombstone is written if it is missing, then it goes), or one being
+/// created that was never renamed into place. Only once no one holds it,
+/// and a minute old, so a creation or removal under way is never touched.
+fn sweep_leftovers(common: &Path) {
+    let Ok(entries) = fs::read_dir(runs_directory(common)) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let pruning = name
+            .strip_prefix(".pruning-")
+            .and_then(|rest| rest.get(..64));
+        if pruning.is_none() && !name.starts_with(".creating-") {
+            continue;
+        }
+        let old = fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(60));
+        if !old || Lease::observe(&path.join("lease")).unwrap_or(true) {
+            continue;
+        }
+        if let Some(run) = pruning {
+            let _ = note_pruned(common, &path, run);
+        }
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
 /// Write the tombstone of the run in `path`, about to be pruned.
-fn note_pruned(common: &Path, path: &Path) -> Result<(), String> {
-    let run = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("a run directory without a name")?;
+fn note_pruned(common: &Path, path: &Path, run: &str) -> Result<(), String> {
+    let tombstone = tombstones(common).join(format!("{run}.json"));
+    // The first note stands: another remover may have written it.
+    if tombstone.exists() {
+        return Ok(());
+    }
     let note = match History::load(path, run) {
         Ok(history) => json!({
             "schema": "sykli-run-tombstone.v1",
@@ -1997,7 +2203,8 @@ mod tests {
     #[test]
     fn a_withdrawn_outcome_leaves_its_task_undecided() {
         let withdrawn = |attempt: char, generation: u64| Fact::Withdrawn {
-            attempt: id(attempt),
+            task: "t".into(),
+            attempt: Some(id(attempt)),
             generation,
             reason: "x".into(),
         };
@@ -2010,7 +2217,7 @@ mod tests {
         once.push(withdrawn('a', 1));
         let kept = history(once.clone()).unwrap();
         assert!(!kept.decided.contains_key("t"));
-        assert!(kept.attempts[&id('a')].withdrawn);
+        assert_eq!(kept.attempts[&id('a')].withdrawn.as_deref(), Some("x"));
         let mut retried = once.clone();
         retried.push(dispatched('b', 1, Some('a')));
         retried.push(started('b', 1));
@@ -2036,6 +2243,56 @@ mod tests {
         });
         late.push(withdrawn('a', 1));
         assert!(history(late).is_err(), "the run concluded");
+
+        // A failure is never withdrawn: it is never a false pass.
+        let failed = vec![
+            dispatched('a', 1, None),
+            started('a', 1),
+            finished('a', 1, Outcome::Failed, 1),
+            withdrawn('a', 1),
+        ];
+        assert!(history(failed).is_err(), "a failure withdrawn");
+        // A task reused from the cache in this generation can be, with no
+        // attempt; one settled blocked cannot.
+        let without = |outcome: Option<Outcome>| match outcome {
+            None => Fact::Reused {
+                task: "t".into(),
+                generation: 1,
+                cache_key: id('c'),
+                provenance: "p".into(),
+                output: id('e'),
+            },
+            Some(outcome) => Fact::Settled {
+                task: "t".into(),
+                generation: 1,
+                cache_key: None,
+                outcome,
+                output: id('e'),
+            },
+        };
+        let reopen = Fact::Withdrawn {
+            task: "t".into(),
+            attempt: None,
+            generation: 1,
+            reason: "x".into(),
+        };
+        let reused = history(vec![without(None), reopen.clone()]).unwrap();
+        assert!(!reused.decided.contains_key("t"));
+        assert!(history(vec![without(Some(Outcome::Blocked)), reopen.clone()]).is_err());
+        assert!(
+            history(vec![
+                without(None),
+                Fact::Resumed { generation: 2 },
+                Fact::Withdrawn {
+                    task: "t".into(),
+                    attempt: None,
+                    generation: 2,
+                    reason: "x".into(),
+                },
+            ])
+            .is_err(),
+            "a reuse of another generation"
+        );
     }
 
     #[test]

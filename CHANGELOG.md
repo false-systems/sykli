@@ -34,7 +34,7 @@ contract consumer can observe; internal refactors are not listed.
   `resume` warns for each task it runs again whose last attempt had started.
   Refused while the coordinator or an attempt's process is alive (its lease
   is held, or its process group still exists: `--assume-ended` overrides the
-  group check), and when the source, contract, lock or runtime changed.
+  group check), and the lost record says so), and when the source, contract, lock or runtime changed.
 - `sykli run --detach [--json]`: record the run, hand it to a coordinator in
   its own session, and print `{"schema":"sykli-run.v1","run":ID}` once the
   record is durable. The coordinator, and so its tasks, keeps none of the
@@ -250,9 +250,12 @@ contract consumer can observe; internal refactors are not listed.
   cache entry, and exits 128+N, instead of dying and leaving them running
   unrecorded. A stop that reaches a task directly as well as sykli (a
   signal to a process group or control group holding both) is covered as far
-  as sykli sees it: an attempt that ends after sykli's handler ran, or less
-  than 100 ms before, is interrupted, an outcome already recorded for it is
-  withdrawn (`withdrawn` in `status --run`), and a resume runs it again. A
+  as sykli sees it: an attempt that ends after sykli's handler ran, or passes
+  less than 100 ms before, is interrupted; a pass already recorded for it,
+  and every pass decided after it, is withdrawn (`withdrawn` in `status
+  --run`), and a resume runs them again. A run waits until 100 ms have passed
+  since the last task it ran passed before it concludes (at most 100 ms per
+  run), so the last task is covered too. A failure is never withdrawn. A
   process still in a task's group when its shell exits is killed then, so it
   can no longer hold the task open; one that left the group (`setsid`) is
   not, and a stop does not wait for it.

@@ -303,10 +303,15 @@ A crash leaves exactly what was observed, and nothing more:
 - A stop sent to a task directly as well (a `kill` of a process group or
   session that holds both, or a service manager stopping a whole control
   group) is covered as far as sykli sees it. An attempt that ends after
-  sykli's own signal handler ran, or less than 100 ms before, is interrupted
-  (an outcome already recorded for it is **withdrawn**), and a resume runs it
-  again. An attempt that ended earlier keeps its outcome, and a signal that
-  never reaches sykli is not seen at all.
+  sykli's own signal handler ran, or passes less than 100 ms before, is
+  interrupted: a pass already recorded for it is **withdrawn**, and so is
+  every pass decided after it (a dependent reused from the cache may rest on
+  it), and a resume runs them again. So that this holds for the last task
+  too, a run waits, before it concludes, until 100 ms have passed since the
+  last task it ran passed: at most 100 ms per run, and none when nothing ran.
+  A failure is never withdrawn (it is never a false pass). A pass that came
+  earlier keeps its outcome, and a signal that never reaches sykli is not
+  seen at all.
 - The receipt is built only from recorded outcomes and written durably, and
   only then is the run **completed**.
 
