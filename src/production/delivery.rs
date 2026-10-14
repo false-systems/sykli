@@ -510,6 +510,11 @@ struct Request {
     /// The newest delivery to this target in this clone when this one was
     /// requested.
     previous: Option<String>,
+    /// Earlier deliveries to this target whose last apply's effect was
+    /// unknown, and could not be reconciled because no observation reached
+    /// the target, that this one was asked to apply over
+    /// (`deliver --reapply-over`).
+    reapply_over: Vec<Override>,
     runtime: String,
     requested_at_ms: u64,
     executor: String,
@@ -524,6 +529,18 @@ impl Request {
             .get(&self.target)
             .ok_or_else(|| format!("the recorded contract has no target {}", self.target))
     }
+}
+
+/// What `deliver --reapply-over` applied over: an earlier delivery's apply
+/// whose effect is unknown, as it stood when this one was requested.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Override {
+    delivery: String,
+    /// Its last attempt; none when its journal could not be read at all.
+    attempt: Option<String>,
+    /// Why its effect stayed unknown.
+    reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -773,6 +790,10 @@ enum Effect {
 struct Reconciliation {
     effect: String,
     observation: u64,
+    /// The cited observation reached the target: its observer exited 0 with
+    /// a valid report of a reachable target. Without that, nothing about
+    /// the target was learned.
+    reached: bool,
     reason: String,
     at: u64,
 }
@@ -1173,10 +1194,12 @@ impl History {
                         ));
                     }
                 }
+                let reached = seen.usable().is_some();
                 let state = self.attempts.get_mut(attempt).unwrap();
                 state.reconciled.push(Reconciliation {
                     effect: effect.clone(),
                     observation: *observation,
+                    reached,
                     reason: reason.clone(),
                     at,
                 });
@@ -1267,19 +1290,141 @@ fn target_lock(common: &Path, target: &str) -> Result<Lease, String> {
     Lease::journal(&directory)
 }
 
-/// Why a delivery still holds its target, if it does: its coordinator is
-/// alive, or its last apply is still running without one.
-fn busy(delivery: &Listed) -> Option<&'static str> {
+/// Why a delivery still holds its target, if it does.
+enum Hold {
+    /// Its coordinator is alive, or its last apply still runs without one.
+    Busy(&'static str),
+    /// Its last apply was dispatched and how it ended is unknown, and no
+    /// observation of the target has reconciled it (invariant H: nothing is
+    /// applied to the target over it until one has).
+    Unreconciled { attempt: String, how: String },
+    /// It was reconciled, but no observation reached the target, so its
+    /// effect is as unknown as before. Only `--reapply-over` passes it.
+    Unreached { attempt: String, reason: String },
+    /// Its journal does not read: nothing is known of its applies.
+    Unreadable(String),
+}
+
+/// Whether a delivery holds its target: its coordinator or apply is alive,
+/// or its last apply's effect is unknown and was never reconciled with an
+/// observation that reached the target.
+fn hold(delivery: &Listed) -> Option<Hold> {
     if Lease::observe(&delivery.path.join("lease")).unwrap_or(true) {
-        return Some("is still running");
+        return Some(Hold::Busy("is still running"));
     }
-    let _journal = Lease::journal_read(&delivery.path).ok()?;
-    let history = History::load(&delivery.path, &delivery.id).ok()?;
+    let history = Lease::journal_read(&delivery.path)
+        .and_then(|_journal| History::load(&delivery.path, &delivery.id));
+    let history = match history {
+        Ok(history) => history,
+        Err(error) => return Some(Hold::Unreadable(error)),
+    };
     let last = history.last()?;
-    (last.end.is_none() && attempt_alive(&delivery.path, last).unwrap_or(true)).then_some(
-        "has an apply still running without its coordinator; once it has ended, `sykli resume \
-         --delivery` reconciles it",
-    )
+    if last.end.is_none() {
+        if attempt_alive(&delivery.path, last).unwrap_or(true) {
+            return Some(Hold::Busy(
+                "has an apply still running without its coordinator; once it has ended, `sykli \
+                 resume --delivery` reconciles it",
+            ));
+        }
+        return Some(Hold::Unreconciled {
+            attempt: last.id.clone(),
+            how: "its coordinator ended without recording how the apply ended".into(),
+        });
+    }
+    if last.effect() != Effect::Unknown {
+        return None;
+    }
+    match last.reconciled.last() {
+        Some(reconciled) if reconciled.reached => None,
+        Some(reconciled) => Some(Hold::Unreached {
+            attempt: last.id.clone(),
+            reason: reconciled.reason.clone(),
+        }),
+        None => Some(Hold::Unreconciled {
+            attempt: last.id.clone(),
+            how: match &last.end {
+                Some(End::Interrupted { signal, .. }) => {
+                    format!("sykli stopped the apply on signal {signal}")
+                }
+                Some(End::Failed { signal, .. }) => format!(
+                    "the apply was ended by signal {} that sykli did not send",
+                    signal.unwrap_or(0)
+                ),
+                Some(End::Lost { reason, .. }) => format!("the apply was lost: {reason}"),
+                _ => "how the apply ended is unknown".into(),
+            },
+        }),
+    }
+}
+
+/// Whether anything may be applied to `target` now: no other delivery to it
+/// (`except` aside) holds it. A delivery whose effect stayed unknown because
+/// its reconciliation never reached the target is passed only when `over`
+/// names it, or a later delivery to the target already applied over it; what
+/// is passed is returned, for the request to record. Every name in `over`
+/// must be such a delivery. Call it holding the target's lock.
+fn clear_to_apply(
+    listed: &[Listed],
+    target: &str,
+    except: Option<&str>,
+    over: &[String],
+) -> Result<Vec<Override>, String> {
+    let to_target: Vec<&Listed> = listed
+        .iter()
+        .filter(|d| d.request.target == target && Some(d.id.as_str()) != except)
+        .collect();
+    let applied_over: BTreeSet<&str> = to_target
+        .iter()
+        .flat_map(|d| d.request.reapply_over.iter().map(|o| o.delivery.as_str()))
+        .collect();
+    let mut asked: BTreeSet<&str> = over.iter().map(String::as_str).collect();
+    let mut passed = Vec::new();
+    for other in to_target {
+        let id = &other.id;
+        let (attempt, reason) = match hold(other) {
+            None => continue,
+            Some(Hold::Busy(why)) => {
+                return Err(format!(
+                    "target-busy: delivery {id} to {target} {why}; see `sykli status --delivery \
+                     {id}`"
+                ));
+            }
+            Some(Hold::Unreconciled { attempt, how }) => {
+                return Err(format!(
+                    "target-unreconciled: delivery {id} to {target} dispatched apply attempt \
+                     {attempt}, and {how}: whether it took effect is unknown, and nothing is \
+                     applied to {target} until that is reconciled with the target. Run `sykli \
+                     resume --delivery {id}` first: it observes the target and applies nothing"
+                ));
+            }
+            Some(Hold::Unreached { attempt, reason }) => (Some(attempt), reason),
+            Some(Hold::Unreadable(error)) => (None, format!("its journal does not read: {error}")),
+        };
+        if applied_over.contains(id.as_str()) {
+            continue;
+        }
+        if !asked.remove(id.as_str()) {
+            return Err(format!(
+                "target-unreconciled: delivery {id} to {target} has an apply whose effect is \
+                 unknown, and its reconciliation could not reach the target ({reason}). Run \
+                 `sykli resume --delivery {id}` again once the target answers; or, to apply over \
+                 that unknown effect anyway, deliver with `--reapply-over {id}`, which the new \
+                 delivery records"
+            ));
+        }
+        passed.push(Override {
+            delivery: id.clone(),
+            attempt,
+            reason,
+        });
+    }
+    if let Some(name) = asked.first() {
+        return Err(format!(
+            "--reapply-over {name}: no delivery to {target} with an unknown effect that its \
+             reconciliation could not settle is named {name}; nothing is applied over"
+        ));
+    }
+    Ok(passed)
 }
 
 /// The newest delivery to `target` after `id` (by request) whose apply was
@@ -2150,6 +2295,7 @@ pub(crate) fn deliver(
     store: &Path,
     production: Option<&str>,
     rollback_to: Option<&str>,
+    reapply_over: &[String],
     detach: bool,
     json: bool,
 ) -> Result<Started, String> {
@@ -2179,18 +2325,13 @@ pub(crate) fn deliver(
         .to_path_buf();
     let common = common_dir()?;
     // One deliver per target at a time, from this check until the new
-    // delivery is recorded and its lease held: two cannot both pass it.
+    // delivery is recorded and its lease held: two cannot both pass it. No
+    // delivery is applied over another whose effect is unknown and was never
+    // reconciled with the target (invariant H, across deliveries).
     let target_lock = target_lock(&common, target)?;
     let listed = list(&common);
+    let applied_over = clear_to_apply(&listed, target, None, reapply_over)?;
     let to_target = || listed.iter().filter(|d| d.request.target == target);
-    for other in to_target() {
-        if let Some(why) = busy(other) {
-            return Err(format!(
-                "target-busy: delivery {} to {target} {why}; see `sykli status --delivery {}`",
-                other.id, other.id
-            ));
-        }
-    }
     let previous = to_target().next_back().map(|d| d.id.clone());
     let runtime = crate::shell_runtime()?;
     let (artifact, intended, identified_by, rollback_of) = match rollback_to {
@@ -2271,6 +2412,7 @@ pub(crate) fn deliver(
         identified_by,
         rollback_of,
         previous,
+        reapply_over: applied_over,
         runtime: runtime.fingerprint.clone(),
         requested_at_ms: now(),
         executor: EXECUTOR.into(),
@@ -2288,6 +2430,13 @@ pub(crate) fn deliver(
     // First, so a caller whose deliver dies from here on knows what to resume.
     if !detach {
         progress.line("delivery", coordinator.id());
+    }
+    for over in &coordinator.request().reapply_over {
+        eprintln!(
+            "warning: applying over delivery {}, whose effect is unknown ({}); recorded in this \
+             delivery's request",
+            over.delivery, over.reason
+        );
     }
     crate::checkpoint("after-request")?;
     if detach {
@@ -2336,6 +2485,16 @@ pub(crate) fn resume(
             }
             _ => {}
         }
+    }
+    // Whatever this resume dispatches is an apply to the target: never one
+    // over another delivery's unknown, unreconciled effect (invariant H
+    // across deliveries). This delivery's lease, held from here on, keeps
+    // the target busy for any deliver that comes after the check.
+    if reapply || coordinator.last().is_none() {
+        let request = coordinator.request();
+        let common = PathBuf::from(&request.common_dir);
+        let _target = target_lock(&common, &request.target)?;
+        clear_to_apply(&list(&common), &request.target, Some(id), &[])?;
     }
     let runtime = crate::shell_runtime()?;
     coordinator.take_over(&assumed)?;
@@ -3109,6 +3268,7 @@ fn judge(
         "identified_by": request.identified_by,
         "rollback_of": request.rollback_of,
         "previous": request.previous,
+        "reapply_over": request.reapply_over,
         "requested_at_ms": request.requested_at_ms,
         "evaluated_at_ms": now_ms,
         "generation": history.generation,
@@ -3204,6 +3364,13 @@ pub(crate) fn describe(status: &Value) -> String {
     )];
     for reason in status["reasons"].as_array().into_iter().flatten() {
         lines.push(format!("  why: {}", text(reason)));
+    }
+    for over in status["reapply_over"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  applied over delivery {} (--reapply-over), whose effect was unknown: {}",
+            text(&over["delivery"]),
+            text(&over["reason"])
+        ));
     }
     let a = &d["operation"];
     lines.push(format!(
@@ -3444,6 +3611,7 @@ mod tests {
             identified_by: Identified::Content,
             rollback_of: None,
             previous: None,
+            reapply_over: Vec::new(),
             runtime: "shell".into(),
             requested_at_ms: 1,
             executor: EXECUTOR.into(),

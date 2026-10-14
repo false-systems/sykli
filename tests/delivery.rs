@@ -1134,11 +1134,13 @@ fn a_target_takes_one_delivery_at_a_time() {
 }
 
 /// An apply that outlives its coordinator still holds its target: another
-/// delivery to it is refused until that apply has ended.
+/// delivery to it is refused while that apply runs, and once it has ended
+/// unrecorded, until its effect is reconciled with the target.
 #[test]
 fn an_orphaned_apply_keeps_its_target_busy() {
     let f = Fixture::new("orphan-busy");
     f.kill_while("apply");
+    let orphaned = f.newest();
     let (out, _) = f.deliver(&[]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
     assert!(
@@ -1148,17 +1150,31 @@ fn an_orphaned_apply_keeps_its_target_busy() {
     );
     assert_eq!(f.deliveries().len(), 1);
     assert_eq!(f.applies(), 1);
+    // The orphaned apply finishes with no one to record its end: the target
+    // stays held until that end is reconciled (invariant H), never re-applied.
     f.release("apply.latch");
     let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
+    let refused = loop {
         let (out, _) = f.deliver(&[]);
-        if out.status.code() != Some(2) {
-            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-            break;
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        let stderr = text(&out.stderr);
+        if !stderr.contains("target-busy") {
+            break stderr;
         }
-        assert!(Instant::now() < deadline, "{}", text(&out.stderr));
+        assert!(Instant::now() < deadline, "{stderr}");
         std::thread::sleep(Duration::from_millis(20));
-    }
+    };
+    assert!(refused.contains("target-unreconciled"), "{refused}");
+    assert!(
+        refused.contains(&format!("sykli resume --delivery {orphaned}")),
+        "{refused}"
+    );
+    assert_eq!(f.applies(), 1);
+    let (out, status) = f.resume(&orphaned, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(dim(&status, "operation")["effect"], "observed");
+    let (out, _) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(f.applies(), 2);
 }
 
@@ -1170,8 +1186,12 @@ fn pruning_keeps_a_delivery_whose_effect_is_unknown() {
         return;
     }
     let f = Fixture::new("prune");
-    f.kill_at("after-apply-exit");
+    // Its apply's end is lost; the target, asked, shows nothing of it: the
+    // effect stays unknown, and the target is free for the next delivery.
+    f.kill_at("after-dispatch");
     let unknown = f.newest();
+    let (_, status) = f.resume(&unknown, false);
+    assert_eq!(dim(&status, "operation")["effect"], "unknown", "{status}");
     let deliver = || {
         let out = f
             .sykli(&["deliver", "--target", "fake", "--json"])
@@ -1196,10 +1216,134 @@ fn pruning_keeps_a_delivery_whose_effect_is_unknown() {
     // And it can still be reconciled.
     let (_, status) = f.resume(&unknown, false);
     assert_eq!(
-        dim(&status, "operation")["attempts"][0]["reconciled"][0]["effect"],
+        dim(&status, "operation")["attempts"][0]["reconciled"][1]["effect"],
         "unknown",
         "{status}"
     );
+}
+
+/// Invariant H across deliveries: a new delivery never applies over an
+/// earlier apply whose end is unknown and that no observation of the target
+/// has reconciled. It is refused, naming that delivery and the remedy; once
+/// the earlier one is reconciled, it goes ahead.
+#[test]
+fn a_new_delivery_never_applies_over_an_unreconciled_lost_apply() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("unreconciled");
+    f.kill_at("after-apply-exit");
+    let lost = f.newest();
+    assert_eq!(f.applies(), 1);
+    for extra in [&[][..], &["--detach"][..]] {
+        let (out, _) = f.deliver(extra);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("target-unreconciled"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("sykli resume --delivery {lost}")),
+            "{stderr}"
+        );
+    }
+    assert_eq!(f.applies(), 1, "applied over a lost apply");
+    assert_eq!(f.deliveries(), vec![lost.clone()]);
+    // Reconciled: the target shows the lost apply's effect.
+    let (out, status) = f.resume(&lost, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(dim(&status, "operation")["effect"], "observed");
+    let (out, status) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(label(&status), "VERIFIED HEALTHY", "{status}");
+    assert_eq!(f.applies(), 2);
+}
+
+/// When the reconciliation could not reach the target, the effect stays
+/// unknown and the target stays held. The only way past it is
+/// `deliver --reapply-over ID`, which names the delivery it applies over and
+/// is recorded in the new delivery's request.
+#[test]
+fn applying_over_an_unreachable_unknown_takes_an_explicit_recorded_override() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("reapply-over");
+    f.kill_at("after-apply-exit");
+    let lost = f.newest();
+    f.target(&unreachable());
+    let (_, status) = f.resume(&lost, false);
+    assert_eq!(label(&status), "UNKNOWN", "{status}");
+    let (out, _) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("target-unreconciled"), "{stderr}");
+    assert!(stderr.contains("could not reach the target"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("--reapply-over {lost}")),
+        "{stderr}"
+    );
+    // An override names what it overrides: anything else is refused.
+    let other = "0".repeat(64);
+    let (out, _) = f.deliver(&["--reapply-over", &other]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(f.applies(), 1);
+    // Asked for by name: applied, and recorded.
+    let (out, status) = f.deliver(&["--reapply-over", &lost]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains(&format!("applying over delivery {lost}")),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(f.applies(), 2);
+    let over = status["reapply_over"].as_array().unwrap();
+    assert_eq!(over.len(), 1, "{status}");
+    assert_eq!(over[0]["delivery"], lost.as_str());
+    assert!(
+        over[0]["reason"].as_str().unwrap().contains("unreachable"),
+        "{status}"
+    );
+    let human = text(
+        &f.output(&["status", "--delivery", status["delivery"].as_str().unwrap()])
+            .stdout,
+    );
+    assert!(
+        human.contains(&format!("applied over delivery {lost}")),
+        "{human}"
+    );
+    // Once applied over, the lost delivery holds the target no more.
+    f.target(&healthy());
+    let (out, _) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(f.applies(), 3);
+}
+
+/// Resuming a delivery that was never dispatched dispatches its apply: that
+/// too is refused while another delivery's apply to the target has an
+/// unknown, unreconciled effect.
+#[test]
+fn resuming_an_undispatched_delivery_never_applies_over_an_unknown_effect() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("resume-held");
+    f.kill_at("after-request");
+    let undispatched = f.newest();
+    f.kill_at("after-apply-exit");
+    let lost = f.newest();
+    assert_ne!(lost, undispatched);
+    assert_eq!(f.applies(), 1);
+    let (out, _) = f.resume(&undispatched, false);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("target-unreconciled"), "{stderr}");
+    assert!(stderr.contains(&lost), "{stderr}");
+    assert_eq!(f.applies(), 1);
+    assert_eq!(f.facts(&undispatched), ["requested"]);
+    let (out, _) = f.resume(&lost, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (out, _) = f.resume(&undispatched, false);
+    assert_ne!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(f.applies(), 2);
 }
 
 /// A rollback delivers an earlier artifact again only under the same

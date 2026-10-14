@@ -479,6 +479,11 @@ enum Command {
         /// Deliver again the artifact an earlier delivery to this target delivered
         #[arg(long, value_name = "DELIVERY")]
         rollback_to: Option<String>,
+        /// Apply even though DELIVERY, an earlier delivery to this target, has an apply whose
+        /// effect is unknown and whose reconciliation (`resume --delivery`) could not reach
+        /// the target. Overrides only that; the new delivery records what it applied over
+        #[arg(long, value_name = "DELIVERY")]
+        reapply_over: Vec<String>,
         /// Record the delivery, hand it to a coordinator that outlives this command, and print
         /// its id once the record is durable (`{"schema":"sykli-delivery.v1","delivery":ID}`
         /// with --json)
@@ -1560,6 +1565,7 @@ fn main() -> ExitCode {
             store,
             production: from,
             rollback_to,
+            reapply_over,
             detach,
             json,
         } => match production::delivery::deliver(
@@ -1568,6 +1574,7 @@ fn main() -> ExitCode {
             &store,
             from.as_deref(),
             rollback_to.as_deref(),
+            &reapply_over,
             detach,
             json,
         ) {
