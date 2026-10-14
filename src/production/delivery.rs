@@ -974,21 +974,22 @@ impl History {
                     return Err("invalid attempt identity or lineage".into());
                 }
                 // Invariant H: one apply, unless the last one's effect is
-                // known not to be there (refused), or was reconciled from an
-                // observation and is still unknown, and the caller asked.
+                // known not to be there (refused), or is still unknown after a
+                // reconciliation whose observation reached the target, and
+                // the caller asked.
                 if let Some(last) = self.last() {
-                    let reconciled = !last.reconciled.is_empty();
+                    let reached = last.reconciled.last().is_some_and(|r| r.reached);
                     let allowed = *reapply
                         && match last.effect() {
                             Effect::Refused => true,
-                            Effect::Unknown => reconciled,
+                            Effect::Unknown => reached,
                             _ => false,
                         };
                     if !allowed {
                         return Err(format!(
                             "attempt {} is not superseded: an apply runs again only on \
                              --reapply, after one that failed or whose unknown effect was \
-                             reconciled with the target",
+                             reconciled from an observation that reached the target",
                             last.id
                         ));
                     }
@@ -2546,6 +2547,25 @@ pub(crate) fn resume(
             crate::checkpoint("after-reconcile")?;
             if effect == "observed" {
                 coordinator.settle(&runtime, settle)?
+            } else if reapply && observation.usable().is_none() {
+                // Nothing about the target was learned: the lost apply may
+                // have taken effect, and repeating it would be blind.
+                return Err(format!(
+                    "--reapply refused: the reconciliation could not reach the target ({}); \
+                     nothing was applied again. Run `sykli resume --delivery {id} --reapply` \
+                     once the target answers (`sykli status --delivery {id}`)",
+                    observation.error.clone().unwrap_or_else(|| {
+                        format!(
+                            "the target's controller was unreachable{}",
+                            observation
+                                .observation
+                                .as_ref()
+                                .and_then(|o| o.reason.as_ref())
+                                .map(|r| format!(": {r}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                ));
             } else if reapply {
                 return coordinator.apply_and_observe(&runtime, progress, true);
             } else {
@@ -2565,7 +2585,9 @@ fn reconcile(id: &str, request: &Request, seen: &Seen) -> (&'static str, String)
         return (
             "unknown",
             format!(
-                "the target could not be observed: {}",
+                "the target could not be observed: {}; nothing was applied again, and nothing \
+                 is until an observation reaches the target (`sykli resume --delivery {id}` once \
+                 it answers)",
                 seen.error.as_deref().unwrap_or("no observation")
             ),
         );
@@ -2626,12 +2648,17 @@ fn reconcile(id: &str, request: &Request, seen: &Seen) -> (&'static str, String)
             request.intended
         )
     };
+    let next = if observation.reachable {
+        format!("`sykli resume --delivery {id} --reapply` applies again")
+    } else {
+        format!(
+            "the target was not reached; nothing is applied again until an observation reaches \
+             it (`sykli resume --delivery {id}` once it answers)"
+        )
+    };
     (
         "unknown",
-        format!(
-            "effect unknown: {why}; nothing was applied again (`sykli resume --delivery {id} \
-             --reapply` applies again)"
-        ),
+        format!("effect unknown: {why}; nothing was applied again ({next})"),
     )
 }
 
@@ -3776,15 +3803,43 @@ mod tests {
                 .unwrap()
                 .contains("not superseded")
         );
-        // Reconciled, unknown, asked for: a new attempt that supersedes.
+        // Asked for, reconciled, but the observation never reached the
+        // target (the observer failed, or the target was unreachable):
+        // nothing was learned, so refused.
+        let unreachable = Observation {
+            reachable: false,
+            present: None,
+            uid: None,
+            desired: None,
+            observed: None,
+            readiness: None,
+            controller: None,
+            reason: Some("connection refused".into()),
+            ..observation(&intended(), None)
+        };
+        for blind in [None, Some(unreachable)] {
+            let mut unreached = lost.clone();
+            unreached.push(observed(blind, Some(2)));
+            unreached.push(Fact::Reconciled {
+                attempt: id('a'),
+                generation: 2,
+                effect: "unknown".into(),
+                observation: 6,
+                reason: "unreachable".into(),
+            });
+            unreached.push(dispatched('b', 2, Some('a'), true));
+            assert!(history(unreached).err().unwrap().contains("not superseded"));
+        }
+        // Reconciled from an observation that reached the target and showed
+        // something else, asked for: a new attempt that supersedes.
         let mut retried = lost.clone();
-        retried.push(observed(None, Some(2)));
+        retried.push(observed(Some(observation("sha256:other", None)), Some(2)));
         retried.push(Fact::Reconciled {
             attempt: id('a'),
             generation: 2,
             effect: "unknown".into(),
             observation: 6,
-            reason: "unreachable".into(),
+            reason: "another artifact".into(),
         });
         retried.push(dispatched('b', 2, Some('a'), true));
         let retried = history(retried).unwrap();

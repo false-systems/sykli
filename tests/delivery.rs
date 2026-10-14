@@ -731,6 +731,49 @@ fn an_artifact_alone_is_never_attributed_to_a_delivery() {
     assert_eq!(f.applies(), 1);
 }
 
+/// `resume --reapply` applies again only after a reconciliation that reached
+/// the target. An observer that failed, or a target it could not reach, says
+/// nothing of whether the lost apply took effect, so nothing is repeated.
+#[test]
+fn reapply_needs_a_reconciliation_that_reached_the_target() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("reapply-blind");
+    // The apply ran and the target took it; only its end was lost.
+    f.kill_at("after-apply-exit");
+    let id = f.newest();
+    assert_eq!(f.applies(), 1);
+    for (case, target) in [
+        ("the observer fails", None),
+        ("unreachable", Some(unreachable())),
+    ] {
+        match target {
+            None => f.clear("target.json"),
+            Some(observation) => f.target(&observation),
+        }
+        let (out, _) = f.resume(&id, true);
+        assert_eq!(out.status.code(), Some(2), "{case}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stderr).contains("could not reach the target"),
+            "{case}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(f.applies(), 1, "{case}: re-applied blind");
+    }
+    let status = f.status(&id);
+    let attempts = dim(&status, "operation")["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1, "{status}");
+    assert_eq!(attempts[0]["reconciled"].as_array().unwrap().len(), 2);
+    assert_eq!(label(&status), "UNKNOWN");
+    // The target answers: its effect is observed, and nothing is applied.
+    f.target(&healthy());
+    let (out, status) = f.resume(&id, true);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(dim(&status, "operation")["effect"], "observed");
+    assert_eq!(f.applies(), 1);
+}
+
 /// Killed while the apply runs: the apply outlives the coordinator, holding
 /// its lease, so the delivery reads as applying and resume is refused until
 /// it ends. Then its effect is reconciled from the target, not re-applied.
