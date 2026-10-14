@@ -708,6 +708,91 @@ fn a_cargo_graph_is_not_reused_across_a_toolchain_change() {
 }
 
 #[test]
+fn an_existing_lock_must_pin_the_named_contract() {
+    let root = graph_repo(
+        "missing-lock-entry",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"a","run":"echo ran > sentinel"}]}"#,
+    );
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    assert!(sykli(&["validate", "sykli.json"]).status.success());
+    let receipt = sykli(&["run", "sykli.json", "--json"]);
+    assert!(receipt.status.success(), "{receipt:?}");
+    fs::write(root.join(".sykli/pin-test.json"), receipt.stdout).unwrap();
+    fs::remove_file(root.join("sentinel")).unwrap();
+    for contracts in [
+        serde_json::json!({}),
+        serde_json::json!({"other.json": "kept"}),
+    ] {
+        fs::write(
+            root.join("sykli.lock"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "sykli-lock.v2", "contracts": contracts
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for command in ["validate", "plan", "run"] {
+            let output = sykli(&[command, "sykli.json"]);
+            assert!(!output.status.success(), "{command} accepted a missing pin");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("does not pin sykli.json"),
+                "{output:?}"
+            );
+        }
+        assert!(!root.join("sentinel").exists());
+        for args in [
+            vec!["add", "sykli.lock"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "-m",
+                "incomplete lock",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let output = sykli(&[
+            "verify",
+            ".sykli/pin-test.json",
+            "--contract",
+            "sykli.json",
+            "--commit",
+            "HEAD",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("does not pin sykli.json"),
+            "{output:?}"
+        );
+        assert!(sykli(&["lock", "sykli.json"]).status.success());
+        assert!(sykli(&["validate", "sykli.json"]).status.success());
+        let repaired: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("sykli.lock")).unwrap()).unwrap();
+        assert!(repaired["contracts"]["sykli.json"].is_string());
+        assert_eq!(repaired["contracts"]["other.json"], contracts["other.json"]);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn one_lock_file_pins_every_contract_in_its_directory() {
     let root = graph_repo(
         "locks",
