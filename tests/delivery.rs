@@ -1463,9 +1463,19 @@ fn resuming_an_undispatched_delivery_never_applies_over_an_unknown_effect() {
     assert_eq!(f.facts(&undispatched), ["requested"]);
     let (out, _) = f.resume(&lost, false);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let (out, _) = f.resume(&undispatched, false);
-    assert_ne!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let (out, status) = f.resume(&undispatched, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(f.applies(), 2);
+    // Requested first, applied last: it is the one on the target, and it
+    // supersedes the one requested after it, whose apply came before.
+    assert_eq!(label(&status), "VERIFIED HEALTHY", "{status}");
+    assert_eq!(dim(&status, "operation")["superseded_by"], Value::Null);
+    let status = f.status(&lost);
+    assert_eq!(
+        dim(&status, "operation")["superseded_by"],
+        undispatched.as_str(),
+        "{status}"
+    );
 }
 
 /// A rollback delivers an earlier artifact again only under the same

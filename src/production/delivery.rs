@@ -79,6 +79,10 @@ const OBSERVATION_LIMIT: usize = 64 * 1024;
 /// The start of a command's stderr kept in a record, for a person.
 const KEPT_STDERR: usize = 4 * 1024;
 const MAX_SETTLE_SECONDS: u64 = 3600;
+/// How far ahead of now an observation may be dated and still be taken as
+/// now. Observations are dated on this machine's clock, so more than this
+/// means the clock stepped back: such an observation is never fresh.
+const CLOCK_SKEW_MS: u64 = 5_000;
 const OBSERVE_INTERVAL: Duration = Duration::from_secs(2);
 const CONTROLLER_STATES: [&str; 5] = ["pending", "progressing", "complete", "failed", "unknown"];
 
@@ -516,6 +520,10 @@ struct Request {
     /// The newest delivery to this target in this clone when this one was
     /// requested.
     previous: Option<String>,
+    /// Its place in the target's sequence (`next_in_sequence`): requests and
+    /// dispatches to the target in the order they happened in this clone,
+    /// whatever the clock did.
+    target_sequence: u64,
     /// Earlier deliveries to this target whose last apply's effect was
     /// unknown, and could not be reconciled because no observation reached
     /// the target, that this one was asked to apply over
@@ -633,6 +641,9 @@ enum Fact {
         supersedes: Option<String>,
         /// Asked for with `resume --reapply`: the only way to apply again.
         reapply: bool,
+        /// Its place in the target's sequence: which apply to the target
+        /// came after which, never by the clock.
+        target_sequence: u64,
     },
     Started {
         attempt: String,
@@ -812,6 +823,8 @@ struct AttemptState {
     reapply: bool,
     dispatched_at: u64,
     dispatched_sequence: u64,
+    /// Its place in the target's sequence.
+    target_sequence: u64,
     started: Option<(i32, u64)>,
     end: Option<End>,
     reconciled: Vec<Reconciliation>,
@@ -966,12 +979,23 @@ impl History {
                 generation,
                 supersedes,
                 reapply,
+                target_sequence,
             } => {
                 self.current(*generation)?;
                 digest(attempt)?;
                 if self.attempts.contains_key(attempt) || supersedes.as_ref() != self.lineage.last()
                 {
                     return Err("invalid attempt identity or lineage".into());
+                }
+                let after = self
+                    .last()
+                    .map_or(self.request().target_sequence, |last| last.target_sequence);
+                if *target_sequence <= after {
+                    return Err(
+                        "an apply's place in the target's sequence comes after its request's \
+                         and its last apply's"
+                            .into(),
+                    );
                 }
                 // Invariant H: one apply, unless the last one's effect is
                 // known not to be there (refused), or is still unknown after a
@@ -1005,6 +1029,7 @@ impl History {
                         reapply: *reapply,
                         dispatched_at: at,
                         dispatched_sequence: record.sequence,
+                        target_sequence: *target_sequence,
                         started: None,
                         end: None,
                         reconciled: Vec::new(),
@@ -1288,13 +1313,75 @@ fn list(common: &Path) -> Vec<Listed> {
 /// delivery is recorded and held: `deliveries/.targets/<digest of the
 /// name>/journal-lock`, taken exclusively (a second deliver waits).
 fn target_lock(common: &Path, target: &str) -> Result<Lease, String> {
+    Lease::journal(&target_directory(common, target)?)
+}
+
+/// `deliveries/.targets/<digest of the name>/`: the target's lock and its
+/// sequence.
+fn target_directory(common: &Path, target: &str) -> Result<PathBuf, String> {
     let mut directory = common.to_path_buf();
     let name = crate::sha256(target.as_bytes());
     for part in ["sykli", "deliveries", ".targets", &name[..32]] {
         directory.push(part);
         crate::hook::ensure_directory(&directory, |path| fs::create_dir(path))?;
     }
-    Lease::journal(&directory)
+    Ok(directory)
+}
+
+/// The next place in the target's sequence (`.targets/<digest>/sequence/`),
+/// durable before it is returned, taken under the sequence's own lock, held
+/// only for this: every request and every dispatch to the target in this
+/// clone gets a place after every one before it, the order in which they
+/// happened, which a clock stepping back cannot invert. (A request takes its
+/// place holding the target's lock too; a dispatch does not need it, since
+/// only a delivery that holds its target, the one live there, dispatches,
+/// and a coordinator stopped mid-dispatch must never hold up a `deliver`
+/// that would otherwise be told `target-busy`.) Without its file (removed by
+/// hand), it starts after every place the clone's deliveries recorded.
+fn next_in_sequence(common: &Path, target: &str) -> Result<u64, String> {
+    let directory = target_directory(common, target)?.join("sequence");
+    crate::hook::ensure_directory(&directory, |path| fs::create_dir(path))?;
+    let _sequence = Lease::journal(&directory)?;
+    let path = directory.join("last");
+    let last = match fs::read_to_string(&path) {
+        Ok(text) => text
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("{}: not a sequence number", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => list(common)
+            .iter()
+            .filter(|d| d.request.target == target)
+            .map(|d| {
+                let applied = Lease::journal_read(&d.path)
+                    .and_then(|_journal| History::load(&d.path, &d.id))
+                    .ok()
+                    .and_then(|h| h.last().map(|a| a.target_sequence));
+                applied.unwrap_or(0).max(d.request.target_sequence)
+            })
+            .max()
+            .unwrap_or(0),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let next = last + 1;
+    let staged = path.with_file_name(format!(
+        ".last-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::File::create(&staged)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(next.to_string().as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&staged, &path))
+        .map_err(|e| format!("{}: {e}", path.display()));
+    if written.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    written?;
+    crate::canonical::sync_directory(path.parent().unwrap(), Durability::Fsync)?;
+    Ok(next)
 }
 
 /// Why a delivery still holds its target, if it does.
@@ -1434,23 +1521,26 @@ fn clear_to_apply(
     Ok(passed)
 }
 
-/// The newest delivery to `target` after `id` (by request) whose apply was
-/// dispatched: the one that superseded it.
-fn superseded_by(common: &Path, id: &str, request: &Request) -> Option<(String, u64)> {
-    let mine = (request.requested_at_ms, id.to_string());
+/// The delivery in this clone that superseded this one: of the other
+/// deliveries to the target, the one whose last apply was dispatched last,
+/// if that was after this one's last apply, in the target's sequence (never
+/// by the clock). Its id and when it was dispatched. None while this one has
+/// applied nothing.
+fn superseded_by(common: &Path, id: &str, history: &History) -> Option<(String, u64)> {
+    let request = history.request();
+    let mine = history.last()?.target_sequence;
     list(common)
         .into_iter()
-        .filter(|other| {
-            other.request.target == request.target
-                && (other.request.requested_at_ms, other.id.clone()) > mine
-        })
-        .rev()
-        .find_map(|other| {
+        .filter(|other| other.request.target == request.target && other.id != id)
+        .filter_map(|other| {
             let _journal = Lease::journal_read(&other.path).ok()?;
-            let history = History::load(&other.path, &other.id).ok()?;
-            let first = history.lineage.first()?;
-            Some((other.id.clone(), history.attempts[first].dispatched_at))
+            let theirs = History::load(&other.path, &other.id).ok()?;
+            let last = theirs.last()?;
+            (last.target_sequence > mine)
+                .then(|| (last.target_sequence, other.id.clone(), last.dispatched_at))
         })
+        .max()
+        .map(|(_, other, dispatched_at)| (other, dispatched_at))
 }
 
 // ---------------------------------------------------------------------------
@@ -1747,11 +1837,16 @@ impl Coordinator {
                     "pid": std::process::id(), "nonce": NONCE.fetch_add(1, Ordering::Relaxed)}),
         )?;
         let lease = Lease::attempt(&self.directory, &id)?;
+        // Its place in the target's sequence: applies to a target are ordered
+        // as they happened, never by the clock.
+        let request = self.request();
+        let common = PathBuf::from(&request.common_dir);
         self.append(Fact::Dispatched {
             attempt: id.clone(),
             generation,
             supersedes,
             reapply,
+            target_sequence: next_in_sequence(&common, &request.target)?,
         })?;
         Ok(Attempt {
             coordinator: self,
@@ -2344,8 +2439,11 @@ pub(crate) fn deliver(
     let target_lock = target_lock(&common, target)?;
     let listed = list(&common);
     let applied_over = clear_to_apply(&listed, target, None, reapply_over)?;
-    let to_target = || listed.iter().filter(|d| d.request.target == target);
-    let previous = to_target().next_back().map(|d| d.id.clone());
+    let previous = listed
+        .iter()
+        .filter(|d| d.request.target == target)
+        .max_by_key(|d| d.request.target_sequence)
+        .map(|d| d.id.clone());
     let runtime = crate::shell_runtime()?;
     let (artifact, intended, identified_by, rollback_of) = match rollback_to {
         Some(earlier) => {
@@ -2413,6 +2511,8 @@ pub(crate) fn deliver(
             (artifact, intended, identified_by, None)
         }
     };
+    // Last, so a refusal above takes no place in the target's sequence.
+    let target_sequence = next_in_sequence(&common, target)?;
     let request = Request {
         contract,
         contract_path: contract_path.to_string_lossy().into_owned(),
@@ -2425,6 +2525,7 @@ pub(crate) fn deliver(
         identified_by,
         rollback_of,
         previous,
+        target_sequence,
         reapply_over: applied_over,
         runtime: runtime.fingerprint.clone(),
         requested_at_ms: now(),
@@ -2728,7 +2829,7 @@ pub(crate) fn status(id: &str) -> Result<Value, String> {
         History::load(&directory, id)?
     };
     let live = Lease::observe(&directory.join("lease"))?;
-    let superseded = superseded_by(&common, id, history.request());
+    let superseded = superseded_by(&common, id, &history);
     let known: BTreeMap<String, String> = list(&common)
         .into_iter()
         .map(|d| (d.id, d.request.intended))
@@ -3131,19 +3232,30 @@ fn judge(
             "verdict": "unobserved",
         }),
         Some(seen) => {
+            // Dated ahead of now by more than the skew: the clock stepped
+            // back since. Its age is unknown, never 0, and it is not fresh.
+            let ahead = seen.at().saturating_sub(now_ms);
+            let future = ahead > CLOCK_SKEW_MS;
             let age = now_ms.saturating_sub(seen.at());
-            let fresh = age <= bound_ms && changed_since.is_empty();
+            let fresh = !future && age <= bound_ms && changed_since.is_empty();
             json!({
                 "dimension": "F",
                 "observation": seen.sequence,
                 "observed_at_ms": seen.at(),
                 "observed_at": iso(seen.at()),
-                "age_ms": age,
+                "age_ms": if future { Value::Null } else { json!(age) },
+                "ahead_ms": if future { json!(ahead) } else { Value::Null },
                 "bound_ms": bound_ms,
                 "changed_since": changed_since,
                 "token": seen.observation.as_ref().and_then(|o| o.token.clone()),
                 "fresh": fresh,
-                "verdict": if fresh { "fresh" } else { "stale" },
+                "verdict": if future {
+                    "future"
+                } else if fresh {
+                    "fresh"
+                } else {
+                    "stale"
+                },
             })
         }
     };
@@ -3285,11 +3397,19 @@ fn judge(
                 .unwrap_or_default()
         ));
         if let Some(seen) = usable {
-            reasons.push(format!(
-                "the last usable observation, at {}, is {} s old",
-                iso(seen.at()),
-                now_ms.saturating_sub(seen.at()) / 1000
-            ));
+            reasons.push(match freshness["ahead_ms"].as_u64() {
+                Some(ahead) => format!(
+                    "the last usable observation, at {}, is dated {} s after now (the clock \
+                     moved back)",
+                    iso(seen.at()),
+                    ahead / 1000
+                ),
+                None => format!(
+                    "the last usable observation, at {}, is {} s old",
+                    iso(seen.at()),
+                    now_ms.saturating_sub(seen.at()) / 1000
+                ),
+            });
         }
         UNKNOWN
     } else if let Some((other, _)) = &superseded {
@@ -3301,17 +3421,26 @@ fn judge(
     } else if freshness["fresh"] != true {
         let mut as_observed = Vec::new();
         let label = healthy_dims(&mut as_observed);
-        reasons.push(format!(
-            "the last observation, at {}, is {} s old; the bound is {} s{}",
-            freshness["observed_at"].as_str().unwrap_or("?"),
-            freshness["age_ms"].as_u64().unwrap_or(0) / 1000,
-            definition.freshness_seconds,
-            if changed_since.is_empty() {
-                String::new()
-            } else {
-                format!("; since then: {}", changed_since.join("; "))
-            }
-        ));
+        if let Some(ahead) = freshness["ahead_ms"].as_u64() {
+            reasons.push(format!(
+                "the last observation, at {}, is dated {} s after now: this machine's clock \
+                 moved back since, so how old it is is unknown, and it says nothing about now",
+                freshness["observed_at"].as_str().unwrap_or("?"),
+                ahead / 1000
+            ));
+        } else {
+            reasons.push(format!(
+                "the last observation, at {}, is {} s old; the bound is {} s{}",
+                freshness["observed_at"].as_str().unwrap_or("?"),
+                freshness["age_ms"].as_u64().unwrap_or(0) / 1000,
+                definition.freshness_seconds,
+                if changed_since.is_empty() {
+                    String::new()
+                } else {
+                    format!("; since then: {}", changed_since.join("; "))
+                }
+            ));
+        }
         reasons.push(format!("as last observed: {label}"));
         operation["as_last_observed"] = json!({"label": label, "reasons": as_observed});
         STALE
@@ -3513,6 +3642,12 @@ pub(crate) fn describe(status: &Value) -> String {
     ));
     let f = &d["freshness"];
     lines.push(match f["observed_at"].as_str() {
+        Some(at) if f["verdict"] == "future" => format!(
+            "  F freshness: future — observed {at}, {} s after now: the clock moved back (bound \
+             {} s)",
+            f["ahead_ms"].as_u64().unwrap_or(0) / 1000,
+            f["bound_ms"].as_u64().unwrap_or(0) / 1000,
+        ),
         Some(at) => format!(
             "  F freshness: {} — observed {at}, {} s ago (bound {} s){}",
             text(&f["verdict"]),
@@ -3561,14 +3696,15 @@ fn prune(common: &Path, keep: &str) {
     }
     let newest: BTreeSet<&str> = listed
         .iter()
-        .rev()
-        .fold(BTreeMap::new(), |mut newest, d| {
-            newest
-                .entry(d.request.target.as_str())
-                .or_insert(d.id.as_str());
+        .fold(BTreeMap::new(), |mut newest: BTreeMap<&str, &Listed>, d| {
+            let entry = newest.entry(d.request.target.as_str()).or_insert(d);
+            if d.request.target_sequence > entry.request.target_sequence {
+                *entry = d;
+            }
             newest
         })
         .into_values()
+        .map(|d| d.id.as_str())
         .collect();
     let over = listed.len() + 1 - budget;
     let candidates: Vec<&Listed> = listed
@@ -3691,6 +3827,7 @@ mod tests {
             identified_by: Identified::Content,
             rollback_of: None,
             previous: None,
+            target_sequence: 1,
             reapply_over: Vec::new(),
             runtime: "shell".into(),
             requested_at_ms: 1,
@@ -3730,6 +3867,8 @@ mod tests {
             generation,
             supersedes: supersedes.map(id),
             reapply,
+            // Attempts a, b, … come in that order in the target's sequence.
+            target_sequence: u64::from(attempt),
         }
     }
 
@@ -4291,6 +4430,80 @@ mod tests {
         let mut facts = acknowledged();
         facts.push(observed(Some(failed), Some(1)));
         assert_eq!(judged(facts, 20, None)["label"], DEGRADED);
+    }
+
+    /// After the clock steps back, an observation is dated in the future. It
+    /// is never fresh and never age 0: it says nothing about now. Within the
+    /// documented skew it is taken as now.
+    #[test]
+    fn a_future_dated_observation_is_never_fresh() {
+        let delivery = delivery_id();
+        let mut facts = acknowledged();
+        facts.push(observed(
+            Some(observation(&intended(), Some(&delivery))),
+            Some(1),
+        ));
+        let history = history(facts).unwrap();
+        let at = |now_ms: u64| {
+            judge(
+                &std::env::temp_dir().join("sykli-delivery-judge-nothing-here"),
+                &history,
+                false,
+                now_ms,
+                None,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        };
+        // Judged 50 minutes before the observation's own time.
+        let v = at(later() - 3_000_000);
+        assert_eq!(v["label"], STALE, "{v}");
+        let freshness = &v["dimensions"]["freshness"];
+        assert_eq!(freshness["fresh"], false, "{v}");
+        assert_eq!(freshness["verdict"], "future", "{v}");
+        assert_ne!(freshness["age_ms"], 0, "{v}");
+        assert_eq!(freshness["ahead_ms"], 3_000_000, "{v}");
+        assert!(v["reasons"].to_string().contains("clock"), "{v}");
+        // Within the skew, it is now.
+        let v = at(later() - CLOCK_SKEW_MS);
+        assert_eq!(v["label"], VERIFIED_HEALTHY, "{v}");
+        assert_eq!(v["dimensions"]["freshness"]["age_ms"], 0, "{v}");
+    }
+
+    /// Which delivery superseded which follows the target's own sequence,
+    /// taken under its lock, never the clock: a delivery requested after a
+    /// backward clock step, so with an earlier `requested_at_ms`, still
+    /// supersedes the one whose apply came before it.
+    #[test]
+    fn superseding_follows_the_targets_sequence_not_the_clock() {
+        let common = std::env::temp_dir().join(format!(
+            "sykli-delivery-sequence-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&common).unwrap();
+        let deliver = |requested_at_ms: u64| {
+            let _lock = target_lock(&common, "staging").unwrap();
+            let mut request = request();
+            request.common_dir = common.to_string_lossy().into_owned();
+            request.requested_at_ms = requested_at_ms;
+            request.target_sequence = next_in_sequence(&common, "staging").unwrap();
+            drop(_lock);
+            let coordinator = Coordinator::create(request).unwrap();
+            let attempt = coordinator.dispatch(false).unwrap();
+            drop(attempt);
+            coordinator.id().to_string()
+        };
+        let first = deliver(1_000_000);
+        // The clock stepped back: the second is requested "earlier".
+        let second = deliver(5_000);
+        let load = |id: &str| History::load(&delivery_directory(&common, id).unwrap(), id).unwrap();
+        assert_eq!(
+            superseded_by(&common, &first, &load(&first)).map(|(by, _)| by),
+            Some(second.clone())
+        );
+        assert_eq!(superseded_by(&common, &second, &load(&second)), None);
+        let _ = fs::remove_dir_all(&common);
     }
 
     #[test]
