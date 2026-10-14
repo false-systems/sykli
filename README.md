@@ -202,8 +202,11 @@ checks a contract without running it.
 Tasks run under `sh -c` with no stdin. They receive `PATH`, `HOME` and `TMPDIR`,
 plus declared `env` values and named `inherit` variables. Inherited values reach
 the task, but only their digests reach the receipt, where they count toward the
-task's identity. Task output is captured, so commands are responsible for what
-they print. Sykli runs local commands with your permissions.
+task's identity. A declared value may name `${worktree_cache}`, a directory of
+the worktree's own
+([one build directory per worktree](#one-build-directory-per-worktree)). Task
+output is captured, so commands are responsible for what they print. Sykli runs
+local commands with your permissions.
 
 </details>
 
@@ -322,8 +325,14 @@ clean, dirty), the contract and lock digests, each task's state and every
 attempt (id, started, finished, exit, signal, outcome, what it supersedes,
 whether its outcome was withdrawn, and what stopped it), and the receipt
 (path, in the file system's spelling however the repository was named, and
-digest) once complete. It reads the journal and its locks, runs no git once
-the repository is known, and writes nothing. A run removed by the run
+digest) once complete. A run also keeps a copy of its receipt in its own
+directory, `sykli/runs/<run-id>/rcpt_<sha256>.json`, written durably before
+the run is recorded completed. Status reports it as `receipt.kept` (`path`,
+`present`). The copy outlives the worktree that ran the run: after a
+disposable checkout is removed, `status --run` from any other worktree of the
+clone still names it, `verify KEPT --commit REV` judges it, and `status
+--commit` counts it. It goes when the run is pruned. Status reads the journal
+and its locks, runs no git once the repository is known, and writes nothing. A run removed by the run
 budget answers that it was pruned, with what it was, from the tombstone the
 budget leaves (`sykli/pruned-runs/`).
 
@@ -356,7 +365,8 @@ tree the run recorded.
 receipts of a commit's tree say, judged with the code `verify --commit`
 uses. Like `verify`, it does not establish that their tasks ran: an outcome
 is the receipt's claim. Every receipt of `REV`'s tree that this clone keeps
-(this worktree's, kept ones, and those of runs, from any worktree) is judged
+(this worktree's, those the pre-push hook kept, and those of runs, from any
+worktree, where they were written or as the run kept them) is judged
 for `REV`. Those that verify now, passed or failed, are `current`; the others
 of that tree are `historical`, shown but never current evidence: another
 contract or an edited record (`not-applicable`, `unverifiable`), or a
@@ -399,6 +409,118 @@ On macOS that is not `F_FULLFSYNC`: a power cut on a drive that ignores
 Durable runs need Unix file locks. On Windows a run keeps everything in memory
 until its receipt is written, as before, and `--detach`, `status --run` and
 `resume --run` are unavailable.
+
+## One build directory per worktree
+
+A task's declared `env` values may name `${worktree_cache}`, a directory that
+belongs to the worktree the run is in:
+
+```json
+{
+  "name": "test",
+  "run": "cargo test --workspace --locked",
+  "inputs": ["Cargo.toml", "Cargo.lock", "src/main.rs"],
+  "env": {
+    "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target",
+    "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build"
+  }
+}
+```
+
+It expands to `$(git rev-parse --git-common-dir)/sykli/worktrees/<id>/cache`.
+`<id>` (16 hex digits) identifies one incarnation of the worktree: its top
+level, its own git directory, and a token sykli keeps in that git directory
+(`sykli-incarnation`). Sykli makes the directory when a run needs it. It is
+the same on every run in that worktree, and different in every other
+worktree. A worktree removed and made again at the same path gets a new
+directory: git gives it the same git directory, but deletes the old token
+with the old worktree. It lies outside the work tree, so it never shows in
+`git status` or in a tree a receipt binds. The directory belongs to the
+tasks: sykli keeps its own records beside it, in `<id>/`, so a task may empty
+or remove it (`cargo clean`), and the next run makes it again.
+
+**Recommended for Rust contracts: declare both variables.** When every
+worktree of a clone shares one Cargo target directory (`[build] target-dir`
+in `~/.cargo/config.toml`, or a `CARGO_TARGET_DIR` set for everything), the
+final artifacts land in shared `debug/<name>` paths. A gate in one worktree
+can then run a binary that another worktree built. Cargo may find the other
+worktree's build fresh and build nothing, or another build may replace
+`debug/<name>` while the gate's tests run it. The receipt then claims a pass
+for code that never ran.
+
+- `CARGO_TARGET_DIR=${worktree_cache}/cargo-target` moves the final
+  artifacts.
+- A shared `[build] build-dir` (Cargo 1.91 and later) holds the intermediate
+  ones: dependencies, fingerprints and test binaries. With
+  `CARGO_TARGET_DIR` alone, a gate still finds another worktree's build fresh
+  there. `CARGO_BUILD_BUILD_DIR=${worktree_cache}/cargo-build` moves those
+  too. A Cargo without `build-dir` ignores it.
+- Both take precedence over Cargo's configuration, so each gate builds in its
+  own worktree's directory. Your own `cargo` commands keep the shared ones.
+
+**What it costs:**
+
+- The first gate in each worktree builds cold. Later gates there are
+  incremental.
+- Each worktree keeps build directories of its own on disk until it is gone.
+- Adding the lines changes the contract's digest, so receipts from before
+  them read as another contract's.
+- A sykli older than this one hands `${worktree_cache}` to the task as
+  written, and Cargo then builds in a `${worktree_cache}/` directory inside
+  the work tree. Adopt the lines once every sykli that runs the contract
+  knows them.
+- On Windows, paths under `.git\sykli\worktrees\<id>\cache\` are about 50
+  characters longer than under an in-tree `target\`, which counts against
+  `MAX_PATH` (260) for tools that do not use long paths. If a build hits it,
+  enable long paths (the `LongPathsEnabled` policy, and `core.longpaths` for
+  git), or keep the clone's path short.
+
+**The cache key covers the declaration, never the directory.** The key
+contains `${worktree_cache}` as written, not the path it expands to. A pass is
+evidence about the inputs it ran with, and a build in a directory that no
+other worktree writes is a build of those inputs. So:
+
+- Identical work in two worktrees has the same key.
+- A worktree you move keeps its cached passes.
+- A pass earned with a shared directory is never reused once the contract
+  declares `${worktree_cache}`, because the declaration changed.
+
+Sykli records the directory nowhere, in no receipt and no journal. A task's
+own captured output may name it: `cargo test` prints the paths it runs.
+
+The directory keeps worktrees apart by accident, not by force: its path can
+be computed, and any process that can write the common git directory can
+write into it, just as it can write receipts.
+
+**Where a contract is written or run** (`validate`, `lock`, `plan`, `run`,
+`resume`, the pre-commit hook), these are refused: `validate` exits 1, and
+the others exit 2.
+
+- In an `env` value, any `${…}` other than `${worktree_cache}`, or an unclosed
+  one. Such a value is never passed on literally. A `$` that opens no `${`
+  is kept as written (`$ORIGIN`, `$LINENO`).
+- In an `env` value, `$${`. It is reserved for an escape of `${`, so that
+  adding one later never changes what a valid contract means. There is no
+  escape for a literal `${` yet.
+- `${worktree_cache}` (or `$worktree_cache`) anywhere but an `env` value: in
+  `run`, `workdir`, `inputs`, `outputs` or an env name. Sykli does not expand
+  it there, and a shell would make it empty. Declare it in `env` and use the
+  variable.
+
+**Where a contract is judged** (`verify`, `status --commit`, the pre-push
+hook), none of these apply. A commit whose contract an earlier sykli ran with
+`"PS4": "+${LINENO}: "` keeps the verdict its receipt earns.
+
+On Linux and macOS a run holds the directory's lease. So do its tasks that
+name it, and whatever they start. When a run is recorded in any worktree of
+the clone, sykli sets aside the directory of every worktree incarnation that
+is gone, but never one whose lease is held. An incarnation is gone once its
+worktree was removed, moved, made again, or pruned by git, unless git keeps it
+locked (`git worktree lock`, for a worktree on removable media). The run
+deletes what it set aside once its work is done, so a large directory never
+delays its start. On Windows the directories are made but never pruned:
+remove `sykli/worktrees/` in the common git directory yourself, when no run
+is live.
 
 ## In CI
 
@@ -807,7 +929,8 @@ The cache, the receipts, runs and production scratch are bounded, and each limit
 | Task cache | **1 GiB**; least recently used entries are dropped when a run would go over | `SYKLI_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
-| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt); when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
+| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
+| Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. Not pruned on Windows (remove them by hand when no run is live) | — |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A

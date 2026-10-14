@@ -241,6 +241,31 @@ impl Lease {
         Ok(Some(Self(file)))
     }
 
+    /// Hold the lease at `path` shared, beside any other shared holder,
+    /// waiting while one holds it alone (a remover, briefly). None when,
+    /// once it is held, `path` no longer names it, or its directory is
+    /// gone: a remover moved the directory aside meanwhile, and the caller
+    /// starts again from a directory that is there.
+    pub fn share(path: &Path) -> Result<Option<Self>, String> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        let lease = Self::lock(file, 1)?; // LOCK_SH
+        let held = lease.0.metadata().map_err(err)?;
+        Ok(fs::metadata(path)
+            .ok()
+            .filter(|now| (now.dev(), now.ino()) == (held.dev(), held.ino()))
+            .map(|_| lease))
+    }
+
     fn lock(file: File, mode: i32) -> Result<Self, String> {
         // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
         loop {
@@ -386,5 +411,42 @@ mod tests {
         assert!(Lease::acquire(&directory).is_err());
         drop(next_controller);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Shared holders exclude a remover and not each other; a holder that
+    /// waited while a remover moved the directory aside gets nothing, and
+    /// starts again from a directory that is there.
+    #[test]
+    fn a_shared_lease_is_refused_once_its_directory_is_moved_aside() {
+        let base = std::env::temp_dir().join(format!(
+            "sykli-share-{}-{}-{}",
+            std::process::id(),
+            now(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let directory = base.join("held");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("lease");
+        let first = Lease::share(&path).unwrap().expect("held");
+        let second = Lease::share(&path).unwrap().expect("held beside the first");
+        assert!(Lease::acquire_existing(&directory).is_err());
+        drop((first, second));
+
+        // A remover holds it alone, a holder waits, the remover moves the
+        // directory aside and lets go: the holder gets nothing.
+        let remover = Lease::acquire_existing(&directory).unwrap().unwrap();
+        let waiting = {
+            let path = path.clone();
+            std::thread::spawn(move || Lease::share(&path).map(|lease| lease.is_some()))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::rename(&directory, base.join("aside")).unwrap();
+        drop(remover);
+        assert_eq!(waiting.join().unwrap(), Ok(false));
+        assert!(
+            Lease::share(&path).unwrap().is_none(),
+            "its directory is gone"
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 }

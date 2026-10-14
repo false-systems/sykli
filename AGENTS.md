@@ -75,7 +75,23 @@ domains and schema meanings never change; incompatible changes are a new `.vN`.
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
 `inherit` variables (inherited values reach the task; only their digests reach
-the receipt). Inside a git hook, the directory git prepends to `PATH`
+the receipt). A declared `env` value may name `${worktree_cache}`
+(`src/worktree_cache.rs`): `<git-common-dir>/sykli/worktrees/<id>/cache`, the
+16-hex id from the worktree's incarnation: its resolved top level and git
+directory (read from its `.git`, no git process) and the token in that git
+directory's `sykli-incarnation`, so a worktree made again at one path gets a
+new directory. `<id>/` is made aside and renamed into place with a
+`worktree.json` marker and a `lease` beside `cache/`, which the tasks own (a
+`cargo clean` takes nothing of sykli's). Placeholder rules (`check`, through
+`authored`) apply only where a contract is written or run (`validate`, `lock`,
+`plan`, `run`, resume, the coordinator), never in `parse_contract`/`validate`,
+which judging shares: `verify` and `status --commit` judge an old contract as
+it ran. `prepare` (run, resume, detached coordinator) makes and holds it shared
+before the run is recorded; `launch` expands it and lets tasks that name it
+inherit the lease; `prune`, called where runs are pruned, renames the
+directories of gone (and not `locked`) incarnations aside under an exclusive
+lease, and `remove_pruned` deletes them at the end of `conclude`. Keys cover
+the value as declared, never the expanded path. Inside a git hook, the directory git prepends to `PATH`
 (`GIT_EXEC_PATH`) is taken off again (`without_git_prepend`), so hooked and
 manual runs share keys. A task's cache key covers its declaration, input digests
 (content plus execute bits), runtime fingerprint (for a Cargo graph, including
@@ -161,6 +177,9 @@ sykli's own handler ran is `withdrawn`, with every pass decided after it
 (`withdraw_before_stop`: the same stop may have reached the task first; a run
 waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
 receipt.
+`conclude` keeps the receipt as `rcpt_<digest>.json` in the run's directory
+(`publish_with`, named by digest so a fenced coordinator cannot replace it)
+before it records `concluded`; `status --run` reports it as `receipt.kept`.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
 `run --detach` hands the lease to a `setsid` coordinator
