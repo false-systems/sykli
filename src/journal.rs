@@ -71,8 +71,9 @@ pub(crate) fn load<R: Record>(
 ) -> Result<Vec<Envelope<R>>, String> {
     let mut paths = Vec::new();
     if records.exists() {
-        for entry in fs::read_dir(records).map_err(err)? {
-            let path = entry.map_err(err)?.path();
+        let named = |e: std::io::Error| format!("{}: {e}", records.display());
+        for entry in fs::read_dir(records).map_err(named)? {
+            let path = entry.map_err(named)?.path();
             if path
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -86,7 +87,10 @@ pub(crate) fn load<R: Record>(
     paths.sort();
     let mut loaded: Vec<Envelope<R>> = Vec::new();
     for path in paths {
-        let envelope: Envelope<R> = decode(&fs::read(&path).map_err(err)?)?;
+        // Every refusal names the record it is about.
+        let named = |e: String| format!("{}: {e}", path.display());
+        let bytes = fs::read(&path).map_err(|e| named(err(e)))?;
+        let envelope: Envelope<R> = decode(&bytes).map_err(named)?;
         let record = &envelope.record;
         if record.schema() != R::SCHEMA
             || record.owner() != owner
@@ -96,12 +100,12 @@ pub(crate) fn load<R: Record>(
             || path.file_name().and_then(|s| s.to_str())
                 != Some(format!("{:020}.json", record.sequence()).as_str())
         {
-            return Err(format!(
+            return Err(named(format!(
                 "record sequence, digest or {} reference mismatch",
                 R::OWNER
-            ));
+            )));
         }
-        apply(record)?;
+        apply(record).map_err(named)?;
         loaded.push(envelope);
     }
     Ok(loaded)
@@ -134,11 +138,9 @@ pub(crate) fn write<R: Record>(
     envelope: &Envelope<R>,
     durability: Durability,
 ) -> Result<(), String> {
-    publish_with(
-        &record_path(records, envelope.record.sequence()),
-        &canonical(envelope)?,
-        durability,
-    )
+    let path = record_path(records, envelope.record.sequence());
+    publish_with(&path, &canonical(envelope)?, durability)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // Native advisory locks: the open file description survives controller exit
@@ -146,6 +148,50 @@ pub(crate) fn write<R: Record>(
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
     fn fcntl(fd: i32, command: i32, ...) -> i32;
+}
+
+// Process control for runs, production and tasks, declared once here.
+unsafe extern "C" {
+    pub(crate) fn setsid() -> i32;
+    pub(crate) fn setpgid(pid: i32, pgid: i32) -> i32;
+    pub(crate) fn killpg(pgid: i32, signal: i32) -> i32;
+    pub(crate) fn kill(pid: i32, signal: i32) -> i32;
+    pub(crate) fn signal(signal: i32, handler: usize) -> usize;
+    fn getdtablesize() -> i32;
+}
+
+/// Whether any process is still in process group `group`, by signal 0 (no
+/// signal is sent). A group sykli may not signal (EPERM) still exists.
+pub(crate) fn group_exists(group: i32) -> bool {
+    if group <= 1 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks; a negative pid names the group.
+    let found = unsafe { kill(-group, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
+/// Mark every descriptor from 3 up close-on-exec, so a process this one
+/// starts inherits none of them (a caller's pipe, say) unless it is handed
+/// one explicitly, as a lease is (`Lease::inherit`). The open descriptors are
+/// listed from `/dev/fd`; where that cannot be read, every number up to the
+/// descriptor limit is tried.
+pub(crate) fn close_inherited_on_exec() {
+    let listed = fs::read_dir("/dev/fd").ok().map(|entries| {
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            .collect::<Vec<_>>()
+    });
+    // SAFETY: getdtablesize only reads the process's limit.
+    let all = || (0..unsafe { getdtablesize() }.clamp(0, 1 << 16)).collect::<Vec<_>>();
+    for fd in listed.unwrap_or_else(all).into_iter().filter(|fd| *fd >= 3) {
+        // SAFETY: F_SETFD (2) with FD_CLOEXEC (1) changes only this
+        // process's descriptor flags; EBADF for a closed one is harmless.
+        unsafe {
+            fcntl(fd, 2, 1);
+        }
+    }
 }
 
 pub struct Lease(File);

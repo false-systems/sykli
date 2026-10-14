@@ -13,26 +13,45 @@ contract consumer can observe; internal refactors are not listed.
   each task's attempts as they happen (dispatched, started, finished with exit
   or signal and its captured output, interrupted, lost). The run id is
   printed first (`run: ID`) and is the receipt's new `run` field. A task whose
-  end was not recorded is reported `lost`, never passed. At most 100 runs are
-  kept per clone (`SYKLI_RUN_BUDGET`, `0` keeps all).
+  end was not recorded is reported `lost`, never passed, and not while the
+  process group the journal recorded for it still exists (a process that
+  closed the attempt's lease, as `sudo` does, is still seen). At most 100
+  runs are kept per clone (`SYKLI_RUN_BUDGET`, `0` keeps all); each one
+  removed leaves a tombstone in `<git-common-dir>/sykli/pruned-runs/` (at
+  most 1000). Once a newer generation has taken a run over, the old
+  coordinator's first refused write fences it off and it writes nothing more.
+  Journal errors name the file they are about.
 - `sykli status --run ID [--json]` (`sykli-run-status.v1`): the run's state
   (`requested`, `running`, `completed`, `interrupted`, `lost`), subject,
-  contract and lock digests, each task's state and attempts, and its receipt
-  (path, digest). Pure: it reads the journal and its locks and writes nothing.
+  contract and lock digests, each task's state and attempts (an interrupted
+  attempt's own exit code or signal, and `stopped_by`, the signal that
+  stopped the run), and its receipt (path, in the file system's spelling, and
+  digest). Pure: it reads the journal and its locks and writes nothing. A
+  pruned run's id answers that it was pruned, and what it was.
 - `sykli resume --run ID`: continue a run whose coordinator ended. Recorded
   outcomes are kept; lost and interrupted tasks are retried as new attempts
-  that supersede the old ones. Refused while the coordinator or an attempt's
-  process is alive, and when the source, contract, lock or runtime changed.
+  that supersede the old ones: at least once, and possibly more than once, and
+  `resume` warns for each task it runs again whose last attempt had started.
+  Refused while the coordinator or an attempt's process is alive (its lease
+  is held, or its process group still exists: `--assume-ended` overrides the
+  group check), and when the source, contract, lock or runtime changed.
 - `sykli run --detach [--json]`: record the run, hand it to a coordinator in
   its own session, and print `{"schema":"sykli-run.v1","run":ID}` once the
-  record is durable.
+  record is durable. The coordinator, and so its tasks, keeps none of the
+  caller's descriptors, so a pipe the caller reads ends when `run` returns.
 - `sykli status --commit REV [--contract PATH] [--json]`
   (`sykli-commit-status.v1`): every kept receipt of `REV`'s tree judged for
   `REV` as `verify --commit` judges it, split into `current` and `historical`,
-  with the runs of that tree.
+  with the runs of that tree and each task's attempts. The `verdict` never
+  lets a pass hide a failure: the newest recorded result decides, and a pass
+  no run recorded never outranks a recorded failure (`conflict`, with why).
+  Each current receipt says whether its run `recorded` it and which tasks it
+  `retried`; a run whose journal cannot be read is named in `unreadable_runs`.
 - `sykli verify --json` (`sykli-verify.v1`): every check, the first failing
-  stage, the exit code and the trust tiers established and not established.
-  Exit codes are unchanged.
+  stage, the exit code and the trust tiers established (`schema`, `contract`,
+  `source`, `consistency`) and not established (`outcome`, `provenance`,
+  `producer`, `execution`): an outcome is the receipt's claim. Exit codes are
+  unchanged.
 
 - Receipts record each task's declared inputs (`tasks[].inputs`): for each
   input, the SHA-256 of the bytes the run read, its execute bits (`mode`) and
@@ -170,6 +189,18 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- On Linux and macOS `run` needs a writable common git directory: every run
+  is recorded in `<git-common-dir>/sykli/runs/` before any task starts, and
+  `run` exits 2 when it cannot write there (with `chmod a-w .git`, an earlier
+  sykli exited 0).
+- On Linux and macOS a signal no longer kills `run`: it stops the run's tasks
+  (TERM, then KILL after 3 s or on a second signal), records the run stopped,
+  and exits 128+N. A caller reading the wait status sees an exit code, not a
+  death by signal, and the exit takes as long as the tasks take to stop.
+- Every receipt written on Linux and macOS carries `run`, so its bytes, and
+  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
+  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
+  fields (including older `verify`) are unaffected.
 - `verify --commit` and `sykli hook pre-push` refuse (exit 3, and the push)
   a receipt whose run read a declared input that the commit cannot show at
   its declared path (sykli#78): an ignored or untracked file, a name spelled
@@ -210,10 +241,6 @@ contract consumer can observe; internal refactors are not listed.
   instead; this repository's CI does.
 
 ### Changed
-- Every receipt written on Linux and macOS carries `run`, so its bytes, and
-  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
-  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
-  fields (including older `verify`) are unaffected.
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
   and SIGHUP reach tasks through sykli, which stops them, records them as
   interrupted whatever they exit with (a task that traps the signal and exits

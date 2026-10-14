@@ -275,14 +275,24 @@ sykli resume --run RUN_ID               # continue a run whose coordinator ended
 sykli run sykli.json --detach --json    # {"schema":"sykli-run.v1","run":"…"} once recorded
 ```
 
+`run --detach` answers once the run is recorded, and hands it to a coordinator
+in its own session. That coordinator, and so every task it runs, keeps none
+of the caller's descriptors: a caller reading the command's output to its end
+sees it end when `run` returns, not when the run does.
+
 A crash leaves exactly what was observed, and nothing more:
 
 - A task whose end was recorded keeps its outcome: passed, failed, errored,
   cached or blocked.
 - A task whose attempt was dispatched but whose end was not recorded is
   **lost**. Its outcome is unknown and it is never passed, even if its process
-  later exited 0 with nobody watching. While that process still runs (the
-  shell and its children hold the attempt's lease), the task is **running**.
+  later exited 0 with nobody watching. While that process still runs, the
+  task is **running**: the shell and its children hold the attempt's lease,
+  and the process group the journal recorded for the attempt still exists. A
+  process that closes the lease's descriptor (as `sudo` does) is still seen
+  through its group; one that also leaves the group (`setsid`) is not seen at
+  all. A group id the system has reused for an unrelated process reads as
+  running too: never lost too early.
 - On SIGINT, SIGTERM or SIGHUP, the run stops each running task's process
   group, records it **interrupted** (not failed, and never passed: whatever
   it exits with answers the signal, so a task that traps it and exits 0 is
@@ -305,40 +315,73 @@ A crash leaves exactly what was observed, and nothing more:
 coordinator ended without concluding it), its subject (tree, commit when
 clean, dirty), the contract and lock digests, each task's state and every
 attempt (id, started, finished, exit, signal, outcome, what it supersedes,
-whether its outcome was withdrawn),
-and the receipt (path and digest) once complete. It reads the journal and
-its locks, runs no git once the repository is known, and writes nothing.
+whether its outcome was withdrawn, and what stopped it), and the receipt
+(path, in the file system's spelling however the repository was named, and
+digest) once complete. It reads the journal and its locks, runs no git once
+the repository is known, and writes nothing. A run removed by the run
+budget answers that it was pruned, with what it was, from the tombstone the
+budget leaves (`sykli/pruned-runs/`).
 
 `sykli resume --run ID` takes over a run whose coordinator ended. Tasks with
 a recorded outcome are kept, failed ones included. Each lost or interrupted
 task is retried as a new attempt that supersedes the old one, which stays in
 the history. Resume is refused while the run's coordinator, or a process of
-one of its attempts, is still alive, and when the worktree's source, the
+one of its attempts, is still alive (its lease is held, or its process group
+still exists; `--assume-ended` overrides the group check when that id now
+belongs to an unrelated process), and when the worktree's source, the
 contract, its lock or the runtime is not what the run recorded: its receipt
 would then claim a tree that did not produce it. Each coordinator that takes
 a run over opens a new generation, and every record carries its generation,
 so a coordinator that lost its lease cannot later complete an attempt or
-conclude a run that a newer one has taken over.
+conclude a run that a newer one has taken over: its first refused write
+fences it off, and it writes nothing more.
+
+A resumed task runs **at least once**, and possibly more than once: a lost or
+interrupted attempt may have run to completion, and done whatever it does,
+before its end went unrecorded. `resume` says so on stderr for each task it
+runs again whose last attempt had started (`warning: re-running TASK: …`).
+A task with side effects, such as a deployment, must be safe to repeat, or
+be checked before a resume.
 
 A task whose declared inputs change while the run is in progress is
 `errored` (class `input_changed`), never passed: what it read is not the
 tree the run recorded.
 
-`sykli status --commit REV --json` (`sykli-commit-status.v1`) asks whether a
-commit is validated, with the code `verify --commit` uses. Every receipt of
-`REV`'s tree that this clone keeps (this worktree's, kept ones, and those of
-runs, from any worktree) is judged for `REV`. Those that verify now, passed
-or failed, are `current`; the others of that tree are `historical`, shown but
-never current evidence: another contract or an edited record
-(`not-applicable`, `unverifiable`), or a receipt whose run this clone keeps
-but which did not conclude with it (`unconcluded`, `unrecorded`). A pass
-recorded for one commit is never current for another, and the runs of that
-tree are listed with their states.
+`sykli status --commit REV --json` (`sykli-commit-status.v1`) asks what the
+receipts of a commit's tree say, judged with the code `verify --commit`
+uses. Like `verify`, it does not establish that their tasks ran: an outcome
+is the receipt's claim. Every receipt of `REV`'s tree that this clone keeps
+(this worktree's, kept ones, and those of runs, from any worktree) is judged
+for `REV`. Those that verify now, passed or failed, are `current`; the others
+of that tree are `historical`, shown but never current evidence: another
+contract or an edited record (`not-applicable`, `unverifiable`), or a
+receipt whose run this clone keeps (or pruned, or cannot read) but which did
+not conclude with it (`unconcluded`, `unrecorded`). Receipts bind trees, not
+commits: a pass for one commit is current for every commit with the same
+tree, and for no other.
+
+A current receipt is `recorded` when its run concluded with it in this
+clone's journal. The `verdict` follows one rule: **a failure is never hidden
+by a pass**. The newest recorded result for the tree and contract decides (a
+run that concluded failed counts even when its receipt is gone), so a rerun
+that passes after a failure is `passed`, and a failure after a pass is
+`failed`. A receipt no run recorded has only the time it claims: a pass of
+that kind never outranks a recorded failure, and a failure it claims after
+the newest recorded pass is not ignored. Either way the verdict is
+`conflict`, and `conflict` says why. With no recorded result, the newest
+receipt decides. The verdict is `pending` while a run of the tree is in
+progress and nothing else decides, and `none` otherwise. The runs of the
+tree are listed with their states and each task's attempts (`["lost",
+"passed"]`: the pass came only after a lost attempt; a receipt's `retried`
+names such tasks), and a run whose journal cannot be read is named in
+`unreadable_runs`, never skipped silently.
 
 `sykli verify --json` prints the verdict as one `sykli-verify.v1` document:
 every check, the first failing stage, the exit code (unchanged), and what the
-verdict establishes (`schema`, `contract`, `source`, `consistency`,
-`outcome`) and does not (`provenance`, `producer`, `execution`).
+verdict establishes (`schema`, `contract`, `source`, `consistency`) and does
+not (`outcome`, `provenance`, `producer`, `execution`). An outcome is the
+receipt's claim: receipts are unsigned, and an outcome rewritten with
+consistent digests verifies. A failed outcome still exits 1.
 
 The journal is local and unsigned, trusted like the receipts, and claims no
 authenticity. Each record is synced with `fsync(2)` before it is acknowledged.
@@ -755,7 +798,7 @@ The cache, the receipts, runs and production scratch are bounded, and each limit
 | Task cache | **1 GiB**; least recently used entries are dropped when a run would go over | `SYKLI_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
-| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt); when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
+| Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt); when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A

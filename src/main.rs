@@ -75,7 +75,12 @@ mod runs {
         ) -> Result<(), String> {
             match self.0 {}
         }
-        pub(crate) fn interrupted(&self, _: i32) -> Result<(), String> {
+        pub(crate) fn interrupted(
+            &self,
+            _: i32,
+            _: Option<i32>,
+            _: Option<i32>,
+        ) -> Result<(), String> {
             match self.0 {}
         }
     }
@@ -244,7 +249,10 @@ enum Command {
         .sykli/receipts, kept receipts, and the receipts of runs) as `verify --commit` does\n\
         (sykli-commit-status.v1). Receipts that verify for REV now are `current`; the others\n\
         of the same tree (another contract, a failed check) are `historical`, kept and shown\n\
-        but never current evidence. Runs of that tree are listed with their states.")]
+        but never current evidence. Runs of that tree are listed with their states and each\n\
+        task's attempts. The verdict never lets a pass hide a failure: the newest result its\n\
+        run recorded decides, and a pass no run recorded never outranks a recorded failure\n\
+        (`conflict`, with why). Like `verify`, it does not establish that tasks ran.")]
     Status {
         /// Production ID printed by `produce`
         #[arg(required_unless_present_any = ["run", "commit"], conflicts_with_all = ["run", "commit"])]
@@ -282,8 +290,14 @@ enum Command {
         included. Every attempt left unfinished is recorded as lost, and every lost or\n\
         interrupted task is retried as a new attempt that supersedes the old one, which\n\
         stays in the history. It is refused while the run's coordinator or any of its\n\
-        attempts' processes is alive, and when the worktree's source, the contract, its lock\n\
-        or the runtime is not what the run recorded. Prints the receipt like `run`.")]
+        attempts' processes is alive (the attempt's lease is held, or the process group the\n\
+        journal recorded for it still exists; --assume-ended overrides the group check), and\n\
+        when the worktree's source, the contract, its lock or the runtime is not what the run\n\
+        recorded. Prints the receipt like `run`.\n\n\
+        A resumed task runs at least once, and possibly more than once: an attempt that was\n\
+        lost or interrupted may have run to completion, and done whatever it does, before its\n\
+        end went unrecorded. A resume warns, naming each task it runs again whose last\n\
+        attempt had started.")]
     Resume {
         /// Production ID printed by `produce`
         #[arg(required_unless_present = "run", conflicts_with = "run")]
@@ -291,6 +305,10 @@ enum Command {
         /// A graph run's id
         #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
         run: Option<String>,
+        /// With --run: take an attempt whose process group still exists as ended (lost), for
+        /// when that group id now belongs to an unrelated process
+        #[arg(long, requires = "run")]
+        assume_ended: bool,
         /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
         store: PathBuf,
@@ -1283,11 +1301,6 @@ fn enter_for_contract(contract: &mut PathBuf, paths: &mut [&mut PathBuf]) -> Res
         .map_err(|error| format!("cannot enter the repository at {}: {error}", root.display()))
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn signal(signal: i32, handler: usize) -> usize;
-}
-
 fn main() -> ExitCode {
     // Rust ignores SIGPIPE, which turns `sykli plan --json | head` into a
     // panic on the first write after the reader leaves. Restore the default
@@ -1295,7 +1308,7 @@ fn main() -> ExitCode {
     #[cfg(unix)]
     // SAFETY: SIGPIPE (13) with SIG_DFL (0); no handler code runs.
     unsafe {
-        signal(13, 0);
+        journal::signal(13, 0);
     }
     let mut cli = Cli::parse();
     if let (Some(root), Some(common_dir)) = (cli.repo_root.take(), cli.git_common_dir.take()) {
@@ -1464,9 +1477,10 @@ fn main() -> ExitCode {
         #[cfg(unix)]
         Command::Resume {
             run: Some(run),
+            assume_ended,
             json,
             ..
-        } => match resume_run(&run, json) {
+        } => match resume_run(&run, assume_ended, json) {
             Ok(ran) => exit_for(ran, json),
             Err(error) => {
                 eprintln!("error: {error}");
@@ -1904,8 +1918,8 @@ fn exit_for(ran: Ran, json: bool) -> ExitCode {
 /// worktree, contract, lock and runtime are shown to be what it recorded,
 /// and decide what it left undecided.
 #[cfg(unix)]
-fn resume_run(run: &str, json: bool) -> Result<Ran, String> {
-    let coordinator = runs::Coordinator::reopen(run)?;
+fn resume_run(run: &str, assume_ended: bool, json: bool) -> Result<Ran, String> {
+    let coordinator = runs::Coordinator::reopen(run, assume_ended)?;
     let request = coordinator.request();
     let here = repo::repository()?;
     let same = |a: &Path, b: &Path| {
@@ -1952,6 +1966,13 @@ fn resume_run(run: &str, json: bool) -> Result<Ran, String> {
     }
     coordinator.take_over()?;
     checkpoint("after-lost")?;
+    // At least once, not exactly once: say which tasks may run twice.
+    for (task, attempt) in coordinator.restarted() {
+        eprintln!(
+            "warning: re-running {task}: its attempt {attempt} started and may have run to \
+             completion unobserved; a resumed task runs at least once, and possibly more than once"
+        );
+    }
     let cache = LocalCache::new(Path::new(&request.subject.repository));
     cache.bound();
     let progress = Progress::of(json);
@@ -2034,13 +2055,24 @@ fn describe_run(status: &serde_json::Value) -> String {
 /// historical: kept and shown, never current evidence. Git is asked once
 /// (one `cat-file --batch` for the commit, its contract and inputs), and
 /// receipts are read from disk.
+///
+/// A current receipt is `recorded` when its run concluded with it in this
+/// clone's journal (a pruned run's tombstone counts). The verdict follows
+/// one rule: a failure is never hidden by a pass. The newest recorded result
+/// for REV's tree and contract decides (a concluded failed run whose receipt
+/// is gone counts too), so a rerun that passes after a failure passes, and a
+/// failure after a pass fails. A result no run recorded has only the time it
+/// claims: it never outranks a recorded failure, whatever that time, and a
+/// failure it claims after the newest recorded pass is not ignored either;
+/// either way the verdict is `conflict`, and `conflict` says why. With no
+/// recorded result, the newest receipt decides.
 #[cfg(unix)]
 fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, String> {
     use serde_json::json;
     let repository = repo::repository()
         .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
     let (judged, at) = commit_facts(repository, rev, contract_path)?;
-    let runs = runs::runs_of_tree(&at.tree)?;
+    let (runs, unreadable) = runs::runs_of_tree(&at.tree)?;
     let mut candidates = vec![repository.root.join(".sykli/receipt.json")];
     for directory in [
         repository.root.join(".sykli/receipts"),
@@ -2059,13 +2091,6 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
         runs.iter()
             .filter_map(|run| run["receipt"]["path"].as_str().map(PathBuf::from)),
     );
-    // A receipt whose run this clone keeps counts only once that run has
-    // concluded with it: a coordinator stopped, or fenced off, between the
-    // receipt and its conclusion did not finish the run.
-    let concluded = runs
-        .iter()
-        .filter_map(|run| Some((run["run"].as_str()?, run)))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
     let mut current = Vec::new();
     let mut historical = Vec::new();
@@ -2083,31 +2108,74 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
         if !seen.insert(digest.clone()) {
             continue;
         }
-        let unconcluded = receipt["run"]
-            .as_str()
-            .and_then(|run| concluded.get(run))
-            .filter(|run| {
-                run["state"] != "completed" || run["receipt"]["digest"] != digest.as_str()
-            });
-        let (judgement, stage, refusal_line) = match unconcluded {
-            Some(run) if run["state"] == "completed" => (
-                "unrecorded",
-                None,
-                Some(format!(
-                    "its run {} concluded with another receipt ({})",
-                    run["run"].as_str().unwrap_or("?"),
-                    run["receipt"]["digest"].as_str().unwrap_or("?")
-                )),
-            ),
-            Some(run) => (
+        let path = spelled(&path);
+        // A receipt whose run this clone keeps (or pruned) counts only once
+        // that run has concluded with it: a coordinator stopped, or fenced
+        // off, between the receipt and its conclusion did not finish the
+        // run. One whose run's journal cannot be read is not current either.
+        let mut retried = Vec::new();
+        let named = match receipt["run"].as_str() {
+            Some(run) => Some((run, runs::known(run)?)),
+            None => None,
+        };
+        let not_judged = match &named {
+            Some((run, runs::Known::Kept(Ok(status)))) => {
+                let state = status["state"].as_str().unwrap_or("?");
+                if state != "completed" {
+                    Some((
+                        "unconcluded",
+                        format!("its run {run} has not concluded with it (the run is {state})"),
+                    ))
+                } else if status["receipt"]["digest"] != digest.as_str() {
+                    Some((
+                        "unrecorded",
+                        format!(
+                            "its run {run} concluded with another receipt ({})",
+                            status["receipt"]["digest"].as_str().unwrap_or("?")
+                        ),
+                    ))
+                } else {
+                    retried = status["tasks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|task| task["attempts"].as_array().is_some_and(|a| a.len() > 1))
+                        .map(|task| task["name"].clone())
+                        .collect();
+                    None
+                }
+            }
+            Some((run, runs::Known::Kept(Err(error)))) => Some((
                 "unconcluded",
-                None,
-                Some(format!(
-                    "its run {} has not concluded with it (the run is {})",
-                    run["run"].as_str().unwrap_or("?"),
-                    run["state"].as_str().unwrap_or("?")
-                )),
-            ),
+                format!("its run {run}'s journal cannot be read: {error}"),
+            )),
+            Some((run, runs::Known::Pruned(note))) => {
+                if note["receipt"]["digest"] == digest.as_str() {
+                    None
+                } else if note["state"] == "completed" {
+                    Some((
+                        "unrecorded",
+                        format!("its run {run} concluded with another receipt, and was pruned"),
+                    ))
+                } else {
+                    Some((
+                        "unconcluded",
+                        format!(
+                            "its run {run} was pruned without concluding with it (it was {})",
+                            note["state"].as_str().unwrap_or("?")
+                        ),
+                    ))
+                }
+            }
+            Some((_, runs::Known::Unknown)) | None => None,
+        };
+        let recorded = not_judged.is_none()
+            && matches!(
+                named,
+                Some((_, runs::Known::Kept(Ok(_)) | runs::Known::Pruned(_)))
+            );
+        let (judgement, stage, refusal_line) = match not_judged {
+            Some((judgement, why)) => (judgement, None, Some(why)),
             None => match judge(&path, Ok((&judged, &at))) {
                 Ok(checks) => match checks.iter().find(|check| !check.ok) {
                     None => ("verified", None, None),
@@ -2133,6 +2201,8 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             "judgement": judgement,
             "stage": stage,
             "refusal": refusal_line,
+            "recorded": recorded,
+            "retried": retried,
         });
         if matches!(judgement, "verified" | "failed") {
             current.push(entry);
@@ -2145,17 +2215,95 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
     };
     newest_first(&mut current);
     newest_first(&mut historical);
-    let verdict = if current.iter().any(|entry| entry["judgement"] == "verified") {
-        "passed"
-    } else if !current.is_empty() {
-        "failed"
-    } else if runs
+
+    // Every result for REV: current receipts, and the failure of a run of
+    // this tree and contract that concluded failed and whose receipt is gone.
+    struct Evidence {
+        passed: bool,
+        recorded: bool,
+        at: u64,
+        what: String,
+    }
+    let mut evidence = current
         .iter()
-        .any(|run| matches!(run["state"].as_str(), Some("requested" | "running")))
-    {
-        "pending"
-    } else {
-        "none"
+        .map(|entry| Evidence {
+            passed: entry["judgement"] == "verified",
+            recorded: entry["recorded"] == true,
+            at: entry["started_at_ms"].as_u64().unwrap_or(0),
+            what: format!(
+                "receipt {}",
+                entry["digest"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .chars()
+                    .take(12)
+                    .collect::<String>()
+            ),
+        })
+        .collect::<Vec<_>>();
+    evidence.extend(
+        runs.iter()
+            .filter(|run| {
+                run["state"] == "completed"
+                    && matches!(run["outcome"].as_str(), Some("failed" | "errored"))
+                    && run["contract_digest"] == judged.hash.as_str()
+                    && run["receipt"]["present"] == false
+            })
+            .map(|run| Evidence {
+                passed: false,
+                recorded: true,
+                at: run["requested_at_ms"].as_u64().unwrap_or(0),
+                what: format!(
+                    "run {} (its receipt is gone)",
+                    run["run"].as_str().unwrap_or("?")
+                ),
+            }),
+    );
+    // The newest, a failure on a tie.
+    let newest = |recorded: bool| {
+        evidence
+            .iter()
+            .filter(|result| result.recorded == recorded)
+            .max_by_key(|result| (result.at, !result.passed))
+    };
+    let (verdict, conflict) = match newest(true) {
+        Some(last) if last.passed => match evidence
+            .iter()
+            .find(|result| !result.recorded && !result.passed && result.at > last.at)
+        {
+            Some(failure) => (
+                "conflict",
+                Some(format!(
+                    "{} failed, claiming a time after the pass {} recorded",
+                    failure.what, last.what
+                )),
+            ),
+            None => ("passed", None),
+        },
+        Some(last) => match evidence
+            .iter()
+            .find(|result| !result.recorded && result.passed)
+        {
+            Some(pass) => (
+                "conflict",
+                Some(format!(
+                    "{} passed, but no run in this clone recorded it, and {} failed",
+                    pass.what, last.what
+                )),
+            ),
+            None => ("failed", None),
+        },
+        None => match newest(false) {
+            Some(last) if last.passed => ("passed", None),
+            Some(_) => ("failed", None),
+            None if runs
+                .iter()
+                .any(|run| matches!(run["state"].as_str(), Some("requested" | "running"))) =>
+            {
+                ("pending", None)
+            }
+            None => ("none", None),
+        },
     };
     let runs = runs
         .iter()
@@ -2167,7 +2315,15 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
                 "dirty": run["subject"]["dirty"],
                 "receipt": run["receipt"],
                 "tasks": run["tasks"].as_array().into_iter().flatten()
-                    .map(|task| json!({"name": task["name"], "state": task["state"]}))
+                    .map(|task| json!({
+                        "name": task["name"],
+                        "state": task["state"],
+                        // Every attempt's outcome, oldest first: a pass that
+                        // came only after a lost or interrupted attempt says so.
+                        "attempts": task["attempts"].as_array().into_iter().flatten()
+                            .map(|attempt| attempt["outcome"].as_str().unwrap_or("running"))
+                            .collect::<Vec<_>>(),
+                    }))
                     .collect::<Vec<_>>(),
             })
         })
@@ -2178,9 +2334,11 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
         "tree": at.tree,
         "contract": {"path": contract_path, "hash": judged.hash},
         "verdict": verdict,
+        "conflict": conflict,
         "current": current,
         "historical": historical,
         "runs": runs,
+        "unreadable_runs": unreadable,
         "trust": TRUST,
     }))
 }
@@ -2260,7 +2418,7 @@ fn report_json(
     };
     let mut established = Vec::new();
     let mut not_established = Vec::new();
-    for name in ["schema", "contract", "source", "consistency", "outcome"] {
+    for name in ["schema", "contract", "source", "consistency"] {
         let tier_checks = checks
             .iter()
             .filter(|check| tier(check.name) == name)
@@ -2271,7 +2429,10 @@ fn report_json(
             not_established.push(name);
         }
     }
-    not_established.extend(["provenance", "producer", "execution"]);
+    // A receipt's outcome is its own claim: receipts are unsigned, and an
+    // outcome rewritten with consistent digests verifies (`TRUST`). Its check
+    // is reported, and decides the exit code, but establishes nothing.
+    not_established.extend(["outcome", "provenance", "producer", "execution"]);
     if let Some(first) = first {
         eprintln!("refused: {}", refusal(first));
     }
@@ -3408,7 +3569,9 @@ fn execute(
                 }
                 Ok(None) => eprintln!("interrupted: {}", task.name),
                 Err(error) => {
-                    eprintln!("errored: {}: {error}", task.name);
+                    // The run could not record a step of it (or a test hook
+                    // stopped it): not the task's outcome.
+                    eprintln!("not recorded: {}: {error}", task.name);
                     failure.get_or_insert(error);
                 }
             }
@@ -3439,20 +3602,16 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let launched = launch(
-        task,
-        runtime,
-        progress,
-        MAX_CAPTURE_BYTES,
-        Isolation::OwnGroup,
-        attempt.as_ref(),
-    )?;
-    let Launched::Ran { mut record, ended } = launched else {
-        checkpoint("during-cancel")?;
-        if let Some(attempt) = &attempt {
-            attempt.interrupted(runs::signalled().unwrap_or(15))?;
+    let launched = launch(task, runtime, progress, MAX_CAPTURE_BYTES, attempt.as_ref())?;
+    let (mut record, ended) = match launched {
+        Launched::Ran { record, ended } => (*record, ended),
+        Launched::Stopped { exit_code, signal } => {
+            checkpoint("during-cancel")?;
+            if let Some(attempt) = &attempt {
+                attempt.interrupted(runs::signalled().unwrap_or(15), exit_code, signal)?;
+            }
+            return Ok(None);
         }
-        return Ok(None);
     };
     record.cache_key = Some(key);
     if let Some(changed) = baseline.drifted(task) {
@@ -3464,7 +3623,7 @@ fn attempt_task(
     if let Some(attempt) = &attempt {
         attempt.finished(&record, ended)?;
     }
-    Ok(Some(*record))
+    Ok(Some(record))
 }
 
 /// What a run's tasks must still find while it runs: the bytes of each
@@ -3562,25 +3721,23 @@ fn cacheable(record: &TaskReceipt) -> bool {
     record.outcome == Outcome::Passed && record.importable
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn setpgid(pid: i32, pgid: i32) -> i32;
-    fn killpg(pgid: i32, signal: i32) -> i32;
-}
-
-/// How a task's shell relates to the caller's process group.
-#[derive(Clone, Copy, PartialEq)]
-#[cfg_attr(not(unix), allow(dead_code))] // Windows has no process groups here
-enum Isolation {
-    /// Share the caller's group: Ctrl-C reaches the task, as a user expects.
-    #[allow(dead_code)]
-    Shared,
-    /// Own group: as soon as the shell exits, every process still in its
-    /// group is killed, so a straggler there holding the output pipes cannot
-    /// keep the task open. A process that left the group (`setsid`) is not
-    /// reached. A signal to sykli reaches the group through sykli, which
-    /// records the attempt as interrupted.
-    OwnGroup,
+/// What became of a task's shell.
+enum Launched {
+    /// It ran to its end, seen at `ended`, and this is what it did.
+    Ran {
+        record: Box<TaskReceipt>,
+        ended: Instant,
+    },
+    /// A stop reached sykli before it saw the shell's end: sykli signalled
+    /// its group, or was signalled itself (the same stop may have reached
+    /// the task directly, as a signal to a process group holding both
+    /// does). What the shell exited with (its code, or the signal that ended
+    /// it) may answer that signal, so what the task did is unknown.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Stopped {
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    },
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -3589,12 +3746,11 @@ fn run_task(
     runtime: &ShellRuntime,
     progress: Progress,
     capture_limit: usize,
-    isolation: Isolation,
 ) -> TaskReceipt {
-    launch(task, runtime, progress, capture_limit, isolation, None)
+    launch(task, runtime, progress, capture_limit, None)
         .and_then(|launched| match launched {
             Launched::Ran { record, .. } => Ok(*record),
-            Launched::Stopped => Err("stopped on a signal".to_string()),
+            Launched::Stopped { .. } => Err("stopped on a signal".to_string()),
         })
         .unwrap_or_else(|error| {
             empty_task_receipt(
@@ -3610,31 +3766,17 @@ fn run_task(
 
 /// Run one task's shell and record what it did. With an attempt, the shell
 /// inherits the attempt's lease and its start is journaled; a start that
-/// What became of a task's shell.
-enum Launched {
-    /// It ran to its end, seen at `ended`, and this is what it did.
-    Ran {
-        record: Box<TaskReceipt>,
-        ended: Instant,
-    },
-    /// A stop reached sykli before it saw the shell's end: sykli signalled
-    /// its group, or was signalled itself (the same stop may have reached
-    /// the task directly, as a signal to a process group holding both
-    /// does). Whatever the shell exited with may answer that signal, so what
-    /// the task did is unknown.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    Stopped,
-}
-
-/// Run one task's shell and record what it did. With an attempt, the shell
-/// inherits the attempt's lease and its start is journaled; a start that
-/// cannot be journaled kills it and is an error.
+/// cannot be journaled kills it and is an error. On Unix the shell runs in
+/// its own process group: as soon as it exits, every process still in that
+/// group is killed, so a straggler there holding the output pipes cannot keep
+/// the task open (a process that left the group, by `setsid`, is not
+/// reached), and a signal to sykli reaches the group through sykli, which
+/// stops it (`Launched::Stopped`).
 fn launch(
     task: &Task,
     runtime: &ShellRuntime,
     progress: Progress,
     capture_limit: usize,
-    isolation: Isolation,
     attempt: Option<&runs::Attempt<'_>>,
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
@@ -3645,12 +3787,12 @@ fn launch(
     let started = Instant::now();
     let mut command = ProcessCommand::new(&runtime.path);
     #[cfg(unix)]
-    if isolation == Isolation::OwnGroup {
+    {
         use std::os::unix::process::CommandExt;
         // SAFETY: setpgid is async-signal-safe and allocates nothing.
         unsafe {
             command.pre_exec(|| {
-                if setpgid(0, 0) == -1 {
+                if journal::setpgid(0, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -3661,8 +3803,6 @@ fn launch(
     if let Some(attempt) = attempt {
         attempt.inherit(&mut command);
     }
-    #[cfg(not(unix))]
-    let _ = isolation;
     // `--` keeps a command that starts with `-` from being read as a shell
     // option; a null stdin keeps tasks from prompting or racing for the
     // terminal, and out of the receipt as an undeclared input.
@@ -3708,15 +3848,13 @@ fn launch(
     };
     let group = child.id() as i32;
     #[cfg(unix)]
-    if isolation == Isolation::OwnGroup {
-        runs::register(group);
-    }
+    runs::register(group);
     if let Some(attempt) = attempt {
         if let Err(error) = attempt.started(group, started_at_ms) {
             #[cfg(unix)]
             // SAFETY: the group this process just created.
             unsafe {
-                killpg(group, 9);
+                journal::killpg(group, 9);
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -3740,14 +3878,12 @@ fn launch(
     drop(sender);
     let status = child.wait().map_err(|error| error.to_string());
     let ended = Instant::now();
+    // The leader has exited; anything left in its group is a straggler,
+    // killed now rather than waited for.
+    // SAFETY: killpg on a group id we created; ESRCH when already empty.
     #[cfg(unix)]
-    if isolation == Isolation::OwnGroup {
-        // The leader has exited; anything left in its group is a
-        // straggler, killed now rather than waited for.
-        // SAFETY: killpg on a group id we created; ESRCH when already empty.
-        unsafe {
-            killpg(group, 9);
-        }
+    unsafe {
+        journal::killpg(group, 9);
     }
     // Once sykli has signalled the group, what the attempt prints no longer
     // matters: it is not waited for, so a process that left the group and
@@ -3755,7 +3891,7 @@ fn launch(
     let stopping = || {
         #[cfg(unix)]
         {
-            isolation == Isolation::OwnGroup && runs::stopped(group)
+            runs::stopped(group)
         }
         #[cfg(not(unix))]
         {
@@ -3775,8 +3911,12 @@ fn launch(
     // the group is always unregistered.) A stop that reaches sykli only
     // after this is `withdraw_before_stop`'s.
     #[cfg(unix)]
-    if isolation == Isolation::OwnGroup && (runs::unregister(group) | runs::signalled().is_some()) {
-        return Ok(Launched::Stopped);
+    if runs::unregister(group) | runs::signalled().is_some() {
+        let status = status.ok();
+        return Ok(Launched::Stopped {
+            exit_code: status.and_then(|status| status.code()),
+            signal: status.as_ref().and_then(exit_signal),
+        });
     }
     let [stdout, stderr] = captured.map(|output| {
         output.unwrap_or_else(|| CapturedOutput {
@@ -6674,7 +6814,22 @@ fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String), String> {
         }
         canonical::sync_directory(&directory, canonical::Durability::Fsync)?;
     }
-    Ok((path, hash))
+    Ok((spelled(&path), hash))
+}
+
+/// `path` as the file system spells it (symbolic links resolved, as on
+/// macOS, where /var is /private/var), so a path sykli reports has one
+/// spelling however a caller spelled the repository (`--repo-root`). A path
+/// that is gone keeps its directory resolved; one that cannot be resolved
+/// at all is as given.
+fn spelled(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .or_else(|_| {
+            let name = path.file_name().ok_or(io::ErrorKind::NotFound)?;
+            fs::canonicalize(path.parent().ok_or(io::ErrorKind::NotFound)?)
+                .map(|parent| parent.join(name))
+        })
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -7119,7 +7274,6 @@ mod tests {
             &shell_runtime().unwrap(),
             Progress::Json,
             4,
-            Isolation::OwnGroup,
         );
         assert!(truncated.stdout_truncated);
         assert_eq!(truncated.stdout_bytes_dropped, 4);
