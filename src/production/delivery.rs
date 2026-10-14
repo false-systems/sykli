@@ -451,18 +451,24 @@ impl Observation {
     }
 
     /// Whether this observation shows `delivery`'s effect: the target's
-    /// desired state names its artifact, and names it (when the target keeps
-    /// an operation at all), not another operation.
+    /// desired state names its artifact and names this delivery as its
+    /// operation. The artifact alone shows nothing of who put it there.
     fn shows(&self, delivery: &str, intended: &str) -> bool {
+        self.desires(intended)
+            && self
+                .desired
+                .as_ref()
+                .is_some_and(|desired| desired.operation.as_deref() == Some(delivery))
+    }
+
+    /// Whether the target's desired state names `intended`, whoever asked.
+    fn desires(&self, intended: &str) -> bool {
         self.reachable
             && self.present == Some(true)
-            && self.desired.as_ref().is_some_and(|desired| {
-                desired.artifact.as_deref() == Some(intended)
-                    && desired
-                        .operation
-                        .as_deref()
-                        .is_none_or(|operation| operation == delivery)
-            })
+            && self
+                .desired
+                .as_ref()
+                .is_some_and(|desired| desired.artifact.as_deref() == Some(intended))
     }
 }
 
@@ -2596,6 +2602,17 @@ fn reconcile(id: &str, request: &Request, seen: &Seen) -> (&'static str, String)
         )
     } else if observation.present != Some(true) {
         "the target is missing".into()
+    } else if observation.desires(&request.intended)
+        && observation
+            .desired
+            .as_ref()
+            .is_some_and(|d| d.operation.is_none())
+    {
+        format!(
+            "artifact present, not attributed to this delivery: the target's desired state is \
+             {}, but names no operation, so it may be any delivery's",
+            request.intended
+        )
     } else {
         let desired = observation.desired.as_ref();
         format!(
@@ -2916,15 +2933,17 @@ fn judge(
                 operation: None,
                 writer: None,
             });
+            // Attributed only when the target names this delivery as the
+            // operation behind its desired state: the artifact alone may be
+            // any delivery's (the same artifact delivered again, say).
             let ours = o.shows(id, intended);
+            let unattributed = !ours && o.desires(intended) && d.operation.is_none();
             let explanation = if ours {
-                if d.operation.is_some() {
-                    "the target's desired state is this delivery's".to_string()
-                } else {
-                    "the target's desired state is this delivery's artifact; the target names no \
-                     operation, so it is not attributed to this delivery"
-                        .to_string()
-                }
+                "the target's desired state is this delivery's".to_string()
+            } else if unattributed {
+                "the target's desired state is this delivery's artifact, but the target names no \
+                 operation, so it is not attributed to this delivery"
+                    .to_string()
             } else if let Some((other, _)) = &superseded {
                 format!("superseded: delivery {other} to this target followed this one")
             } else if d.operation.as_deref() == Some(id.as_str()) {
@@ -2975,8 +2994,14 @@ fn judge(
                 "operation": d.operation,
                 "writer": d.writer,
                 "uid": o.uid,
-                "attributed": ours && d.operation.is_some(),
-                "verdict": if ours { "this-delivery" } else { "other" },
+                "attributed": ours,
+                "verdict": if ours {
+                    "this-delivery"
+                } else if unattributed {
+                    "unattributed"
+                } else {
+                    "other"
+                },
                 "explanation": explanation,
             })
         }
@@ -3096,7 +3121,7 @@ fn judge(
             reasons.push("target missing: the observer found no target object".into());
             return DEGRADED;
         }
-        if desired["verdict"] == "other" {
+        if desired["verdict"] == "other" || desired["verdict"] == "unattributed" {
             reasons.push(desired["explanation"].as_str().unwrap_or("").into());
             return NOT_VERIFIED_HEALTHY;
         }
@@ -3827,6 +3852,8 @@ mod tests {
         for other in [
             Some(observation("sha256:other", Some(&delivery))),
             Some(observation(&intended(), Some(&id('z')))),
+            // The artifact alone, no operation: not attributed to anyone.
+            Some(observation(&intended(), None)),
             None,
         ] {
             let mut claims = base(other);

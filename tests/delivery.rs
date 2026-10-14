@@ -686,6 +686,51 @@ fn an_unreconcilable_lost_acknowledgement_stays_unknown() {
     assert_eq!(f.applies(), 1);
 }
 
+/// Without an operation id, an observation cannot say which delivery put the
+/// target's desired state there. A lost acknowledgement is never recorded
+/// "effect observed" from the artifact alone (invariant F), and no delivery
+/// is VERIFIED HEALTHY on a desired state it cannot show is its own.
+#[test]
+fn an_artifact_alone_is_never_attributed_to_a_delivery() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("opless");
+    let mut opless = healthy();
+    opless["desired"]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
+    f.target(&opless);
+    let (out, first) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(label(&first), "NOT VERIFIED HEALTHY", "{first}");
+    assert_eq!(dim(&first, "desired")["verdict"], "unattributed");
+    assert_eq!(dim(&first, "desired")["attributed"], false);
+    assert!(
+        first["reasons"].to_string().contains("not attributed"),
+        "{first}"
+    );
+    // The same artifact again, killed after dispatch: its apply never ran,
+    // while the target desires that artifact (the first delivery's).
+    f.kill_at("after-dispatch");
+    let second = f.newest();
+    assert_eq!(f.applies(), 1);
+    let (out, status) = f.resume(&second, false);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(label(&status), "UNKNOWN", "{status}");
+    let reconciled = &dim(&status, "operation")["attempts"][0]["reconciled"][0];
+    assert_eq!(reconciled["effect"], "unknown", "{status}");
+    assert!(
+        reconciled["reason"]
+            .as_str()
+            .unwrap()
+            .contains("artifact present, not attributed to this delivery"),
+        "{status}"
+    );
+    assert_eq!(f.applies(), 1);
+}
+
 /// Killed while the apply runs: the apply outlives the coordinator, holding
 /// its lease, so the delivery reads as applying and resume is refused until
 /// it ends. Then its effect is reconciled from the target, not re-applied.
