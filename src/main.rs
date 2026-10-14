@@ -4721,7 +4721,17 @@ impl Cache for LocalCache {
                     self.evict(&target);
                     return Ok(());
                 }
-                Err(_) if target.exists() => {
+                // The target was there: still, or until a concurrent store
+                // moved it aside after this rename failed (so `exists` alone
+                // can miss it, and the store failed with "Directory not
+                // empty"). Either way, look again.
+                Err(failed)
+                    if target.exists()
+                        || matches!(
+                            failed.kind(),
+                            io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists
+                        ) =>
+                {
                     if self.inspect(task, key, &record.runtime_fingerprint).is_ok() {
                         let _ = fs::remove_dir_all(&temporary);
                         return Ok(());
