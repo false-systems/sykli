@@ -216,9 +216,12 @@ contract consumer can observe; internal refactors are not listed.
   fields (including older `verify`) are unaffected.
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
   and SIGHUP reach tasks through sykli, which stops them, records them as
-  interrupted and exits 128+N, instead of dying and leaving them running
-  unrecorded. A process a task leaves behind is killed as soon as its shell
-  exits, so it can no longer hold the task open.
+  interrupted whatever they exit with (a task that traps the signal and exits
+  0 never finished its work, and is never passed), writes no receipt and no
+  cache entry, and exits 128+N, instead of dying and leaving them running
+  unrecorded. A process still in a task's group when its shell exits is
+  killed then, so it can no longer hold the task open; one that left the
+  group (`setsid`) is not, and a stop does not wait for it.
 - A task whose declared inputs change while the run is in progress is
   `errored` with class `input_changed`, not passed or failed: its result is
   not evidence for the tree the run recorded.

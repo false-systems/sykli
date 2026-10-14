@@ -284,8 +284,11 @@ A crash leaves exactly what was observed, and nothing more:
   later exited 0 with nobody watching. While that process still runs (the
   shell and its children hold the attempt's lease), the task is **running**.
 - On SIGINT, SIGTERM or SIGHUP, the run stops each running task's process
-  group, records it **interrupted** (not failed), and exits 128+N. Each task
-  runs in its own process group, so a signal reaches it through sykli.
+  group, records it **interrupted** (not failed, and never passed: whatever
+  it exits with answers the signal, so a task that traps it and exits 0 is
+  interrupted too), writes no receipt, and exits 128+N. Each task runs in its
+  own process group, so a signal reaches it through sykli. Outcomes recorded
+  before the signal are kept, and `sykli resume` concludes the run.
 - The receipt is built only from recorded outcomes and written durably, and
   only then is the run **completed**.
 

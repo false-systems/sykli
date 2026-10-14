@@ -129,7 +129,8 @@ enum Command {
         2  could not evaluate: unreadable contract, lock drift, undeclared Cargo inputs, no git or sh,\n     \
            or the run's journal could not be written (nothing unrecorded is reported as passed)\n  \
         128+N  stopped by signal N (SIGINT 130, SIGTERM 143): running tasks were stopped and\n     \
-           recorded as interrupted; `sykli resume --run ID` continues the run\n\n\
+           recorded as interrupted, whatever they exited with, and no receipt was written;\n     \
+           `sykli resume --run ID` continues the run\n\n\
         The receipt is written to .sykli/receipts/rcpt_<sha256>.json; --json also prints it.\n\n\
         On Linux and macOS every run is durable: before any task starts, the run is recorded in\n\
         $(git rev-parse --git-common-dir)/sykli/runs/<run-id>/, and each task's attempts\n\
@@ -2951,8 +2952,8 @@ enum Ran {
     /// Every task was decided and the receipt is durable: whether the run
     /// passed, and where its receipt is.
     Concluded { passed: bool, receipt: PathBuf },
-    /// Stopped on a signal before every task was decided; `sykli resume
-    /// --run` continues it.
+    /// Stopped on a signal: the attempts sykli signalled are interrupted,
+    /// and no receipt is written; `sykli resume --run` continues it.
     #[cfg_attr(not(unix), allow(dead_code))]
     Interrupted { run: String, signal: i32 },
     /// Handed to a detached coordinator once its record was durable.
@@ -3155,9 +3156,12 @@ fn coordinate(
         &subject,
         coordinator.decided()?,
     )?;
-    if decided.iter().any(Option::is_none) {
-        let signal = runs::signalled();
-        coordinator.stop(signal, "stopped on a signal before every task was decided")?;
+    // A run that was signalled stops, even when every task got decided:
+    // its caller asked it to, and a receipt now would answer a stop with a
+    // verdict. The outcomes it accepted stay, and a resume concludes it.
+    let signal = runs::signalled();
+    if signal.is_some() || decided.iter().any(Option::is_none) {
+        coordinator.stop(signal, "stopped on a signal")?;
         return Ok(Ran::Interrupted {
             run: coordinator.id().into(),
             signal: signal.unwrap_or(15),
@@ -3413,8 +3417,10 @@ fn execute(
 
 /// Run one task as a new attempt: dispatched durably, its shell in its own
 /// process group holding the attempt's lease, its start and end journaled,
-/// and its record kept before it is accepted. None when a signal stopped
-/// it: its outcome is unknown, and it is recorded as interrupted.
+/// and its record kept before it is accepted. None when sykli's stop
+/// signalled its group: its outcome is unknown whatever it exited with (a
+/// task that traps TERM and exits 0 never finished its work), and it is
+/// recorded as interrupted, never passed.
 #[allow(clippy::too_many_arguments)]
 fn attempt_task(
     task: &Task,
@@ -3428,25 +3434,22 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let mut record = launch(
+    let Some(mut record) = launch(
         task,
         runtime,
         progress,
         MAX_CAPTURE_BYTES,
         Isolation::OwnGroup,
         attempt.as_ref(),
-    )?;
-    record.cache_key = Some(key);
-    if let Some(signal) = runs::signalled() {
-        // A pass is a pass; anything else after a stop is not a verdict.
-        if record.outcome != Outcome::Passed {
-            checkpoint("during-cancel")?;
-            if let Some(attempt) = &attempt {
-                attempt.interrupted(signal)?;
-            }
-            return Ok(None);
+    )?
+    else {
+        checkpoint("during-cancel")?;
+        if let Some(attempt) = &attempt {
+            attempt.interrupted(runs::signalled().unwrap_or(15))?;
         }
-    }
+        return Ok(None);
+    };
+    record.cache_key = Some(key);
     if let Some(changed) = baseline.drifted(task) {
         record.outcome = Outcome::Errored;
         record.importable = false;
@@ -3567,10 +3570,11 @@ enum Isolation {
     /// Share the caller's group: Ctrl-C reaches the task, as a user expects.
     #[allow(dead_code)]
     Shared,
-    /// Own group: as soon as the shell exits, the whole group is killed, so
-    /// termination of every descendant is established, not assumed, and a
-    /// straggler holding the output pipes cannot keep the task open. A
-    /// signal to sykli reaches the group through sykli, which records it.
+    /// Own group: as soon as the shell exits, every process still in its
+    /// group is killed, so a straggler there holding the output pipes cannot
+    /// keep the task open. A process that left the group (`setsid`) is not
+    /// reached. A signal to sykli reaches the group through sykli, which
+    /// records the attempt as interrupted.
     OwnGroup,
 }
 
@@ -3582,21 +3586,25 @@ fn run_task(
     capture_limit: usize,
     isolation: Isolation,
 ) -> TaskReceipt {
-    launch(task, runtime, progress, capture_limit, isolation, None).unwrap_or_else(|error| {
-        empty_task_receipt(
-            task,
-            runtime,
-            Outcome::Errored,
-            &error,
-            "runtime_error",
-            false,
-        )
-    })
+    launch(task, runtime, progress, capture_limit, isolation, None)
+        .and_then(|record| record.ok_or_else(|| "stopped on a signal".to_string()))
+        .unwrap_or_else(|error| {
+            empty_task_receipt(
+                task,
+                runtime,
+                Outcome::Errored,
+                &error,
+                "runtime_error",
+                false,
+            )
+        })
 }
 
 /// Run one task's shell and record what it did. With an attempt, the shell
 /// inherits the attempt's lease and its start is journaled; a start that
-/// cannot be journaled kills it and is an error.
+/// cannot be journaled kills it and is an error. None when sykli signalled
+/// its group (a stop): whatever it exited with answered the signal, so what
+/// it did is unknown.
 fn launch(
     task: &Task,
     runtime: &ShellRuntime,
@@ -3604,7 +3612,7 @@ fn launch(
     capture_limit: usize,
     isolation: Isolation,
     attempt: Option<&runs::Attempt<'_>>,
-) -> Result<TaskReceipt, String> {
+) -> Result<Option<TaskReceipt>, String> {
     progress.line("running", &task.name);
     // Instant for the duration, wall clock for the claim: Instant is monotonic
     // and cannot be read as a time of day, SystemTime can jump but is what a
@@ -3661,14 +3669,14 @@ fn launch(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return Ok(empty_task_receipt(
+            return Ok(Some(empty_task_receipt(
                 task,
                 runtime,
                 Outcome::Errored,
                 &error.to_string(),
                 "spawn_error",
                 false,
-            ));
+            )));
         }
     };
     let group = child.id() as i32;
@@ -3690,41 +3698,62 @@ fn launch(
             return Err(error);
         }
     }
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let (status, stdout, stderr) = thread::scope(|scope| {
-        let stdout_writer = progress.stdout();
-        let stderr_writer = progress.stderr();
-        let stdout = scope.spawn(move || relay(stdout, stdout_writer, capture_limit));
-        let stderr = scope.spawn(move || relay(stderr, stderr_writer, capture_limit));
-        let status = child.wait().map_err(|error| error.to_string());
-        #[cfg(unix)]
-        if isolation == Isolation::OwnGroup {
-            // The leader has exited; anything left in its group is a
-            // straggler, killed now rather than waited for.
-            // SAFETY: killpg on a group id we created; ESRCH when already empty.
-            unsafe {
-                killpg(group, 9);
-            }
-        }
-        let stdout = stdout.join().unwrap_or_else(|_| CapturedOutput {
-            bytes: Vec::new(),
-            digest: sha256(&[]),
-            bytes_dropped: 0,
-            error: Some("stdout reader panicked".into()),
+    // Each stream is relayed on its own thread until the last process
+    // holding it lets go, which may be one that left the group.
+    let (sender, received) = std::sync::mpsc::channel();
+    let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().unwrap());
+    let stderr: Box<dyn Read + Send> = Box::new(child.stderr.take().unwrap());
+    let relays = [(stdout, progress.stdout()), (stderr, progress.stderr())];
+    for (index, (reader, writer)) in relays.into_iter().enumerate() {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send((index, relay(reader, writer, capture_limit)));
         });
-        let stderr = stderr.join().unwrap_or_else(|_| CapturedOutput {
-            bytes: Vec::new(),
-            digest: sha256(&[]),
-            bytes_dropped: 0,
-            error: Some("stderr reader panicked".into()),
-        });
-        (status, stdout, stderr)
-    });
+    }
+    drop(sender);
+    let status = child.wait().map_err(|error| error.to_string());
     #[cfg(unix)]
     if isolation == Isolation::OwnGroup {
-        runs::unregister(group);
+        // The leader has exited; anything left in its group is a
+        // straggler, killed now rather than waited for.
+        // SAFETY: killpg on a group id we created; ESRCH when already empty.
+        unsafe {
+            killpg(group, 9);
+        }
     }
+    // Once sykli has signalled the group, what the attempt prints no longer
+    // matters: it is not waited for, so a process that left the group and
+    // still holds a stream cannot hold up the stop.
+    let stopping = || {
+        #[cfg(unix)]
+        {
+            isolation == Isolation::OwnGroup && runs::stopped(group)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    let mut captured: [Option<CapturedOutput>; 2] = [None, None];
+    while captured.iter().any(Option::is_none) {
+        match received.recv_timeout(std::time::Duration::from_millis(25)) {
+            Ok((index, output)) => captured[index] = Some(output),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !stopping() => {}
+            Err(_) => break,
+        }
+    }
+    #[cfg(unix)]
+    if isolation == Isolation::OwnGroup && runs::unregister(group) {
+        return Ok(None);
+    }
+    let [stdout, stderr] = captured.map(|output| {
+        output.unwrap_or_else(|| CapturedOutput {
+            bytes: Vec::new(),
+            digest: sha256(&[]),
+            bytes_dropped: 0,
+            error: Some("an output reader panicked".into()),
+        })
+    });
 
     let CapturedOutput {
         bytes: stdout,
@@ -3791,7 +3820,7 @@ fn launch(
         }
     }
 
-    Ok(TaskReceipt {
+    Ok(Some(TaskReceipt {
         name: task.name.clone(),
         command: task.run.clone(),
         runtime_fingerprint: runtime.fingerprint.clone(),
@@ -3818,7 +3847,7 @@ fn launch(
         provenance: None,
         cache_key: None,
         inputs: None,
-    })
+    }))
 }
 
 /// The signal that ended a process, where there are signals.

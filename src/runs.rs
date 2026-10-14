@@ -1165,10 +1165,13 @@ fn read_output(directory: &Path, digest_hex: &str) -> Result<TaskReceipt, String
 // Signals. The handler only notes the first signal (and that more came);
 // a watcher thread stops every attempt's process group: SIGTERM at once,
 // SIGKILL if the group is still there after a grace period or on a second
-// signal. Each attempt is then recorded as interrupted, never as failed.
+// signal. Each attempt sykli signalled is then recorded as interrupted,
+// never as failed and never as passed: whatever it exited with answered
+// the signal, not its task.
 static SIGNALLED: AtomicI32 = AtomicI32::new(0);
 static REPEATED: AtomicI32 = AtomicI32::new(0);
-static GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// Every running attempt's process group, and whether sykli signalled it.
+static GROUPS: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
 const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 extern "C" fn on_signal(number: i32) {
@@ -1207,11 +1210,12 @@ pub(crate) fn handle_signals() {
                 if first || escalate {
                     let number = if escalate { 9 } else { 15 };
                     killed |= escalate;
-                    for group in GROUPS.lock().unwrap().iter() {
+                    for (group, signalled) in GROUPS.lock().unwrap().iter_mut() {
                         // SAFETY: a process group this process created.
                         unsafe {
                             killpg(*group, number);
                         }
+                        *signalled = true;
                     }
                 }
             }
@@ -1225,18 +1229,37 @@ pub(crate) fn signalled() -> Option<i32> {
 }
 
 /// Track an attempt's process group while it runs, so a signal stops it.
+/// Checked under the lock the watcher signals under, so a group is either
+/// signalled here or by the watcher's next round, never missed.
 pub(crate) fn register(group: i32) {
-    GROUPS.lock().unwrap().push(group);
-    if signalled().is_some() {
+    let mut groups = GROUPS.lock().unwrap();
+    let stopping = signalled().is_some();
+    if stopping {
         // SAFETY: the group was just created by this process.
         unsafe {
             killpg(group, 15);
         }
     }
+    groups.push((group, stopping));
 }
 
-pub(crate) fn unregister(group: i32) {
-    GROUPS.lock().unwrap().retain(|known| *known != group);
+/// Whether sykli has signalled `group`, a group it tracks.
+pub(crate) fn stopped(group: i32) -> bool {
+    GROUPS
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(known, signalled)| *known == group && *signalled)
+}
+
+/// Stop tracking `group`; whether sykli signalled it while it was tracked.
+pub(crate) fn unregister(group: i32) -> bool {
+    let mut groups = GROUPS.lock().unwrap();
+    let signalled = groups
+        .iter()
+        .any(|(known, signalled)| *known == group && *signalled);
+    groups.retain(|(known, _)| *known != group);
+    signalled
 }
 
 /// What sykli knows of one run, from its journal and its leases alone:
