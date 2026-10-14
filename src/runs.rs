@@ -788,6 +788,12 @@ impl History {
     }
 }
 
+/// Where a run keeps the receipt it concluded with: `rcpt_<digest>.json`
+/// in its own directory, as `.sykli/receipts/` names receipts.
+fn kept_receipt(directory: &Path, digest: &str) -> PathBuf {
+    directory.join(format!("rcpt_{digest}.json"))
+}
+
 /// `<common>/sykli/runs`.
 fn runs_directory(common: &Path) -> PathBuf {
     common.join("sykli").join("runs")
@@ -857,6 +863,7 @@ impl Coordinator {
             crate::hook::ensure_directory(&parent, |path| fs::create_dir(path))?;
         }
         prune(&common, &id);
+        crate::worktree_cache::prune(&common);
         let directory = run_directory(&common, &id)?;
         // Made aside and renamed into place with its lease already held, so
         // no one (a pruner) ever sees the run without a holder while it is
@@ -1310,13 +1317,27 @@ impl Coordinator {
         })
     }
 
-    /// The run's receipt is durable: the run is complete.
+    /// The run's receipt is durable: the run is complete. A copy of it
+    /// (`bytes`, whose SHA-256 is `digest`) is kept first in the run's own
+    /// directory, so a concluded run's receipt outlives the worktree that
+    /// wrote it. The copy is named by its digest and never replaced, so a
+    /// coordinator taken over meanwhile cannot change the one a newer
+    /// generation concluded with.
     pub(crate) fn conclude(
         &self,
         receipt: &Path,
         digest: &str,
+        bytes: &[u8],
         outcome: Outcome,
     ) -> Result<(), String> {
+        if crate::sha256(bytes) != digest {
+            return Err("the receipt to keep is not the one written".into());
+        }
+        publish_with(
+            &kept_receipt(&self.directory, digest),
+            bytes,
+            Durability::Fsync,
+        )?;
         self.append(Fact::Concluded {
             generation: self.generation(),
             receipt: receipt.to_string_lossy().into(),
@@ -1752,10 +1773,18 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
         // is unknown.
         "lost"
     };
-    // In one spelling, the file system's, however the run spelled it.
+    // In one spelling, the file system's, however the run spelled it. The
+    // copy the run kept is reported beside it: the one to read once the
+    // worktree that wrote the receipt is gone.
     let receipt = history.concluded.as_ref().map(|(path, digest, _)| {
         let path = crate::spelled(Path::new(path));
-        json!({"path": path, "digest": digest, "present": path.is_file()})
+        let kept = crate::spelled(&kept_receipt(directory, digest));
+        json!({
+            "path": path,
+            "digest": digest,
+            "present": path.is_file(),
+            "kept": {"path": kept, "present": kept.is_file()},
+        })
     });
     let subject = &request.subject;
     Ok(json!({

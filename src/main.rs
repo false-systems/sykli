@@ -29,6 +29,7 @@ mod production;
 mod repo;
 #[cfg(unix)]
 mod runs;
+mod worktree_cache;
 
 /// Durable runs need Unix file leases. Elsewhere there is no coordinator:
 /// these types have no values, so every use of one is unreachable.
@@ -58,6 +59,7 @@ mod runs {
             &self,
             _: &std::path::Path,
             _: &str,
+            _: &[u8],
             _: Outcome,
         ) -> Result<(), String> {
             match *self {}
@@ -122,7 +124,9 @@ enum Command {
     /// Validate a declared contract without executing it
     #[command(after_help = "Exit codes:\n  \
         0  valid\n  \
-        1  invalid, unreadable, or drifted from sykli.lock")]
+        1  invalid, unreadable, or drifted from sykli.lock\n\n\
+        An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
+        or an unclosed one, is invalid.")]
     Validate {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -150,7 +154,16 @@ enum Command {
         group. Elsewhere runs are not durable and nothing changes.\n\n\
         A contract outside the repository judges the git repository around the current\n\
         directory: its inputs are paths from that repository's root, its lock is the\n\
-        sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.")]
+        sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.\n\n\
+        A task's declared env values may name ${worktree_cache}: a directory that belongs to\n\
+        this worktree, <git-common-dir>/sykli/worktrees/<id>/cache, outside the work tree,\n\
+        made when a run needs it. For a Rust contract, declare\n\
+        \"env\": {\"CARGO_TARGET_DIR\": \"${worktree_cache}/cargo-target\"} so that no gate runs a\n\
+        binary another worktree built; the first gate in each worktree then builds cold.\n\
+        Cache keys cover the value as declared, never the directory. On Linux and macOS a\n\
+        run holds the directory, and a later run removes it once its worktree is gone\n\
+        (removed, moved or pruned, and not locked). Any other ${...} in an env value, or an\n\
+        unclosed one, exits 2.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -244,9 +257,13 @@ enum Command {
         completed, interrupted, or lost when its coordinator ended without concluding it),\n\
         its subject and contract, each task's state (pending, running, passed, failed,\n\
         errored, cached, blocked, interrupted, lost) with every attempt, and its receipt once\n\
-        complete. A task whose end was not recorded is never passed. No git runs.\n\n\
+        complete. A run also keeps a copy of its receipt in its own directory\n\
+        (receipt.kept), which outlives the worktree that ran it: `verify KEPT --commit REV`\n\
+        judges it from any worktree of the clone. A task whose end was not recorded is\n\
+        never passed. No git runs.\n\n\
         --commit REV judges every receipt of REV's tree that this clone keeps (this worktree's\n\
-        .sykli/receipts, kept receipts, and the receipts of runs) as `verify --commit` does\n\
+        .sykli/receipts, those the pre-push hook kept, and the receipts of runs, where they\n\
+        were written or as the run kept them) as `verify --commit` does\n\
         (sykli-commit-status.v1). Receipts that verify for REV now are `current`; the others\n\
         of the same tree (another contract, a failed check) are `historical`, kept and shown\n\
         but never current evidence. Runs of that tree are listed with their states and each\n\
@@ -516,7 +533,10 @@ enum Command {
         ran: receipts are unsigned, so an outcome rewritten to passed, or a receipt\n\
         recomputed in full for a commit with consistent digests, verifies. A\n\
         converted input is bound only as the commit's attributes and this\n\
-        repository's configuration convert it.")]
+        repository's configuration convert it.\n\n\
+        RECEIPT may be anywhere: the copy a run keeps in its own directory,\n\
+        <git-common-dir>/sykli/runs/<run-id>/rcpt_<sha256>.json (`status --run` names it,\n\
+        receipt.kept), is judged like any other, and outlives the worktree that ran it.")]
     Verify {
         /// Path to a sykli-receipt.v1 JSON file
         receipt: PathBuf,
@@ -1965,6 +1985,7 @@ fn resume_run(run: &str, assume_ended: bool, json: bool) -> Result<Ran, String> 
             request.subject.tree_oid, subject.tree_oid
         ));
     }
+    worktree_cache::prepare(&contract)?;
     coordinator.take_over()?;
     checkpoint("after-lost")?;
     // At least once, not exactly once: say which tasks may run twice.
@@ -1993,6 +2014,7 @@ fn coordinator_main(run: &str, fd: i32) -> Result<Ran, String> {
         if runtime.fingerprint != request.runtime {
             return Err("the runtime changed before the run's coordinator started".to_string());
         }
+        worktree_cache::prepare(&contract)?;
         Ok((contract, levels, runtime))
     })();
     let (contract, levels, runtime) = match started {
@@ -2035,9 +2057,16 @@ fn describe_run(status: &serde_json::Value) -> String {
             }
         ));
     }
-    match status["receipt"]["path"].as_str() {
+    let receipt = &status["receipt"];
+    match receipt["path"].as_str() {
+        Some(path) if receipt["present"] == false => lines.push(format!("receipt: {path} (gone)")),
         Some(path) => lines.push(format!("receipt: {path}")),
         None => lines.push("receipt: none yet".into()),
+    }
+    if let Some(kept) = receipt["kept"]["path"].as_str() {
+        if receipt["kept"]["present"] == true {
+            lines.push(format!("kept: {kept}"));
+        }
     }
     if matches!(status["state"].as_str(), Some("lost" | "interrupted")) {
         lines.push(format!(
@@ -2088,10 +2117,13 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             );
         }
     }
-    candidates.extend(
-        runs.iter()
-            .filter_map(|run| run["receipt"]["path"].as_str().map(PathBuf::from)),
-    );
+    // A run's receipt where it was written, and the copy the run kept, which
+    // outlives the worktree that wrote it; one receipt is judged once.
+    candidates.extend(runs.iter().flat_map(|run| {
+        [&run["receipt"]["path"], &run["receipt"]["kept"]["path"]]
+            .into_iter()
+            .filter_map(|path| path.as_str().map(PathBuf::from))
+    }));
     let mut seen = HashSet::new();
     let mut current = Vec::new();
     let mut historical = Vec::new();
@@ -2249,6 +2281,11 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
                     && matches!(run["outcome"].as_str(), Some("failed" | "errored"))
                     && run["contract_digest"] == judged.hash.as_str()
                     && run["receipt"]["present"] == false
+                    // Its kept copy stands in only when it is current
+                    // evidence itself.
+                    && !current
+                        .iter()
+                        .any(|entry| entry["digest"] == run["receipt"]["digest"])
             })
             .map(|run| Evidence {
                 passed: false,
@@ -2732,6 +2769,7 @@ fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
         if let Some(workdir) = &task.workdir {
             validate_contract_path(&task.name, "workdir", workdir)?;
         }
+        worktree_cache::validate(task)?;
         for input in &task.inputs {
             validate_contract_path(&task.name, "input", Path::new(input))?;
         }
@@ -3249,6 +3287,9 @@ fn run(
         return Err(folder_coverage_error(&folders));
     }
     let subject = subject(contract)?;
+    // Before the run is recorded: a directory that cannot be made or held
+    // is a run that cannot be evaluated, not a task that errored.
+    worktree_cache::prepare(contract)?;
     let runtime = graph_runtime(contract)?;
     let cache = LocalCache::new(Path::new(&subject.repository));
     cache.bound();
@@ -3396,10 +3437,10 @@ fn conclude(
     for record in &mut receipt.tasks {
         record.inputs = receipt.subject.inputs.get(&record.name).cloned();
     }
-    let (path, digest) = write_receipt(&receipt)?;
+    let (path, digest, bytes) = write_receipt(&receipt)?;
     checkpoint("after-receipt")?;
     if let Some(coordinator) = coordinator {
-        coordinator.conclude(&path, &digest, receipt.outcome)?;
+        coordinator.conclude(&path, &digest, &bytes, receipt.outcome)?;
     }
     let receipt_name = path.file_name().unwrap().to_string_lossy();
     for (task, record) in contract.tasks.iter().zip(&receipt.tasks) {
@@ -3422,6 +3463,10 @@ fn conclude(
         Progress::Human => println!("receipt: {}", path.display()),
         Progress::Quiet => {}
     }
+    // What this run set aside when it was recorded (the directories of gone
+    // worktrees), deleted only now: their size never delays a run's start.
+    #[cfg(unix)]
+    worktree_cache::remove_pruned();
     Ok(Ran::Concluded {
         passed: matches!(receipt.outcome, Outcome::Passed | Outcome::Cached),
         receipt: path,
@@ -3796,6 +3841,7 @@ fn launch(
     attempt: Option<&runs::Attempt<'_>>,
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
+    let declared = worktree_cache::environment(task)?;
     // Instant for the duration, wall clock for the claim: Instant is monotonic
     // and cannot be read as a time of day, SystemTime can jump but is what a
     // freshness policy compares against.
@@ -3819,6 +3865,8 @@ fn launch(
     if let Some(attempt) = attempt {
         attempt.inherit(&mut command);
     }
+    #[cfg(unix)]
+    worktree_cache::inherit(task, &mut command);
     // `--` keeps a command that starts with `-` from being read as a shell
     // option; a null stdin keeps tasks from prompting or racing for the
     // terminal, and out of the receipt as an undeclared input.
@@ -3834,7 +3882,7 @@ fn launch(
                 .iter()
                 .map(|(name, value)| (name, value)),
         )
-        .envs(&task.env)
+        .envs(declared)
         .envs(
             task.inherit
                 .iter()
@@ -6812,8 +6860,8 @@ fn refusal(check: &Check) -> String {
 /// Write a receipt as `.sykli/receipts/rcpt_<sha256 of its bytes>.json`,
 /// durably: the bytes are synced in a temporary, then renamed into place,
 /// then the directory is synced. A receipt already there has these bytes, by
-/// its name. Returns its path and digest.
-fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String), String> {
+/// its name. Returns its path, digest and bytes.
+fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String, Vec<u8>), String> {
     let bytes = serde_json::to_vec_pretty(receipt).map_err(|error| error.to_string())?;
     let hash = sha256(&bytes);
     let directory = Path::new(&receipt.subject.repository).join(".sykli/receipts");
@@ -6840,7 +6888,7 @@ fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String), String> {
         }
         canonical::sync_directory(&directory, canonical::Durability::Fsync)?;
     }
-    Ok((spelled(&path), hash))
+    Ok((spelled(&path), hash, bytes))
 }
 
 /// `path` as the file system spells it (symbolic links resolved, as on
@@ -7374,7 +7422,7 @@ mod tests {
             outcome: Outcome::Passed,
             run: None,
         };
-        let (receipt_path, _) = write_receipt(&receipt).unwrap();
+        let (receipt_path, _, _) = write_receipt(&receipt).unwrap();
         cache
             .store(
                 &cached_contract.tasks[0],

@@ -118,6 +118,16 @@ impl Scratch {
     /// the git processes it started. The global git config is an empty file,
     /// so nothing configured on this machine starts processes of its own.
     fn counted(&self, args: &[&str], stdin: Option<&str>) -> (Output, Vec<String>) {
+        self.counted_in(&self.repo, args, stdin)
+    }
+
+    /// `counted`, with sykli started in `directory`.
+    fn counted_in(
+        &self,
+        directory: &Path,
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> (Output, Vec<String>) {
         use std::io::Write;
         let trace = self.base.join(format!(
             "trace-{}.json",
@@ -125,7 +135,7 @@ impl Scratch {
         ));
         let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
             .args(args)
-            .current_dir(&self.repo)
+            .current_dir(directory)
             .env("GIT_TRACE2_EVENT", &trace)
             .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig"))
             .stdin(Stdio::piped())
@@ -313,6 +323,72 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
         fs::write(scratch.repo.join("file.txt"), "one\n").unwrap();
         scratch.commit("back to one");
     }
+}
+
+/// A task that uses `${worktree_cache}` costs no git process: which worktree
+/// a run is in is read from its `.git` (a directory in the main checkout, a
+/// `gitdir:` file in a linked worktree), never asked of git. Each run
+/// counted here is a first run in its worktree, and its task fails unless it
+/// got the directory, so each count measured a run that expanded it.
+#[test]
+fn a_worktree_cache_costs_no_git_process() {
+    let scratch = Scratch::new("worktree-cache");
+    fs::write(
+        scratch.repo.join("sykli.json"),
+        CONTRACT.replace(
+            r#""run":"test"#,
+            r#""env":{"DIR":"${worktree_cache}/x"},"run":"mkdir \"$DIR\" && test"#,
+        ),
+    )
+    .unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", "sykli.json"])
+        .current_dir(&scratch.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    scratch.commit("contract");
+    let linked = scratch.base.join("linked");
+    let given = scratch.base.join("given");
+    for worktree in [&linked, &given] {
+        scratch.git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ]);
+    }
+    within(
+        "run, main checkout",
+        scratch.counted(&["run", "sykli.json"], None),
+        0,
+        RUN,
+    );
+    within(
+        "run, linked worktree",
+        scratch.counted_in(&linked, &["run", "sykli.json"], None),
+        0,
+        RUN,
+    );
+    let common = scratch.repo.join(".git");
+    within(
+        "run, linked worktree (given)",
+        scratch.counted_in(
+            &given,
+            &[
+                "--repo-root",
+                given.to_str().unwrap(),
+                "--git-common-dir",
+                common.to_str().unwrap(),
+                "run",
+                "sykli.json",
+            ],
+            None,
+        ),
+        0,
+        RUN_GIVEN,
+    );
 }
 
 #[test]

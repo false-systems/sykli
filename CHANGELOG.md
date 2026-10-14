@@ -8,6 +8,54 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- `${worktree_cache}` in a task's declared `env` values: a directory that
+  belongs to the worktree the run is in,
+  `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is the identity
+  (`sykli-worktree.v1`) of the worktree's top level and its own git
+  directory, both resolved. The directory is made when a run needs it, is
+  the same on every run in that worktree, and lies outside the work tree, so
+  it changes neither `git status` nor a receipt's tree. It belongs to the
+  tasks: sykli's own `worktree.json` and `lease` sit beside it in `<id>/`, so
+  a task may empty or remove it (`cargo clean`), and the next run makes it
+  again.
+  - **For Rust contracts,** declare
+    `"env": {"CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"}`. With one
+    target directory for every worktree (`[build] target-dir` in Cargo's
+    configuration), a gate in one worktree could run a binary another
+    worktree built, and its receipt claimed a pass for code that never ran.
+    Cargo found the other worktree's build fresh and built nothing, or another
+    build replaced `debug/<name>` while the gate's tests ran.
+  - **The cost** is a cold first build in each worktree, and a target
+    directory per worktree on disk. An older sykli hands the placeholder to
+    the task as written, and Cargo then builds in a `${worktree_cache}/`
+    directory inside the work tree, so adopt it once every runner has this
+    version.
+  - **Cache keys cover the value as declared,** never the directory.
+    Identical work in two worktrees has one key, a moved worktree keeps its
+    passes, and moving a contract from a shared directory to
+    `${worktree_cache}` changes its key. Sykli records the directory in no
+    receipt and no journal; a task's captured output may name it.
+  - **Pruning (Linux and macOS):** a run holds the directory's lease, and so
+    do its tasks that name it. When any run is recorded, sykli sets aside the
+    directory of every worktree that is gone (removed, moved, or its git
+    directory pruned, and not locked with `git worktree lock`), never one
+    whose lease is held. The run deletes what it set aside once its work is
+    done. On Windows the directories are made but not pruned.
+  - Finding the worktree starts no git process. On Windows the expanded path
+    is an ordinary absolute path, not a verbatim `\\?\` one.
+- A run keeps the receipt it concludes with in its own directory,
+  `<git-common-dir>/sykli/runs/<run-id>/rcpt_<sha256>.json`. The copy is
+  written durably before the run is recorded concluded, so the evidence of a
+  run, detached or not, outlives the worktree that ran it.
+  - `status --run` reports it as `receipt.kept` (`path`, `present`) and
+    prints it as `kept:`. A receipt gone from its worktree prints as
+    `(gone)`.
+  - `status --commit` judges it like any receipt of the run. A concluded
+    failed run whose receipt is gone from its worktree still counts as a
+    failure, unless its kept copy is itself current evidence for the commit.
+  - `verify` reads it from there like any receipt; with `--commit`, from any
+    worktree of the clone.
+  - It is removed when the run is pruned.
 - Durable graph runs (Linux and macOS). Every `run` is journaled in
   `<git-common-dir>/sykli/runs/<run-id>/` before any task is dispatched, and
   each task's attempts as they happen (dispatched, started, finished with exit
@@ -191,6 +239,12 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- A declared `env` value that contains `${` must name `${worktree_cache}` and
+  close it. Any other `${NAME}`, or an unclosed `${`, is refused when the
+  contract is read: `validate` exits 1, and `run`, `lock`, `plan` and `verify`
+  exit 2. Such a value used to reach the task literally (sykli never expanded
+  it). A `$` that does not open `${` is kept as written, and there is no
+  escape for a literal `${`.
 - On Linux and macOS `run` needs a writable common git directory: every run
   is recorded in `<git-common-dir>/sykli/runs/` before any task starts, and
   `run` exits 2 when it cannot write there (with `chmod a-w .git`, an earlier

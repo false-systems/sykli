@@ -2215,3 +2215,129 @@ fn assume_ended_is_recorded() {
     assert!(reason.contains("--assume-ended"), "{first}");
     assert!(reason.contains(&group.to_string()), "{first}");
 }
+
+/// A run keeps its receipt in its own directory, in the common git
+/// directory, before it concludes: the evidence outlives the checkout that
+/// ran it, as a caller's disposable checkout is removed once its run ends.
+/// From another worktree of the clone, `status --run` still names the
+/// receipt, `verify --commit` accepts it from there, and `status --commit`
+/// counts it as recorded.
+#[test]
+fn a_runs_receipt_outlives_the_worktree_that_ran_it() {
+    let f = Fixture::new("kept", "one\n", one_task);
+    f.unlatch();
+    for command in ["status", "verify"] {
+        let help = f.output(&[command, "--help"]);
+        assert!(
+            text(&help.stdout).contains("receipt.kept"),
+            "{command} --help"
+        );
+    }
+    let rev = f.git(&["rev-parse", "HEAD"]);
+    let checkout = f.base.join("checkout");
+    f.git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "--detach",
+        checkout.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let out = f
+        .sykli(&["run", "sykli.json", "--detach", "--json"])
+        .current_dir(&checkout)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let run = answer["run"].as_str().unwrap().to_owned();
+    wait_until(|| f.status(&run)["state"] == "completed");
+
+    let status = f.status(&run);
+    let receipt = &status["receipt"];
+    let path = PathBuf::from(receipt["path"].as_str().unwrap());
+    assert!(
+        path.starts_with(fs::canonicalize(&checkout).unwrap()),
+        "{receipt}"
+    );
+    assert_eq!(receipt["present"], true, "{receipt}");
+    let kept = PathBuf::from(
+        receipt["kept"]["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no kept receipt: {receipt}")),
+    );
+    assert_eq!(
+        kept.parent(),
+        Some(fs::canonicalize(f.runs_dir().join(&run)).unwrap().as_path()),
+        "{receipt}"
+    );
+    assert_eq!(receipt["kept"]["present"], true, "{receipt}");
+    let bytes = fs::read(&kept).unwrap();
+    assert_eq!(bytes, fs::read(&path).unwrap());
+    assert_eq!(receipt["digest"], format!("{:x}", Sha256::digest(&bytes)));
+
+    // The checkout goes, as a caller's rolling checkout does.
+    f.git(&["worktree", "remove", "--force", checkout.to_str().unwrap()]);
+    assert!(!checkout.exists());
+    let status = f.status(&run);
+    assert_eq!(status["state"], "completed", "{status}");
+    assert_eq!(status["receipt"]["present"], false, "{status}");
+    assert_eq!(status["receipt"]["kept"]["present"], true, "{status}");
+    assert_eq!(status["receipt"]["kept"]["path"], kept.to_str().unwrap());
+    let human = f.output(&["status", "--run", &run]);
+    assert!(
+        text(&human.stdout).contains(kept.to_str().unwrap()),
+        "{}",
+        text(&human.stdout)
+    );
+
+    let verified = f.verify_commit(&kept, &rev);
+    assert_eq!(
+        verified.status.code(),
+        Some(0),
+        "{}{}",
+        text(&verified.stdout),
+        text(&verified.stderr)
+    );
+    let commit = f.commit_status(&rev);
+    assert_eq!(commit["verdict"], "passed", "{commit}");
+    assert_eq!(
+        commit["current"][0]["receipt"],
+        kept.to_str().unwrap(),
+        "{commit}"
+    );
+    assert_eq!(commit["current"][0]["recorded"], true, "{commit}");
+}
+
+/// A failed run's receipt, kept by the run, still decides the commit once
+/// the worktree that ran it is gone: a failure is never hidden by losing
+/// the checkout.
+#[test]
+fn a_failed_runs_kept_receipt_still_fails_the_commit() {
+    let f = Fixture::new("keptfail", "two\n", one_task);
+    f.unlatch();
+    let rev = f.git(&["rev-parse", "HEAD"]);
+    let checkout = f.base.join("checkout");
+    f.git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "--detach",
+        checkout.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let out = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .current_dir(&checkout)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    f.git(&["worktree", "remove", "--force", checkout.to_str().unwrap()]);
+    let run = f.run_id();
+    let kept = f.status(&run)["receipt"]["kept"].clone();
+    assert_eq!(kept["present"], true, "{kept}");
+    let commit = f.commit_status(&rev);
+    assert_eq!(commit["verdict"], "failed", "{commit}");
+    assert_eq!(commit["current"][0]["receipt"], kept["path"], "{commit}");
+    assert_eq!(commit["current"][0]["judgement"], "failed", "{commit}");
+}

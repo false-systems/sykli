@@ -22,6 +22,7 @@
         "src/canonical.rs",
         "src/journal.rs",
         "src/runs.rs",
+        "src/worktree_cache.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -37,6 +38,7 @@
         "tests/facts.rs",
         "tests/forgery.rs",
         "tests/runs.rs",
+        "tests/worktree_cache.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -83,6 +85,7 @@
         "src/canonical.rs",
         "src/journal.rs",
         "src/runs.rs",
+        "src/worktree_cache.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -98,6 +101,7 @@
         "tests/facts.rs",
         "tests/forgery.rs",
         "tests/runs.rs",
+        "tests/worktree_cache.rs",
         "tests/snapshot.rs"
       ]
     },
@@ -126,6 +130,7 @@
         "src/canonical.rs",
         "src/journal.rs",
         "src/runs.rs",
+        "src/worktree_cache.rs",
         "src/evidence.rs",
         "src/github.rs",
         "src/inspect.rs",
@@ -156,6 +161,7 @@
         "tests/facts.rs",
         "tests/forgery.rs",
         "tests/runs.rs",
+        "tests/worktree_cache.rs",
         "tests/snapshot.rs",
         "tests/qa/sykli.json",
         ".github/workflows/ci.yml",
