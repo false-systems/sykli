@@ -579,8 +579,23 @@ struct Execution {
     stdout_digest: String,
     stderr_digest: String,
     stderr: String,
+    /// The variables it inherited, each `set` or `absent`: never a value,
+    /// nor a digest of one (an unsalted digest of a short secret is found by
+    /// trying values).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    inherited_digests: BTreeMap<String, String>,
+    inherited: BTreeMap<String, String>,
+}
+
+/// The inherited variables a command ran with, by name: `set` or `absent`.
+/// What a delivery records of them; a value's digest never reaches it.
+fn inherited(digests: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    digests
+        .iter()
+        .map(|(name, digest)| {
+            let state = if digest == "absent" { "absent" } else { "set" };
+            (name.clone(), state.to_string())
+        })
+        .collect()
 }
 
 impl Execution {
@@ -608,7 +623,7 @@ impl Execution {
             stdout_digest: record.stdout_digest.clone(),
             stderr_digest: record.stderr_digest.clone(),
             stderr,
-            inherited_digests: record.inherited_digests.clone(),
+            inherited: inherited(&record.inherited_digests),
         }
     }
 
@@ -791,8 +806,9 @@ enum End {
 enum Effect {
     /// It has not ended.
     Pending,
-    /// The apply exited 0.
-    Applied,
+    /// The apply exited 0: the target accepted the change. An acknowledgement,
+    /// not an observed effect.
+    Acknowledged,
     /// The apply reported failure, or never started; the target may hold
     /// part of what it sent.
     Refused,
@@ -850,7 +866,7 @@ impl AttemptState {
     fn effect(&self) -> Effect {
         match &self.end {
             None => Effect::Pending,
-            Some(End::Acknowledged { .. }) => Effect::Applied,
+            Some(End::Acknowledged { .. }) => Effect::Acknowledged,
             Some(End::Failed {
                 exit_code: Some(_),
                 signal: None,
@@ -1809,8 +1825,20 @@ impl Coordinator {
     }
 
     /// Keep an apply's output record, named by its digest.
+    /// The record names the inherited variables (`inherited`, `set` or
+    /// `absent`) in place of the digests of their values.
     fn persist(&self, record: &TaskReceipt) -> Result<String, String> {
-        let bytes = serde_json::to_vec(record).map_err(err)?;
+        let mut kept = serde_json::to_value(record).map_err(err)?;
+        if let Some(fields) = kept.as_object_mut() {
+            fields.remove("inherited_digests");
+            if !record.inherited_digests.is_empty() {
+                fields.insert(
+                    "inherited".into(),
+                    json!(inherited(&record.inherited_digests)),
+                );
+            }
+        }
+        let bytes = serde_json::to_vec(&kept).map_err(err)?;
         let digest = crate::sha256(&bytes);
         publish_with(
             &self
@@ -2083,7 +2111,7 @@ impl Coordinator {
             return Ok(Done::Interrupted(signal));
         }
         let settle = match self.last().map(|attempt| attempt.effect()) {
-            Some(Effect::Applied) => self.request().definition()?.settle_seconds,
+            Some(Effect::Acknowledged) => self.request().definition()?.settle_seconds,
             _ => 0,
         };
         match self.settle(runtime, settle)? {
@@ -2591,10 +2619,15 @@ pub(crate) fn resume(
                      without --reapply to dispatch it"
                 ));
             }
-            Some((Effect::Applied | Effect::Observed, attempt)) => {
+            Some((effect @ (Effect::Acknowledged | Effect::Observed), attempt)) => {
                 return Err(format!(
-                    "attempt {attempt} of delivery {id} took effect; nothing is applied again \
-                     (deliver again for a new apply)"
+                    "attempt {attempt} of delivery {id} {}; nothing is applied again (deliver \
+                     again for a new apply)",
+                    if effect == Effect::Acknowledged {
+                        "was acknowledged by the target"
+                    } else {
+                        "took effect, as an observation of the target showed"
+                    }
                 ));
             }
             _ => {}
@@ -2623,7 +2656,7 @@ pub(crate) fn resume(
     let settle = request.definition()?.settle_seconds;
     let stopped = match last.effect() {
         Effect::Pending => unreachable!("take_over ends every unfinished attempt"),
-        Effect::Applied | Effect::Observed => coordinator.settle(&runtime, settle)?,
+        Effect::Acknowledged | Effect::Observed => coordinator.settle(&runtime, settle)?,
         Effect::Refused if reapply => {
             return coordinator.apply_and_observe(&runtime, progress, true);
         }
@@ -2886,7 +2919,7 @@ fn judge(
             ),
             (Some(End::Acknowledged { .. }), _) => (
                 "acknowledged",
-                "applied",
+                "acknowledged",
                 "the apply exited 0: the target accepted the change (an acknowledgement, not a \
                  deployment)"
                     .into(),
@@ -2978,7 +3011,7 @@ fn judge(
                 })).collect::<Vec<_>>(),
                 "effect": match attempt.effect() {
                     Effect::Pending => "pending",
-                    Effect::Applied => "applied",
+                    Effect::Acknowledged => "acknowledged",
                     Effect::Refused => "refused",
                     Effect::Unknown => "unknown",
                     Effect::Observed => "observed",
@@ -3735,6 +3768,7 @@ pub(crate) fn describe(status: &Value) -> String {
             text(&status["delivery"])
         ));
     }
+    lines.push(format!("trust: {}", text(&status["trust"])));
     lines.push("Use --json for every attempt and observation.".into());
     lines.join("\n")
 }
@@ -3959,7 +3993,7 @@ mod tests {
             stdout_digest: id('f'),
             stderr_digest: id('f'),
             stderr: String::new(),
-            inherited_digests: BTreeMap::new(),
+            inherited: BTreeMap::new(),
         }
     }
 

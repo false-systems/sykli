@@ -464,6 +464,12 @@ fn a_healthy_delivery_is_verified_from_its_observation() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(label(&status), "VERIFIED HEALTHY", "{status}");
     assert_eq!(dim(&status, "operation")["state"], "acknowledged");
+    // An exit 0 is an acknowledgement, never called an effect.
+    assert_eq!(dim(&status, "operation")["effect"], "acknowledged");
+    assert_eq!(
+        dim(&status, "operation")["attempts"][0]["effect"],
+        "acknowledged"
+    );
     assert_eq!(dim(&status, "artifact")["verdict"], "match");
     assert_eq!(dim(&status, "desired")["verdict"], "this-delivery");
     assert_eq!(dim(&status, "desired")["attributed"], true);
@@ -504,6 +510,11 @@ fn a_healthy_delivery_is_verified_from_its_observation() {
     ] {
         assert!(human.contains(line), "{human}");
     }
+    // And what it rests on, as the README says.
+    assert!(
+        human.contains("trust: trusted-local-coordinator-and-journal"),
+        "{human}"
+    );
 }
 
 /// An acknowledgement is not a deployment: the apply exited 0 and the target
@@ -1637,14 +1648,31 @@ fn credentials_reach_only_the_command_that_inherits_them() {
     );
     let id = f.newest();
     let directory = f.repo.join(".git/sykli/deliveries").join(&id);
+    // Nor its unsalted digest, from which a short value is found by trying
+    // values: a delivery's records name the inherited variables, no more.
+    let digest: String = {
+        use sha2::Digest;
+        sha2::Sha256::digest(b"s3cr3t-value")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let mut named = false;
     for entry in walk(&directory) {
-        let bytes = fs::read(&entry).unwrap_or_default();
+        let bytes = String::from_utf8_lossy(&fs::read(&entry).unwrap_or_default()).into_owned();
         assert!(
-            !String::from_utf8_lossy(&bytes).contains("s3cr3t-value"),
+            !bytes.contains("s3cr3t-value"),
             "the credential is in {}",
             entry.display()
         );
+        assert!(
+            !bytes.contains(&digest),
+            "the credential's digest is in {}",
+            entry.display()
+        );
+        named |= bytes.contains("DEPLOY_TOKEN");
     }
+    assert!(named, "the inherited variable is named nowhere");
 }
 
 fn walk(directory: &Path) -> Vec<PathBuf> {
@@ -1713,19 +1741,23 @@ fn an_invalid_delivery_contract_is_refused() {
 /// produce the pinned artifact, request the delivery, let the apply run and
 /// kill the coordinator before the acknowledgement is recorded, then resume,
 /// which reconciles by querying the actual target. Then it observes again.
-/// Every status is printed (`--nocapture`), for the record.
+/// Every status is printed (`--nocapture`), for the record. Ignored unless
+/// asked for (`cargo test --test delivery -- --ignored real_target`), so it
+/// is never counted as passing when it did not run; asked for without its
+/// variables, or in a release build, it fails.
 #[test]
+#[ignore = "opt-in: needs a real target (SYKLI_TEST_REAL_TARGET, SYKLI_TEST_REAL_TARGET_NAME)"]
 fn real_target_experiment_e() {
     let (Some(repo), Ok(target)) = (
         std::env::var_os("SYKLI_TEST_REAL_TARGET").map(PathBuf::from),
         std::env::var("SYKLI_TEST_REAL_TARGET_NAME"),
     ) else {
-        eprintln!("skipped: set SYKLI_TEST_REAL_TARGET and SYKLI_TEST_REAL_TARGET_NAME");
-        return;
+        panic!("not run: set SYKLI_TEST_REAL_TARGET and SYKLI_TEST_REAL_TARGET_NAME");
     };
-    if hooks_missing() {
-        return;
-    }
+    assert!(
+        !hooks_missing(),
+        "not run: the crash hooks are compiled into debug builds only"
+    );
     let pause = std::env::temp_dir().join(format!("sykli-real-e-{}", std::process::id()));
     fs::create_dir_all(&pause).unwrap();
     let sykli = |args: &[&str]| {
