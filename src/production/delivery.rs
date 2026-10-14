@@ -1385,18 +1385,16 @@ fn next_in_sequence(common: &Path, target: &str) -> Result<u64, String> {
             .trim()
             .parse::<u64>()
             .map_err(|_| format!("{}: not a sequence number", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => list(common)
-            .iter()
-            .filter(|d| d.request.target == target)
-            .map(|d| {
-                let applied = Lease::journal_read(&d.path)
-                    .and_then(|_journal| History::load(&d.path, &d.id))
-                    .ok()
-                    .and_then(|h| h.last().map(|a| a.target_sequence));
-                applied.unwrap_or(0).max(d.request.target_sequence)
-            })
-            .max()
-            .unwrap_or(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut last = 0;
+            for delivery in list(common).iter().filter(|d| d.request.target == target) {
+                let _journal = Lease::journal_read(&delivery.path)?;
+                let history = History::load(&delivery.path, &delivery.id)?;
+                let applied = history.last().map_or(0, |a| a.target_sequence);
+                last = last.max(applied).max(delivery.request.target_sequence);
+            }
+            last
+        }
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     let next = last + 1;
@@ -1529,7 +1527,11 @@ fn clear_to_apply(
                 ));
             }
             Some(Hold::Unreached { attempt, reason }) => (Some(attempt), reason),
-            Some(Hold::Unreadable(error)) => (None, format!("its journal does not read: {error}")),
+            Some(Hold::Unreadable(error)) => {
+                return Err(format!(
+                    "delivery {id} journal does not read: {error}; nothing is applied to {target}"
+                ));
+            }
         };
         if applied_over.contains(id.as_str()) {
             continue;
@@ -1563,21 +1565,27 @@ fn clear_to_apply(
 /// if that was after this one's last apply, in the target's sequence (never
 /// by the clock). Its id and when it was dispatched. None while this one has
 /// applied nothing.
-fn superseded_by(common: &Path, id: &str, history: &History) -> Option<(String, u64)> {
+fn superseded_by(
+    common: &Path,
+    id: &str,
+    history: &History,
+) -> Result<Option<(String, u64)>, String> {
     let request = history.request();
-    let mine = history.last()?.target_sequence;
-    list(common)
+    let Some(mine) = history.last().map(|last| last.target_sequence) else {
+        return Ok(None);
+    };
+    let mut newest = None;
+    for other in list(common)
         .into_iter()
         .filter(|other| other.request.target == request.target && other.id != id)
-        .filter_map(|other| {
-            let _journal = Lease::journal_read(&other.path).ok()?;
-            let theirs = History::load(&other.path, &other.id).ok()?;
-            let last = theirs.last()?;
-            (last.target_sequence > mine)
-                .then(|| (last.target_sequence, other.id.clone(), last.dispatched_at))
-        })
-        .max()
-        .map(|(_, other, dispatched_at)| (other, dispatched_at))
+    {
+        let _journal = Lease::journal_read(&other.path)?;
+        let theirs = History::load(&other.path, &other.id)?;
+        if let Some(last) = theirs.last().filter(|last| last.target_sequence > mine) {
+            newest = newest.max(Some((last.target_sequence, other.id, last.dispatched_at)));
+        }
+    }
+    Ok(newest.map(|(_, other, dispatched_at)| (other, dispatched_at)))
 }
 
 // ---------------------------------------------------------------------------
@@ -2883,7 +2891,7 @@ pub(crate) fn status(id: &str) -> Result<Value, String> {
         History::load(&directory, id)?
     };
     let live = Lease::observe(&directory.join("lease"))?;
-    let superseded = superseded_by(&common, id, &history);
+    let superseded = superseded_by(&common, id, &history)?;
     let known: BTreeMap<String, String> = list(&common)
         .into_iter()
         .map(|d| (d.id, d.request.intended))
@@ -3054,7 +3062,8 @@ fn judge(
     // Observations in the order their observers began, never the order their
     // records landed: one that began before an observation already recorded
     // may have read the target before that one did, so it is out of order
-    // and decides nothing (it is kept, and listed).
+    // and cannot decide current state (it is kept, listed, and prevents an
+    // older healthy observation from establishing current health).
     let (in_order, out_of_order) = by_start(&history.seen);
     // Which observations speak about this apply: recorded after its dispatch,
     // and begun once it had ended (`observable_from`), so never one begun
@@ -3070,6 +3079,14 @@ fn judge(
     let latest = after.last().copied();
     let usable = after.iter().rev().find(|s| s.usable().is_some()).copied();
     let observation = usable.and_then(|s| s.usable());
+    // A later record with a non-increasing start may be a slow observer,
+    // or a new observer after a clock step. Neither ordering is proven.
+    // Only a subsequently recorded, strictly newer start resolves that gap.
+    let order_uncertain = usable.is_some_and(|chosen| {
+        out_of_order
+            .iter()
+            .any(|s| s.sequence > chosen.sequence && s.sequence > since)
+    });
 
     // Superseded, as this clone's journal says (`superseded`), or else as
     // the target says: its desired state names another operation that is no
@@ -3340,7 +3357,7 @@ fn judge(
             let ahead = seen.at().saturating_sub(now_ms);
             let future = ahead > CLOCK_SKEW_MS;
             let age = now_ms.saturating_sub(seen.at());
-            let fresh = !future && age <= bound_ms && changed_since.is_empty();
+            let fresh = !order_uncertain && !future && age <= bound_ms && changed_since.is_empty();
             json!({
                 "dimension": "F",
                 "observation": seen.sequence,
@@ -3352,7 +3369,9 @@ fn judge(
                 "changed_since": changed_since,
                 "token": seen.observation.as_ref().and_then(|o| o.token.clone()),
                 "fresh": fresh,
-                "verdict": if future {
+                "verdict": if order_uncertain {
+                    "unordered"
+                } else if future {
                     "future"
                 } else if fresh {
                     "fresh"
@@ -3535,6 +3554,14 @@ fn judge(
             request.target
         ));
         NOT_VERIFIED_HEALTHY
+    } else if order_uncertain {
+        reasons.push("observation order is uncertain: a later record has an equal or earlier observer start; observe again after the clock catches up".into());
+        let label = healthy_dims(&mut reasons);
+        if label == VERIFIED_HEALTHY {
+            UNKNOWN
+        } else {
+            label
+        }
     } else if freshness["fresh"] != true {
         let mut as_observed = Vec::new();
         let label = healthy_dims(&mut as_observed);
@@ -3612,7 +3639,7 @@ fn judge(
     }))
 }
 
-/// The observations whose observers began no earlier than any observation
+/// The observations whose observers began strictly later than any observation
 /// recorded before them, in journal order; and the rest, out of order. An
 /// observer that began earlier may have read the target before a recorded
 /// observation did, however late its own record landed, so it can never be
@@ -3621,7 +3648,7 @@ fn by_start(seen: &[Seen]) -> (Vec<&Seen>, Vec<&Seen>) {
     let mut began = 0;
     let (mut in_order, mut out_of_order) = (Vec::new(), Vec::new());
     for s in seen {
-        if s.at() < began {
+        if !in_order.is_empty() && s.at() <= began {
             out_of_order.push(s);
         } else {
             began = s.at();
@@ -4519,6 +4546,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_clock_step_or_equal_start_cannot_restore_old_healthy_evidence() {
+        for offset in [0, 3_000, 3_000_000] {
+            let mut facts = acknowledged();
+            facts.push(observed(
+                Some(observation(&intended(), Some(&delivery_id()))),
+                Some(1),
+            ));
+            let mut earlier = execution();
+            earlier.started_at_ms = later() - offset;
+            facts.push(Fact::observed(
+                None,
+                earlier,
+                None,
+                Some("observer failed".into()),
+                None,
+            ));
+            let h = history(facts.clone()).unwrap();
+            for now in [later() - offset, later(), later() + 60_000] {
+                let v = judge(
+                    &std::env::temp_dir(),
+                    &h,
+                    false,
+                    now,
+                    None,
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert_eq!(v["label"], UNKNOWN, "offset {offset}: {v}");
+                assert_eq!(v["dimensions"]["freshness"]["fresh"], false, "{v}");
+                assert_eq!(v["dimensions"]["freshness"]["verdict"], "unordered", "{v}");
+            }
+            let mut newer = execution();
+            newer.started_at_ms = later() + 60_001;
+            facts.push(Fact::observed(
+                None,
+                newer,
+                Some(observation(&intended(), Some(&delivery_id()))),
+                None,
+                None,
+            ));
+            assert_eq!(judged(facts, 60_002, None)["label"], VERIFIED_HEALTHY);
+        }
+    }
+
     /// Only the controller's own `complete` counts toward VERIFIED HEALTHY:
     /// an observation that says converged while its controller says it is
     /// still working, or does not know, contradicts itself.
@@ -4617,10 +4689,44 @@ mod tests {
         let second = deliver(5_000);
         let load = |id: &str| History::load(&delivery_directory(&common, id).unwrap(), id).unwrap();
         assert_eq!(
-            superseded_by(&common, &first, &load(&first)).map(|(by, _)| by),
+            superseded_by(&common, &first, &load(&first))
+                .unwrap()
+                .map(|(by, _)| by),
             Some(second.clone())
         );
-        assert_eq!(superseded_by(&common, &second, &load(&second)), None);
+        assert_eq!(
+            superseded_by(&common, &second, &load(&second)).unwrap(),
+            None
+        );
+        // Another delivery's busy journal is unknown, never silently absent.
+        let first_path = delivery_directory(&common, &first).unwrap();
+        let held = Lease::journal(&first_path).unwrap();
+        assert!(
+            clear_to_apply(
+                &list(&common),
+                "staging",
+                Some(&second),
+                std::slice::from_ref(&first)
+            )
+            .is_err_and(|error| error.contains("journal-busy"))
+        );
+        assert!(
+            superseded_by(&common, &second, &load(&second))
+                .is_err_and(|error| error.contains("journal-busy"))
+        );
+        let sequence = target_directory(&common, "staging")
+            .unwrap()
+            .join("sequence/last");
+        fs::remove_file(&sequence).unwrap();
+        assert!(
+            next_in_sequence(&common, "staging").is_err_and(|error| error.contains("journal-busy"))
+        );
+        assert!(
+            !sequence.exists(),
+            "never rebuild a sequence from incomplete history"
+        );
+        drop(held);
+        assert_eq!(next_in_sequence(&common, "staging").unwrap(), 5);
         let _ = fs::remove_dir_all(&common);
     }
 

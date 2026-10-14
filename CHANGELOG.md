@@ -23,7 +23,7 @@ contract consumer can observe; internal refactors are not listed.
     shows, recorded with the time taken before its observer was spawned and
     the digest of the observer's output. Observations count in the order
     their observers began: one that began before an observation already
-    recorded decides nothing (`out_of_order`).
+    recorded is unordered (`out_of_order`) and cannot establish current health.
   - **The verdict** (`sykli-delivery-status.v1`) has six dimensions: A the
     operation (an exit 0's effect is `acknowledged`), B intended against
     running artifact, C the desired state (this delivery's only when the
@@ -418,6 +418,17 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- Existing v2 lock files must pin the named contract; empty maps and missing
+  entries no longer silently run unpinned, including `verify --commit`.
+  `sykli lock` can add the missing entry without discarding sibling pins.
+- Delivery observations with equal or decreasing start times cannot revive
+  older healthy evidence after a clock step. Freshness reports `unordered`
+  until a subsequently recorded, strictly newer observation resolves the gap.
+- Journal lock acquisition fails with `journal-busy` after 2 seconds rather
+  than hanging on a stopped writer. Cross-delivery supersession and target
+  sequence recovery propagate unreadable journals instead of skipping them.
+  `--reapply-over` cannot override an unreadable journal: it requires a
+  recorded reconciliation that could not reach the target.
 - `verify --commit` and the pre-push hook: two forgeries the first fix for
   sykli#78 still let through are refused.
   - A symbolic link whose target has a `..` after a name (`sub/../x`, with

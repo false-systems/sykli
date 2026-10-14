@@ -658,7 +658,10 @@ directory:
   changing one does not invalidate a cached pass. Keep such helpers in the
   repository and declare them, or install them as tools.
 - The lock is the `sykli.lock` beside the contract as you name it, as always,
-  and `sykli lock "$gate"` writes it there. For a contract named through a
+  and `sykli lock "$gate"` writes it there. An existing v2 lock must contain
+  the named contract, even when it already pins other contracts: run `sykli
+  lock "$gate"` to add it. Only an absent lock permits an unpinned contract.
+  For a contract named through a
   symbolic link that is the lock beside the link: when there is none there but
   the link's target has one, the contract runs unpinned and sykli warns.
 - Receipts and the cache stay in the repository's `.sykli/`. `init --contract`
@@ -866,12 +869,20 @@ What the label rests on, and its limits:
 - **Observations count in the order their observers began**, never the order
   their records landed: the time is taken before the observer is spawned, and
   one that began before an observation already recorded (a slow observer
-  beside a faster one) is kept, listed as `out_of_order`, and decides nothing.
+  beside a faster one) is kept and listed as `out_of_order`. Equal start times
+  are unordered too. A later unordered record prevents an older healthy
+  observation from establishing current health (`freshness.verdict: unordered`,
+  label `UNKNOWN`), until a subsequently recorded observation starts strictly
+  later than all preceding observations. Negative evidence remains visible.
 - **The clock.** Observations are dated on this machine's clock. One dated
   more than 5 s ahead of now (the clock stepped back since) is never fresh:
   its age is unknown, not 0. Which apply to a target came after which follows
   the target's own sequence in this clone, taken under the target's lock,
   never the clock.
+- **Busy journals.** Reading or writing a journal waits at most 2 seconds
+  for its lock, then fails with `journal-busy`. A stopped writer's lock is
+  never stolen, and an unreadable delivery is never skipped to declare another
+  delivery healthy or rebuild the target's sequence. Retry once the holder ends.
 - **Superseded** means another apply to the target came after this
   delivery's. In this clone that is known from the journals at once. A
   delivery from another clone is known only when an observation of this one

@@ -279,6 +279,33 @@ impl Lease {
         }
     }
 
+    /// Journal critical sections are short. A stopped writer must not hang
+    /// inspection or another operation indefinitely; never steal its lock.
+    fn journal_lock(file: File, mode: i32, path: &Path) -> Result<Self, String> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // SAFETY: owned descriptor; LOCK_NB never waits in the kernel.
+            if unsafe { flock(file.as_raw_fd(), mode | 4) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Err(format!("{}: {error}", path.display()));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "journal-busy: {} remained locked for 2 seconds; retry when its holder finishes",
+                    path.display()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     pub fn journal(directory: &Path) -> Result<Self, String> {
         let path = directory.join("journal-lock");
         let file = match File::open(&path) {
@@ -288,16 +315,17 @@ impl Lease {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(path)
+                .open(&path)
                 .map_err(err)?,
             Err(error) => return Err(err(error)),
         };
-        Self::lock(file, 2) // LOCK_EX; the lock file's contents are never written.
+        Self::journal_lock(file, 2, &path) // LOCK_EX; contents are never written.
     }
 
     pub fn journal_read(directory: &Path) -> Result<Option<Self>, String> {
-        match File::open(directory.join("journal-lock")) {
-            Ok(file) => Self::lock(file, 1).map(Some), // LOCK_SH
+        let path = directory.join("journal-lock");
+        match File::open(&path) {
+            Ok(file) => Self::journal_lock(file, 1, &path).map(Some), // LOCK_SH
             // Older stores have no journal lock. Read their validated atomic prefix.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(err(error)),
@@ -379,6 +407,34 @@ mod tests {
     use super::*;
     use crate::canonical::{NONCE, now};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn journal_contention_is_bounded_without_stealing_the_lock() {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-journal-busy-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        for read in [true, false] {
+            let held = Lease::journal(&directory).unwrap();
+            // A finite holder also bounds this regression on the old implementation.
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                drop(held);
+            });
+            let result = if read {
+                Lease::journal_read(&directory).map(|_| ())
+            } else {
+                Lease::journal(&directory).map(|_| ())
+            };
+            release.join().unwrap();
+            assert!(result.is_err_and(|error| error.contains("journal-busy")));
+            assert!(directory.join("journal-lock").is_file());
+            drop(Lease::journal(&directory).unwrap());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn observing_a_lease_does_not_reserve_it() {
