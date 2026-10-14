@@ -533,7 +533,8 @@ enum Command {
         commit: Option<String>,
         /// Print the verdict as one JSON document (`sykli-verify.v1`): every check, the
         /// first failing stage, the exit code, and what the verdict establishes and does
-        /// not; the exit code is unchanged
+        /// not, with the receipt's own outcome as `claimed_outcome`; the exit code is
+        /// unchanged
         #[arg(long)]
         json: bool,
     },
@@ -2433,6 +2434,14 @@ fn report_json(
     // outcome rewritten with consistent digests verifies (`TRUST`). Its check
     // is reported, and decides the exit code, but establishes nothing.
     not_established.extend(["outcome", "provenance", "producer", "execution"]);
+    // The receipt's own outcome, as it records it, for a caller that needs
+    // it without reading the human `actual` text: its claim, which a passing
+    // verify does not establish. Null when the receipt cannot be read or
+    // records no outcome a receipt can have.
+    let claimed_outcome = fs::read(receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| serde_json::from_value::<Outcome>(value["outcome"].clone()).ok());
     if let Some(first) = first {
         eprintln!("refused: {}", refusal(first));
     }
@@ -2449,6 +2458,7 @@ fn report_json(
                 None => json!({"kind": "checkout"}),
             },
             "verified": exit == 0,
+            "claimed_outcome": claimed_outcome,
             "exit": exit,
             "stage": first.map(|check| check.name),
             "refusal": first.map(refusal),

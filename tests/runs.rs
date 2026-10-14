@@ -1375,6 +1375,25 @@ fn verify_json_reports_the_verdict_and_what_it_establishes() {
         verdict["trust"]["not_established"],
         json!(["outcome", "provenance", "producer", "execution"])
     );
+    // The receipt's own outcome, as a field: its claim, not established.
+    assert_eq!(verdict["claimed_outcome"], "passed");
+
+    // A cached receipt claims `cached`.
+    let cached = f.output(&["run", "sykli.json", "--json"]);
+    let cached_path = f.base.join("cached.json");
+    fs::write(&cached_path, &cached.stdout).unwrap();
+    let out = f.output(&[
+        "verify",
+        cached_path.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--commit",
+        "HEAD",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["claimed_outcome"], "cached");
     fs::write(f.repo.join("file.txt"), "two\n").unwrap();
     let c2 = f.commit("c2");
     let out = f.output(&[
@@ -1397,6 +1416,41 @@ fn verify_json_reports_the_verdict_and_what_it_establishes() {
             .unwrap()
             .contains(&json!("source"))
     );
+    // Refused for c2, it still claims what it claimed.
+    assert_eq!(verdict["claimed_outcome"], "passed");
+
+    // A failed run's receipt claims `failed`, and verify exits 1.
+    let failed = f.output(&["run", "sykli.json", "--json"]);
+    assert_eq!(failed.status.code(), Some(1), "{}", text(&failed.stderr));
+    let failed_path = f.base.join("failed.json");
+    fs::write(&failed_path, &failed.stdout).unwrap();
+    let out = f.output(&[
+        "verify",
+        failed_path.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--commit",
+        &c2,
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["stage"], "outcome");
+    assert_eq!(verdict["claimed_outcome"], "failed");
+
+    // A receipt that cannot be read claims nothing.
+    let unreadable = f.base.join("unreadable.json");
+    fs::write(&unreadable, "not json").unwrap();
+    let out = f.output(&[
+        "verify",
+        unreadable.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["claimed_outcome"], Value::Null);
 }
 
 /// `status --commit`: what applies to a commit now is kept apart from what

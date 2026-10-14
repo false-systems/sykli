@@ -51,7 +51,9 @@ contract consumer can observe; internal refactors are not listed.
   stage, the exit code and the trust tiers established (`schema`, `contract`,
   `source`, `consistency`) and not established (`outcome`, `provenance`,
   `producer`, `execution`): an outcome is the receipt's claim. Exit codes are
-  unchanged.
+  unchanged. `claimed_outcome` gives the receipt's own outcome as it
+  records it (`passed`, `cached`, `failed`, `errored`; null when the receipt
+  cannot be read).
 
 - Receipts record each task's declared inputs (`tasks[].inputs`): for each
   input, the SHA-256 of the bytes the run read, its execute bits (`mode`) and

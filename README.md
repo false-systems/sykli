@@ -382,6 +382,10 @@ verdict establishes (`schema`, `contract`, `source`, `consistency`) and does
 not (`outcome`, `provenance`, `producer`, `execution`). An outcome is the
 receipt's claim: receipts are unsigned, and an outcome rewritten with
 consistent digests verifies. A failed outcome still exits 1.
+`claimed_outcome` is the receipt's own `outcome` as it records it (`passed`,
+`cached`, `failed`, `errored`), or null when the receipt cannot be read: the
+claim, given as a field so a caller need not read the human `actual` text of
+the outcome check.
 
 The journal is local and unsigned, trusted like the receipts, and claims no
 authenticity. Each record is synced with `fsync(2)` before it is acknowledged.
