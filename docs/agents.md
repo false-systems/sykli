@@ -261,7 +261,11 @@ than the contract's bound; `acknowledged` alone is not a deployment. A status
 ages: re-observe with `sykli observe --delivery ID --json`, which never
 applies anything. After a crash, `sykli resume --delivery ID --json`
 reconciles an apply whose end is unknown by observing the target; if that
-leaves it `UNKNOWN`, apply again only deliberately, with `--reapply`.
+leaves it `UNKNOWN`, apply again only deliberately, with `--reapply`, which
+is refused until an observation has reached the target. A `deliver` refused
+with `target-unreconciled` names an earlier delivery whose effect is unknown:
+resume that one first; never work around it. `--reapply-over ID` is for a
+person who has decided to apply over an effect nobody could observe.
 
 To learn what a pull request has established before acting on it, run
 `sykli inspect --repo OWNER/NAME --pr N --requirements FILE --json` and read the

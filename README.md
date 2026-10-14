@@ -793,7 +793,8 @@ sykli deliver --target staging --rollback-to EARLIER_ID
 - **The commands run as a run's tasks do:** `sh -c` in the contract's
   directory, with a cleared environment plus `PATH`, `HOME` and `TMPDIR`, the
   declared `env`, and the `inherit`ed variables. An inherited value reaches only
-  the command that declares it, and only its digest reaches the journal. Each
+  the command that declares it; the delivery's records name the variable (`set`
+  or `absent`), never its value or a digest of it. Each
   command also gets `SYKLI_DELIVERY` (the id; write it to the target so an
   observer can name it), `SYKLI_INTENDED` and `SYKLI_DELIVERY_TARGET`. `apply`
   also gets `SYKLI_ARTIFACT` (the artifact, materialized) and
@@ -805,8 +806,8 @@ sykli deliver --target staging --rollback-to EARLIER_ID
   the apply is recorded as dispatched before its shell starts. An apply that
   exits 0 is **acknowledged**: the target accepted the change, which is not a
   deployment. Then `observe` runs (until the target settles, at most
-  `settle_seconds`), and every observation is recorded with its time and the
-  digest of what the observer printed.
+  `settle_seconds`), and every observation is recorded with its time (taken
+  before the observer is spawned) and the digest of what the observer printed.
 
 `observe` prints a `sykli-observation.v1`, integers only:
 
@@ -822,45 +823,88 @@ sykli deliver --target staging --rollback-to EARLIER_ID
 
 `reachable: false` (with a `reason`) is itself an observation: the controller
 could not be reached. `desired` is what the target is asked to run, `observed`
-what it runs, by immutable digest; `controller.state` is `pending`,
-`progressing`, `complete`, `failed` or `unknown`.
+what it runs, by immutable digest.
+
+- **`desired.operation` attributes the desired state.** Have `apply` write
+  `$SYKLI_DELIVERY` to the target (an annotation, say) and `observe` report it.
+  Without it, the desired state is attributed to no delivery: no delivery is
+  VERIFIED HEALTHY on it, and no lost acknowledgement is reconciled from it,
+  since the same artifact may have been put there by another delivery.
+- **`controller.state`** is one of `pending`, `progressing`, `complete`,
+  `failed` or `unknown`, and is required when the target is present. Only
+  `complete` counts toward VERIFIED HEALTHY; `failed` is DEGRADED; the others
+  are NOT VERIFIED HEALTHY, whatever `converged` says.
+- **`uid`** identifies the target object. Another uid than the one first
+  observed after this delivery's apply means the object was recreated since,
+  and this delivery never applied to it.
 
 **The verdict has dimensions, never one "succeeded".** `sykli status --delivery
 ID --json` (`sykli-delivery-status.v1`) judges, at the moment it is asked:
 
 | | Dimension | What it compares |
 |---|---|---|
-| A | operation | requested, dispatched, applying, acknowledged, apply-failed, lost, unknown, acknowledgement-lost; superseded by a later delivery to the target |
+| A | operation | requested, dispatched, applying, acknowledged, apply-failed, lost, unknown, acknowledgement-lost, with the effect (`acknowledged` for an exit 0, `observed` only from an observation); superseded by a later apply to the target |
 | B | artifact | the intended identity against what runs (`match`, `partial`, `mismatch`, `none-running`) |
-| C | desired | whether the target's desired state is this delivery's (or modified out of band, rolled back, someone else's) |
-| D | observed | the observed revision against the desired one, converged |
+| C | desired | whether the target's desired state is this delivery's: its artifact, naming this delivery as the operation (`this-delivery`); the artifact with no operation (`unattributed`); or modified out of band, rolled back, someone else's (`other`) |
+| D | observed | the observed revision against the desired one, converged, and the controller's own state (`equals-desired` only when it reports `complete`) |
 | E | health | readiness, the observer's checks, the smoke command |
-| F | freshness | the observation's age against `freshness_seconds`, and any later delivery |
+| F | freshness | the observation's age against `freshness_seconds`, and any later apply to the target |
 
 The label is **VERIFIED HEALTHY** only when B matches, D equals C, E passes and
 F is fresh, and the desired state is the one this delivery's own apply put
-there. Otherwise it is **NOT VERIFIED HEALTHY** (rollout incomplete, apply
-failed, superseded, changed out of band), **DEGRADED** (a failed check or smoke, the controller's own failure,
-the target missing), **UNKNOWN** (the apply's end or the target is unknown) or
-**STALE** (the evidence is too old to say anything about now), with the reasons.
-A passing smoke check or a healthy old replica never makes it healthy: B must
-match.
+there: the target names this delivery as its operation, on the object this
+delivery's apply changed. Otherwise it is **NOT VERIFIED HEALTHY** (rollout
+incomplete, the controller not done, apply failed, superseded, not attributed,
+changed out of band, the target recreated), **DEGRADED** (a failed check or
+smoke, the controller's own failure, the target missing), **UNKNOWN** (the
+apply's end or the target is unknown) or **STALE** (the evidence is too old,
+or dated ahead of now, to say anything about now), with the reasons. A passing
+smoke check or a healthy old replica never makes it healthy: B must match.
+
+What the label rests on, and its limits:
+
+- **Observations count in the order their observers began**, never the order
+  their records landed: the time is taken before the observer is spawned, and
+  one that began before an observation already recorded (a slow observer
+  beside a faster one) is kept, listed as `out_of_order`, and decides nothing.
+- **The clock.** Observations are dated on this machine's clock. One dated
+  more than 5 s ahead of now (the clock stepped back since) is never fresh:
+  its age is unknown, not 0. Which apply to a target came after which follows
+  the target's own sequence in this clone, taken under the target's lock,
+  never the clock.
+- **Superseded** means another apply to the target came after this
+  delivery's. In this clone that is known from the journals at once. A
+  delivery from another clone is known only when an observation of this one
+  shows the target naming that other delivery as its operation: until this
+  delivery is observed again, its label holds as of its last observation,
+  within `freshness_seconds`.
 
 **A lost acknowledgement is never answered by applying again.** If the
 coordinator dies after the apply was dispatched but before its end was
 recorded, `sykli resume --delivery ID` observes the target. When the target's
-desired state is this delivery's artifact (and names this delivery, when the
-target keeps an operation id), the attempt is recorded "acknowledgement lost,
-effect observed"; otherwise its effect is recorded **unknown**, and only
-`--reapply` applies again, as a new attempt that supersedes the old one, which
-stays in the history. The journal itself refuses
-any second apply that was not asked for, or that came before that
+desired state is this delivery's artifact and names this delivery as its
+operation, the attempt is recorded "acknowledgement lost, effect observed";
+otherwise its effect is recorded **unknown** (the artifact alone is recorded
+"artifact present, not attributed to this delivery"), and only `--reapply`
+applies again, as a new attempt that supersedes the old one, which stays in the
+history. `--reapply` is refused while the reconciliation did not reach the
+target (the observer failed, or reported `reachable: false`): nothing was
+learned, so repeating the apply would be blind. The journal itself refuses any
+second apply that was not asked for, or that came before such a
 reconciliation. An apply that was never dispatched is simply dispatched.
 
-What a delivery's status rests on is printed with it: a trusted local
-coordinator and journal, and each observation as the declared observer reported
-it, never independently verified. A delivery is no controller either: sykli
-never re-applies to keep a target in shape, it only runs the commands you
+Nothing else is applied to the target meanwhile. While a delivery to it has an
+apply whose effect is unknown and not reconciled from an observation that
+reached the target, a new `deliver`, or a `resume` that would dispatch, is
+refused with `target-unreconciled` (exit 2), naming that delivery and
+`sykli resume --delivery ID`. If its reconciliation cannot reach the target,
+`deliver --reapply-over ID` applies over it anyway; the new delivery's request
+records what it applied over, and why that effect was unknown.
+
+What a delivery's status rests on is printed with it (`trust:`): a trusted
+local coordinator and journal, and each observation as the declared observer
+reported it, never independently verified. A delivery is no controller either:
+sykli never re-applies to keep a target in shape, it only runs the commands you
 declared when you ask, and says what was observed.
 
 ### Inspect pull-request evidence

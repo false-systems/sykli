@@ -278,11 +278,14 @@ enum Command {
         --delivery ID reads a delivery's journal (sykli-delivery-status.v1) and judges it now,\n\
         one dimension at a time: A the operation (requested, dispatched, applying,\n\
         acknowledged, apply-failed, lost, unknown, acknowledgement-lost), B the intended\n\
-        artifact against what runs, C the target's desired state, D its observed state, E\n\
-        health (readiness, checks, smoke), F freshness (the last observation's age against\n\
-        the contract's bound). The label is VERIFIED HEALTHY only when every dimension\n\
-        holds; otherwise NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN or STALE, with why. Nothing\n\
-        runs and nothing is written: a status ages as its last observation does.")]
+        artifact against what runs, C the target's desired state (this delivery's only when\n\
+        the target names it as the operation), D its observed state (done only when the\n\
+        controller reports `complete`), E health (readiness, checks, smoke), F freshness (the\n\
+        last observation's age against the contract's bound; one dated ahead of now is never\n\
+        fresh). Observations count in the order their observers began. The label is VERIFIED\n\
+        HEALTHY only when every dimension holds; otherwise NOT VERIFIED HEALTHY, DEGRADED,\n\
+        UNKNOWN or STALE, with why. Nothing runs and nothing is written: a status ages as its\n\
+        last observation does.")]
     Status {
         /// Production ID printed by `produce`
         #[arg(required_unless_present_any = ["run", "commit", "delivery"], conflicts_with_all = ["run", "commit", "delivery"])]
@@ -334,11 +337,15 @@ enum Command {
         --delivery ID takes over a delivery whose coordinator ended, and never runs an apply\n\
         again on its own. An apply whose end was not recorded (lost, interrupted, killed) is\n\
         reconciled first, by observing the target: when the target's desired state shows\n\
-        this delivery's artifact, the attempt is recorded `acknowledgement lost, effect\n\
-        observed`; otherwise its effect is recorded unknown, the delivery is UNKNOWN, and\n\
-        only --reapply applies again, as a new attempt that supersedes the old one, which\n\
-        stays in the history. A delivery never dispatched is dispatched; an acknowledged one\n\
-        is observed again. Exits 0 when the delivery is then VERIFIED HEALTHY, 1 otherwise.")]
+        this delivery's artifact and names this delivery as its operation, the attempt is\n\
+        recorded `acknowledgement lost, effect observed`; otherwise its effect is recorded\n\
+        unknown, the delivery is UNKNOWN, and only --reapply applies again, as a new attempt\n\
+        that supersedes the old one, which stays in the history; --reapply is refused (exit\n\
+        2) when that observation did not reach the target. A delivery never dispatched is\n\
+        dispatched; an acknowledged one is observed again. Nothing is dispatched while\n\
+        another delivery to the target has an unknown, unreconciled effect\n\
+        (`target-unreconciled`, exit 2). Exits 0 when the delivery is then VERIFIED HEALTHY,\n\
+        1 otherwise.")]
     Resume {
         /// Production ID printed by `produce`
         #[arg(required_unless_present_any = ["run", "delivery"], conflicts_with_all = ["run", "delivery"])]
@@ -350,7 +357,8 @@ enum Command {
         #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
         delivery: Option<String>,
         /// With --delivery: apply again, as a new attempt, once the last apply's unknown
-        /// effect has been reconciled with the target (or the last apply failed)
+        /// effect has been reconciled from an observation that reached the target (or the
+        /// last apply failed)
         #[arg(long, requires = "delivery")]
         reapply: bool,
         /// With --run or --delivery: take an attempt whose process group still exists as
@@ -442,7 +450,9 @@ enum Command {
            or STALE (see the reasons, and `sykli status --delivery ID`)\n  \
         2  nothing was delivered: invalid contract, no complete production of the current\n     \
            sources (run `sykli produce` first), its artifact unavailable, the identity\n     \
-           command failed, another delivery to the target still running, or the journal\n     \
+           command failed, another delivery to the target still running (`target-busy`),\n     \
+           or one whose apply's effect is unknown and not reconciled with the target\n     \
+           (`target-unreconciled`: `sykli resume --delivery ID` it first), or the journal\n     \
            could not be written\n  \
         128+N  stopped by signal N; `sykli resume --delivery ID` reconciles and continues\n\n\
         A sykli-delivery-contract.v1 names, per target, the product it receives (a target and\n\
@@ -453,8 +463,10 @@ enum Command {
         observation may be and still say anything about now) and `settle_seconds` (how long to\n\
         keep observing after the apply). The commands run as a run's tasks do: `sh -c` in the\n\
         contract's directory, a cleared environment plus PATH, HOME and TMPDIR, the declared\n\
-        `env`, and the `inherit`ed variables, whose values reach only that command and whose\n\
-        digests reach the journal. Each also gets SYKLI_DELIVERY (the id), SYKLI_INTENDED,\n\
+        `env`, and the `inherit`ed variables, whose values reach only that command; the\n\
+        journal names them (set or absent), never their values or digests. Each also gets\n\
+        SYKLI_DELIVERY (the id; write it to the target so an observer can name it),\n\
+        SYKLI_INTENDED,\n\
         SYKLI_DELIVERY_TARGET, and for apply SYKLI_ARTIFACT (the artifact, materialized from\n\
         the store) and SYKLI_DELIVERY_ATTEMPT.\n\n\
         The delivery is recorded in $(git rev-parse --git-common-dir)/sykli/deliveries/<id>/\n\

@@ -18,24 +18,40 @@
 //!
 //! * `records/<sequence>.json`: the journal (`sykli-delivery-record.v1`),
 //!   hash chained, each record synced before it is acknowledged.
-//! * `outputs/<sha256>.json`: each apply's output record, cited by its end.
+//! * `outputs/<sha256>.json`: each apply's output record, cited by its end;
+//!   inherited variables are named in it (`set` or `absent`), never digested.
 //! * `lease`: the coordinator's; `attempt-leases/<attempt>`: held by an
 //!   apply's shell and everything it starts, so an apply that outlives a
 //!   killed coordinator is seen as running.
 //! * `scratch/`: the artifact materialized for an apply, removed after it.
+//!
+//! and, per target, `deliveries/.targets/<digest>/`: the lock a `deliver`
+//! (or a dispatching `resume`) holds from its check until its delivery is
+//! recorded, and `sequence/`, the order of requests and dispatches to the
+//! target in this clone, which no clock decides.
 //!
 //! The order of facts is the point (invariants A, B, H):
 //! `requested` is durable before anything is dispatched; `dispatched` is
 //! durable before the apply's shell is spawned; then exactly one end:
 //! `acknowledged` (exit 0), `failed` (it reported a failure, or could not
 //! start), `interrupted` (sykli stopped it) or `lost` (a later coordinator
-//! found it unfinished). Observations (`observed`) are recorded with their
-//! time and the digest of the observer's output; any number, any time.
+//! found it unfinished). Observations (`observed`) are recorded with the
+//! time taken before their observer was spawned and the digest of what it
+//! printed; any number, any time. They are judged in the order their
+//! observers began, never the order their records landed.
+//!
 //! When an apply's end is unknown, recovery never runs it again: `resume`
 //! observes the target and records `reconciled`, effect `observed` only when
 //! the observation shows this delivery's artifact as the target's desired
-//! state, `unknown` otherwise. Only `resume --reapply` applies again, as a
-//! new attempt that supersedes the last; nothing is rewritten.
+//! state and names this delivery as its operation, `unknown` otherwise.
+//! Only `resume --reapply` applies again, after a reconciliation whose
+//! observation reached the target, as a new attempt that supersedes the
+//! last; nothing is rewritten. Nothing else is applied to the target
+//! meanwhile: a `deliver`, or a `resume` that would dispatch, is refused
+//! (`target-unreconciled`) while another delivery to it has an apply whose
+//! effect is unknown and was never reconciled from an observation that
+//! reached the target; `deliver --reapply-over` passes one whose target
+//! could not be reached, and the new request records it.
 //!
 //! Every coordinator holds a generation, as a run's does: a fact from a
 //! coordinator a newer generation took over is refused.
@@ -316,7 +332,8 @@ struct Observation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     present: Option<bool>,
     /// The target object's identity; a recreated object has another, and
-    /// its revisions start again.
+    /// its revisions start again. Another uid than the one first observed
+    /// after an apply means the target was recreated since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     uid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,7 +365,9 @@ struct Desired {
     #[serde(default)]
     artifact: Option<String>,
     /// The operation the desired state names (an apply passes
-    /// `$SYKLI_DELIVERY` to the target), if the target keeps one.
+    /// `$SYKLI_DELIVERY` to the target), if the target keeps one. Without
+    /// it, the desired state is attributed to no delivery: none is VERIFIED
+    /// HEALTHY on it, and no lost acknowledgement is reconciled from it.
     #[serde(default)]
     operation: Option<String>,
     /// Who last wrote the desired artifact, as the target says.
@@ -388,7 +407,9 @@ struct HealthCheck {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Controller {
-    /// pending, progressing, complete, failed or unknown.
+    /// pending, progressing, complete, failed or unknown. Only `complete`
+    /// counts toward VERIFIED HEALTHY; `failed` is DEGRADED; the others are
+    /// NOT VERIFIED HEALTHY, whatever else the observation says.
     state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
