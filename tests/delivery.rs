@@ -917,6 +917,62 @@ fn a_later_delivery_supersedes_an_earlier_one() {
     );
 }
 
+/// A slow observer that read the target before it changed, and is recorded
+/// after a newer observation that saw the change, never decides the label:
+/// observations are judged by when their observer began.
+#[test]
+fn a_slow_observer_recorded_late_never_overrides_a_newer_observation() {
+    let f = Fixture::with("slow-observer", |base| {
+        let mut target = fake_target(base, false, 300, 0);
+        let b = base.display();
+        // Reads the target first, then (when held) waits before printing.
+        target["observe"]["run"] = json!(format!(
+            "set -- $(cat '{b}/desired' 2>/dev/null) sha256:0000 none; \
+             if [ -e '{b}/observe.hold' ]; then printf ready > '{b}/observe.ready'; read token < '{b}/observe.latch'; fi; \
+             sed -e \"s|@INTENDED@|$1|g\" -e \"s|@DELIVERY@|$2|g\" '{b}/target.json'"
+        ));
+        target
+    });
+    let (out, status) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let id = status["delivery"].as_str().unwrap().to_string();
+    f.set("observe.hold", "");
+    let slow = f
+        .sykli(&["observe", "--delivery", &id, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = f.base.join("observe.ready");
+    wait_until(|| ready.exists());
+    fs::remove_file(&ready).unwrap();
+    f.clear("observe.hold");
+    // Out of band, after the slow observer read the target: what it asks
+    // for changes, still naming this delivery.
+    std::thread::sleep(Duration::from_millis(5));
+    f.desired("sha256:3a4a1", &id);
+    let (_, newer) = f.observe(&id);
+    assert_eq!(label(&newer), "NOT VERIFIED HEALTHY", "{newer}");
+    f.release("observe.latch");
+    let out = slow.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let status = f.status(&id);
+    assert_eq!(label(&status), "NOT VERIFIED HEALTHY", "{status}");
+    assert!(
+        status["reasons"]
+            .to_string()
+            .contains("modified out of band"),
+        "{status}"
+    );
+    let latest = status["observations"]["latest_usable"].as_u64().unwrap();
+    assert_eq!(
+        status["observations"]["out_of_order"],
+        json!([latest + 1]),
+        "{status}"
+    );
+    assert_eq!(f.applies(), 1);
+}
+
 /// Manual modification: the target still names this delivery, but someone
 /// changed what it asks for.
 #[test]

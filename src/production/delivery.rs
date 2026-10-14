@@ -553,7 +553,10 @@ struct Execution {
 }
 
 impl Execution {
-    fn of(record: &TaskReceipt, started_at_ms: u64) -> Self {
+    /// `began` is the time taken before the command was spawned: it cannot
+    /// have read anything earlier, so it is the time an observation speaks
+    /// from, and the order observations are judged in.
+    fn of(record: &TaskReceipt, began: u64) -> Self {
         let mut stderr = record.stderr.clone();
         if stderr.len() > KEPT_STDERR {
             let mut end = KEPT_STDERR;
@@ -562,13 +565,14 @@ impl Execution {
             }
             stderr.truncate(end);
         }
+        let started_at_ms = record.started_at_ms.map_or(began, |at| at.min(began));
         Execution {
             exit_code: record.exit_code,
             signal: record.signal,
-            started_at_ms: record.started_at_ms.unwrap_or(started_at_ms),
+            started_at_ms,
             ended_at_ms: record
                 .started_at_ms
-                .unwrap_or(started_at_ms)
+                .unwrap_or(began)
                 .saturating_add(record.duration_ms),
             stdout_digest: record.stdout_digest.clone(),
             stderr_digest: record.stderr_digest.clone(),
@@ -1944,6 +1948,7 @@ enum Round {
 fn observe_target(id: &str, request: &Request, runtime: &ShellRuntime) -> Result<Round, String> {
     let definition = request.definition()?;
     let task = command(id, request, "observe", &definition.observe, &[]);
+    // Taken before the observer exists: the time its observation speaks from.
     let started = now();
     match crate::launch(&task, runtime, Progress::Quiet, OBSERVATION_LIMIT, None)? {
         Launched::Stopped { .. } => Ok(Round::Stopped(crate::runs::signalled().unwrap_or(15))),
@@ -2682,14 +2687,20 @@ fn judge(
         "attempts": attempts,
     });
 
+    // Observations in the order their observers began, never the order their
+    // records landed: one that began before an observation already recorded
+    // may have read the target before that one did, so it is out of order
+    // and decides nothing (it is kept, and listed).
+    let (in_order, out_of_order) = by_start(&history.seen);
     // Which observations speak about this apply: recorded after its dispatch,
-    // and begun once it had ended (`observable_from`).
+    // and begun once it had ended (`observable_from`), so never one begun
+    // before its dispatch.
     let (since, from) = last.map_or((0, 0), |attempt| {
         (attempt.dispatched_sequence, attempt.observable_from())
     });
-    let after: Vec<&Seen> = history
-        .seen
+    let after: Vec<&Seen> = in_order
         .iter()
+        .copied()
         .filter(|s| s.sequence > since && s.at() >= from)
         .collect();
     let latest = after.last().copied();
@@ -3075,6 +3086,7 @@ fn judge(
         "since_dispatch": after.len(),
         "latest": latest.map(seen_summary),
         "latest_usable": usable.map(|s| s.sequence),
+        "out_of_order": out_of_order.iter().map(|s| s.sequence).collect::<Vec<_>>(),
         "recent": history.seen.iter().rev().take(20).map(seen_summary).collect::<Vec<_>>(),
     });
     Ok(json!({
@@ -3113,6 +3125,25 @@ fn judge(
         "through_sequence": history.records.len(),
         "trust": TRUST,
     }))
+}
+
+/// The observations whose observers began no earlier than any observation
+/// recorded before them, in journal order; and the rest, out of order. An
+/// observer that began earlier may have read the target before a recorded
+/// observation did, however late its own record landed, so it can never be
+/// the latest word on the target.
+fn by_start(seen: &[Seen]) -> (Vec<&Seen>, Vec<&Seen>) {
+    let mut began = 0;
+    let (mut in_order, mut out_of_order) = (Vec::new(), Vec::new());
+    for s in seen {
+        if s.at() < began {
+            out_of_order.push(s);
+        } else {
+            began = s.at();
+            in_order.push(s);
+        }
+    }
+    (in_order, out_of_order)
 }
 
 fn seen_summary(seen: &Seen) -> Value {
@@ -3923,6 +3954,34 @@ mod tests {
             },
         ];
         assert!(history(cited).is_err());
+    }
+
+    /// Observations are taken in the order their observers began, never in
+    /// the order their records landed: an observer that read the target
+    /// before a newer observation was recorded, and finished after it, never
+    /// becomes the latest or the usable one.
+    #[test]
+    fn an_observation_begun_before_one_already_recorded_never_decides() {
+        let delivery = delivery_id();
+        let healthy = observation(&intended(), Some(&delivery));
+        let mut modified = healthy.clone();
+        modified.desired.as_mut().unwrap().artifact = Some("sha256:manual".into());
+        let early = execution();
+        let mut late = execution();
+        late.started_at_ms = later() + 800;
+        let mut facts = acknowledged();
+        // Records 5 (began later, recorded first) and 6 (began first).
+        facts.push(Fact::observed(None, late, Some(modified), None, None));
+        facts.push(Fact::observed(None, early, Some(healthy), None, None));
+        let v = judged(facts, 2_000, None);
+        assert_eq!(v["label"], NOT_VERIFIED_HEALTHY, "{v}");
+        assert_eq!(v["observations"]["latest"]["sequence"], 5, "{v}");
+        assert_eq!(v["observations"]["latest_usable"], 5, "{v}");
+        assert_eq!(v["observations"]["out_of_order"], json!([6]), "{v}");
+        assert!(
+            v["reasons"].to_string().contains("modified out of band"),
+            "{v}"
+        );
     }
 
     #[test]
