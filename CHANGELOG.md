@@ -8,6 +8,44 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- **Delivery (Linux and macOS):** `sykli deliver`, `sykli status --delivery`,
+  `sykli observe --delivery` and `sykli resume --delivery`. A produced artifact
+  is put on a target through commands the caller declares in a
+  `sykli-delivery-contract.v1` (`identity`, `apply`, `observe`, optional
+  `smoke`, `freshness_seconds`, `settle_seconds`), and the operation is
+  journaled in `<git-common-dir>/sykli/deliveries/<id>/`
+  (`sykli-delivery-record.v1`). Sykli knows no kind of target.
+  - **Order:** the delivery is durable before anything runs, and the apply is
+    durable as `dispatched` before its shell starts; then exactly one end:
+    `acknowledged` (exit 0), `failed`, `interrupted` or `lost`. An
+    acknowledgement is not a deployment: what is deployed is only what an
+    observation (`sykli-observation.v1`, printed by the caller's `observe`)
+    shows, recorded with its time and the digest of the observer's output.
+  - **The verdict** (`sykli-delivery-status.v1`) has six dimensions: A the
+    operation, B intended against running artifact, C the desired state, D the
+    observed state, E health (readiness, checks, smoke) and F freshness (age
+    against the contract's bound, and later deliveries). The label is
+    `VERIFIED HEALTHY` only when all hold; otherwise `NOT VERIFIED HEALTHY`,
+    `DEGRADED`, `UNKNOWN` or `STALE`, with reasons. A status is judged when it
+    is asked, so it ages.
+  - **A lost acknowledgement is never answered by applying again.**
+    `resume --delivery` observes the target first and records
+    `reconciled`: "acknowledgement lost, effect observed" when the target's
+    desired state shows this delivery's artifact, unknown otherwise. Only
+    `--reapply` applies again, as a new attempt that supersedes the old one;
+    the journal refuses a second apply that was not asked for or came before
+    that reconciliation.
+  - Also: `deliver --detach` (`sykli-delivery.v1`), `--production ID`,
+    `--rollback-to DELIVERY`, `observe` (never applies, runs beside a live
+    coordinator), a busy target refused (`target-busy`), and inherited
+    variables reaching only the command that declares them. Retention:
+    `SYKLI_DELIVERY_BUDGET` (100) deliveries per clone, the oldest settled
+    ones first: never the newest to a target, nor one whose apply is alive or
+    whose effect is still unknown; at most 2000 records per delivery.
+  - `deliver` and `status --delivery` start one `git rev-parse`, none with
+    `--repo-root` and `--git-common-dir` (pinned in `tests/git_calls.rs`).
+- `resume --assume-ended` applies to `--delivery` as well as `--run` (with
+  neither, it is still refused, exit 2).
 - `${worktree_cache}` in a task's declared `env` values: a directory that
   belongs to the worktree the run is in,
   `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is 16 hex digits of

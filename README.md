@@ -746,7 +746,122 @@ exits 1 while checks remain. Artifact availability and completed checks are
 recorded separately. Failed work requires an explicit retry, and an unresolved
 lost attempt cannot silently become a success. See
 [the production agent loop](docs/agents.md) for preparation without execution,
-bounded parallel work and diagnostics.
+bounded parallel work and diagnostics. A production's `delivery` field says the
+artifact is in the local store; it says nothing about any deployment.
+
+### Deliver an artifact, and say only what is observed
+
+On Linux and macOS, `sykli deliver` puts a produced artifact on a target and
+records the operation so that a crash leaves a true record. Sykli knows nothing
+about any kind of target. A `sykli-delivery-contract.v1` (default
+`sykli.delivery.json`) names, per target, the product it receives and the
+commands **you** own: `apply` does the side effect, `observe` prints what the
+target reports, `smoke` is optional, and `identity` says what the target will
+report for the artifact:
+
+```json
+{
+  "schema": "sykli-delivery-contract.v1",
+  "production": "sykli.production.json",
+  "targets": {
+    "staging": {
+      "artifact": {"target": "app", "product": "image"},
+      "identity": {"kind": "command", "run": "./deploy/identify.sh"},
+      "apply": {"run": "./deploy/apply.sh", "inherit": ["DEPLOY_TOKEN"]},
+      "observe": {"run": "./deploy/observe.sh"},
+      "smoke": {"run": "./deploy/smoke.sh"},
+      "freshness_seconds": 120,
+      "settle_seconds": 90
+    }
+  }
+}
+```
+
+```sh
+sykli produce app
+sykli deliver --target staging            # prints `delivery: ID` first
+sykli status --delivery ID                # judged again, now; nothing runs
+sykli observe --delivery ID               # observe the target now; never applies
+sykli resume --delivery ID [--reapply]    # after a crash: reconcile first
+sykli deliver --target staging --rollback-to EARLIER_ID
+```
+
+- **Only a complete production is delivered,** with its artifact available in
+  the store. `identity` is `{"kind": "content"}` (the artifact's own SHA-256) or a
+  command that prints what the target will report for it, such as the manifest
+  digest inside an image archive.
+- **The commands run as a run's tasks do:** `sh -c` in the contract's
+  directory, with a cleared environment plus `PATH`, `HOME` and `TMPDIR`, the
+  declared `env`, and the `inherit`ed variables. An inherited value reaches only
+  the command that declares it, and only its digest reaches the journal. Each
+  command also gets `SYKLI_DELIVERY` (the id; write it to the target so an
+  observer can name it), `SYKLI_INTENDED` and `SYKLI_DELIVERY_TARGET`. `apply`
+  also gets `SYKLI_ARTIFACT` (the artifact, materialized) and
+  `SYKLI_DELIVERY_ATTEMPT`. Sykli redacts nothing a command prints: it keeps
+  each apply's output (at most 64 KiB per stream), the first 4 KiB of every
+  command's stderr, and each observation, so a command must never print a
+  secret.
+- **The order is durable.** The delivery is recorded before anything runs, and
+  the apply is recorded as dispatched before its shell starts. An apply that
+  exits 0 is **acknowledged**: the target accepted the change, which is not a
+  deployment. Then `observe` runs (until the target settles, at most
+  `settle_seconds`), and every observation is recorded with its time and the
+  digest of what the observer printed.
+
+`observe` prints a `sykli-observation.v1`, integers only:
+
+```json
+{"schema": "sykli-observation.v1", "reachable": true, "present": true, "uid": "…",
+ "desired": {"revision": "8", "artifact": "sha256:…", "operation": "<the delivery id>", "writer": "…"},
+ "observed": {"revision": "8", "artifacts": ["sha256:…"], "converged": true},
+ "readiness": {"ready": 2, "wanted": 2},
+ "checks": [{"name": "…", "passed": true}],
+ "controller": {"state": "complete", "reason": "…"},
+ "token": "…"}
+```
+
+`reachable: false` (with a `reason`) is itself an observation: the controller
+could not be reached. `desired` is what the target is asked to run, `observed`
+what it runs, by immutable digest; `controller.state` is `pending`,
+`progressing`, `complete`, `failed` or `unknown`.
+
+**The verdict has dimensions, never one "succeeded".** `sykli status --delivery
+ID --json` (`sykli-delivery-status.v1`) judges, at the moment it is asked:
+
+| | Dimension | What it compares |
+|---|---|---|
+| A | operation | requested, dispatched, applying, acknowledged, apply-failed, lost, unknown, acknowledgement-lost; superseded by a later delivery to the target |
+| B | artifact | the intended identity against what runs (`match`, `partial`, `mismatch`, `none-running`) |
+| C | desired | whether the target's desired state is this delivery's (or modified out of band, rolled back, someone else's) |
+| D | observed | the observed revision against the desired one, converged |
+| E | health | readiness, the observer's checks, the smoke command |
+| F | freshness | the observation's age against `freshness_seconds`, and any later delivery |
+
+The label is **VERIFIED HEALTHY** only when B matches, D equals C, E passes and
+F is fresh, and the desired state is the one this delivery's own apply put
+there. Otherwise it is **NOT VERIFIED HEALTHY** (rollout incomplete, apply
+failed, superseded, changed out of band), **DEGRADED** (a failed check or smoke, the controller's own failure,
+the target missing), **UNKNOWN** (the apply's end or the target is unknown) or
+**STALE** (the evidence is too old to say anything about now), with the reasons.
+A passing smoke check or a healthy old replica never makes it healthy: B must
+match.
+
+**A lost acknowledgement is never answered by applying again.** If the
+coordinator dies after the apply was dispatched but before its end was
+recorded, `sykli resume --delivery ID` observes the target. When the target's
+desired state is this delivery's artifact (and names this delivery, when the
+target keeps an operation id), the attempt is recorded "acknowledgement lost,
+effect observed"; otherwise its effect is recorded **unknown**, and only
+`--reapply` applies again, as a new attempt that supersedes the old one, which
+stays in the history. The journal itself refuses
+any second apply that was not asked for, or that came before that
+reconciliation. An apply that was never dispatched is simply dispatched.
+
+What a delivery's status rests on is printed with it: a trusted local
+coordinator and journal, and each observation as the declared observer reported
+it, never independently verified. A delivery is no controller either: sykli
+never re-applies to keep a target in shape, it only runs the commands you
+declared when you ask, and says what was observed.
 
 ### Inspect pull-request evidence
 
@@ -922,7 +1037,7 @@ change the tree they describe.
 
 ## What Sykli keeps on disk
 
-The cache, the receipts, runs and production scratch are bounded, and each limit is stated:
+The cache, the receipts, runs, deliveries and production scratch are bounded, and each limit is stated:
 
 | State | Limit | Override |
 |---|---|---|
@@ -932,6 +1047,7 @@ The cache, the receipts, runs and production scratch are bounded, and each limit
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. Not pruned on Windows (remove them by hand when no run is live) | — |
 | Production attempts | Working directories removed (best effort) once outputs are collected | — |
+| Deliveries, in the common git directory | **100** deliveries per clone; when one is requested, the oldest settled ones are removed: never one whose coordinator or apply is alive, whose apply's effect is still unknown (a resume needs it), or the newest delivery to any target, so the count can exceed the budget by those. Each holds at most **2000** journal records (observing stops there), each apply's output (at most 64 KiB per stream), and the artifact only while an apply runs | `SYKLI_DELIVERY_BUDGET` (`0` keeps every delivery) |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
 production command first sweeps the working directories of any attempt that no
@@ -957,6 +1073,8 @@ entry costs a re-run, never a result.
 | | `produce` | Build an artifact from captured source and run its checks |
 | | `status` · `resume` | Inspect or continue a production by ID |
 | | `diagnostics` · `verify-production` | Read an attempt's diagnostics; check a production record |
+| **Delivery** | `deliver` | Apply a produced artifact through your commands and judge it from observations (`--detach`, `--rollback-to`) |
+| | `status --delivery` · `observe` · `resume --delivery` | Judge a delivery now; observe its target again; reconcile after a crash (`--reapply` to apply again) |
 | **Evidence** | `inspect` | Collect a pull request's runs and reviews through `gh` |
 | | `assess` | Assess a saved evidence bundle, offline and deterministically |
 
