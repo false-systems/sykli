@@ -25,6 +25,8 @@ static NONCE: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     base: PathBuf,
     repo: PathBuf,
+    /// When the test first signalled a sykli process (ms since the epoch).
+    signalled_at: std::cell::Cell<Option<u64>>,
 }
 
 /// A task that waits at its latch until released, unless `BASE/go` exists,
@@ -57,7 +59,11 @@ impl Fixture {
         let _ = fs::remove_dir_all(&base);
         let repo = base.join("repo");
         fs::create_dir_all(&repo).unwrap();
-        let fixture = Fixture { base, repo };
+        let fixture = Fixture {
+            base,
+            repo,
+            signalled_at: std::cell::Cell::new(None),
+        };
         fixture.git(&["init", "--quiet", "--initial-branch=main"]);
         fs::write(fixture.repo.join("file.txt"), file).unwrap();
         fs::write(fixture.repo.join(".gitignore"), ".sykli/\n").unwrap();
@@ -80,7 +86,7 @@ impl Fixture {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = own_git_config(&mut Command::new("git"))
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .current_dir(&self.repo)
@@ -98,7 +104,7 @@ impl Fixture {
 
     fn sykli(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_sykli"));
-        command
+        own_git_config(&mut command)
             .args(args)
             .current_dir(&self.repo)
             .env("SYKLI_TEST_PAUSE_DIR", &self.base)
@@ -126,11 +132,20 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Signal a sykli process (a coordinator), noting when it was first
+    /// signalled: an attempt still running then was stopped, not finished.
+    fn stop(&self, pid: u32, name: &str) {
+        if self.signalled_at.get().is_none() {
+            self.signalled_at.set(Some(now_ms()));
+        }
+        signal(pid, name);
+    }
+
     /// Start `args`, wait until it reaches `point`, and SIGKILL it there.
     fn kill_at(&self, args: &[&str], point: &str) -> Output {
         let child = self.spawn(args, Some(point));
         let pid = self.wait_for_pid(point);
-        signal(pid, "KILL");
+        self.stop(pid, "KILL");
         let out = child.wait_with_output().unwrap();
         assert_eq!(
             out.status.code(),
@@ -247,6 +262,17 @@ impl Fixture {
     }
 }
 
+/// Git settings of the test's own, never the machine's: no global excludes
+/// file, and `main` for a new repository.
+fn own_git_config(command: &mut Command) -> &mut Command {
+    command
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "core.excludesFile")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
+        .env("GIT_CONFIG_KEY_1", "init.defaultBranch")
+        .env("GIT_CONFIG_VALUE_1", "main")
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         // Nothing a test started may outlive it.
@@ -302,6 +328,13 @@ fn alive(pid: u32) -> bool {
         .success()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 fn wait_until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !predicate() {
@@ -328,8 +361,10 @@ fn attempts(status: &Value, name: &str) -> Vec<Value> {
 }
 
 /// The invariant every test ends on: no task is passed (or cached) in the
-/// run's status unless its acceptance is recorded, and no receipt claims a
-/// pass for this commit unless every task in it was accepted.
+/// run's status unless its acceptance is recorded, no attempt that was
+/// still running when the test signalled sykli is passed (its exit status,
+/// even 0, answers the signal, not the task's work), and no receipt claims
+/// a pass for this commit unless every task in it was accepted.
 fn nothing_unknown_passed(fixture: &Fixture, status: &Value) {
     for task in status["tasks"].as_array().unwrap() {
         if matches!(task["state"].as_str(), Some("passed")) {
@@ -337,6 +372,18 @@ fn nothing_unknown_passed(fixture: &Fixture, status: &Value) {
             assert_eq!(last["outcome"], "passed", "{task}");
             assert_eq!(last["recorded"], true, "{task}");
             assert_eq!(last["exit"], 0, "{task}");
+        }
+        if let Some(signalled) = fixture.signalled_at.get() {
+            for attempt in task["attempts"].as_array().unwrap() {
+                let running = attempt["started"].as_u64().is_some_and(|at| at < signalled)
+                    && attempt["finished"]
+                        .as_u64()
+                        .is_some_and(|at| at >= signalled);
+                assert!(
+                    !(running && attempt["outcome"] == "passed"),
+                    "an attempt running when sykli was signalled is passed: {task}"
+                );
+            }
         }
     }
     let commit = fixture.commit_status("HEAD");
@@ -551,7 +598,7 @@ fn window_05_a_coordinator_killed_during_execution_keeps_what_finished() {
     let f = Fixture::new("w05", "one\n", two_tasks);
     let child = f.spawn(&["run", "sykli.json", "--json"], None);
     f.wait_ready("second");
-    signal(child.id(), "KILL");
+    f.stop(child.id(), "KILL");
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), None);
     let run = f.run_id();
@@ -738,7 +785,7 @@ fn window_11_a_cancelled_run_records_its_stopped_task_as_interrupted() {
             .trim()
             .parse()
             .unwrap();
-        signal(child.id(), signal_name);
+        f.stop(child.id(), signal_name);
         let out = child.wait_with_output().unwrap();
         assert_eq!(
             out.status.code(),
@@ -775,16 +822,126 @@ fn window_11_killed_while_cancelling() {
     let f = Fixture::new("w11k", "one\n", two_tasks);
     let child = f.spawn(&["run", "sykli.json", "--json"], Some("during-cancel"));
     f.wait_ready("second");
-    signal(child.id(), "TERM");
+    f.stop(child.id(), "TERM");
     let pid = f.wait_for_pid("during-cancel");
     assert_eq!(pid, child.id());
-    signal(pid, "KILL");
+    f.stop(pid, "KILL");
     child.wait_with_output().unwrap();
     let run = f.run_id();
     let status = f.status(&run);
     assert_eq!(status["state"], "lost");
     assert_eq!(state(&status, "second"), "lost");
     nothing_unknown_passed(&f, &status);
+}
+
+/// Window 11, a task that answers the stop with exit 0 (the usual
+/// `trap cleanup INT TERM` idiom): its work never finished, so its exit 0 is
+/// not a pass (invariant B). An attempt whose process group sykli signalled
+/// is interrupted whatever its exit status; the run stops, exits 128+N and
+/// writes no receipt and no cache entry, so the next run runs the task again.
+#[test]
+fn window_11_a_task_that_exits_zero_on_the_stop_is_interrupted_not_passed() {
+    let f = Fixture::new("w11trap", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "trap 'exit 0' INT TERM; echo $$ > '{b}/t.pid'; echo run >> '{b}/t.count'; \
+                 if [ ! -e '{b}/go' ]; then printf ready > '{b}/t.ready'; sleep 30 & wait $!; fi; \
+                 test \"$(cat file.txt)\" = one"
+            ),
+            vec![],
+        )]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    f.stop(child.id(), "TERM");
+    let out = child.wait_with_output().unwrap();
+    let run = f.run_id();
+    let status = f.status(&run);
+    nothing_unknown_passed(&f, &status);
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "no receipt: {}", text(&out.stdout));
+    assert_eq!(status["state"], "interrupted");
+    assert_eq!(state(&status, "t"), "interrupted");
+    assert!(f.receipts().is_empty());
+    assert_eq!(f.commit_status("HEAD")["verdict"], "none");
+
+    // Nothing was cached: the next run runs the task again, and passes.
+    f.unlatch();
+    let again = f.output(&["run", "sykli.json", "--json"]);
+    assert_eq!(again.status.code(), Some(0), "{}", text(&again.stderr));
+    let receipt: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(receipt["tasks"][0]["outcome"], "passed");
+    assert_eq!(f.count("t"), 2);
+}
+
+/// Window 11, a stop while a process that left the task's group (`setsid`)
+/// still holds the task's output after its shell exited 0: the stop is
+/// honoured at once, not when that process lets go, and the attempt is
+/// interrupted, not passed.
+#[test]
+fn window_11_a_stop_does_not_wait_for_a_process_that_left_the_group() {
+    let f = Fixture::new("w11setsid", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "echo $$ > '{b}/t.pid'; \
+                 perl -MPOSIX -e 'POSIX::setsid(); open F, \">\", shift; print F $$; close F; sleep 30' \
+                 '{b}/holder.pid' & \
+                 while [ ! -s '{b}/holder.pid' ]; do sleep 0.01; done; printf ready > '{b}/t.ready'; exit 0"
+            ),
+            vec![],
+        )]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    let shell: u32 = fs::read_to_string(f.base.join("t.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let holder: u32 = fs::read_to_string(f.base.join("holder.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // The shell has exited (and was reaped); the holder keeps its output open.
+    wait_until(|| !alive(shell));
+    assert!(alive(holder));
+    let mut child = child;
+    let signalled = Instant::now();
+    f.stop(child.id(), "TERM");
+    let mut exited = None;
+    while signalled.elapsed() < Duration::from_secs(3) {
+        if let Some(status) = child.try_wait().unwrap() {
+            exited = Some(status);
+            break;
+        }
+        if signalled.elapsed() > Duration::from_secs(1) {
+            // A second signal must be honoured too.
+            let _ = Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = Command::new("kill")
+        .args(["-KILL", &holder.to_string()])
+        .status();
+    let elapsed = signalled.elapsed();
+    let out = child.wait_with_output().unwrap();
+    let status = f.status(&f.run_id());
+    nothing_unknown_passed(&f, &status);
+    assert!(
+        exited.is_some(),
+        "still running {elapsed:?} after the stop: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    assert_eq!(state(&status, "t"), "interrupted");
+    assert!(f.receipts().is_empty());
 }
 
 /// Window 12: killed during recovery, after the lost attempts were

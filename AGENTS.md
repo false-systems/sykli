@@ -150,7 +150,9 @@ is decided. The receipt is built only from accepted records (`coordinate`,
 `conclude`), so it round-trips (`TaskReceipt` is `Deserialize`) and gains
 only `run`. Tasks run in their own process group holding their attempt's
 lease (so an orphan reads as running); SIGINT/SIGTERM/SIGHUP stop every
-group (TERM, KILL after 3 s) and the run records `stopped`, exit 128+N.
+group (TERM, KILL after 3 s), an attempt sykli signalled is `interrupted`
+whatever it exits with, and the run records `stopped`, exit 128+N, no
+receipt.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
 `run --detach` hands the lease to a `setsid` coordinator
