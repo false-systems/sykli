@@ -13,10 +13,6 @@ use contract::*;
 use std::os::unix::process::CommandExt;
 use store::*;
 
-unsafe extern "C" {
-    fn setsid() -> i32;
-}
-
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -1056,7 +1052,7 @@ fn advance(
             // SAFETY: setsid is async-signal-safe and allocates nothing.
             unsafe {
                 child.pre_exec(|| {
-                    if setsid() == -1 {
+                    if crate::journal::setsid() == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -1218,7 +1214,6 @@ fn execute(
         &super::shell_runtime()?,
         super::Progress::Json,
         super::MAX_CAPTURE_BYTES,
-        super::Isolation::OwnGroup,
     );
     // Only a failed wait leaves termination unknown. The shell ran in its own
     // process group and the group was killed after it exited, so a shell that

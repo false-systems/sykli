@@ -57,8 +57,9 @@ Both contracts list files explicitly; nothing is globbed.
   1.85. Keep them out (use `Option::filter`, `is_some_and`, or a nested `if`)
   and run `cargo +1.85 check --workspace --all-targets --locked` before pushing.
 - No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls
-  (`flock`, `fcntl`, `setsid`, `setpgid`, `killpg`, `signal`) are declared as
-  `unsafe extern "C"` blocks, not via libc.
+  (`flock`, `fcntl`, `setsid`, `setpgid`, `kill`, `killpg`, `signal`) are
+  declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via
+  libc.
 - `src/production` is `#[cfg(unix)]`; on Windows those commands do not exist and
   anything only they construct must be `cfg_attr(not(unix), allow(dead_code))`.
 
@@ -146,19 +147,34 @@ or `lost` (a later coordinator found it unfinished). Every record carries the
 coordinator's generation (`requested` 1, each `resumed` +1); `History::apply`
 refuses a stale generation, a second end, a pass without exit 0, a retry
 that does not supersede the last attempt, and a conclusion before every task
-is decided. The receipt is built only from accepted records (`coordinate`,
+is decided. A coordinator's generation is fixed when it creates, receives or
+takes over the run; once a newer one has written, it is `fenced` and writes
+nothing more. The receipt is built only from accepted records (`coordinate`,
 `conclude`), so it round-trips (`TaskReceipt` is `Deserialize`) and gains
 only `run`. Tasks run in their own process group holding their attempt's
-lease (so an orphan reads as running); SIGINT/SIGTERM/SIGHUP stop every
+lease (so an orphan reads as running; so does one whose recorded process
+group still exists, `group_exists`, which `resume` also refuses unless
+`--assume-ended`); SIGINT/SIGTERM/SIGHUP stop every
 group (TERM, KILL after 3 s), an attempt sykli signalled is `interrupted`
-whatever it exits with, and the run records `stopped`, exit 128+N, no
+whatever it exits with, a pass accepted less than 100 ms before
+sykli's own handler ran is `withdrawn`, with every pass decided after it
+(`withdraw_before_stop`: the same stop may have reached the task first; a run
+waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
 receipt.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
 `run --detach` hands the lease to a `setsid` coordinator
-(`__run_coordinator`). `drifted` errors a task whose declared inputs changed
+(`__run_coordinator`), and nothing else: every other descriptor is marked
+close-on-exec first (`close_inherited_on_exec`). `drifted` errors a task
+whose declared inputs changed
 during the run. `status --commit` judges every kept receipt of a commit's
-tree with `judge`. `checkpoint(POINT)` is a debug-build test hook
+tree with `judge`; a receipt is `recorded` when its run (or the run's
+tombstone in `sykli/pruned-runs/`, left by `prune`: a run is created aside and
+renamed into place with its lease held, and `remove_run` takes a lease only if
+it exists and moves the run aside before deleting it) concluded with it, and
+the verdict lets the newest recorded result decide, never an unrecorded pass
+over a recorded failure (`conflict`). `checkpoint(POINT)` is a debug-build
+test hook
 (`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
 crash window; release builds have none. On Windows `runs` is a stub of
 uninhabited types and a run is in memory, as before.

@@ -118,6 +118,22 @@ impl Fixture {
         self.sykli(args).output().unwrap()
     }
 
+    /// `sh -c SCRIPT` in the repository, as a caller would start sykli
+    /// (`$SYKLI`), with sykli's own test environment.
+    fn shell(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        own_git_config(&mut command)
+            .arg("-c")
+            .arg(script)
+            .current_dir(&self.repo)
+            .env("SYKLI", env!("CARGO_BIN_EXE_sykli"))
+            .env("SYKLI_TEST_PAUSE_DIR", &self.base)
+            .env_remove("SYKLI_TEST_PAUSE_AT")
+            .env_remove("SYKLI_TEST_FAIL_AT")
+            .stdin(Stdio::null());
+        command
+    }
+
     /// A command started in the background, paused at `point` when given.
     fn spawn(&self, args: &[&str], point: Option<&str>) -> Child {
         let mut command = self.sykli(args);
@@ -628,6 +644,28 @@ fn window_05_a_coordinator_killed_during_execution_keeps_what_finished() {
         f.verify_commit(Path::new(path), "HEAD").status.code(),
         Some(0)
     );
+    // Invariant H: the resume said it was running `second` again, whose
+    // earlier attempt had started and may have finished; `first` it kept.
+    let warned = text(&resumed.stderr);
+    assert!(warned.contains("re-running second"), "{warned}");
+    assert!(!warned.contains("re-running first"), "{warned}");
+    // Invariant G: the commit's status says `second` passed only after a
+    // lost attempt, not plainly passed.
+    let commit = f.commit_status("HEAD");
+    assert_eq!(commit["verdict"], "passed");
+    let second = commit["runs"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["name"] == "second")
+        .unwrap()
+        .clone();
+    assert_eq!(second["attempts"], json!(["lost", "passed"]), "{commit}");
+    assert_eq!(
+        commit["current"][0]["retried"],
+        json!(["second"]),
+        "{commit}"
+    );
 }
 
 /// Window 6: the process completed, its output is not yet kept. Lost.
@@ -733,7 +771,10 @@ fn window_09_after_the_receipt_before_the_run_concludes() {
     assert_eq!(f.commit_status("HEAD")["verdict"], "passed");
     assert_eq!(f.receipts(), receipts, "the same receipt, not a second one");
     assert_eq!(fs::read(&receipts[0]).unwrap(), before);
-    assert_eq!(status["receipt"]["path"], receipts[0].to_str().unwrap());
+    // One spelling, whatever the temporary directory is called (on macOS
+    // /var is a link to /private/var): the path as the file system has it.
+    let canonical = fs::canonicalize(&receipts[0]).unwrap();
+    assert_eq!(status["receipt"]["path"], canonical.to_str().unwrap());
     assert_eq!(f.count("t"), 1);
 }
 
@@ -773,13 +814,16 @@ fn window_10_a_retry_killed_again_keeps_every_attempt() {
 
 /// Window 11, cancellation: SIGTERM and SIGINT stop the run. Its running
 /// task's whole process group is stopped and recorded as interrupted (not
-/// failed), the run as interrupted, and the run exits 128+N.
+/// failed), the run as interrupted, and the run exits 128+N. `first`
+/// passed well before the stop (an outcome accepted within 100 ms of it is
+/// withdrawn: the stop may have caused it) and is kept, not run again.
 #[test]
 fn window_11_a_cancelled_run_records_its_stopped_task_as_interrupted() {
     for (signal_name, number) in [("TERM", 15), ("INT", 2)] {
         let f = Fixture::new(&format!("w11{signal_name}"), "one\n", two_tasks);
         let child = f.spawn(&["run", "sykli.json", "--json"], None);
         f.wait_ready("second");
+        std::thread::sleep(Duration::from_millis(300));
         let task_pid: u32 = fs::read_to_string(f.base.join("second.pid"))
             .unwrap()
             .trim()
@@ -799,7 +843,12 @@ fn window_11_a_cancelled_run_records_its_stopped_task_as_interrupted() {
         assert_eq!(status["state"], "interrupted");
         assert_eq!(state(&status, "first"), "passed");
         assert_eq!(state(&status, "second"), "interrupted");
-        assert_eq!(attempts(&status, "second")[0]["signal"], number);
+        // What ended the attempt is recorded as its own: sykli stops a group
+        // with TERM first, whatever stopped the run.
+        let stopped = &attempts(&status, "second")[0];
+        assert_eq!(stopped["signal"], 15, "{stopped}");
+        assert_eq!(stopped["exit"], Value::Null, "{stopped}");
+        assert_eq!(stopped["stopped_by"], number, "{stopped}");
         assert!(f.receipts().is_empty());
         nothing_unknown_passed(&f, &status);
         f.unlatch();
@@ -866,6 +915,11 @@ fn window_11_a_task_that_exits_zero_on_the_stop_is_interrupted_not_passed() {
     assert_eq!(state(&status, "t"), "interrupted");
     assert!(f.receipts().is_empty());
     assert_eq!(f.commit_status("HEAD")["verdict"], "none");
+    // It answered the stop with exit 0, and that is what its attempt says.
+    let stopped = &attempts(&status, "t")[0];
+    assert_eq!(stopped["exit"], 0, "{stopped}");
+    assert_eq!(stopped["signal"], Value::Null, "{stopped}");
+    assert_eq!(stopped["stopped_by"], 15, "{stopped}");
 
     // Nothing was cached: the next run runs the task again, and passes.
     f.unlatch();
@@ -942,6 +996,58 @@ fn window_11_a_stop_does_not_wait_for_a_process_that_left_the_group() {
     assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
     assert_eq!(state(&status, "t"), "interrupted");
     assert!(f.receipts().is_empty());
+}
+
+/// Window 11, a stop that reaches the task directly as well as sykli: one
+/// `kill` of sykli and of the task's group (as a service manager stopping a
+/// whole control group does). The task traps TERM and exits 0, often before
+/// sykli's own handler has run. Its exit answered the stop, so it is never
+/// kept as a pass: the attempt is interrupted, and a resume runs the task
+/// again. Repeated, since which process sees the signal first varies.
+#[test]
+fn window_11_a_stop_sent_to_the_task_too_is_never_a_pass() {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    for round in 0..5 {
+        let f = Fixture::new(&format!("w11both{round}"), "one\n", |base| {
+            let b = base.display();
+            vec![(
+                "t".into(),
+                format!(
+                    "trap 'exit 0' TERM; echo $$ > '{b}/t.pid'; echo run >> '{b}/t.count'; \
+                     if [ ! -e '{b}/go' ]; then printf ready > '{b}/t.ready'; sleep 30 & wait $!; fi"
+                ),
+                vec![],
+            )]
+        });
+        let child = f.spawn(&["run", "sykli.json", "--json"], None);
+        f.wait_ready("t");
+        let group: i32 = fs::read_to_string(f.base.join("t.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        f.signalled_at.set(Some(now_ms()));
+        // SAFETY: plain kill(2) of the task's group, then of sykli.
+        unsafe {
+            kill(-group, 15);
+            kill(child.id() as i32, 15);
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+        let run = f.run_id();
+        let status = f.status(&run);
+        nothing_unknown_passed(&f, &status);
+        assert_ne!(state(&status, "t"), "passed", "{status}");
+        assert!(f.receipts().is_empty());
+
+        f.unlatch();
+        let resumed = f.resume(&run);
+        assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+        assert_eq!(f.count("t"), 2, "the resume ran the task again");
+        nothing_unknown_passed(&f, &f.status(&run));
+    }
 }
 
 /// Window 12: killed during recovery, after the lost attempts were
@@ -1164,6 +1270,12 @@ fn a_failed_write_is_never_acknowledged() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(out.stdout.is_empty());
+    // A step the journal refused is not the task erroring.
+    assert!(
+        !text(&out.stderr).contains("errored: t"),
+        "{}",
+        text(&out.stderr)
+    );
     let status = f.status(&f.run_id());
     assert_eq!(state(&status, "t"), "lost");
     assert!(f.receipts().is_empty());
@@ -1257,12 +1369,31 @@ fn verify_json_reports_the_verdict_and_what_it_establishes() {
     assert_eq!(verdict["stage"], Value::Null);
     assert_eq!(
         verdict["trust"]["established"],
-        json!(["schema", "contract", "source", "consistency", "outcome"])
+        json!(["schema", "contract", "source", "consistency"])
     );
     assert_eq!(
         verdict["trust"]["not_established"],
-        json!(["provenance", "producer", "execution"])
+        json!(["outcome", "provenance", "producer", "execution"])
     );
+    // The receipt's own outcome, as a field: its claim, not established.
+    assert_eq!(verdict["claimed_outcome"], "passed");
+
+    // A cached receipt claims `cached`.
+    let cached = f.output(&["run", "sykli.json", "--json"]);
+    let cached_path = f.base.join("cached.json");
+    fs::write(&cached_path, &cached.stdout).unwrap();
+    let out = f.output(&[
+        "verify",
+        cached_path.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--commit",
+        "HEAD",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["claimed_outcome"], "cached");
     fs::write(f.repo.join("file.txt"), "two\n").unwrap();
     let c2 = f.commit("c2");
     let out = f.output(&[
@@ -1285,6 +1416,41 @@ fn verify_json_reports_the_verdict_and_what_it_establishes() {
             .unwrap()
             .contains(&json!("source"))
     );
+    // Refused for c2, it still claims what it claimed.
+    assert_eq!(verdict["claimed_outcome"], "passed");
+
+    // A failed run's receipt claims `failed`, and verify exits 1.
+    let failed = f.output(&["run", "sykli.json", "--json"]);
+    assert_eq!(failed.status.code(), Some(1), "{}", text(&failed.stderr));
+    let failed_path = f.base.join("failed.json");
+    fs::write(&failed_path, &failed.stdout).unwrap();
+    let out = f.output(&[
+        "verify",
+        failed_path.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--commit",
+        &c2,
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["stage"], "outcome");
+    assert_eq!(verdict["claimed_outcome"], "failed");
+
+    // A receipt that cannot be read claims nothing.
+    let unreadable = f.base.join("unreadable.json");
+    fs::write(&unreadable, "not json").unwrap();
+    let out = f.output(&[
+        "verify",
+        unreadable.to_str().unwrap(),
+        "--contract",
+        "sykli.json",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["claimed_outcome"], Value::Null);
 }
 
 /// `status --commit`: what applies to a commit now is kept apart from what
@@ -1471,4 +1637,581 @@ fn an_execute_bit_changed_during_validation_is_never_a_pass() {
     let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(receipt["tasks"][0]["class"], "input_changed");
     nothing_unknown_passed(&f, &f.status(receipt["run"].as_str().unwrap()));
+}
+
+/// A run's receipt path is reported in one spelling, the file system's,
+/// whichever spelling of the repository a caller gave (`--repo-root` through
+/// a symbolic link here, or macOS's /var for /private/var): `status --run`,
+/// and `status --commit`'s receipts and runs, agree.
+#[test]
+fn a_receipt_path_is_reported_in_one_spelling() {
+    let f = Fixture::new("spelling", "one\n", one_task);
+    f.unlatch();
+    let alias = f.base.join("alias");
+    std::os::unix::fs::symlink(&f.repo, &alias).unwrap();
+    let out = f.output(&[
+        "--repo-root",
+        alias.to_str().unwrap(),
+        "--git-common-dir",
+        alias.join(".git").to_str().unwrap(),
+        "run",
+        "sykli.json",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let run = f.run_id();
+    let canonical = fs::canonicalize(&f.receipts()[0]).unwrap();
+    let canonical = canonical.to_str().unwrap();
+    assert_eq!(f.status(&run)["receipt"]["path"], canonical);
+    let commit = f.commit_status("HEAD");
+    assert_eq!(commit["current"][0]["receipt"], canonical, "{commit}");
+    assert_eq!(commit["runs"][0]["receipt"]["path"], canonical, "{commit}");
+}
+
+/// `run --detach` hands the run to a coordinator that keeps none of its
+/// caller's descriptors: a pipe the caller left open at fd 5 (as a harness
+/// does) reaches EOF as soon as `run` returns, not when the run ends.
+#[test]
+fn a_detached_run_keeps_none_of_its_callers_descriptors() {
+    let f = Fixture::new("detachfd", "one\n", one_task);
+    let mut child = f
+        .shell("(\"$SYKLI\" run sykli.json --detach --json 5>&1) | cat")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The run's task is running, held at its latch.
+    f.wait_ready("t");
+    let started = Instant::now();
+    let mut returned = None;
+    while started.elapsed() < Duration::from_secs(10) {
+        if let Some(status) = child.try_wait().unwrap() {
+            returned = Some(status);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    f.unlatch();
+    f.release("t.latch");
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        returned.is_some(),
+        "the caller's pipe stayed open while the run went on: {}",
+        text(&out.stderr)
+    );
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(answer["schema"], "sykli-run.v1");
+    let run = answer["run"].as_str().unwrap().to_owned();
+    wait_until(|| f.status(&run)["state"] == "completed");
+}
+
+/// The newest recorded result for a commit's tree and contract decides its
+/// verdict (invariant G): a newer failure is never hidden by an older pass
+/// (a flaky check), and a pass after a failure (a rerun) passes.
+#[test]
+fn status_commit_lets_the_newest_recorded_result_decide() {
+    let f = Fixture::new("flaky", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!("echo run >> '{b}/t.count'; test ! -e '{b}/fail'"),
+            vec![],
+        )]
+    });
+    let judgements = |status: &Value| {
+        status["current"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["judgement"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        f.output(&["run", "sykli.json", "--json"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(f.commit_status("HEAD")["verdict"], "passed");
+
+    fs::remove_dir_all(f.repo.join(".sykli/cache")).unwrap();
+    fs::write(f.base.join("fail"), "").unwrap();
+    assert_eq!(
+        f.output(&["run", "sykli.json", "--json"]).status.code(),
+        Some(1)
+    );
+    let status = f.commit_status("HEAD");
+    assert_eq!(judgements(&status), ["failed", "verified"], "{status}");
+    assert_eq!(status["verdict"], "failed", "{status}");
+
+    fs::remove_file(f.base.join("fail")).unwrap();
+    assert_eq!(
+        f.output(&["run", "sykli.json", "--json"]).status.code(),
+        Some(0)
+    );
+    let status = f.commit_status("HEAD");
+    assert_eq!(
+        judgements(&status),
+        ["verified", "failed", "verified"],
+        "{status}"
+    );
+    assert_eq!(status["verdict"], "passed", "{status}");
+    assert_eq!(f.count("t"), 3);
+}
+
+/// A failure the journal recorded is never hidden by a pass no run recorded
+/// (F1). A copy of the failed receipt with its outcome rewritten to passed
+/// and its `run` removed verifies on its own, as documented; but the
+/// commit's verdict is `conflict`, never `passed`, whichever time the copy
+/// claims, before the failure or after it.
+#[test]
+fn status_commit_never_lets_an_unrecorded_pass_hide_a_recorded_failure() {
+    for shift in [-1000_i64, 1000] {
+        let f = Fixture::new("f1", "two\n", one_task);
+        f.unlatch();
+        let out = f.output(&["run", "sykli.json", "--json"]);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let mut forged: Value = serde_json::from_slice(&out.stdout).unwrap();
+        forged["outcome"] = "passed".into();
+        for task in forged["tasks"].as_array_mut().unwrap() {
+            task["outcome"] = "passed".into();
+            task["exit_code"] = 0.into();
+            task["error"] = Value::Null;
+            task["importable"] = true.into();
+            task["class"] = Value::Null;
+        }
+        forged.as_object_mut().unwrap().remove("run");
+        forged["started_at_ms"] = (forged["started_at_ms"].as_i64().unwrap() + shift).into();
+        let bytes = serde_json::to_vec_pretty(&forged).unwrap();
+        let kept = f.repo.join(".git/sykli/receipts");
+        fs::create_dir_all(&kept).unwrap();
+        let path = kept.join(format!("rcpt_{:x}.json", Sha256::digest(&bytes)));
+        fs::write(&path, &bytes).unwrap();
+        // The documented limit: an outcome rewrite verifies on its own.
+        assert_eq!(f.verify_commit(&path, "HEAD").status.code(), Some(0));
+
+        let status = f.commit_status("HEAD");
+        assert_eq!(status["verdict"], "conflict", "{status}");
+        assert!(status["conflict"].is_string(), "{status}");
+        let recorded = status["current"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| (entry["judgement"].clone(), entry["recorded"].clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            recorded.contains(&(json!("failed"), json!(true))),
+            "{status}"
+        );
+        assert!(
+            recorded.contains(&(json!("verified"), json!(false))),
+            "{status}"
+        );
+    }
+}
+
+/// Invariant H and the lease model: a task whose process closes the
+/// descriptors it inherits (as `sudo` does) holds no attempt lease. After
+/// its coordinator is killed, the process group the journal recorded shows
+/// it still running: it is not lost, and a resume does not run it again
+/// while it runs. Once it has ended, it is lost, and a resume runs it.
+#[test]
+fn a_task_that_drops_its_lease_is_running_while_its_group_lives() {
+    let f = Fixture::new("dropped", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "exec perl -MPOSIX -e 'POSIX::close($_) for 3..1023; exec @ARGV' sh -c \
+                 'echo $$ > \"{b}/t.pid\"; echo run >> \"{b}/t.count\"; \
+                 if [ ! -e \"{b}/go\" ]; then printf ready > \"{b}/t.ready\"; read token < \"{b}/t.latch\"; fi'"
+            ),
+            vec![],
+        )]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    f.stop(child.id(), "KILL");
+    child.wait_with_output().unwrap();
+    let run = f.run_id();
+    let status = f.status(&run);
+    assert_eq!(state(&status, "t"), "running", "{status}");
+    let refused = f.resume(&run);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("still running"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert!(
+        text(&refused.stderr).contains("--assume-ended"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(f.count("t"), 1);
+
+    f.unlatch();
+    f.release("t.latch");
+    wait_until(|| state(&f.status(&run), "t") == "lost");
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert_eq!(f.count("t"), 2);
+    nothing_unknown_passed(&f, &f.status(&run));
+}
+
+/// A run removed by the run budget is reported as pruned, not as an
+/// unknown id; and a receipt it wrote before it concluded stays historical
+/// once its journal is gone: nothing shows the run concluded with it.
+#[test]
+fn a_pruned_run_is_reported_and_its_unconcluded_receipt_stays_historical() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("pruned", "one\n", one_task);
+    f.unlatch();
+    let c1 = f.git(&["rev-parse", "HEAD"]);
+    f.kill_at(&["run", "sykli.json", "--json"], "after-receipt");
+    let lost = f.run_id();
+    assert_eq!(
+        f.commit_status(&c1)["historical"][0]["judgement"],
+        "unconcluded"
+    );
+    // Another commit's run, under a budget of one, removes it.
+    fs::write(f.repo.join("file.txt"), "two\n").unwrap();
+    f.commit("c2");
+    f.sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_RUN_BUDGET", "1")
+        .output()
+        .unwrap();
+    assert!(!f.runs().contains(&lost));
+    let out = f.output(&["status", "--run", &lost, "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("pruned"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    let status = f.commit_status(&c1);
+    assert_eq!(status["verdict"], "none", "{status}");
+    assert_eq!(status["historical"][0]["judgement"], "unconcluded");
+}
+
+/// A run whose journal cannot be read is named, never skipped silently, and
+/// a receipt naming it is not current: nothing shows it concluded with it.
+#[test]
+fn an_unreadable_run_is_named_and_its_receipt_is_not_current() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("unreadable", "one\n", one_task);
+    f.unlatch();
+    f.kill_at(&["run", "sykli.json", "--json"], "after-receipt");
+    let run = f.run_id();
+    fs::write(
+        f.runs_dir()
+            .join(&run)
+            .join("records/00000000000000000001.json"),
+        "garbage",
+    )
+    .unwrap();
+    let status = f.commit_status("HEAD");
+    assert_eq!(status["verdict"], "none", "{status}");
+    assert_eq!(status["historical"][0]["judgement"], "unconcluded");
+    assert_eq!(
+        status["unreadable_runs"][0]["run"],
+        run.as_str(),
+        "{status}"
+    );
+}
+
+/// A journal that does not load says which file it could not read.
+#[test]
+fn journal_errors_name_the_file() {
+    let f = Fixture::new("journalerror", "one\n", one_task);
+    f.unlatch();
+    assert_eq!(
+        f.output(&["run", "sykli.json", "--json"]).status.code(),
+        Some(0)
+    );
+    let run = f.run_id();
+    fs::write(
+        f.runs_dir()
+            .join(&run)
+            .join("records/00000000000000000002.json"),
+        "garbage",
+    )
+    .unwrap();
+    let out = f.output(&["status", "--run", &run, "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("00000000000000000002.json"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `resume --help` says what a resume promises: at least once.
+#[test]
+fn resume_help_says_tasks_run_at_least_once() {
+    let f = Fixture::new("resumehelp", "one\n", one_task);
+    let help = text(&f.output(&["resume", "--help"]).stdout);
+    assert!(help.contains("at least once"), "{help}");
+}
+
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+/// A task that traps TERM and exits 0 (its "cleanup"), holding until it
+/// is stopped unless `BASE/go` exists; it counts its runs in `BASE/NAME.count`
+/// and writes its pid, its group's id, to `BASE/NAME.pid`.
+fn trapping(base: &Path, name: &str, then: &str) -> String {
+    let b = base.display();
+    format!(
+        "trap 'exit 0' TERM; echo $$ > '{b}/{name}.pid'; echo run >> '{b}/{name}.count'; \
+         if [ ! -e '{b}/go' ]; then printf ready > '{b}/{name}.ready'; sleep 30 & wait $!; fi; {then}"
+    )
+}
+
+fn pid_of(f: &Fixture, task: &str) -> i32 {
+    fs::read_to_string(f.base.join(format!("{task}.pid")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Invariant B for the last task of a run: the stop reaches its group first
+/// and sykli only later (two `kill`s, as a supervisor stopping children
+/// before their parent does). The task traps it and exits 0, and nothing else
+/// is left to run; sykli must not conclude with that pass before the window
+/// in which its own stop may still arrive is over. (The window is widened
+/// here, debug builds only, so the test does not hang on scheduling.)
+#[test]
+fn window_11_a_stop_after_the_last_task_exited_is_never_a_pass() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("w11last", "one\n", |base| {
+        vec![("t".into(), trapping(base, "t", "true"), vec![])]
+    });
+    let child = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_TEST_STOP_WINDOW_MS", "3000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    f.wait_ready("t");
+    let group = pid_of(&f, "t");
+    f.signalled_at.set(Some(now_ms()));
+    // SAFETY: plain kill(2) of the task's group.
+    unsafe {
+        kill(-group, 15);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // SAFETY: plain kill(2) of sykli, which may have exited already.
+    unsafe {
+        kill(child.id() as i32, 15);
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let run = f.run_id();
+    let status = f.status(&run);
+    nothing_unknown_passed(&f, &status);
+    assert_ne!(state(&status, "t"), "passed", "{status}");
+    assert!(f.receipts().is_empty());
+    assert_eq!(f.commit_status("HEAD")["verdict"], "none");
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert_eq!(f.count("t"), 2, "the resume ran the task again");
+}
+
+/// Invariant G: only a pass is withdrawn. A task that fails on its own just
+/// before a stop reaches sykli keeps its failure: a failure is never a false
+/// pass, and calling it an interruption would hide it.
+#[test]
+fn window_11_a_failure_just_before_a_stop_is_kept() {
+    let f = Fixture::new("w11fail", "one\n", |base| {
+        let b = base.display();
+        vec![
+            ("a".into(), format!("touch '{b}/a.failing'; exit 1"), vec![]),
+            ("t".into(), trapping(base, "t", "true"), vec![]),
+        ]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    wait_until(|| f.base.join("a.failing").exists());
+    std::thread::sleep(Duration::from_millis(30));
+    f.stop(child.id(), "TERM");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let run = f.run_id();
+    let status = f.status(&run);
+    assert_eq!(state(&status, "a"), "failed", "{status}");
+    assert_eq!(attempts(&status, "a")[0]["withdrawn"], false, "{status}");
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(1), "{}", text(&resumed.stderr));
+    assert_eq!(
+        attempts(&f.status(&run), "a").len(),
+        1,
+        "a is not run again"
+    );
+}
+
+/// A withdrawn pass takes with it what was decided after it: here `b`, which
+/// runs after `a`, was reused from the cache on the strength of `a`'s pass.
+/// When the resume finds `a` failing, `b` is blocked, not left cached.
+#[test]
+fn a_withdrawn_pass_reopens_what_was_decided_after_it() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("w11dep", "one\n", |base| {
+        let b = base.display();
+        vec![
+            (
+                "a".into(),
+                trapping(base, "a", &format!("test ! -e '{b}/fail'")),
+                vec![],
+            ),
+            ("b".into(), "true".into(), vec!["a".into()]),
+        ]
+    });
+    // Both pass and are cached; then only a's entry is dropped, so a runs
+    // again and b is reused.
+    f.unlatch();
+    let first = f.output(&["run", "sykli.json", "--json"]);
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    // a's cache key, from its `dispatched` record in the first run's journal.
+    let records = f.runs_dir().join(f.run_id()).join("records");
+    let key = fs::read_dir(&records)
+        .unwrap()
+        .filter_map(|entry| {
+            let record: Value =
+                serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
+            let fact = &record["record"]["fact"];
+            (fact["kind"] == "dispatched" && fact["task"] == "a")
+                .then(|| fact["cache_key"].as_str().unwrap().to_owned())
+        })
+        .next()
+        .unwrap();
+    fs::remove_dir_all(f.repo.join(".sykli/cache").join(key)).unwrap();
+    fs::remove_file(f.base.join("go")).unwrap();
+
+    let child = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_TEST_STOP_WINDOW_MS", "5000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    f.wait_ready("a");
+    // SAFETY: plain kill(2) of a's group: it traps TERM and exits 0.
+    unsafe {
+        kill(-pid_of(&f, "a"), 15);
+    }
+    let run = loop {
+        let runs = f.runs();
+        if let Some(run) = runs.iter().find(|run| {
+            f.status(run)["tasks"].as_array().is_some_and(|tasks| {
+                tasks
+                    .iter()
+                    .any(|t| t["name"] == "b" && t["state"] == "cached")
+            })
+        }) {
+            break run.clone();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    f.signalled_at.set(Some(now_ms()));
+    f.stop(child.id(), "TERM");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+    let status = f.status(&run);
+    assert_ne!(state(&status, "a"), "passed", "{status}");
+    assert_ne!(state(&status, "b"), "cached", "{status}");
+
+    fs::write(f.base.join("fail"), "").unwrap();
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(1), "{}", text(&resumed.stderr));
+    let receipt: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(receipt["tasks"][0]["outcome"], "failed", "{receipt}");
+    assert_eq!(receipt["tasks"][1]["outcome"], "blocked", "{receipt}");
+}
+
+/// Concurrent runs prune concurrently. Every run directory left is a whole
+/// run (never one holding only a re-created `lease`), the count stays within
+/// the budget plus the runs in flight, and no run is pruned while it is being
+/// created (each one succeeds).
+#[test]
+fn concurrent_pruning_leaves_only_whole_runs() {
+    let f = Fixture::new("prunerace", "one\n", one_task);
+    f.unlatch();
+    for _ in 0..12 {
+        let children = (0..4)
+            .map(|_| {
+                f.sykli(&["run", "sykli.json", "--json"])
+                    .env("SYKLI_RUN_BUDGET", "2")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        }
+    }
+    let entries = fs::read_dir(f.runs_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    for path in &entries {
+        assert!(
+            path.join("records/00000000000000000001.json").is_file(),
+            "not a whole run: {} holds {:?}",
+            path.display(),
+            fs::read_dir(path).map(|e| e.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+        );
+    }
+    assert!(entries.len() <= 2 + 4, "{entries:?}");
+    let commit = f.commit_status("HEAD");
+    assert_eq!(commit["unreadable_runs"], json!([]), "{commit}");
+}
+
+/// `--assume-ended` leaves a trace: the lost record of an attempt whose
+/// process group still existed says that the override let it go.
+#[test]
+fn assume_ended_is_recorded() {
+    let f = Fixture::new("assumed", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "exec perl -MPOSIX -e 'POSIX::close($_) for 3..1023; exec @ARGV' sh -c \
+                 'echo $$ > \"{b}/t.pid\"; echo run >> \"{b}/t.count\"; \
+                 if [ ! -e \"{b}/go\" ]; then printf ready > \"{b}/t.ready\"; read token < \"{b}/t.latch\"; fi'"
+            ),
+            vec![],
+        )]
+    });
+    let child = f.spawn(&["run", "sykli.json", "--json"], None);
+    f.wait_ready("t");
+    f.stop(child.id(), "KILL");
+    child.wait_with_output().unwrap();
+    let run = f.run_id();
+    let group = pid_of(&f, "t");
+    f.unlatch();
+    let resumed = f.output(&["resume", "--run", &run, "--assume-ended", "--json"]);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    f.release("t.latch");
+    let first = &attempts(&f.status(&run), "t")[0];
+    assert_eq!(first["outcome"], "lost", "{first}");
+    let reason = first["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("--assume-ended"), "{first}");
+    assert!(reason.contains(&group.to_string()), "{first}");
 }
