@@ -246,6 +246,26 @@ The same local store is sufficient; no chat handover is required. Compact state
 omits command captures; retrieve them with `sykli diagnostics ID ATTEMPT --json`.
 Read `assessment` and `delivery` separately: an available artifact can still
 have unfinished checks, and a failed operation needs an explicit `--retry`.
+That `delivery` means the artifact is in the local store, not that it is
+deployed anywhere.
+
+To put a produced artifact on a target, use `sykli deliver
+sykli.delivery.json --target NAME --json` (or `--detach --json`, which returns
+`{"schema":"sykli-delivery.v1","delivery":ID}` once the request is durable).
+Keep the delivery ID. Ask about it with `sykli status --delivery ID --json`
+(`sykli-delivery-status.v1`), and read `label` and every entry of
+`dimensions` (A `operation`, B `artifact`, C `desired`, D `observed`, E
+`health`, F `freshness`) rather than one of them. Only `VERIFIED HEALTHY` says
+the intended artifact runs, converged and healthy, by an observation fresher
+than the contract's bound; `acknowledged` alone is not a deployment. A status
+ages: re-observe with `sykli observe --delivery ID --json`, which never
+applies anything. After a crash, `sykli resume --delivery ID --json`
+reconciles an apply whose end is unknown by observing the target; if that
+leaves it `UNKNOWN`, apply again only deliberately, with `--reapply`, which
+is refused until an observation has reached the target. A `deliver` refused
+with `target-unreconciled` names an earlier delivery whose effect is unknown:
+resume that one first; never work around it. `--reapply-over ID` is for a
+person who has decided to apply over an effect nobody could observe.
 
 To learn what a pull request has established before acting on it, run
 `sykli inspect --repo OWNER/NAME --pr N --requirements FILE --json` and read the

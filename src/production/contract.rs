@@ -115,7 +115,7 @@ pub fn name(value: &str) -> Result<(), String> {
 }
 
 // Target/product labels are not used as environment variable names or paths.
-fn label(value: &str) -> Result<(), String> {
+pub fn label(value: &str) -> Result<(), String> {
     if !value.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
         || !value
             .bytes()

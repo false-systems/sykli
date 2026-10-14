@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 
 mod contract;
+pub(crate) mod delivery;
 mod discovery;
 mod store;
 use contract::*;
