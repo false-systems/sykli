@@ -997,6 +997,74 @@ fn a_controller_that_has_not_completed_is_never_verified() {
     );
 }
 
+/// A recreated target object is not the one this delivery's apply changed,
+/// even when it asks for the same thing and names this delivery: its uid
+/// differs, and this delivery never applied to it.
+#[test]
+fn a_recreated_target_is_not_verified() {
+    let f = Fixture::new("recreated");
+    let (out, status) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let id = status["delivery"].as_str().unwrap().to_string();
+    let mut recreated = healthy();
+    recreated["uid"] = json!("uid-2");
+    f.target(&recreated);
+    let (out, status) = f.observe(&id);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(label(&status), "NOT VERIFIED HEALTHY", "{status}");
+    let reasons = status["reasons"].to_string();
+    assert!(reasons.contains("target recreated"), "{reasons}");
+    assert!(
+        reasons.contains("uid-1") && reasons.contains("uid-2"),
+        "{reasons}"
+    );
+    assert_eq!(f.applies(), 1);
+}
+
+/// A delivery from another clone to the same target supersedes this one.
+/// This clone has no record of it, so it is seen at this delivery's next
+/// observation, when the target names that other delivery; until then the
+/// label holds only as of the last observation, within the freshness bound.
+#[test]
+fn a_delivery_from_another_clone_supersedes_at_the_next_observation() {
+    let f = Fixture::new("clones");
+    let (out, first) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let id = first["delivery"].as_str().unwrap().to_string();
+    let other = f.base.join("other");
+    let out = own_git_config(&mut Command::new("git"))
+        .args(["clone", "--quiet"])
+        .arg(&f.repo)
+        .arg(&other)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let in_other = |args: &[&str]| {
+        let mut command = f.sykli(args);
+        command.current_dir(&other);
+        command.output().unwrap()
+    };
+    let out = in_other(&["produce", "app", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = in_other(&["deliver", "--target", "fake", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let theirs = theirs["delivery"].as_str().unwrap().to_string();
+    assert_ne!(theirs, id);
+    assert_eq!(f.applies(), 2);
+    // Not yet observed from this clone: nothing here knows of it.
+    assert_eq!(label(&f.status(&id)), "VERIFIED HEALTHY");
+    let (out, status) = f.observe(&id);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(label(&status), "NOT VERIFIED HEALTHY", "{status}");
+    assert_eq!(dim(&status, "operation")["superseded_by"], theirs.as_str());
+    assert_eq!(dim(&status, "operation")["superseded_seen"], "observation");
+    assert!(
+        status["reasons"].to_string().contains("superseded"),
+        "{status}"
+    );
+}
+
 /// Target missing: the object is gone.
 #[test]
 fn a_missing_target_is_degraded() {

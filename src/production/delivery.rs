@@ -3017,6 +3017,48 @@ fn judge(
     let usable = after.iter().rev().find(|s| s.usable().is_some()).copied();
     let observation = usable.and_then(|s| s.usable());
 
+    // Superseded, as this clone's journal says (`superseded`), or else as
+    // the target says: its desired state names another operation that is no
+    // delivery this clone keeps (another clone's, say). That one is seen
+    // only by an observation, so only from the next one on.
+    let superseded_seen = match (&superseded, observation, usable) {
+        (None, Some(o), Some(seen)) => o
+            .desired
+            .as_ref()
+            .and_then(|d| d.operation.as_ref())
+            .filter(|op| op.as_str() != id.as_str() && !known.contains_key(op.as_str()))
+            .map(|op| (op.clone(), seen.sequence)),
+        _ => None,
+    };
+    operation["superseded_by"] = json!(
+        superseded
+            .as_ref()
+            .map(|(other, _)| other)
+            .or(superseded_seen.as_ref().map(|(op, _)| op))
+    );
+    operation["superseded_seen"] = json!(match (&superseded, &superseded_seen) {
+        (Some(_), _) => Some("journal"),
+        (None, Some(_)) => Some("observation"),
+        _ => None,
+    });
+
+    // The target object as first observed after this apply: one with
+    // another uid since was recreated, and this delivery never applied to it.
+    let uid_after_apply = after
+        .iter()
+        .filter_map(|s| s.usable())
+        .filter(|o| o.present == Some(true))
+        .find_map(|o| o.uid.clone());
+    let recreated = match (
+        &uid_after_apply,
+        observation
+            .filter(|o| o.present == Some(true))
+            .and_then(|o| o.uid.as_ref()),
+    ) {
+        (Some(first), Some(now)) if first != now => Some((first.clone(), now.clone())),
+        _ => None,
+    };
+
     // B: the artifact.
     let artifact = match observation {
         None => json!({"dimension": "B", "intended": intended, "verdict": "unknown"}),
@@ -3080,6 +3122,12 @@ fn judge(
                     .to_string()
             } else if let Some((other, _)) = &superseded {
                 format!("superseded: delivery {other} to this target followed this one")
+            } else if let Some((op, _)) = &superseded_seen {
+                format!(
+                    "superseded: the target's desired state is operation {op}'s, which is no \
+                     delivery this clone keeps (another clone's delivery, or one this clone \
+                     removed)"
+                )
             } else if d.operation.as_deref() == Some(id.as_str()) {
                 format!(
                     "modified out of band: the target names this delivery but asks for {}{}",
@@ -3128,6 +3176,7 @@ fn judge(
                 "operation": d.operation,
                 "writer": d.writer,
                 "uid": o.uid,
+                "uid_after_apply": uid_after_apply,
                 "attributed": ours,
                 "verdict": if ours {
                     "this-delivery"
@@ -3272,6 +3321,13 @@ fn judge(
             reasons.push("target missing: the observer found no target object".into());
             return DEGRADED;
         }
+        if let Some((first, now)) = &recreated {
+            reasons.push(format!(
+                "target recreated: the object first observed after this delivery's apply was \
+                 {first}; it is now {now}, which this delivery never applied to"
+            ));
+            return NOT_VERIFIED_HEALTHY;
+        }
         if desired["verdict"] == "other" || desired["verdict"] == "unattributed" {
             reasons.push(desired["explanation"].as_str().unwrap_or("").into());
             return NOT_VERIFIED_HEALTHY;
@@ -3415,6 +3471,13 @@ fn judge(
     } else if let Some((other, _)) = &superseded {
         reasons.push(format!(
             "superseded: delivery {other} to {} followed this one",
+            request.target
+        ));
+        NOT_VERIFIED_HEALTHY
+    } else if let Some((op, sequence)) = &superseded_seen {
+        reasons.push(format!(
+            "superseded: observation {sequence} shows {}'s desired state put there by operation \
+             {op}, a delivery this clone has no record of (another clone's, or one it removed)",
             request.target
         ));
         NOT_VERIFIED_HEALTHY
