@@ -2842,11 +2842,21 @@ fn parse_lock(bytes: &[u8], name: &str) -> Result<LockFile, String> {
     Ok(lock)
 }
 
-/// The hash a lock file pins for this contract, if it pins one.
-fn pinned(lock: LockFile, contract: &Path) -> Option<String> {
+/// An existing lock must pin the named contract; only an absent lock is unpinned.
+fn pinned(lock: LockFile, contract: &Path) -> Result<String, String> {
     match lock.contract_hash {
-        Some(hash) => Some(hash),
-        None => lock.contracts.get(&lock_key(contract)).cloned(),
+        Some(hash) => Ok(hash),
+        None => lock
+            .contracts
+            .get(&lock_key(contract))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "{} does not pin {}; run `sykli lock` to accept it",
+                    lock_path(contract).display(),
+                    lock_key(contract)
+                )
+            }),
     }
 }
 
@@ -2859,7 +2869,7 @@ fn read_lock(path: &Path) -> Result<Option<String>, String> {
 /// and the SHA-256 of that file, if there is one, from a single read.
 fn read_lock_digest(path: &Path) -> Result<(Option<String>, Option<String>), String> {
     Ok(match read_lock_file(&lock_path(path))? {
-        Some((lock, digest)) => (pinned(lock, path), Some(digest)),
+        Some((lock, digest)) => (Some(pinned(lock, path)?), Some(digest)),
         None => {
             warn_unpinned_link(path);
             (None, None)
@@ -6878,9 +6888,12 @@ impl ContractNames {
         let (contract, _, hash) = parse_contract(&bytes)
             .map_err(|error| format!("{} in commit {short}: {error}", path.display()))?;
         let lock = match blob(&self.lock)? {
-            Some(bytes) => pinned(
-                parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
-                &path,
+            Some(bytes) => Some(
+                pinned(
+                    parse_lock(&bytes, &format!("sykli.lock in commit {short}"))?,
+                    &path,
+                )
+                .map_err(|error| format!("commit {short}: {error}"))?,
             ),
             None => None,
         };
