@@ -329,11 +329,15 @@ fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resul
         })
         .map_err(|e| e.to_string())?;
         // Synced: a marker torn by a power cut would read as a gone worktree.
+        // Closed before the rename: Windows refuses to rename a directory
+        // that holds an open file.
         let path = staging.join("worktree.json");
-        let mut file = fs::File::create(&path).map_err(|e| error(&path, e))?;
-        file.write_all(&marker)
-            .and_then(|()| sync(&file, Durability::Fsync))
-            .map_err(|e| error(&path, e))?;
+        {
+            let mut file = fs::File::create(&path).map_err(|e| error(&path, e))?;
+            file.write_all(&marker)
+                .and_then(|()| sync(&file, Durability::Fsync))
+                .map_err(|e| error(&path, e))?;
+        }
         fs::write(staging.join("lease"), b"").map_err(|e| error(&staging, e))?;
         fs::create_dir(staging.join(HANDED_OUT)).map_err(|e| error(&staging, e))?;
         sync_directory(&staging, Durability::Fsync)?;
