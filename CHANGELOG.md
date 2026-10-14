@@ -219,9 +219,14 @@ contract consumer can observe; internal refactors are not listed.
   interrupted whatever they exit with (a task that traps the signal and exits
   0 never finished its work, and is never passed), writes no receipt and no
   cache entry, and exits 128+N, instead of dying and leaving them running
-  unrecorded. A process still in a task's group when its shell exits is
-  killed then, so it can no longer hold the task open; one that left the
-  group (`setsid`) is not, and a stop does not wait for it.
+  unrecorded. A stop that reaches a task directly as well as sykli (a
+  signal to a process group or control group holding both) is covered as far
+  as sykli sees it: an attempt that ends after sykli's handler ran, or less
+  than 100 ms before, is interrupted, an outcome already recorded for it is
+  withdrawn (`withdrawn` in `status --run`), and a resume runs it again. A
+  process still in a task's group when its shell exits is killed then, so it
+  can no longer hold the task open; one that left the group (`setsid`) is
+  not, and a stop does not wait for it.
 - A task whose declared inputs change while the run is in progress is
   `errored` with class `input_changed`, not passed or failed: its result is
   not evidence for the tree the run recorded.

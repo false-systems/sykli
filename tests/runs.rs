@@ -773,13 +773,16 @@ fn window_10_a_retry_killed_again_keeps_every_attempt() {
 
 /// Window 11, cancellation: SIGTERM and SIGINT stop the run. Its running
 /// task's whole process group is stopped and recorded as interrupted (not
-/// failed), the run as interrupted, and the run exits 128+N.
+/// failed), the run as interrupted, and the run exits 128+N. `first`
+/// passed well before the stop (an outcome accepted within 100 ms of it is
+/// withdrawn: the stop may have caused it) and is kept, not run again.
 #[test]
 fn window_11_a_cancelled_run_records_its_stopped_task_as_interrupted() {
     for (signal_name, number) in [("TERM", 15), ("INT", 2)] {
         let f = Fixture::new(&format!("w11{signal_name}"), "one\n", two_tasks);
         let child = f.spawn(&["run", "sykli.json", "--json"], None);
         f.wait_ready("second");
+        std::thread::sleep(Duration::from_millis(300));
         let task_pid: u32 = fs::read_to_string(f.base.join("second.pid"))
             .unwrap()
             .trim()
@@ -942,6 +945,58 @@ fn window_11_a_stop_does_not_wait_for_a_process_that_left_the_group() {
     assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
     assert_eq!(state(&status, "t"), "interrupted");
     assert!(f.receipts().is_empty());
+}
+
+/// Window 11, a stop that reaches the task directly as well as sykli: one
+/// `kill` of sykli and of the task's group (as a service manager stopping a
+/// whole control group does). The task traps TERM and exits 0, often before
+/// sykli's own handler has run. Its exit answered the stop, so it is never
+/// kept as a pass: the attempt is interrupted, and a resume runs the task
+/// again. Repeated, since which process sees the signal first varies.
+#[test]
+fn window_11_a_stop_sent_to_the_task_too_is_never_a_pass() {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    for round in 0..5 {
+        let f = Fixture::new(&format!("w11both{round}"), "one\n", |base| {
+            let b = base.display();
+            vec![(
+                "t".into(),
+                format!(
+                    "trap 'exit 0' TERM; echo $$ > '{b}/t.pid'; echo run >> '{b}/t.count'; \
+                     if [ ! -e '{b}/go' ]; then printf ready > '{b}/t.ready'; sleep 30 & wait $!; fi"
+                ),
+                vec![],
+            )]
+        });
+        let child = f.spawn(&["run", "sykli.json", "--json"], None);
+        f.wait_ready("t");
+        let group: i32 = fs::read_to_string(f.base.join("t.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        f.signalled_at.set(Some(now_ms()));
+        // SAFETY: plain kill(2) of the task's group, then of sykli.
+        unsafe {
+            kill(-group, 15);
+            kill(child.id() as i32, 15);
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(143), "{}", text(&out.stderr));
+        let run = f.run_id();
+        let status = f.status(&run);
+        nothing_unknown_passed(&f, &status);
+        assert_ne!(state(&status, "t"), "passed", "{status}");
+        assert!(f.receipts().is_empty());
+
+        f.unlatch();
+        let resumed = f.resume(&run);
+        assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+        assert_eq!(f.count("t"), 2, "the resume ran the task again");
+        nothing_unknown_passed(&f, &f.status(&run));
+    }
 }
 
 /// Window 12: killed during recovery, after the lost attempts were

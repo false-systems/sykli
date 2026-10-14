@@ -151,7 +151,9 @@ is decided. The receipt is built only from accepted records (`coordinate`,
 only `run`. Tasks run in their own process group holding their attempt's
 lease (so an orphan reads as running); SIGINT/SIGTERM/SIGHUP stop every
 group (TERM, KILL after 3 s), an attempt sykli signalled is `interrupted`
-whatever it exits with, and the run records `stopped`, exit 128+N, no
+whatever it exits with, an outcome accepted less than 100 ms before
+sykli's own handler ran is `withdrawn` (`withdraw_before_stop`: the same
+stop may have reached the task first), and the run records `stopped`, exit 128+N, no
 receipt.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;

@@ -68,7 +68,11 @@ mod runs {
         pub(crate) fn started(&self, _: i32, _: u64) -> Result<(), String> {
             match self.0 {}
         }
-        pub(crate) fn finished(&self, _: &TaskReceipt) -> Result<(), String> {
+        pub(crate) fn finished(
+            &self,
+            _: &TaskReceipt,
+            _: std::time::Instant,
+        ) -> Result<(), String> {
             match self.0 {}
         }
         pub(crate) fn interrupted(&self, _: i32) -> Result<(), String> {
@@ -3161,6 +3165,7 @@ fn coordinate(
     // verdict. The outcomes it accepted stay, and a resume concludes it.
     let signal = runs::signalled();
     if signal.is_some() || decided.iter().any(Option::is_none) {
+        coordinator.withdraw_before_stop()?;
         coordinator.stop(signal, "stopped on a signal")?;
         return Ok(Ran::Interrupted {
             run: coordinator.id().into(),
@@ -3434,15 +3439,15 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let Some(mut record) = launch(
+    let launched = launch(
         task,
         runtime,
         progress,
         MAX_CAPTURE_BYTES,
         Isolation::OwnGroup,
         attempt.as_ref(),
-    )?
-    else {
+    )?;
+    let Launched::Ran { mut record, ended } = launched else {
         checkpoint("during-cancel")?;
         if let Some(attempt) = &attempt {
             attempt.interrupted(runs::signalled().unwrap_or(15))?;
@@ -3457,9 +3462,9 @@ fn attempt_task(
         record.error = Some(changed);
     }
     if let Some(attempt) = &attempt {
-        attempt.finished(&record)?;
+        attempt.finished(&record, ended)?;
     }
-    Ok(Some(record))
+    Ok(Some(*record))
 }
 
 /// What a run's tasks must still find while it runs: the bytes of each
@@ -3587,7 +3592,10 @@ fn run_task(
     isolation: Isolation,
 ) -> TaskReceipt {
     launch(task, runtime, progress, capture_limit, isolation, None)
-        .and_then(|record| record.ok_or_else(|| "stopped on a signal".to_string()))
+        .and_then(|launched| match launched {
+            Launched::Ran { record, .. } => Ok(*record),
+            Launched::Stopped => Err("stopped on a signal".to_string()),
+        })
         .unwrap_or_else(|error| {
             empty_task_receipt(
                 task,
@@ -3602,9 +3610,25 @@ fn run_task(
 
 /// Run one task's shell and record what it did. With an attempt, the shell
 /// inherits the attempt's lease and its start is journaled; a start that
-/// cannot be journaled kills it and is an error. None when sykli signalled
-/// its group (a stop): whatever it exited with answered the signal, so what
-/// it did is unknown.
+/// What became of a task's shell.
+enum Launched {
+    /// It ran to its end, seen at `ended`, and this is what it did.
+    Ran {
+        record: Box<TaskReceipt>,
+        ended: Instant,
+    },
+    /// A stop reached sykli before it saw the shell's end: sykli signalled
+    /// its group, or was signalled itself (the same stop may have reached
+    /// the task directly, as a signal to a process group holding both
+    /// does). Whatever the shell exited with may answer that signal, so what
+    /// the task did is unknown.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Stopped,
+}
+
+/// Run one task's shell and record what it did. With an attempt, the shell
+/// inherits the attempt's lease and its start is journaled; a start that
+/// cannot be journaled kills it and is an error.
 fn launch(
     task: &Task,
     runtime: &ShellRuntime,
@@ -3612,7 +3636,7 @@ fn launch(
     capture_limit: usize,
     isolation: Isolation,
     attempt: Option<&runs::Attempt<'_>>,
-) -> Result<Option<TaskReceipt>, String> {
+) -> Result<Launched, String> {
     progress.line("running", &task.name);
     // Instant for the duration, wall clock for the claim: Instant is monotonic
     // and cannot be read as a time of day, SystemTime can jump but is what a
@@ -3669,14 +3693,17 @@ fn launch(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return Ok(Some(empty_task_receipt(
-                task,
-                runtime,
-                Outcome::Errored,
-                &error.to_string(),
-                "spawn_error",
-                false,
-            )));
+            return Ok(Launched::Ran {
+                record: Box::new(empty_task_receipt(
+                    task,
+                    runtime,
+                    Outcome::Errored,
+                    &error.to_string(),
+                    "spawn_error",
+                    false,
+                )),
+                ended: Instant::now(),
+            });
         }
     };
     let group = child.id() as i32;
@@ -3712,6 +3739,7 @@ fn launch(
     }
     drop(sender);
     let status = child.wait().map_err(|error| error.to_string());
+    let ended = Instant::now();
     #[cfg(unix)]
     if isolation == Isolation::OwnGroup {
         // The leader has exited; anything left in its group is a
@@ -3742,9 +3770,13 @@ fn launch(
             Err(_) => break,
         }
     }
+    // Stopped when sykli signalled the group, or saw a stop itself before
+    // getting here: the same stop may have reached the task first. (`|`, so
+    // the group is always unregistered.) A stop that reaches sykli only
+    // after this is `withdraw_before_stop`'s.
     #[cfg(unix)]
-    if isolation == Isolation::OwnGroup && runs::unregister(group) {
-        return Ok(None);
+    if isolation == Isolation::OwnGroup && (runs::unregister(group) | runs::signalled().is_some()) {
+        return Ok(Launched::Stopped);
     }
     let [stdout, stderr] = captured.map(|output| {
         output.unwrap_or_else(|| CapturedOutput {
@@ -3820,34 +3852,37 @@ fn launch(
         }
     }
 
-    Ok(Some(TaskReceipt {
-        name: task.name.clone(),
-        command: task.run.clone(),
-        runtime_fingerprint: runtime.fingerprint.clone(),
-        started_at_ms: Some(started_at_ms),
-        exit_code,
-        signal,
-        duration_ms,
-        stdout_truncated: stdout_bytes_dropped != 0,
-        stdout_bytes_dropped,
-        stderr_truncated: stderr_bytes_dropped != 0,
-        stderr_bytes_dropped,
-        stdout_digest,
-        stderr_digest,
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        output_digests,
-        inherited_digests: inherited_digests(task),
-        outcome,
-        importable,
-        class,
-        retryable,
-        source: "task".into(),
-        error,
-        provenance: None,
-        cache_key: None,
-        inputs: None,
-    }))
+    Ok(Launched::Ran {
+        record: Box::new(TaskReceipt {
+            name: task.name.clone(),
+            command: task.run.clone(),
+            runtime_fingerprint: runtime.fingerprint.clone(),
+            started_at_ms: Some(started_at_ms),
+            exit_code,
+            signal,
+            duration_ms,
+            stdout_truncated: stdout_bytes_dropped != 0,
+            stdout_bytes_dropped,
+            stderr_truncated: stderr_bytes_dropped != 0,
+            stderr_bytes_dropped,
+            stdout_digest,
+            stderr_digest,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            output_digests,
+            inherited_digests: inherited_digests(task),
+            outcome,
+            importable,
+            class,
+            retryable,
+            source: "task".into(),
+            error,
+            provenance: None,
+            cache_key: None,
+            inputs: None,
+        }),
+        ended,
+    })
 }
 
 /// The signal that ended a process, where there are signals.

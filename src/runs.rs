@@ -24,7 +24,10 @@
 //! once it runs, and exactly one end: `finished` (exit or signal, its
 //! output, the accepted outcome), `interrupted` (sykli stopped it on a
 //! signal) or `lost` (a later coordinator found it unfinished). A retry is a
-//! new attempt that `supersedes` the last; nothing is ever rewritten. The
+//! new attempt that `supersedes` the last; nothing is ever rewritten. An
+//! outcome accepted just before a stop reached sykli is `withdrawn` (the
+//! same stop may have reached the attempt first): its task is undecided
+//! again, and the attempt stays in the history. The
 //! run ends `concluded` (its receipt) or `stopped` (interrupted).
 //!
 //! Every coordinator that takes the run's lease opens a generation
@@ -46,8 +49,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const RECORD: &str = "sykli-run-record.v1";
 const EXECUTOR: &str = "local-shell.v1";
@@ -227,6 +231,15 @@ pub(crate) enum Fact {
         generation: u64,
         reason: String,
     },
+    /// An outcome this generation accepted is withdrawn: its attempt ended
+    /// so close before a stop reached sykli that the stop may have ended it
+    /// (a task the same signal reached first, which trapped it and exited).
+    /// The task is undecided again, and the attempt stays in its history.
+    Withdrawn {
+        attempt: String,
+        generation: u64,
+        reason: String,
+    },
     Stopped {
         generation: u64,
         signal: Option<i32>,
@@ -324,6 +337,8 @@ struct AttemptState {
     started: Option<(i32, u64)>,
     end: Option<(End, Fact)>,
     output: Option<String>,
+    /// Its accepted outcome was withdrawn (`Withdrawn`).
+    withdrawn: bool,
 }
 
 /// How a task's outcome was accepted.
@@ -488,6 +503,7 @@ impl History {
                         started: None,
                         end: None,
                         output: None,
+                        withdrawn: false,
                     },
                 );
                 self.lineage
@@ -656,6 +672,30 @@ impl History {
                 }
                 state.end = Some((End::Lost { at }, fact.clone()));
             }
+            Fact::Withdrawn {
+                attempt,
+                generation,
+                ..
+            } => {
+                self.current(*generation)?;
+                self.open()?;
+                let state = self
+                    .attempts
+                    .get_mut(attempt)
+                    .ok_or("a withdrawal without a dispatch")?;
+                let accepted = matches!(
+                    self.decided.get(&state.task),
+                    Some(Decided::Attempt(id)) if id == attempt
+                );
+                if state.generation != *generation || state.withdrawn || !accepted {
+                    return Err(
+                        "only an outcome this generation accepted is withdrawn, once".into(),
+                    );
+                }
+                state.withdrawn = true;
+                let task = state.task.clone();
+                self.decided.remove(&task);
+            }
             Fact::Stopped {
                 generation,
                 signal,
@@ -720,6 +760,9 @@ pub(crate) struct Coordinator {
     id: String,
     lease: Lease,
     history: Mutex<History>,
+    /// When this process saw each attempt it accepted end, for a stop that
+    /// comes right after (`withdraw_before_stop`).
+    ended: Mutex<Vec<(String, Instant)>>,
 }
 
 /// One attempt, dispatched: its id and its lease, which its shell inherits.
@@ -758,6 +801,7 @@ impl Coordinator {
             id: id.clone(),
             lease,
             history: Mutex::new(History::new(&id)),
+            ended: Mutex::new(Vec::new()),
         };
         coordinator.append(Fact::Requested {
             request: Box::new(RequestFact(request)),
@@ -779,6 +823,7 @@ impl Coordinator {
             id: run.into(),
             lease,
             history: Mutex::new(history),
+            ended: Mutex::new(Vec::new()),
         })
     }
 
@@ -821,6 +866,7 @@ impl Coordinator {
             id: run.into(),
             lease,
             history: Mutex::new(history),
+            ended: Mutex::new(Vec::new()),
         })
     }
 
@@ -1008,6 +1054,32 @@ impl Coordinator {
             .collect()
     }
 
+    /// A stop reached sykli: withdraw every outcome this process accepted
+    /// for an attempt it saw end less than `STOP_WINDOW` before its handler
+    /// ran. The same stop may have reached that attempt first (a signal to
+    /// a process group or a whole service holding both), and a task that
+    /// trapped it and exited 0 never finished its work. A resume runs it
+    /// again: at least once, never a pass the stop produced.
+    pub(crate) fn withdraw_before_stop(&self) -> Result<(), String> {
+        let Some(cutoff) = signalled_at().map(|at| at.checked_sub(STOP_WINDOW).unwrap_or(at))
+        else {
+            return Ok(());
+        };
+        let ended = std::mem::take(&mut *self.ended.lock().unwrap());
+        for (attempt, _) in ended.into_iter().filter(|(_, at)| *at >= cutoff) {
+            self.append(Fact::Withdrawn {
+                attempt,
+                generation: self.generation(),
+                reason: format!(
+                    "it ended less than {} ms before a stop reached sykli, which may have ended \
+                     it",
+                    STOP_WINDOW.as_millis()
+                ),
+            })?;
+        }
+        Ok(())
+    }
+
     /// The run stopped on a signal: every attempt has ended.
     pub(crate) fn stop(&self, signal: Option<i32>, reason: &str) -> Result<(), String> {
         self.append(Fact::Stopped {
@@ -1127,7 +1199,7 @@ impl Attempt<'_> {
     /// The attempt's process has exited and `record` is what was observed:
     /// kept as its output, then accepted. Exactly one end per attempt; a
     /// stale or duplicate completion is refused by the journal.
-    pub(crate) fn finished(&self, record: &TaskReceipt) -> Result<(), String> {
+    pub(crate) fn finished(&self, record: &TaskReceipt, ended: Instant) -> Result<(), String> {
         crate::checkpoint("after-exit")?;
         let output = self.coordinator.persist(record)?;
         crate::checkpoint("after-output")?;
@@ -1138,7 +1210,13 @@ impl Attempt<'_> {
             signal: record.signal,
             outcome: record.outcome,
             output,
-        })
+        })?;
+        self.coordinator
+            .ended
+            .lock()
+            .unwrap()
+            .push((self.id.clone(), ended));
+        Ok(())
     }
 
     /// sykli stopped the attempt's process on a signal: its outcome is
@@ -1169,6 +1247,13 @@ fn read_output(directory: &Path, digest_hex: &str) -> Result<TaskReceipt, String
 // never as failed and never as passed: whatever it exited with answered
 // the signal, not its task.
 static SIGNALLED: AtomicI32 = AtomicI32::new(0);
+/// When the first signal's handler ran, in nanoseconds after `CLOCK`
+/// (0: none yet).
+static SIGNALLED_AT: AtomicU64 = AtomicU64::new(0);
+static CLOCK: OnceLock<Instant> = OnceLock::new();
+/// How long before sykli's own handler ran an attempt's end counts as
+/// possibly caused by the same stop (`withdraw_before_stop`).
+const STOP_WINDOW: Duration = Duration::from_millis(100);
 static REPEATED: AtomicI32 = AtomicI32::new(0);
 /// Every running attempt's process group, and whether sykli signalled it.
 static GROUPS: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
@@ -1180,6 +1265,10 @@ extern "C" fn on_signal(number: i32) {
         .is_err()
     {
         REPEATED.store(1, Ordering::SeqCst);
+    } else if let Some(clock) = CLOCK.get() {
+        // Reading the monotonic clock (clock_gettime) is async-signal-safe.
+        let at = u64::try_from(clock.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        SIGNALLED_AT.store(at.max(1), Ordering::SeqCst);
     }
 }
 
@@ -1188,6 +1277,7 @@ extern "C" fn on_signal(number: i32) {
 pub(crate) fn handle_signals() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        CLOCK.get_or_init(Instant::now);
         // SAFETY: the handler only stores into atomics, which is
         // async-signal-safe; SIGHUP 1, SIGINT 2, SIGTERM 15.
         unsafe {
@@ -1226,6 +1316,13 @@ pub(crate) fn handle_signals() {
 /// The signal that is stopping this run, if one is.
 pub(crate) fn signalled() -> Option<i32> {
     Some(SIGNALLED.load(Ordering::SeqCst)).filter(|number| *number != 0)
+}
+
+/// When sykli's handler saw the signal that is stopping this run.
+fn signalled_at() -> Option<Instant> {
+    let at = SIGNALLED_AT.load(Ordering::SeqCst);
+    let clock = CLOCK.get()?;
+    (at != 0).then(|| *clock + Duration::from_nanos(at))
 }
 
 /// Track an attempt's process group while it runs, so a signal stops it.
@@ -1297,7 +1394,12 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
                     Some(*at),
                     *exit_code,
                     *signal,
-                    Some(serde_json::to_value(outcome).map_err(err)?),
+                    // A withdrawn outcome was not kept: a stop may have caused it.
+                    Some(if attempt.withdrawn {
+                        json!("interrupted")
+                    } else {
+                        serde_json::to_value(outcome).map_err(err)?
+                    }),
                 ),
                 Some((End::Interrupted { signal, at }, _)) => {
                     (Some(*at), None, Some(*signal), Some(json!("interrupted")))
@@ -1323,6 +1425,7 @@ fn view(directory: &Path, history: &History) -> Result<Value, String> {
                 "generation": attempt.generation,
                 "process_group": attempt.started.map(|(group, _)| group),
                 "recorded": attempt.end.is_some(),
+                "withdrawn": attempt.withdrawn,
             }));
         }
         let mut entry = json!({"name": task, "attempts": attempts});
@@ -1621,6 +1724,53 @@ mod tests {
             signal: 15,
         });
         assert!(history(interrupted).is_err());
+    }
+
+    /// A withdrawn outcome leaves its task undecided, with its attempt kept:
+    /// a new attempt supersedes it. Only an outcome this generation accepted
+    /// is withdrawn, once, and never after the run concluded.
+    #[test]
+    fn a_withdrawn_outcome_leaves_its_task_undecided() {
+        let withdrawn = |attempt: char, generation: u64| Fact::Withdrawn {
+            attempt: id(attempt),
+            generation,
+            reason: "x".into(),
+        };
+        let passed = vec![
+            dispatched('a', 1, None),
+            started('a', 1),
+            finished('a', 1, Outcome::Passed, 0),
+        ];
+        let mut once = passed.clone();
+        once.push(withdrawn('a', 1));
+        let kept = history(once.clone()).unwrap();
+        assert!(!kept.decided.contains_key("t"));
+        assert!(kept.attempts[&id('a')].withdrawn);
+        let mut retried = once.clone();
+        retried.push(dispatched('b', 1, Some('a')));
+        retried.push(started('b', 1));
+        retried.push(finished('b', 1, Outcome::Passed, 0));
+        assert!(history(retried).unwrap().decided.contains_key("t"));
+
+        let mut twice = once;
+        twice.push(withdrawn('a', 1));
+        assert!(history(twice).is_err(), "withdrawn twice");
+        let mut unaccepted = vec![dispatched('a', 1, None), started('a', 1)];
+        unaccepted.push(withdrawn('a', 1));
+        assert!(history(unaccepted).is_err(), "nothing was accepted");
+        let mut stale = passed.clone();
+        stale.push(Fact::Resumed { generation: 2 });
+        stale.push(withdrawn('a', 2));
+        assert!(history(stale).is_err(), "another generation's outcome");
+        let mut late = passed;
+        late.push(Fact::Concluded {
+            generation: 1,
+            receipt: "r".into(),
+            digest: id('d'),
+            outcome: Outcome::Passed,
+        });
+        late.push(withdrawn('a', 1));
+        assert!(history(late).is_err(), "the run concluded");
     }
 
     #[test]

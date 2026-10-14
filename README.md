@@ -287,8 +287,16 @@ A crash leaves exactly what was observed, and nothing more:
   group, records it **interrupted** (not failed, and never passed: whatever
   it exits with answers the signal, so a task that traps it and exits 0 is
   interrupted too), writes no receipt, and exits 128+N. Each task runs in its
-  own process group, so a signal reaches it through sykli. Outcomes recorded
-  before the signal are kept, and `sykli resume` concludes the run.
+  own process group, so a signal sent to sykli reaches it through sykli.
+  Outcomes recorded before the signal are kept, and `sykli resume` concludes
+  the run.
+- A stop sent to a task directly as well (a `kill` of a process group or
+  session that holds both, or a service manager stopping a whole control
+  group) is covered as far as sykli sees it. An attempt that ends after
+  sykli's own signal handler ran, or less than 100 ms before, is interrupted
+  (an outcome already recorded for it is **withdrawn**), and a resume runs it
+  again. An attempt that ended earlier keeps its outcome, and a signal that
+  never reaches sykli is not seen at all.
 - The receipt is built only from recorded outcomes and written durably, and
   only then is the run **completed**.
 
@@ -296,7 +304,8 @@ A crash leaves exactly what was observed, and nothing more:
 (`requested`, `running`, `completed`, `interrupted`, or `lost` when its
 coordinator ended without concluding it), its subject (tree, commit when
 clean, dirty), the contract and lock digests, each task's state and every
-attempt (id, started, finished, exit, signal, outcome, what it supersedes),
+attempt (id, started, finished, exit, signal, outcome, what it supersedes,
+whether its outcome was withdrawn),
 and the receipt (path and digest) once complete. It reads the journal and
 its locks, runs no git once the repository is known, and writes nothing.
 
