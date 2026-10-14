@@ -2032,17 +2032,23 @@ fn settled(id: &str, request: &Request, observation: &Observation) -> bool {
         .as_ref()
         .is_some_and(|c| c.state == "failed")
         || observation.checks.iter().any(|check| !check.passed);
-    let healthy = observation.observed.as_ref().is_some_and(|running| {
-        running.converged
-            && !running.artifacts.is_empty()
-            && running
-                .artifacts
-                .iter()
-                .all(|artifact| *artifact == request.intended)
-    }) && observation
-        .readiness
+    let complete = observation
+        .controller
         .as_ref()
-        .is_some_and(|r| r.wanted > 0 && r.ready >= r.wanted);
+        .is_some_and(|c| c.state == "complete");
+    let healthy = complete
+        && observation.observed.as_ref().is_some_and(|running| {
+            running.converged
+                && !running.artifacts.is_empty()
+                && running
+                    .artifacts
+                    .iter()
+                    .all(|artifact| *artifact == request.intended)
+        })
+        && observation
+            .readiness
+            .as_ref()
+            .is_some_and(|r| r.wanted > 0 && r.ready >= r.wanted);
     failed || healthy
 }
 
@@ -3043,15 +3049,21 @@ fn judge(
             let wanted = o.desired.as_ref().and_then(|d| d.revision.clone());
             let equal =
                 running.converged && running.revision.is_some() && running.revision == wanted;
+            // The controller is the authority on whether it is done: only its
+            // own `complete` confirms what the observation says.
+            let state = o.controller.as_ref().map(|c| c.state.as_str());
             json!({
                 "dimension": "D",
                 "revision": running.revision,
                 "converged": running.converged,
+                "revision_matches": equal,
                 "controller": o.controller,
-                "verdict": if equal {
-                    "equals-desired"
-                } else if o.controller.as_ref().is_some_and(|c| c.state == "failed") {
+                "verdict": if state == Some("failed") {
                     "stalled"
+                } else if equal && state == Some("complete") {
+                    "equals-desired"
+                } else if equal {
+                    "unconfirmed"
                 } else if !running.converged {
                     "converging"
                 } else {
@@ -3203,16 +3215,31 @@ fn judge(
             ));
         }
         if observed["verdict"] != "equals-desired" {
-            incomplete.push(format!(
-                "observed revision {} {} desired revision {}",
-                observed["revision"],
-                if observed["converged"] == true {
-                    "differs from"
-                } else {
-                    "is converging on"
-                },
-                desired["revision"]
-            ));
+            let state = observed["controller"]["state"]
+                .as_str()
+                .unwrap_or("no state");
+            if state != "complete" {
+                incomplete.push(format!(
+                    "the controller reports {state}, not complete{}",
+                    if observed["converged"] == true {
+                        ", though the observation says converged"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if observed["revision_matches"] != true {
+                incomplete.push(format!(
+                    "observed revision {} {} desired revision {}",
+                    observed["revision"],
+                    if observed["converged"] == true {
+                        "differs from"
+                    } else {
+                        "is converging on"
+                    },
+                    desired["revision"]
+                ));
+            }
         }
         if health["verdict"] != "passed" {
             if health["readiness"]["passed"] != true {
@@ -3456,10 +3483,11 @@ pub(crate) fn describe(status: &Value) -> String {
     ));
     let o = &d["observed"];
     lines.push(format!(
-        "  D observed:  {} — revision {}, converged {}",
+        "  D observed:  {} — revision {}, converged {}, controller {}",
         text(&o["verdict"]),
         text(&o["revision"]),
-        text(&o["converged"])
+        text(&o["converged"]),
+        text(&o["controller"]["state"])
     ));
     let e = &d["health"];
     let checks = e["checks"].as_array().map_or(0, Vec::len);
@@ -4232,6 +4260,37 @@ mod tests {
             v["reasons"].to_string().contains("modified out of band"),
             "{v}"
         );
+    }
+
+    /// Only the controller's own `complete` counts toward VERIFIED HEALTHY:
+    /// an observation that says converged while its controller says it is
+    /// still working, or does not know, contradicts itself.
+    #[test]
+    fn only_a_complete_controller_counts_toward_verified() {
+        let delivery = delivery_id();
+        for state in ["pending", "progressing", "unknown"] {
+            let mut o = observation(&intended(), Some(&delivery));
+            o.controller.as_mut().unwrap().state = state.into();
+            let mut facts = acknowledged();
+            facts.push(observed(Some(o), Some(1)));
+            let v = judged(facts, 20, None);
+            assert_eq!(v["label"], NOT_VERIFIED_HEALTHY, "{state}: {v}");
+            assert!(
+                v["reasons"]
+                    .to_string()
+                    .contains(&format!("the controller reports {state}, not complete")),
+                "{state}: {v}"
+            );
+            assert_ne!(
+                v["dimensions"]["observed"]["verdict"], "equals-desired",
+                "{state}: {v}"
+            );
+        }
+        let mut failed = observation(&intended(), Some(&delivery));
+        failed.controller.as_mut().unwrap().state = "failed".into();
+        let mut facts = acknowledged();
+        facts.push(observed(Some(failed), Some(1)));
+        assert_eq!(judged(facts, 20, None)["label"], DEGRADED);
     }
 
     #[test]

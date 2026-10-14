@@ -963,6 +963,40 @@ fn an_unreachable_controller_is_unknown() {
     assert_eq!(f.applies(), 1);
 }
 
+/// The controller is the authority on whether a rollout is done: one that
+/// says it is still progressing is never verified, whatever else the
+/// observation claims, and an observation with no controller state at all
+/// establishes nothing.
+#[test]
+fn a_controller_that_has_not_completed_is_never_verified() {
+    let f = Fixture::new("controller");
+    let (out, status) = f.deliver(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let id = status["delivery"].as_str().unwrap().to_string();
+    let mut progressing = healthy();
+    progressing["controller"] = json!({"state": "progressing", "reason": "ReplicaSetUpdated"});
+    f.target(&progressing);
+    let (out, status) = f.observe(&id);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(label(&status), "NOT VERIFIED HEALTHY", "{status}");
+    assert!(
+        status["reasons"].to_string().contains("progressing"),
+        "{status}"
+    );
+    let human = text(&f.output(&["status", "--delivery", &id]).stdout);
+    assert!(human.contains("controller progressing"), "{human}");
+    let mut missing = healthy();
+    missing.as_object_mut().unwrap().remove("controller");
+    f.target(&missing);
+    let (out, status) = f.observe(&id);
+    assert_eq!(out.status.code(), Some(1));
+    assert_ne!(label(&status), "VERIFIED HEALTHY", "{status}");
+    assert!(
+        status["reasons"].to_string().contains("controller"),
+        "{status}"
+    );
+}
+
 /// Target missing: the object is gone.
 #[test]
 fn a_missing_target_is_degraded() {
