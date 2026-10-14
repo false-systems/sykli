@@ -274,14 +274,25 @@ enum Command {
         but never current evidence. Runs of that tree are listed with their states and each\n\
         task's attempts. The verdict never lets a pass hide a failure: the newest result its\n\
         run recorded decides, and a pass no run recorded never outranks a recorded failure\n\
-        (`conflict`, with why). Like `verify`, it does not establish that tasks ran.")]
+        (`conflict`, with why). Like `verify`, it does not establish that tasks ran.\n\n\
+        --delivery ID reads a delivery's journal (sykli-delivery-status.v1) and judges it now,\n\
+        one dimension at a time: A the operation (requested, dispatched, applying,\n\
+        acknowledged, apply-failed, lost, unknown, acknowledgement-lost), B the intended\n\
+        artifact against what runs, C the target's desired state, D its observed state, E\n\
+        health (readiness, checks, smoke), F freshness (the last observation's age against\n\
+        the contract's bound). The label is VERIFIED HEALTHY only when every dimension\n\
+        holds; otherwise NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN or STALE, with why. Nothing\n\
+        runs and nothing is written: a status ages as its last observation does.")]
     Status {
         /// Production ID printed by `produce`
-        #[arg(required_unless_present_any = ["run", "commit"], conflicts_with_all = ["run", "commit"])]
+        #[arg(required_unless_present_any = ["run", "commit", "delivery"], conflicts_with_all = ["run", "commit", "delivery"])]
         production: Option<String>,
         /// A graph run's id, as `run` printed it or its receipt's `run` names it
-        #[arg(long, conflicts_with = "commit")]
+        #[arg(long, conflicts_with_all = ["commit", "delivery"])]
         run: Option<String>,
+        /// A delivery's id, as `deliver` printed it
+        #[arg(long, conflicts_with = "commit")]
+        delivery: Option<String>,
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
@@ -319,17 +330,32 @@ enum Command {
         A resumed task runs at least once, and possibly more than once: an attempt that was\n\
         lost or interrupted may have run to completion, and done whatever it does, before its\n\
         end went unrecorded. A resume warns, naming each task it runs again whose last\n\
-        attempt had started.")]
+        attempt had started.\n\n\
+        --delivery ID takes over a delivery whose coordinator ended, and never runs an apply\n\
+        again on its own. An apply whose end was not recorded (lost, interrupted, killed) is\n\
+        reconciled first, by observing the target: when the target's desired state shows\n\
+        this delivery's artifact, the attempt is recorded `acknowledgement lost, effect\n\
+        observed`; otherwise its effect is recorded unknown, the delivery is UNKNOWN, and\n\
+        only --reapply applies again, as a new attempt that supersedes the old one, which\n\
+        stays in the history. A delivery never dispatched is dispatched; an acknowledged one\n\
+        is observed again. Exits 0 when the delivery is then VERIFIED HEALTHY, 1 otherwise.")]
     Resume {
         /// Production ID printed by `produce`
-        #[arg(required_unless_present = "run", conflicts_with = "run")]
+        #[arg(required_unless_present_any = ["run", "delivery"], conflicts_with_all = ["run", "delivery"])]
         production: Option<String>,
         /// A graph run's id
-        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
+        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary", "delivery"])]
         run: Option<String>,
-        /// With --run: take an attempt whose process group still exists as ended (lost), for
-        /// when that group id now belongs to an unrelated process
-        #[arg(long, requires = "run")]
+        /// A delivery's id, as `deliver` printed it
+        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
+        delivery: Option<String>,
+        /// With --delivery: apply again, as a new attempt, once the last apply's unknown
+        /// effect has been reconciled with the target (or the last apply failed)
+        #[arg(long, requires = "delivery")]
+        reapply: bool,
+        /// With --run or --delivery: take an attempt whose process group still exists as
+        /// ended (lost), for when that group id now belongs to an unrelated process
+        #[arg(long)]
         assume_ended: bool,
         /// Where captured inputs, artifacts and records are kept
         #[arg(long, default_value = ".sykli/production")]
@@ -405,6 +431,88 @@ enum Command {
     RunCoordinator {
         #[arg(long)]
         run: String,
+        #[arg(long)]
+        lease_fd: i32,
+    },
+    /// Apply a produced artifact to a declared target, and judge it from observations (Linux and macOS)
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the delivery is VERIFIED HEALTHY (--detach: it is recorded and handed off)\n  \
+        1  it is recorded but not verified healthy: NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN\n     \
+           or STALE (see the reasons, and `sykli status --delivery ID`)\n  \
+        2  nothing was delivered: invalid contract, no complete production of the current\n     \
+           sources (run `sykli produce` first), its artifact unavailable, the identity\n     \
+           command failed, another delivery to the target still running, or the journal\n     \
+           could not be written\n  \
+        128+N  stopped by signal N; `sykli resume --delivery ID` reconciles and continues\n\n\
+        A sykli-delivery-contract.v1 names, per target, the product it receives (a target and\n\
+        product of the production contract it names) and four commands the caller owns:\n\
+        `identity` (`{\"kind\":\"content\"}` for the artifact's own SHA-256, or a command that\n\
+        prints what the target will report for it), `apply`, `observe` (prints a\n\
+        sykli-observation.v1) and an optional `smoke`, with `freshness_seconds` (how old an\n\
+        observation may be and still say anything about now) and `settle_seconds` (how long to\n\
+        keep observing after the apply). The commands run as a run's tasks do: `sh -c` in the\n\
+        contract's directory, a cleared environment plus PATH, HOME and TMPDIR, the declared\n\
+        `env`, and the `inherit`ed variables, whose values reach only that command and whose\n\
+        digests reach the journal. Each also gets SYKLI_DELIVERY (the id), SYKLI_INTENDED,\n\
+        SYKLI_DELIVERY_TARGET, and for apply SYKLI_ARTIFACT (the artifact, materialized from\n\
+        the store) and SYKLI_DELIVERY_ATTEMPT.\n\n\
+        The delivery is recorded in $(git rev-parse --git-common-dir)/sykli/deliveries/<id>/\n\
+        before anything is applied, and the apply is recorded as dispatched before its shell\n\
+        starts. An apply that exits 0 is `acknowledged`: the target accepted the change, which\n\
+        is not a deployment. What is deployed is only ever what an observation shows, judged\n\
+        dimension by dimension (see `sykli status --help`). The delivery id is printed first\n\
+        (`delivery: ID`, on stderr with --json); --json prints sykli-delivery-status.v1.")]
+    Deliver {
+        /// Path to a sykli-delivery-contract.v1 file
+        #[arg(default_value = "sykli.delivery.json")]
+        contract: PathBuf,
+        /// The delivery target, as the contract names it
+        #[arg(long)]
+        target: String,
+        /// Where the production's artifacts are kept
+        #[arg(long, default_value = ".sykli/production")]
+        store: PathBuf,
+        /// Deliver this production's product instead of the current sources'
+        #[arg(long, conflicts_with = "rollback_to")]
+        production: Option<String>,
+        /// Deliver again the artifact an earlier delivery to this target delivered
+        #[arg(long, value_name = "DELIVERY")]
+        rollback_to: Option<String>,
+        /// Record the delivery, hand it to a coordinator that outlives this command, and print
+        /// its id once the record is durable (`{"schema":"sykli-delivery.v1","delivery":ID}`
+        /// with --json)
+        #[arg(long)]
+        detach: bool,
+        /// Print sykli-delivery-status.v1 on stdout; progress and the apply's output go to stderr
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe a delivery's target now and record it; never applies anything (Linux and macOS)
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  recorded, and the delivery is VERIFIED HEALTHY\n  \
+        1  recorded, and it is not (NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN or STALE)\n  \
+        2  unknown delivery, its record bound reached, or the journal could not be written\n  \
+        128+N  stopped by signal N; nothing was recorded\n\n\
+        Runs the target's observe command (and its smoke command, when it declares one) as the\n\
+        delivery recorded them, records what it reported with its time and the digest of its\n\
+        output, and prints the delivery's status. It runs beside a live coordinator, and on a\n\
+        delivery whose apply's end is unknown it observes without deciding anything: only\n\
+        `sykli resume --delivery ID` reconciles.")]
+    Observe {
+        /// A delivery's id, as `deliver` printed it
+        #[arg(long)]
+        delivery: String,
+        /// Print sykli-delivery-status.v1 on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    #[cfg(unix)]
+    #[command(name = "__delivery_coordinator", hide = true)]
+    DeliveryCoordinator {
+        #[arg(long)]
+        delivery: String,
         #[arg(long)]
         lease_fd: i32,
     },
@@ -1428,6 +1536,99 @@ fn main() -> ExitCode {
         ),
         #[cfg(unix)]
         Command::Status {
+            delivery: Some(delivery),
+            json,
+            ..
+        } => match production::delivery::status(&delivery) {
+            Ok(status) => {
+                if json {
+                    println!("{status}");
+                } else {
+                    println!("{}", production::delivery::describe(&status));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
+        #[cfg(unix)]
+        Command::Deliver {
+            contract,
+            target,
+            store,
+            production: from,
+            rollback_to,
+            detach,
+            json,
+        } => match production::delivery::deliver(
+            &contract,
+            &target,
+            &store,
+            from.as_deref(),
+            rollback_to.as_deref(),
+            detach,
+            json,
+        ) {
+            Ok(production::delivery::Started::Detached(delivery)) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"schema": "sykli-delivery.v1", "delivery": delivery})
+                    );
+                } else {
+                    println!("delivery: {delivery}");
+                }
+                ExitCode::SUCCESS
+            }
+            Ok(production::delivery::Started::Ran(delivery, done)) => {
+                delivery_exit(&delivery, Ok(done), json)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
+        #[cfg(unix)]
+        Command::Observe { delivery, json } => match production::delivery::observe(&delivery) {
+            Ok(Ok(status)) => delivery_report(&status, json),
+            Ok(Err(signal)) => {
+                eprintln!("interrupted: stopped by signal {signal}; nothing was recorded");
+                ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
+        #[cfg(unix)]
+        Command::DeliveryCoordinator { delivery, lease_fd } => {
+            match production::delivery::coordinator_main(&delivery, lease_fd) {
+                Ok(production::delivery::Done::Interrupted(signal)) => {
+                    ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
+                }
+                Ok(production::delivery::Done::Judged) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("coordinator: {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        #[cfg(unix)]
+        Command::Resume {
+            delivery: Some(delivery),
+            reapply,
+            assume_ended,
+            json,
+            ..
+        } => delivery_exit(
+            &delivery,
+            production::delivery::resume(&delivery, reapply, assume_ended, json),
+            json,
+        ),
+        #[cfg(unix)]
+        Command::Status {
             production: id,
             run: Some(run),
             json,
@@ -1513,6 +1714,13 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        #[cfg(unix)]
+        Command::Resume {
+            assume_ended: true, ..
+        } => {
+            eprintln!("error: --assume-ended applies to --run or --delivery");
+            ExitCode::from(2)
+        }
         #[cfg(unix)]
         Command::Resume {
             production: id,
@@ -1940,6 +2148,52 @@ fn exit_for(ran: Ran, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// What `deliver`, `resume --delivery` exit with once the coordinator's work
+/// is done: the delivery's status, printed, then 0 when it is VERIFIED
+/// HEALTHY and 1 when it is anything else; 128+N when signal N stopped it.
+#[cfg(unix)]
+fn delivery_exit(
+    delivery: &str,
+    done: Result<production::delivery::Done, String>,
+    json: bool,
+) -> ExitCode {
+    match done {
+        Ok(production::delivery::Done::Judged) => match production::delivery::status(delivery) {
+            Ok(status) => delivery_report(&status, json),
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Ok(production::delivery::Done::Interrupted(signal)) => {
+            eprintln!(
+                "interrupted: delivery {delivery} was stopped by signal {signal}; `sykli resume \
+                 --delivery {delivery}` reconciles it with the target and continues it"
+            );
+            ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Print a delivery's status; 0 only when it is VERIFIED HEALTHY.
+#[cfg(unix)]
+fn delivery_report(status: &serde_json::Value, json: bool) -> ExitCode {
+    if json {
+        println!("{status}");
+    } else {
+        println!("{}", production::delivery::describe(status));
+    }
+    if status["label"] == production::delivery::VERIFIED_HEALTHY {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -3684,7 +3938,13 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let launched = launch(task, runtime, progress, MAX_CAPTURE_BYTES, attempt.as_ref())?;
+    let launched = launch(
+        task,
+        runtime,
+        progress,
+        MAX_CAPTURE_BYTES,
+        attempt.as_ref().map(|attempt| attempt as &dyn Journaled),
+    )?;
     let (mut record, ended) = match launched {
         Launched::Ran { record, ended } => (*record, ended),
         Launched::Stopped { exit_code, signal } => {
@@ -3846,6 +4106,26 @@ fn run_task(
         })
 }
 
+/// What `launch` asks of the journal that records an attempt: a run's task
+/// attempt, or a delivery's apply (`production::delivery`).
+trait Journaled {
+    /// Let the shell, and everything it starts, hold the attempt's lease.
+    #[cfg(unix)]
+    fn inherit(&self, command: &mut ProcessCommand);
+    /// The shell is running, in process group `group`.
+    fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String>;
+}
+
+impl Journaled for runs::Attempt<'_> {
+    #[cfg(unix)]
+    fn inherit(&self, command: &mut ProcessCommand) {
+        runs::Attempt::inherit(self, command)
+    }
+    fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String> {
+        runs::Attempt::started(self, group, started_at_ms)
+    }
+}
+
 /// Run one task's shell and record what it did. With an attempt, the shell
 /// inherits the attempt's lease and its start is journaled; a start that
 /// cannot be journaled kills it and is an error. On Unix the shell runs in
@@ -3859,7 +4139,7 @@ fn launch(
     runtime: &ShellRuntime,
     progress: Progress,
     capture_limit: usize,
-    attempt: Option<&runs::Attempt<'_>>,
+    attempt: Option<&dyn Journaled>,
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
     let declared = worktree_cache::environment(task)?;

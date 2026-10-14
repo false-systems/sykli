@@ -39,7 +39,9 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs"
+        "tests/snapshot.rs",
+        "src/production/delivery.rs",
+        "tests/delivery.rs"
       ]
     },
     {
@@ -102,7 +104,9 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs"
+        "tests/snapshot.rs",
+        "src/production/delivery.rs",
+        "tests/delivery.rs"
       ]
     },
     {
@@ -169,7 +173,9 @@
         "action/binary.sh",
         "action/plan.sh",
         "action/summary.sh",
-        "action/verify.sh"
+        "action/verify.sh",
+        "src/production/delivery.rs",
+        "tests/delivery.rs"
       ]
     }
   ]

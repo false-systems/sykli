@@ -74,7 +74,9 @@
             "tests/snapshot.rs",
             "examples/ci_shadow.rs",
             "tests/ci_shadow.rs",
-            "docs/ci-shadow.md"
+            "docs/ci-shadow.md",
+            "src/production/delivery.rs",
+            "tests/delivery.rs"
           ],
           "type": {
             "kind": "source-tree"
