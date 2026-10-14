@@ -126,7 +126,9 @@ enum Command {
         0  valid\n  \
         1  invalid, unreadable, or drifted from sykli.lock\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
-        or an unclosed one, is invalid.")]
+        an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
+        These rules apply where a contract is written or run, not where `verify` or\n\
+        `status --commit` judge a contract that an earlier version ran.")]
     Validate {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -157,13 +159,16 @@ enum Command {
         sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.\n\n\
         A task's declared env values may name ${worktree_cache}: a directory that belongs to\n\
         this worktree, <git-common-dir>/sykli/worktrees/<id>/cache, outside the work tree,\n\
-        made when a run needs it. For a Rust contract, declare\n\
-        \"env\": {\"CARGO_TARGET_DIR\": \"${worktree_cache}/cargo-target\"} so that no gate runs a\n\
-        binary another worktree built; the first gate in each worktree then builds cold.\n\
-        Cache keys cover the value as declared, never the directory. On Linux and macOS a\n\
-        run holds the directory, and a later run removes it once its worktree is gone\n\
-        (removed, moved or pruned, and not locked). Any other ${...} in an env value, or an\n\
-        unclosed one, exits 2.")]
+        made when a run needs it; a worktree made again at the same path gets a new one.\n\
+        For a Rust contract, declare both of these in the task's \"env\":\n  \
+          \"CARGO_TARGET_DIR\": \"${worktree_cache}/cargo-target\"\n  \
+          \"CARGO_BUILD_BUILD_DIR\": \"${worktree_cache}/cargo-build\"\n\
+        so that no gate runs a binary or test that another worktree built (a Cargo without\n\
+        build-dir ignores the second); the first gate in each worktree builds cold. Cache\n\
+        keys cover the value as declared, never the directory. On Linux and macOS a run\n\
+        holds the directory, and a later run removes it once its worktree is gone\n\
+        (removed, moved or pruned, and not locked). Any other ${...} in an env value, an\n\
+        unclosed one, a $${, or ${worktree_cache} anywhere but an env value exits 2.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -1571,42 +1576,44 @@ fn main() -> ExitCode {
             json,
             false,
         ),
-        Command::Validate { contract, json } => match load(&contract) {
-            Ok((_, _, contract_hash)) => {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "schema": "sykli-validate.v1",
-                            "contract": contract.display().to_string(),
-                            "valid": true,
-                            "contract_hash": contract_hash,
-                            "errors": [],
-                        })
-                    );
-                } else {
-                    println!("valid: {}", contract.display());
+        Command::Validate { contract, json } => {
+            match load(&contract).and_then(|loaded| authored(&loaded.0).map(|()| loaded)) {
+                Ok((_, _, contract_hash)) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "schema": "sykli-validate.v1",
+                                "contract": contract.display().to_string(),
+                                "valid": true,
+                                "contract_hash": contract_hash,
+                                "errors": [],
+                            })
+                        );
+                    } else {
+                        println!("valid: {}", contract.display());
+                    }
+                    ExitCode::SUCCESS
                 }
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "schema": "sykli-validate.v1",
-                            "contract": contract.display().to_string(),
-                            "valid": false,
-                            "contract_hash": null,
-                            "errors": [error],
-                        })
-                    );
-                } else {
-                    eprintln!("invalid {}: {error}", contract.display());
+                Err(error) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "schema": "sykli-validate.v1",
+                                "contract": contract.display().to_string(),
+                                "valid": false,
+                                "contract_hash": null,
+                                "errors": [error],
+                            })
+                        );
+                    } else {
+                        eprintln!("invalid {}: {error}", contract.display());
+                    }
+                    ExitCode::FAILURE
                 }
-                ExitCode::FAILURE
             }
-        },
+        }
         Command::Run {
             contract: path,
             json,
@@ -1671,6 +1678,7 @@ fn main() -> ExitCode {
                 load(&contract)
             };
             match loaded.and_then(|(loaded, levels, hash)| {
+                authored(&loaded)?;
                 let tasks = affected(&loaded, &levels, &changed)?;
                 let mut explanations = if explain {
                     Some(explain_plan(&loaded, &levels, &changed, &tasks)?)
@@ -1961,6 +1969,7 @@ fn resume_run(run: &str, assume_ended: bool, json: bool) -> Result<Ran, String> 
         )
     })?;
     let (contract, levels, _) = parse_contract(request.contract.as_bytes())?;
+    authored(&contract)?;
     let ((_, _, hash), lock) = load_pinned(Path::new(&request.contract_path))?;
     if hash != request.contract_hash || lock != request.lock_digest {
         return Err(format!(
@@ -2010,6 +2019,7 @@ fn coordinator_main(run: &str, fd: i32) -> Result<Ran, String> {
     let request = coordinator.request();
     let started = (|| {
         let (contract, levels, _) = parse_contract(request.contract.as_bytes())?;
+        authored(&contract)?;
         let runtime = graph_runtime(&contract)?;
         if runtime.fingerprint != request.runtime {
             return Err("the runtime changed before the run's coordinator started".to_string());
@@ -2649,7 +2659,8 @@ fn lock_path(contract: &Path) -> PathBuf {
 }
 
 fn write_lock(contract: &Path) -> Result<PathBuf, String> {
-    let (_, _, contract_hash) = load_unlocked(contract)?;
+    let (loaded, _, contract_hash) = load_unlocked(contract)?;
+    authored(&loaded)?;
     let path = lock_path(contract);
     // A v1 lock could only ever pin one contract; migrating keeps that pin
     // under this contract's name and upgrades the file to v2.
@@ -2746,6 +2757,16 @@ fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), St
     Ok(())
 }
 
+/// What a contract must also meet where it is written or run (`validate`,
+/// `lock`, `plan`, `run`, `resume`, the pre-commit hook), beyond `validate`:
+/// placeholders sykli knows, only where it expands them. Never applied where
+/// a contract is judged as evidence (`verify`, `status --commit`, the
+/// pre-push hook), so a contract run before a rule existed keeps the meaning
+/// it ran with.
+fn authored(contract: &Contract) -> Result<(), String> {
+    contract.tasks.iter().try_for_each(worktree_cache::check)
+}
+
 fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
     if contract.schema != "sykli-contract.v1" {
         return Err(format!("unsupported schema {:?}", contract.schema));
@@ -2769,7 +2790,6 @@ fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
         if let Some(workdir) = &task.workdir {
             validate_contract_path(&task.name, "workdir", workdir)?;
         }
-        worktree_cache::validate(task)?;
         for input in &task.inputs {
             validate_contract_path(&task.name, "input", Path::new(input))?;
         }
@@ -3273,6 +3293,7 @@ fn run(
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
+    authored(contract)?;
     #[cfg(not(unix))]
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());

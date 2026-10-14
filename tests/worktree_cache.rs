@@ -218,10 +218,10 @@ fn release(path: PathBuf) {
     });
 }
 
-/// The directory a worktree's tasks get: `<caches>/<64 hex>/cache`, with
+/// The directory a worktree's tasks get: `<caches>/<16 hex>/cache`, with
 /// sykli's own marker and lease beside it, and outside the work tree `tree`
 /// (in its `.git` for the main checkout, whose git directory is the common
-/// one; elsewhere for a linked worktree). Its `<64 hex>/`.
+/// one; elsewhere for a linked worktree). Its `<16 hex>/`.
 fn assert_cache_of(fixture: &Fixture, dir: &Path, tree: &Path) -> PathBuf {
     assert_eq!(dir.file_name().unwrap(), "cache", "{}", dir.display());
     let own = dir.parent().unwrap();
@@ -233,7 +233,7 @@ fn assert_cache_of(fixture: &Fixture, dir: &Path, tree: &Path) -> PathBuf {
     );
     let id = own.file_name().unwrap().to_str().unwrap();
     assert!(
-        id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()),
         "{id}"
     );
     for sykli in ["worktree.json", "lease"] {
@@ -301,10 +301,39 @@ fn note_dir(b: &str) -> String {
     format!("printf %s \"$DIR\" > '{b}/dir-'\"$(basename \"$(pwd)\")\"")
 }
 
-/// A placeholder sykli does not know is refused where the contract is
-/// read, before anything runs, never handed to a task literally. A `$`
-/// without braces is not a placeholder and still reaches the task as
-/// written.
+/// A contract with `tasks` (given where tasks may write) that `validate`
+/// refuses (exit 1) and `lock`, `plan` and `run` refuse (exit 2), each
+/// saying `says` and naming `${worktree_cache}`, before anything runs.
+fn assert_refused(what: &str, says: &str, tasks: impl Fn(&str) -> Value) {
+    let fixture = Fixture::new("refused");
+    fixture.write("file.txt", "one\n");
+    fixture.contract(tasks);
+    let validate = fixture
+        .sykli(&fixture.repo, &["validate", "sykli.json"])
+        .output()
+        .unwrap();
+    assert_eq!(validate.status.code(), Some(1), "validate, {what}");
+    let said = text(&validate.stderr);
+    assert!(said.contains(says), "{what}: {said}");
+    assert!(said.contains("${worktree_cache}"), "{what}: {said}");
+    for args in [
+        &["lock", "sykli.json"][..],
+        &["plan", "sykli.json", "--json"],
+        &["run", "sykli.json", "--json"],
+    ] {
+        let out = fixture.sykli(&fixture.repo, args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}, {what}");
+        assert!(text(&out.stderr).contains(says), "{}", text(&out.stderr));
+    }
+    assert!(!fixture.base.join("ran").exists(), "{what}: a task ran");
+    assert!(!fixture.repo.join(".git/sykli/runs").exists(), "{what}");
+}
+
+/// A placeholder sykli does not know is refused where a contract is
+/// written or run, before anything runs, never handed to a task literally;
+/// so is `$${`, kept free for an escape of `${` later, so that adding one
+/// never changes what a contract that is valid now means. A `$` that opens
+/// no `${` is not a placeholder and still reaches the task as written.
 #[test]
 fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
     for (value, says) in [
@@ -312,10 +341,10 @@ fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
         ("${WORKTREE_CACHE}", "${WORKTREE_CACHE}"),
         ("a${}b", "${}"),
         ("${worktree_cache", "unclosed"),
+        ("$${worktree_cache}", "reserved"),
+        ("x$${HOME}", "reserved"),
     ] {
-        let fixture = Fixture::new("refused");
-        fixture.write("file.txt", "one\n");
-        fixture.contract(|b| {
+        assert_refused(value, says, |b| {
             json!([{
                 "name": "t",
                 "run": format!("touch '{b}/ran'"),
@@ -323,24 +352,6 @@ fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
                 "env": {"X": value},
             }])
         });
-        let validate = fixture
-            .sykli(&fixture.repo, &["validate", "sykli.json"])
-            .output()
-            .unwrap();
-        assert_eq!(validate.status.code(), Some(1), "{value}");
-        let said = text(&validate.stderr);
-        assert!(said.contains(says), "{value}: {said}");
-        assert!(said.contains("${worktree_cache}"), "{value}: {said}");
-        for args in [
-            &["lock", "sykli.json"][..],
-            &["run", "sykli.json", "--json"],
-        ] {
-            let out = fixture.sykli(&fixture.repo, args).output().unwrap();
-            assert_eq!(out.status.code(), Some(2), "{args:?} {value}");
-            assert!(text(&out.stderr).contains(says), "{}", text(&out.stderr));
-        }
-        assert!(!fixture.base.join("ran").exists(), "{value}: a task ran");
-        assert!(!fixture.repo.join(".git/sykli/runs").exists(), "{value}");
     }
 
     // `$NAME` is no placeholder: the value reaches the task as written.
@@ -359,7 +370,7 @@ fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
     fixture.contract(|_| {
         json!([{
             "name": "t",
-            "run": "test \"$X\" = '$HOME/$x and $'",
+            "run": "test \"$X\" = '$HOME/$x and $' && test -n \"${HOME}\" && test -z \"$worktree_cache_x\"",
             "inputs": ["file.txt"],
             "env": {"X": "$HOME/$x and $"},
         }])
@@ -367,6 +378,143 @@ fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
     fixture.commit_locked(&["sykli.json"]);
     let ran = fixture.run(&fixture.repo, "sykli.json", 0);
     assert_eq!(outcome(&ran), "passed", "{ran}");
+}
+
+/// sykli expands `${worktree_cache}` only in `env` values. Anywhere else a
+/// task's shell would make it empty (`${worktree_cache}/cargo-target` is
+/// `/cargo-target`, one directory for every worktree), so it is refused,
+/// and the refusal says to declare it in `env`.
+#[test]
+fn the_placeholder_outside_env_is_refused() {
+    let run = |command: &'static str| {
+        move |b: &str| {
+            json!([{
+                "name": "t",
+                "run": format!("{command}; touch '{b}/ran'"),
+                "inputs": ["file.txt"],
+            }])
+        }
+    };
+    assert_refused(
+        "run",
+        "in its run command",
+        run("printf %s ${worktree_cache}/x"),
+    );
+    assert_refused(
+        "run, unbraced",
+        "in its run command",
+        run("echo $worktree_cache"),
+    );
+    assert_refused(
+        "run, a default",
+        "in its run command",
+        run("echo ${worktree_cache:-/x}"),
+    );
+    for (field, value, says) in [
+        ("inputs", json!(["${worktree_cache}/x"]), "in its inputs"),
+        ("outputs", json!(["${worktree_cache}/x"]), "in its outputs"),
+        ("workdir", json!("${worktree_cache}"), "in its workdir"),
+        ("env", json!({"${worktree_cache}": "x"}), "in an env name"),
+    ] {
+        assert_refused(field, says, |b| {
+            let mut task = json!({
+                "name": "t",
+                "run": format!("touch '{b}/ran'"),
+                "inputs": ["file.txt"],
+            });
+            task[field] = value.clone();
+            json!([task])
+        });
+    }
+}
+
+/// A contract is refused for an unknown placeholder only where it is written
+/// or run, never where it is judged: a commit whose contract an earlier
+/// sykli ran with `"PS4": "+${LINENO}: "` keeps the verdict its receipt
+/// earns, from `verify --commit` and `status --commit`, as it did. (The
+/// receipt is made here by running the same task with the value spelled
+/// without braces, and naming the committed contract, as that sykli wrote
+/// it, without a `run`.)
+#[test]
+fn an_old_contract_with_braces_is_still_judged() {
+    let fixture = Fixture::new("old");
+    fixture.write("file.txt", "one\n");
+    let task = |ps4: &str| {
+        json!({"schema": "sykli-contract.v1", "tasks": [{
+            "name": "t",
+            "run": "test \"$(cat file.txt)\" = one",
+            "inputs": ["file.txt"],
+            "env": {"PS4": ps4},
+        }]})
+    };
+    let committed = serde_json::to_vec(&task("+${LINENO}: ")).unwrap();
+    fs::write(fixture.repo.join("sykli.json"), &committed).unwrap();
+    fixture.git(&fixture.repo, &["add", "--all"]);
+    fixture.git(
+        &fixture.repo,
+        &["commit", "--quiet", "--no-verify", "-m", "c1"],
+    );
+    let rev = fixture.git(&fixture.repo, &["rev-parse", "HEAD"]);
+    // Written and run today, it is refused.
+    let validate = fixture
+        .sykli(&fixture.repo, &["validate", "sykli.json"])
+        .output()
+        .unwrap();
+    assert_eq!(validate.status.code(), Some(1));
+
+    let outside = fixture.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let spelled = outside.join("sykli.json");
+    fs::write(&spelled, serde_json::to_vec(&task("+$LINENO: ")).unwrap()).unwrap();
+    let mut ran = fixture.run(&fixture.repo, spelled.to_str().unwrap(), 0);
+    let value: Value = serde_json::from_slice(&committed).unwrap();
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+    ran["contract_hash"] = hash.into();
+    ran["lock_digest"] = Value::Null;
+    ran.as_object_mut().unwrap().remove("run");
+    let receipts = fixture.repo.join(".sykli/receipts");
+    let earlier = receipts.join("rcpt_earlier.json");
+    fs::write(&earlier, serde_json::to_vec_pretty(&ran).unwrap()).unwrap();
+
+    let verified = fixture
+        .sykli(
+            &fixture.repo,
+            &[
+                "verify",
+                earlier.to_str().unwrap(),
+                "--contract",
+                "sykli.json",
+                "--commit",
+                &rev,
+            ],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        verified.status.code(),
+        Some(0),
+        "{}{}",
+        text(&verified.stdout),
+        text(&verified.stderr)
+    );
+    let status = fixture
+        .sykli(
+            &fixture.repo,
+            &[
+                "status",
+                "--commit",
+                &rev,
+                "--contract",
+                "sykli.json",
+                "--json",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0), "{}", text(&status.stderr));
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["verdict"], "passed", "{status}");
 }
 
 /// Each worktree of a clone gets its own directory, in the common git
@@ -530,132 +678,159 @@ struct Observed {
 const BROKEN: &str = "fn main() {\n    println!(\"a\");\n    std::process::exit(1);\n}\n";
 const WORKING: &str = "fn main() {\n    println!(\"b\");\n}\n";
 
-/// Two worktrees, `a` and `b`, of one clone build the same binary, `probe`,
-/// from different code, under a Cargo whose own configuration puts every
-/// build in one target directory. Each worktree's gate runs `cargo test`,
-/// whose test runs the binary at its uplifted path (`CARGO_BIN_EXE_probe`,
-/// which is `<target>/debug/probe`), as integration tests do. An agent
-/// works in `b` with its own `cargo build`, which keeps Cargo's
-/// configuration (isolating gates leaves a person's or an agent's own
-/// commands as they are): once before `a`'s gate, and once more while `a`'s
-/// gate is held after its build, at its test. Then `a`'s test goes on, and
-/// `b`'s gate runs.
-/// `target` is what the contract declares as `CARGO_TARGET_DIR`, if
-/// anything.
-///
-/// Either way Cargo shares a target directory, `a` runs `b`'s binary: a
-/// Cargo that hashes a package by its path relative to the workspace finds
-/// `a`'s build fresh after `b`'s (its sources are older) and builds nothing,
-/// and every Cargo puts `b`'s second build at the same `debug/probe`.
-fn hazard(fixture: &Fixture, target: Option<&str>) -> Observed {
-    let cargo = Path::new(env!("CARGO"));
-    let toolchain = cargo.parent().unwrap();
-    assert!(
-        toolchain.join("rustc").exists(),
-        "no rustc beside {cargo:?}"
-    );
-    let base = fixture.base.to_str().unwrap();
-    // Cargo's own configuration, as `$CARGO_HOME/config.toml` sets it on a
-    // machine that shares one target directory.
-    let home = fixture.base.join("home");
-    fs::create_dir_all(home.join(".cargo")).unwrap();
-    fs::write(
-        home.join(".cargo/config.toml"),
-        format!("[build]\ntarget-dir = \"{base}/shared-target\"\n"),
-    )
-    .unwrap();
-    let environment = [
-        ("HOME", home.to_str().unwrap().to_owned()),
-        ("PATH", format!("{}:/usr/bin:/bin", toolchain.display())),
-    ];
+/// What this repository recommends a Rust contract declare.
+fn recommended() -> Value {
+    json!({
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target",
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+    })
+}
 
-    fixture.write(
-        "Cargo.toml",
-        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    );
-    fixture.write("src/main.rs", BROKEN);
-    fixture.write(
-        "tests/smoke.rs",
-        &format!(
-            "const BASE: &str = {base:?};\n\n\
-             #[test]\n\
-             fn the_probe_succeeds() {{\n    \
-                 let here = std::env::current_dir().unwrap();\n    \
-                 let name = here.file_name().unwrap().to_string_lossy().into_owned();\n    \
-                 let base = std::path::Path::new(BASE);\n    \
-                 if base.join(format!(\"hold-{{name}}\")).exists() {{\n        \
-                     std::fs::write(base.join(format!(\"{{name}}.ready\")), \"\").unwrap();\n        \
-                     let _ = std::fs::read(base.join(\"latch\"));\n    \
-                 }}\n    \
-                 let status = std::process::Command::new(env!(\"CARGO_BIN_EXE_probe\"))\n        \
-                     .status()\n        \
-                     .unwrap();\n    \
-                 assert!(status.success(), \"probe: {{status}}\");\n\
-             }}\n"
-        ),
-    );
-    let lockfile = Command::new(cargo)
-        .args(["generate-lockfile", "--offline"])
-        .current_dir(&fixture.repo)
-        .env("HOME", &home)
-        .output()
-        .unwrap();
-    assert!(lockfile.status.success(), "{}", text(&lockfile.stderr));
-    fixture.contract(|b| {
-        let mut task = json!({
-            "name": "test",
-            "run": format!(
-                "printf %s \"${{CARGO_TARGET_DIR-}}\" > '{b}/target-'\"$(basename \"$(pwd)\")\" \
-                 && cargo test --offline --quiet"
-            ),
-            "inputs": ["Cargo.toml", "Cargo.lock", "src/main.rs", "tests/smoke.rs"],
-        });
-        if let Some(target) = target {
-            task["env"] = json!({"CARGO_TARGET_DIR": target});
+/// A Cargo package, `probe`, under a Cargo whose own configuration puts
+/// every build of every worktree in one target directory (and, with
+/// `build_dir`, its intermediate artifacts in one `build-dir`), as
+/// `$CARGO_HOME/config.toml` does on a machine that shares them. `main`
+/// holds `a`'s code, whose binary exits 1, and a contract whose one task
+/// runs `cargo test`, whose test runs the binary at its uplifted path
+/// (`CARGO_BIN_EXE_probe`), as integration tests do; `env` is what the task
+/// declares. A task held at `base/latch` when `base/hold-NAME` exists.
+struct Probe {
+    cargo: PathBuf,
+    environment: [(&'static str, String); 2],
+}
+
+impl Probe {
+    fn new(fixture: &Fixture, build_dir: bool, env: Option<Value>) -> Self {
+        let cargo = PathBuf::from(env!("CARGO"));
+        let toolchain = cargo.parent().unwrap().to_path_buf();
+        assert!(
+            toolchain.join("rustc").exists(),
+            "no rustc beside {cargo:?}"
+        );
+        let base = fixture.base.to_str().unwrap();
+        let home = fixture.base.join("home");
+        fs::create_dir_all(home.join(".cargo")).unwrap();
+        let mut config = format!("[build]\ntarget-dir = \"{base}/shared-target\"\n");
+        if build_dir {
+            config.push_str(&format!("build-dir = \"{base}/shared-build\"\n"));
         }
-        json!([task])
-    });
-    fixture.commit_locked(&["sykli.json"]);
+        fs::write(home.join(".cargo/config.toml"), config).unwrap();
+        let environment = [
+            ("HOME", home.to_str().unwrap().to_owned()),
+            ("PATH", format!("{}:/usr/bin:/bin", toolchain.display())),
+        ];
+        fixture.write(
+            "Cargo.toml",
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        fixture.write("src/main.rs", BROKEN);
+        fixture.write(
+            "tests/smoke.rs",
+            &format!(
+                "const BASE: &str = {base:?};\n\n\
+                 #[test]\n\
+                 fn the_probe_succeeds() {{\n    \
+                     let here = std::env::current_dir().unwrap();\n    \
+                     let name = here.file_name().unwrap().to_string_lossy().into_owned();\n    \
+                     let base = std::path::Path::new(BASE);\n    \
+                     if base.join(format!(\"hold-{{name}}\")).exists() {{\n        \
+                         std::fs::write(base.join(format!(\"{{name}}.ready\")), \"\").unwrap();\n        \
+                         let _ = std::fs::read(base.join(\"latch\"));\n    \
+                     }}\n    \
+                     let status = std::process::Command::new(env!(\"CARGO_BIN_EXE_probe\"))\n        \
+                         .status()\n        \
+                         .unwrap();\n    \
+                     assert!(status.success(), \"probe: {{status}}\");\n\
+                 }}\n"
+            ),
+        );
+        let lockfile = Command::new(&cargo)
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(&fixture.repo)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(lockfile.status.success(), "{}", text(&lockfile.stderr));
+        fixture.contract(|b| {
+            let mut task = json!({
+                "name": "test",
+                "run": format!(
+                    "printf %s \"${{CARGO_TARGET_DIR-}}\" > '{b}/target-'\"$(basename \"$(pwd)\")\" \
+                     && cargo test --offline --quiet"
+                ),
+                "inputs": ["Cargo.toml", "Cargo.lock", "src/main.rs", "tests/smoke.rs"],
+            });
+            if let Some(env) = &env {
+                task["env"] = env.clone();
+            }
+            json!([task])
+        });
+        fixture.commit_locked(&["sykli.json"]);
+        Probe { cargo, environment }
+    }
+
+    /// A gate: `run --json` in `tree`, bounded; its receipt, whatever it
+    /// exits with.
+    fn gate(&self, fixture: &Fixture, tree: &Path) -> Value {
+        let mut gate = fixture.sykli(tree, &["run", "sykli.json", "--json"]);
+        gate.envs(self.environment.clone());
+        let out = bounded(gate, "a gate");
+        let code = out.status.code().unwrap_or(-1);
+        receipt(out, code)
+    }
+
+    /// An agent's own `cargo build` in `tree`, after saving `main.rs` again
+    /// as an editor does (newer than any build of it): Cargo's own
+    /// configuration decides where it goes.
+    fn agent_builds(&self, tree: &Path, code: &str) {
+        fs::write(tree.join("src/main.rs"), code).unwrap();
+        let mut build = Command::new(&self.cargo);
+        build
+            .args(["build", "--offline", "--quiet"])
+            .current_dir(tree)
+            .env_clear()
+            .envs(self.environment.clone());
+        let built = bounded(build, "an agent's cargo build");
+        assert!(built.status.success(), "{}", text(&built.stderr));
+    }
+}
+
+/// Two worktrees, `a` (`main`'s code) and `b` (code whose binary exits 0),
+/// of a `Probe` clone. An agent works in `b` with its own `cargo build`
+/// (isolating gates leaves a person's or an agent's own commands as they
+/// are): once before `a`'s gate, and once more while `a`'s gate is held
+/// after its build, at its test. Then `a`'s test goes on, and `b`'s gate
+/// runs.
+///
+/// Either way Cargo shares a directory, `a` runs `b`'s binary: a Cargo that
+/// hashes a package by its path relative to the workspace finds `a`'s build
+/// fresh after `b`'s (its sources are older) and builds nothing, and every
+/// Cargo puts `b`'s second build at the same `debug/probe`.
+fn hazard(fixture: &Fixture, build_dir: bool, env: Option<Value>) -> Observed {
+    let probe = Probe::new(fixture, build_dir, env);
     let a = fixture.worktree("a");
     let b = fixture.worktree("b");
     fs::write(b.join("src/main.rs"), WORKING).unwrap();
     fixture.git(&b, &["commit", "--quiet", "--no-verify", "-am", "b works"]);
-    // The agent in `b`, with its own cargo: Cargo's configuration decides.
-    let agent_builds_in_b = || {
-        // Saved again, as an editor does: newer than any build of it.
-        fs::write(b.join("src/main.rs"), WORKING).unwrap();
-        let mut build = Command::new(cargo);
-        build
-            .args(["build", "--offline", "--quiet"])
-            .current_dir(&b)
-            .env_clear()
-            .envs(environment.clone());
-        let built = bounded(build, "the agent's cargo build in b");
-        assert!(built.status.success(), "{}", text(&built.stderr));
-    };
 
-    agent_builds_in_b();
+    probe.agent_builds(&b, WORKING);
     mkfifo(&fixture.base.join("latch"));
     fs::write(fixture.base.join("hold-a"), "").unwrap();
-    let mut gate_a = fixture.sykli(&a, &["run", "sykli.json", "--json"]);
-    gate_a.envs(environment.clone());
-    let held = std::thread::spawn(move || bounded(gate_a, "a's gate"));
-    wait_until("a's build is done and its test is held", || {
-        fixture.base.join("a.ready").exists()
+    let held = std::thread::scope(|scope| {
+        let held = scope.spawn(|| probe.gate(fixture, &a));
+        wait_until("a's build is done and its test is held", || {
+            fixture.base.join("a.ready").exists()
+        });
+        probe.agent_builds(&b, WORKING);
+        release(fixture.base.join("latch"));
+        held.join().unwrap()
     });
-    agent_builds_in_b();
-    release(fixture.base.join("latch"));
-    let out = held.join().unwrap();
-    let code = out.status.code().unwrap_or(-1);
-    let in_a = receipt(out, code);
-    let mut gate_b = fixture.sykli(&b, &["run", "sykli.json", "--json"]);
-    gate_b.envs(environment);
-    let in_b = receipt(bounded(gate_b, "b's gate"), 0);
+    let in_b = probe.gate(fixture, &b);
     for tree in [&a, &b] {
         assert_eq!(fixture.status(tree), "", "{}", tree.display());
     }
     Observed {
-        outcomes: [outcome(&in_a).to_owned(), outcome(&in_b).to_owned()],
+        outcomes: [outcome(&held).to_owned(), outcome(&in_b).to_owned()],
         targets: ["a", "b"]
             .map(|name| fs::read_to_string(fixture.base.join(format!("target-{name}"))).unwrap()),
     }
@@ -663,15 +838,26 @@ fn hazard(fixture: &Fixture, target: Option<&str>) -> Observed {
 
 /// The hazard, and its repair. With one target directory for every
 /// worktree, `a`'s gate runs `b`'s binary: `a`'s receipt claims a pass for
-/// code that never ran. With `CARGO_TARGET_DIR=${worktree_cache}/cargo-target`
-/// declared, which Cargo puts before its own configuration, each gate builds
-/// in its own worktree's directory, outside its tree: `a` fails, as its code
-/// does, and `b` passes, while the agent's own builds still go to the shared
+/// code that never ran. With the recommended `CARGO_TARGET_DIR` and
+/// `CARGO_BUILD_BUILD_DIR` under `${worktree_cache}` declared, which Cargo
+/// puts before its own configuration, each gate builds in its own
+/// worktree's directory, outside its tree: `a` fails, as its code does, and
+/// `b` passes, while the agent's own builds still go to the shared
 /// directory.
 #[test]
 fn a_shared_target_dir_runs_another_worktrees_binary_and_worktree_cache_does_not() {
     let shared = Fixture::new("shared");
-    let observed = hazard(&shared, None);
+    let help = shared
+        .sykli(&shared.repo, &["run", "--help"])
+        .output()
+        .unwrap();
+    for says in [
+        "\"CARGO_TARGET_DIR\": \"${worktree_cache}/cargo-target\"",
+        "\"CARGO_BUILD_BUILD_DIR\": \"${worktree_cache}/cargo-build\"",
+    ] {
+        assert!(text(&help.stdout).contains(says), "run --help: {says}");
+    }
+    let observed = hazard(&shared, false, None);
     assert_eq!(
         observed.outcomes,
         ["passed", "passed"],
@@ -680,7 +866,7 @@ fn a_shared_target_dir_runs_another_worktrees_binary_and_worktree_cache_does_not
     assert_eq!(observed.targets, ["", ""]);
 
     let isolated = Fixture::new("isolated");
-    let observed = hazard(&isolated, Some("${worktree_cache}/cargo-target"));
+    let observed = hazard(&isolated, false, Some(recommended()));
     assert_eq!(observed.outcomes, ["failed", "passed"], "{observed:?}");
     let [in_a, in_b] = observed.targets.clone().map(PathBuf::from);
     for (target, tree) in [(&in_a, "a"), (&in_b, "b")] {
@@ -695,6 +881,104 @@ fn a_shared_target_dir_runs_another_worktrees_binary_and_worktree_cache_does_not
     assert_ne!(in_a, in_b);
     // The agent's own builds kept Cargo's configuration.
     assert!(isolated.base.join("shared-target/debug/probe").is_file());
+}
+
+/// Where Cargo has a `build-dir` (stable since Cargo 1.91), a shared one
+/// holds every build's intermediate artifacts, fingerprints and test
+/// binaries, and `CARGO_TARGET_DIR` moves only the final ones: with it
+/// alone, `a`'s gate still finds `b`'s build fresh and passes on code that
+/// never ran. `CARGO_BUILD_BUILD_DIR=${worktree_cache}/cargo-build` as well
+/// closes it. A Cargo without `build-dir` ignores both the setting and the
+/// variable, and this test says so and stops.
+#[test]
+fn a_shared_build_dir_needs_cargo_build_build_dir_too() {
+    let target_only = Fixture::new("builddir");
+    let observed = hazard(
+        &target_only,
+        true,
+        Some(json!({"CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"})),
+    );
+    if !target_only.base.join("shared-build").exists() {
+        eprintln!("skipped: this Cargo has no build-dir (stable since 1.91)");
+        return;
+    }
+    assert_eq!(
+        observed.outcomes,
+        ["passed", "passed"],
+        "CARGO_TARGET_DIR alone closed it after all: {observed:?}"
+    );
+
+    let both = Fixture::new("builddir-both");
+    let observed = hazard(&both, true, Some(recommended()));
+    assert_eq!(observed.outcomes, ["failed", "passed"], "{observed:?}");
+    for name in ["a", "b"] {
+        let target = PathBuf::from(&observed.targets[usize::from(name == "b")]);
+        let own = assert_cache_of(&both, target.parent().unwrap(), &both.base.join(name));
+        assert!(own.join("cache/cargo-build").is_dir(), "{}", own.display());
+    }
+}
+
+/// A worktree removed and made again at the same path (as a caller's
+/// disposable checkout is) gets the same git directory from git, but never
+/// the directory of the worktree it replaced: that one holds another
+/// commit's build, which a checkout that restores file times (as
+/// `git-restore-mtime` and CI cache recipes do) would find fresh. Here the
+/// first incarnation builds `b`'s code, which passes; the second checks out
+/// `a`'s with its files dated before that build, and must fail.
+#[test]
+fn a_worktree_made_again_at_the_same_path_gets_a_new_directory() {
+    let fixture = Fixture::new("again");
+    let probe = Probe::new(&fixture, false, Some(recommended()));
+    fixture.git(&fixture.repo, &["checkout", "--quiet", "-b", "b"]);
+    fs::write(fixture.repo.join("src/main.rs"), WORKING).unwrap();
+    fixture.git(
+        &fixture.repo,
+        &["commit", "--quiet", "--no-verify", "-am", "b"],
+    );
+    fixture.git(&fixture.repo, &["checkout", "--quiet", "main"]);
+    let path = fixture.base.join("checkout");
+    let add = |branch: &str| {
+        fixture.git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                path.to_str().unwrap(),
+                branch,
+            ],
+        )
+    };
+
+    add("b");
+    let first = probe.gate(&fixture, &path);
+    assert_eq!(outcome(&first), "passed", "{first}");
+    let before = fixture.seen("target-checkout");
+    fixture.git(
+        &fixture.repo,
+        &["worktree", "remove", path.to_str().unwrap()],
+    );
+    add("main");
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    for file in fixture.git(&path, &["ls-files"]).lines() {
+        fs::File::options()
+            .write(true)
+            .open(path.join(file))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    let second = probe.gate(&fixture, &path);
+    assert_eq!(outcome(&second), "failed", "{second}");
+    let after = fixture.seen("target-checkout");
+    assert_ne!(
+        after, before,
+        "the new worktree got the old one's directory"
+    );
+    assert_cache_of(&fixture, after.parent().unwrap(), &path);
+    // The old incarnation's directory is gone with it.
+    assert!(!before.exists(), "{} was kept", before.display());
 }
 
 /// A worktree's directory is removed once the worktree is gone, when a run

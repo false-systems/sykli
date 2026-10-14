@@ -1,26 +1,42 @@
 //! `${worktree_cache}`: a directory of each worktree's own, outside it.
 //!
 //! A task's declared `env` values may name `${worktree_cache}`. It expands to
-//! `<git-common-dir>/sykli/worktrees/<id>/cache`, where `<id>` is the identity
-//! (`sykli-worktree.v1`) of the worktree's top level and its own git
-//! directory, both with symbolic links resolved. The directory is made when
-//! a run needs it and lies outside every work tree, so it changes neither
-//! `git status` nor any tree a receipt binds. It is for a build tool's
-//! output: with one Cargo target directory for every worktree (`[build]
-//! target-dir` in Cargo's own configuration), the final artifacts land in
-//! shared `debug/<name>` paths, and a run in one worktree can run a binary
-//! another worktree built; its receipt would claim a pass for code that never
-//! ran. `CARGO_TARGET_DIR=${worktree_cache}/cargo-target` gives each worktree
-//! its own, at the cost of a cold first build in each.
+//! `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is the first 16 hex
+//! digits of the identity (`sykli-worktree.v1`) of the worktree's
+//! incarnation: its top level and its own git directory, both with symbolic
+//! links resolved, and the token in that git directory's `sykli-incarnation`
+//! (made by the first run that needs it). Git deletes a worktree's git
+//! directory with it, so a worktree removed and made again at the same path,
+//! which git gives the same git directory, is another incarnation and gets
+//! another directory: it never inherits the build of the one it replaced,
+//! which a checkout that restores file times would find fresh.
+//!
+//! The directory is made when a run needs it and lies outside every work
+//! tree, so it changes neither `git status` nor any tree a receipt binds. It
+//! is for a build tool's output: with one Cargo target directory for every
+//! worktree (`[build] target-dir` in Cargo's own configuration), the final
+//! artifacts land in shared `debug/<name>` paths, and a run in one worktree
+//! can run a binary another worktree built; its receipt would claim a pass
+//! for code that never ran. A shared `[build] build-dir` does the same with
+//! the intermediate artifacts. `CARGO_TARGET_DIR=${worktree_cache}/cargo-target`
+//! with `CARGO_BUILD_BUILD_DIR=${worktree_cache}/cargo-build` gives each
+//! worktree its own (a Cargo without `build-dir` ignores the second), at the
+//! cost of a cold first build in each.
 //!
 //! The directory is the tasks' own: sykli keeps what it needs beside it in
 //! `<id>/` (`worktree.json`, whose directory this is, and `lease`), so a task
 //! that empties or removes it (`cargo clean`) takes nothing of sykli's, and
 //! the next run makes it again.
 //!
-//! Any other `${…}` in an `env` value, or one left unclosed, is refused when
-//! the contract is validated: never handed to a task literally. A `$` that
-//! does not open `${` is not a placeholder and is kept as written.
+//! **Where a contract is written or run** (`validate`, `lock`, `plan`,
+//! `run`, `resume`, the pre-commit hook): in an `env` value any other
+//! `${…}`, one left unclosed, or a `$${` (kept free for an escape of `${`
+//! later, so that one never changes what a valid contract means) is
+//! refused, never handed to a task literally; and the placeholder is refused
+//! anywhere else in a task, where a shell would make it empty. A `$` that
+//! opens no `${` is kept as written. **Where a contract is judged as
+//! evidence** (`verify`, `status --commit`, the pre-push hook), none of this
+//! applies: a contract run before these rules keeps the meaning it ran with.
 //!
 //! **What a cache key covers is the declaration**, `${worktree_cache}` as
 //! written, never the directory it names (the task is keyed as declared). A
@@ -37,14 +53,14 @@
 //! holds the directory's lease shared until it ends, and so does every task
 //! that names it, and what that task starts (they inherit it, as they inherit
 //! an attempt's lease). Whenever a run is recorded, in any worktree, the
-//! directory of every worktree that is gone is set aside, never one whose
-//! lease is held, and the run deletes what it set aside once its work is
-//! done, so a large directory never delays a run's start. A worktree is gone
-//! when its top level's `.git` no longer leads to the git directory its
-//! `worktree.json` names (it was removed, moved, or its git directory was
-//! pruned) and git does not keep it locked (`git worktree lock`, for one on
-//! removable media). Windows has no leases here, so there these directories
-//! are made but never pruned.
+//! directory of every worktree incarnation that is gone is set aside, never
+//! one whose lease is held, and the run deletes what it set aside once its
+//! work is done, so a large directory never delays a run's start. An
+//! incarnation is gone when its git directory holds another token or none,
+//! or its top level's `.git` no longer leads to that git directory (it was
+//! removed or moved), unless git keeps it locked (`git worktree lock`, for
+//! one on removable media). Windows has no leases here, so there these
+//! directories are made but never pruned.
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,12 +112,59 @@ fn pieces(value: &str) -> Result<Vec<Piece<'_>>, String> {
     Ok(pieces)
 }
 
-/// Refuse a task whose `env` names an unknown or unclosed placeholder.
-pub(crate) fn validate(task: &Task) -> Result<(), String> {
+/// What a task may say about placeholders where its contract is written or
+/// run (never where it is judged): in an `env` value, only
+/// `${worktree_cache}`, closed, and no `$${` (kept free for an escape);
+/// anywhere else, not the placeholder at all, which a shell would make empty.
+pub(crate) fn check(task: &Task) -> Result<(), String> {
     for (name, value) in &task.env {
+        if value.contains("$${") {
+            return Err(format!(
+                "task {:?} env {name} uses \"$${{\", which is reserved for an escape of \"${{\"; \
+                 the only placeholder is ${{{WORKTREE_CACHE}}}",
+                task.name
+            ));
+        }
         pieces(value).map_err(|error| format!("task {:?} env {name} uses {error}", task.name))?;
     }
+    let mut elsewhere = vec![("its run command", task.run.as_str())];
+    if let Some(workdir) = task.workdir.as_ref().and_then(|path| path.to_str()) {
+        elsewhere.push(("its workdir", workdir));
+    }
+    elsewhere.extend(task.inputs.iter().map(|path| ("its inputs", path.as_str())));
+    elsewhere.extend(
+        task.outputs
+            .iter()
+            .map(|path| ("its outputs", path.as_str())),
+    );
+    elsewhere.extend(task.env.keys().map(|name| ("an env name", name.as_str())));
+    for (field, text) in elsewhere {
+        if names_placeholder(text) {
+            return Err(format!(
+                "task {:?} names ${{{WORKTREE_CACHE}}} in {field}, where sykli does not expand it \
+                 (a shell makes it empty); declare it in an env value, as \
+                 \"env\": {{\"DIR\": \"${{{WORKTREE_CACHE}}}\"}}, and use \"$DIR\"",
+                task.name
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Whether `text` names the placeholder as a shell variable would:
+/// `$worktree_cache` or `${worktree_cache…`, the name not going on.
+fn names_placeholder(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(at) = rest.find(WORKTREE_CACHE) {
+        let before = &rest[..at];
+        let after = &rest[at + WORKTREE_CACHE.len()..];
+        let ends = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        if ends && (before.ends_with('$') || before.ends_with("${")) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 /// Whether a validated task's `env` names `${worktree_cache}`.
@@ -143,6 +206,7 @@ pub(crate) fn prepare(contract: &Contract) -> Result<(), String> {
     })?;
     let worktree = Worktree {
         root: text(root)?,
+        incarnation: incarnation(&gitdir)?,
         gitdir: text(&gitdir)?,
     };
     let prepared = held(&common, &worktree)?;
@@ -200,11 +264,13 @@ pub(crate) fn inherit(task: &Task, command: &mut std::process::Command) {
     }
 }
 
-/// A worktree by its top level and its own git directory, resolved.
+/// A worktree's incarnation: its top level and its own git directory,
+/// resolved, and the token in that git directory.
 #[derive(serde::Serialize)]
 struct Worktree {
     root: String,
     gitdir: String,
+    incarnation: String,
 }
 
 /// `worktree.json`: whose directory this is.
@@ -214,12 +280,82 @@ struct Marker {
     schema: String,
     root: String,
     gitdir: String,
+    incarnation: String,
 }
+
+/// Hex digits of an id: 64 bits. A clone holds at most thousands of
+/// worktree incarnations over its life, so two sharing an id is about as
+/// likely as n²/2⁶⁵ (below 10⁻¹¹ for ten thousand); the id is no secret
+/// either way, since any process that can write the common git directory can
+/// write there. The full identity would add 48 characters to every artifact
+/// path, which counts against Windows' MAX_PATH.
+const ID_LENGTH: usize = 16;
 
 impl Worktree {
     fn id(&self) -> Result<String, String> {
-        crate::canonical::identity("sykli-worktree.v1", self)
+        let identity = crate::canonical::identity("sykli-worktree.v1", self)?;
+        Ok(identity[..ID_LENGTH].to_owned())
     }
+}
+
+/// Whether `name` is a directory id, as `Worktree::id` makes them.
+#[cfg(unix)]
+fn is_id(name: &str) -> bool {
+    name.len() == ID_LENGTH
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The file in a worktree's own git directory that names its incarnation.
+const INCARNATION: &str = "sykli-incarnation";
+
+/// The token of the worktree whose git directory is `gitdir`, made by the
+/// first run that needs it: published whole (synced, then linked into
+/// place, never over another), so a concurrent first run reads this one.
+/// Git ignores the file, and deletes it with the worktree's git directory.
+fn incarnation(gitdir: &Path) -> Result<String, String> {
+    if let Some(token) = current_incarnation(gitdir) {
+        return Ok(token);
+    }
+    let token = crate::sha256(
+        format!(
+            "{}:{}:{}:{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|now| now.as_nanos())
+                .unwrap_or_default(),
+            crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            gitdir.display()
+        )
+        .as_bytes(),
+    );
+    let published = crate::canonical::publish_with(
+        &gitdir.join(INCARNATION),
+        format!("{token}\n").as_bytes(),
+        crate::canonical::Durability::Fsync,
+    );
+    match (published, current_incarnation(gitdir)) {
+        // Ours, or another first run's that won.
+        (_, Some(token)) => Ok(token),
+        (Err(error), None) => Err(format!(
+            "${{worktree_cache}}: cannot record this worktree's incarnation in {}: {error}",
+            gitdir.join(INCARNATION).display()
+        )),
+        (Ok(()), None) => Err(format!(
+            "${{worktree_cache}}: {} is unreadable",
+            gitdir.join(INCARNATION).display()
+        )),
+    }
+}
+
+/// The token in `gitdir`, if there is one; never made.
+fn current_incarnation(gitdir: &Path) -> Option<String> {
+    fs::read_to_string(gitdir.join(INCARNATION))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|token| !token.is_empty())
 }
 
 fn text(path: &Path) -> Result<String, String> {
@@ -326,6 +462,7 @@ fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resul
             schema: MARKER.into(),
             root: worktree.root.clone(),
             gitdir: worktree.gitdir.clone(),
+            incarnation: worktree.incarnation.clone(),
         })
         .map_err(|e| e.to_string())?;
         // Synced: a marker torn by a power cut would read as a gone worktree.
@@ -352,10 +489,10 @@ fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resul
     staged
 }
 
-/// Whether the worktree whose directory `directory` is still exists: its
-/// marker names a top level whose `.git` leads to the git directory the
-/// marker names, or git keeps that worktree locked; and the two are what the
-/// directory is named by.
+/// Whether the worktree incarnation whose directory `directory` is still
+/// exists: the git directory its marker names still holds its token, and its
+/// top level's `.git` still leads there, or git keeps that worktree locked;
+/// and the marker is what the directory is named by.
 #[cfg(unix)]
 fn exists(directory: &Path, id: &str) -> bool {
     let Some(marker) = fs::read(directory.join("worktree.json"))
@@ -368,7 +505,12 @@ fn exists(directory: &Path, id: &str) -> bool {
     let worktree = Worktree {
         root: marker.root,
         gitdir: marker.gitdir,
+        incarnation: marker.incarnation,
     };
+    // Its git directory holds its token: git has not removed and made it
+    // again (as for a worktree made again at the same path).
+    let same = current_incarnation(Path::new(&worktree.gitdir))
+        .is_some_and(|token| token == worktree.incarnation);
     let reachable = || {
         fs::canonicalize(&worktree.root).is_ok_and(|root| {
             root == Path::new(&worktree.root)
@@ -376,6 +518,7 @@ fn exists(directory: &Path, id: &str) -> bool {
         })
     };
     worktree.id().is_ok_and(|named| named == id)
+        && same
         && (Path::new(&worktree.gitdir).join("locked").exists() || reachable())
 }
 
@@ -393,7 +536,7 @@ pub(crate) fn prune(common: &Path) {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if crate::canonical::digest(name).is_err() || exists(&path, name) {
+        if !is_id(name) || exists(&path, name) {
             continue;
         }
         // Held by no one, or it is not ours to take.
@@ -464,10 +607,11 @@ mod tests {
             "$HOME/x",
             "a$b$",
             "$$",
+            "$ {x}",
             "${worktree_cache}",
             "x${worktree_cache}/y${worktree_cache}",
         ] {
-            assert!(validate(&task(&[("V", value)])).is_ok(), "{value}");
+            assert!(check(&task(&[("V", value)])).is_ok(), "{value}");
         }
         for (value, says) in [
             ("${nope}", "unknown placeholder ${nope}"),
@@ -481,8 +625,10 @@ mod tests {
                 "unclosed placeholder \"${worktree_cache\"",
             ),
             ("${worktree_cache}${", "unclosed placeholder \"${\""),
+            ("$${worktree_cache}", "reserved"),
+            ("a$${b}", "reserved"),
         ] {
-            let error = validate(&task(&[("V", value)])).unwrap_err();
+            let error = check(&task(&[("V", value)])).unwrap_err();
             assert!(error.contains(says), "{value}: {error}");
             assert!(error.contains("task \"t\" env V uses"), "{error}");
         }
@@ -491,18 +637,65 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_is_named_by_its_root_and_its_git_directory() {
-        let id = |root: &str, gitdir: &str| {
+    fn the_placeholder_is_named_only_as_a_shell_would_name_it() {
+        for text in [
+            "${worktree_cache}",
+            "x $worktree_cache",
+            "${worktree_cache:-/x}",
+            "\"$worktree_cache\"/y",
+        ] {
+            assert!(names_placeholder(text), "{text}");
+        }
+        for text in [
+            "worktree_cache",
+            "$worktree_cache_dir",
+            "${worktree_caches}",
+            "$HOME/worktree_cache",
+            "",
+        ] {
+            assert!(!names_placeholder(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_is_named_by_its_incarnation() {
+        let id = |root: &str, gitdir: &str, incarnation: &str| {
             Worktree {
                 root: root.into(),
                 gitdir: gitdir.into(),
+                incarnation: incarnation.into(),
             }
             .id()
             .unwrap()
         };
-        assert!(crate::canonical::digest(&id("/r", "/r/.git")).is_ok());
-        assert_eq!(id("/r", "/r/.git"), id("/r", "/r/.git"));
-        assert_ne!(id("/r", "/r/.git"), id("/s", "/r/.git"));
-        assert_ne!(id("/r", "/c/worktrees/a"), id("/r", "/c/worktrees/b"));
+        let one = id("/r", "/c/worktrees/r", "1");
+        assert_eq!(one.len(), ID_LENGTH);
+        assert!(one.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(one, id("/r", "/c/worktrees/r", "1"));
+        assert_ne!(one, id("/s", "/c/worktrees/r", "1"));
+        assert_ne!(one, id("/r", "/c/worktrees/s", "1"));
+        // Made again at the same path, with the same git directory.
+        assert_ne!(one, id("/r", "/c/worktrees/r", "2"));
+    }
+
+    #[test]
+    fn a_git_directory_keeps_one_incarnation_until_it_goes() {
+        let gitdir = std::env::temp_dir().join(format!(
+            "sykli-incarnation-{}-{}",
+            std::process::id(),
+            crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&gitdir).unwrap();
+        assert_eq!(current_incarnation(&gitdir), None);
+        let first = incarnation(&gitdir).unwrap();
+        assert_eq!(incarnation(&gitdir).unwrap(), first);
+        assert_eq!(
+            current_incarnation(&gitdir).as_deref(),
+            Some(first.as_str())
+        );
+        fs::remove_dir_all(&gitdir).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        assert_ne!(incarnation(&gitdir).unwrap(), first);
+        fs::remove_dir_all(&gitdir).unwrap();
     }
 }
