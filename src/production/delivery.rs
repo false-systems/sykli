@@ -1615,6 +1615,9 @@ impl Journaled for Attempt<'_> {
         self.lease.inherit(command);
     }
     fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String> {
+        // The shell already exists and holds its lease. Tests must distinguish
+        // that fact from the durable Started record, not race the scheduler.
+        crate::checkpoint("before-apply-start-record")?;
         self.coordinator.append(Fact::Started {
             attempt: self.id.clone(),
             generation: self.generation,

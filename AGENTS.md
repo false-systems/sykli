@@ -265,7 +265,7 @@ recreated"; an observation naming an operation the clone does not know marks
 the delivery superseded (`superseded_seen`); an observation dated more than
 `CLOCK_SKEW_MS` ahead is never fresh. `deliver --detach` hands the lease to
 `__delivery_coordinator`. Checkpoints: `after-request`, `after-dispatch`,
-`after-apply-start`, `after-apply-exit`, `after-ack`, `before-observed`,
+`before-apply-start-record`, `after-apply-start`, `after-apply-exit`, `after-ack`, `before-observed`,
 `after-lost`, `after-reconcile`, `coordinator-start`. Retention:
 `SYKLI_DELIVERY_BUDGET` (100) per clone, oldest settled first (`prunable`: no
 live coordinator or apply, no unknown effect, not the newest per target);
