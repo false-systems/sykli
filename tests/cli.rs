@@ -1,3 +1,6 @@
+#[path = "support/stdio.rs"]
+mod stdio;
+
 use std::{fs, process::Command};
 
 #[test]
@@ -441,24 +444,13 @@ fn tasks_get_no_stdin_and_dash_commands_are_commands() {
             {"name":"reads","run":"cat; echo done"},
             {"name":"dash","run":"-n 2>/dev/null || echo ran-as-command"}]}"#,
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["run", "sykli.json", "--json"])
-        .current_dir(&root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"secret input\n")
-            .unwrap();
-    }
-    let out = child.wait_with_output().unwrap();
+    let out = stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .current_dir(&root),
+        b"secret input\n",
+    )
+    .unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(receipt["tasks"][0]["outcome"], "passed");
     assert_eq!(

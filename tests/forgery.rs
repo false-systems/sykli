@@ -11,6 +11,9 @@
 //! rewritten to say "passed", with everything else left consistent,
 //! verifies, because nothing in an unsigned receipt shows who ran what.
 
+#[path = "support/stdio.rs"]
+mod stdio;
+
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -18,7 +21,7 @@ use std::collections::BTreeMap;
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
 };
 
 const ZEROS: &str = "0000000000000000000000000000000000000000";
@@ -93,21 +96,13 @@ impl Scratch {
     }
 
     fn sykli(&self, args: &[&str], stdin: Option<&str>) -> Output {
-        use std::io::Write;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(args)
-            .current_dir(&self.repo)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        if let Some(stdin) = stdin {
-            input.write_all(stdin.as_bytes()).unwrap();
-        }
-        drop(input);
-        child.wait_with_output().unwrap()
+        stdio::output(
+            Command::new(env!("CARGO_BIN_EXE_sykli"))
+                .args(args)
+                .current_dir(&self.repo),
+            stdin.unwrap_or_default().as_bytes(),
+        )
+        .unwrap()
     }
 
     /// A run's receipt, as JSON.
