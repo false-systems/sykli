@@ -56,3 +56,19 @@ an already-dispatched attempt without a recorded end. Its attributed
 observation abstracts the existing reconciliation predicate. Lean validation
 is a separate local development check; building, testing and releasing the
 Rust product does not require Lean.
+
+## Ordinary run crash tests
+
+The same readiness race affected `tests/runs.rs` window 5: recovery passed,
+but the expected `re-running second` warning was absent when SIGKILL preceded
+the Started append. README's at-least-once warning applies to recorded starts.
+Unlike delivery, ordinary run recovery retries lost tasks.
+
+`RunCrash` in the same Lean file checks three evidence cases before the Rust
+change: no Started means no rerun warning; Started without acceptance means a
+warning; accepted work is not retried. It models this predicate only, not the
+whole recovery algorithm or OS. The test now waits for the persisted `started`
+timestamp while its child remains latched, before sending SIGKILL. The two
+tests that close inherited leases also wait for Started: their assertions
+require the recorded process group. All original assertions remain intact.
+The existing pre-start and post-start crash injection tests remain distinct.

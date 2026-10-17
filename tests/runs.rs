@@ -195,6 +195,17 @@ impl Fixture {
         fs::remove_file(path).unwrap();
     }
 
+    /// Child readiness precedes the coordinator's durable Started append.
+    /// Keep the child latched until the evidence this crash test needs exists.
+    fn wait_started(&self, name: &str) {
+        let run = self.run_id();
+        wait_until(|| {
+            attempts(&self.status(&run), name)
+                .last()
+                .is_some_and(|attempt| attempt["started"].is_u64())
+        });
+    }
+
     /// Let every latched task run straight through from now on.
     fn unlatch(&self) {
         fs::write(self.base.join("go"), "").unwrap();
@@ -614,6 +625,7 @@ fn window_05_a_coordinator_killed_during_execution_keeps_what_finished() {
     let f = Fixture::new("w05", "one\n", two_tasks);
     let child = f.spawn(&["run", "sykli.json", "--json"], None);
     f.wait_ready("second");
+    f.wait_started("second");
     f.stop(child.id(), "KILL");
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), None);
@@ -1829,6 +1841,7 @@ fn a_task_that_drops_its_lease_is_running_while_its_group_lives() {
     });
     let child = f.spawn(&["run", "sykli.json", "--json"], None);
     f.wait_ready("t");
+    f.wait_started("t");
     f.stop(child.id(), "KILL");
     child.wait_with_output().unwrap();
     let run = f.run_id();
@@ -2201,6 +2214,7 @@ fn assume_ended_is_recorded() {
     });
     let child = f.spawn(&["run", "sykli.json", "--json"], None);
     f.wait_ready("t");
+    f.wait_started("t");
     f.stop(child.id(), "KILL");
     child.wait_with_output().unwrap();
     let run = f.run_id();

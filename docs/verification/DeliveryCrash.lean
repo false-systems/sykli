@@ -112,3 +112,31 @@ theorem recovery_without_duplicate (started ready : Bool) (count : Nat)
 #print axioms after_started_crash
 #print axioms recovery_without_duplicate
 end DeliveryCrash
+
+/- Ordinary task recovery retries lost work, unlike production delivery's
+   reconciliation. Its rerun warning is based on recorded Started evidence,
+   not child readiness. This models only that evidence boundary. -/
+namespace RunCrash
+
+structure Evidence where
+  ready : Bool
+  started : Bool
+  accepted : Bool
+  deriving DecidableEq
+
+def warns (e : Evidence) : Bool := e.started && !e.accepted
+
+-- Child readiness alone does not establish the warning precondition.
+theorem before_started : warns ⟨true, false, false⟩ = false := by decide
+
+-- Wait for the durable start while the child is latched, then kill.
+theorem after_started : warns ⟨true, true, false⟩ = true := by decide
+
+-- Accepted work is retained, not announced as a retry.
+theorem accepted_is_not_retried (ready started : Bool) :
+    warns ⟨ready, started, true⟩ = false := by simp [warns]
+
+#print axioms before_started
+#print axioms after_started
+#print axioms accepted_is_not_retried
+end RunCrash
