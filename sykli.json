@@ -5,6 +5,8 @@
       "name": "fmt",
       "run": "cargo fmt --check",
       "inputs": [
+        "docs/verification/DeliveryInventory.lean",
+        "docs/verification/delivery-inventory.md",
         "docs/verification/delivery-crash.md",
         "docs/verification/DeliveryCrash.lean",
         "Cargo.toml",
@@ -71,6 +73,8 @@
         "fmt"
       ],
       "inputs": [
+        "docs/verification/DeliveryInventory.lean",
+        "docs/verification/delivery-inventory.md",
         "docs/verification/delivery-crash.md",
         "docs/verification/DeliveryCrash.lean",
         "Cargo.lock",
@@ -120,6 +124,8 @@
         "fmt"
       ],
       "inputs": [
+        "docs/verification/DeliveryInventory.lean",
+        "docs/verification/delivery-inventory.md",
         "docs/verification/delivery-crash.md",
         "docs/verification/DeliveryCrash.lean",
         "Cargo.lock",

@@ -23,6 +23,8 @@
             "action/verify.sh",
             "docs/agents.md",
             "docs/verification/DeliveryCrash.lean",
+            "docs/verification/DeliveryInventory.lean",
+            "docs/verification/delivery-inventory.md",
             "docs/verification/delivery-crash.md",
             "install.sh",
             "src/assessment.rs",

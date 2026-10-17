@@ -1623,6 +1623,65 @@ fn resuming_an_undispatched_delivery_never_applies_over_an_unknown_effect() {
     );
 }
 
+/// A missing, malformed or tampered request is unknown, never an absent
+/// delivery: neither new work nor an undispatched resume may apply over it.
+#[test]
+fn unreadable_request_never_hides_an_unresolved_apply() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("unreadable-request");
+    f.kill_at("after-request");
+    let pending = f.newest();
+    f.kill_at("after-apply-exit");
+    let lost = f.newest();
+    assert_eq!(f.applies(), 1);
+    let records = f
+        .repo
+        .join(".git/sykli/deliveries")
+        .join(&lost)
+        .join("records");
+    let mut paths: Vec<_> = fs::read_dir(&records)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    paths.sort();
+    let first = &paths[0];
+    let original = fs::read(first).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+    tampered["record"]["fact"]["request"]["target"] = json!("some-other-target");
+    for bytes in [
+        Some(b"corrupt request\n".to_vec()),
+        None,
+        Some(serde_json::to_vec(&tampered).unwrap()),
+    ] {
+        match bytes {
+            Some(bytes) => fs::write(first, bytes).unwrap(),
+            None => fs::remove_file(first).unwrap(),
+        }
+        for args in [
+            vec!["deliver", "--target", "fake", "--json"],
+            vec!["resume", "--delivery", &pending, "--json"],
+            vec!["status", "--delivery", &pending, "--json"],
+        ] {
+            let out = f.output(&args);
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                text(&out.stdout)
+            );
+            assert!(text(&out.stderr).contains(&lost), "{}", text(&out.stderr));
+            assert_eq!(f.applies(), 1, "unreadable is not absent");
+        }
+        fs::write(first, &original).unwrap();
+    }
+    // Restoring the evidence restores ordinary reconciliation, not a bypass.
+    let (out, _) = f.resume(&lost, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(f.applies(), 1);
+}
+
 /// A rollback delivers an earlier artifact again only under the same
 /// product and the same way of identifying it.
 #[test]
