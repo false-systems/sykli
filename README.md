@@ -883,6 +883,12 @@ What the label rests on, and its limits:
   for its lock, then fails with `journal-busy`. A stopped writer's lock is
   never stolen, and an unreadable delivery is never skipped to declare another
   delivery healthy or rebuild the target's sequence. Retry once the holder ends.
+  Discovery validates every published delivery journal and returns a complete
+  inventory or an error, including a missing or damaged first record. An
+  unreadable request cannot safely identify its target, so this can block
+  another target too. Retention defers pruning rather than use a partial list.
+  A concurrent creation or pruning can cause a transient refusal; retry after
+  it finishes. See [the inventory specification](docs/verification/delivery-inventory.md).
 - **Superseded** means another apply to the target came after this
   delivery's. In this clone that is known from the journals at once. A
   delivery from another clone is known only when an observation of this one

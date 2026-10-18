@@ -319,21 +319,42 @@ impl Fixture {
         );
     }
 
-    /// Start `deliver` with the apply or the observer held on its latch,
-    /// and SIGKILL the coordinator once it is held there.
+    /// Child readiness is not a journal barrier. For an apply, also wait for
+    /// Started to be durable before killing the coordinator.
     fn kill_while(&self, held: &str) {
+        let point = (held == "apply" && cfg!(debug_assertions)).then_some("after-apply-start");
+        self.kill_while_at(held, point);
+    }
+
+    /// Keep the child on its latch and, in debug tests, the coordinator at the
+    /// chosen journal boundary. Neither can move past the intended crash window.
+    fn kill_while_at(&self, held: &str, point: Option<&str>) {
         self.set(&format!("{held}.hold"), "");
-        let mut child = self
-            .sykli(&["deliver", "--target", "fake", "--json"])
+        let mut command = self.sykli(&["deliver", "--target", "fake", "--json"]);
+        if let Some(point) = point {
+            mkfifo(&self.base.join(format!("{point}.release")));
+            command.env("SYKLI_TEST_PAUSE_AT", point);
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let ready = self.base.join(format!("{held}.ready"));
         wait_until(|| ready.exists());
+        if let Some(point) = point {
+            assert_eq!(self.wait_for_pid(point), child.id());
+        } else if held == "apply" {
+            // Release builds have no pause hooks. The child latch still keeps
+            // the attempt unfinished, so waiting for durable Started is enough.
+            let id = self.newest();
+            wait_until(|| {
+                !dim(&self.status(&id), "operation")["attempts"][0]["started_at_ms"].is_null()
+            });
+        }
         fs::remove_file(ready).unwrap();
         child.kill().unwrap();
-        child.wait().unwrap();
+        assert!(!child.wait().unwrap().success());
         self.clear(&format!("{held}.hold"));
     }
 
@@ -792,9 +813,35 @@ fn reapply_needs_a_reconciliation_that_reached_the_target() {
 fn killed_during_apply_resume_waits_then_reconciles() {
     let f = Fixture::new("during-apply");
     f.kill_while("apply");
+    orphan_reconciles_once(&f, "applying", true);
+}
+
+/// The child can be alive before Started is durable. Keep that exact window:
+/// dispatched is not applying, but its live lease must still forbid resume.
+#[test]
+fn killed_before_started_record_resume_waits_then_reconciles() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("before-started-record");
+    f.kill_while_at("apply", Some("before-apply-start-record"));
+    orphan_reconciles_once(&f, "dispatched", false);
+}
+
+// Rust translation of the three checks in docs/verification/DeliveryCrash.lean.
+fn orphan_reconciles_once(f: &Fixture, expected_state: &str, started: bool) {
     let id = f.newest();
     let status = f.status(&id);
-    assert_eq!(dim(&status, "operation")["state"], "applying", "{status}");
+    assert_eq!(
+        dim(&status, "operation")["state"],
+        expected_state,
+        "{status}"
+    );
+    let attempt = &dim(&status, "operation")["attempts"][0];
+    assert_eq!(!attempt["started_at_ms"].is_null(), started, "{status}");
+    assert!(attempt["end"].is_null(), "{status}");
+    assert_eq!(f.facts(&id).contains(&"started".to_string()), started);
+    assert_eq!(f.applies(), 1);
     assert_eq!(label(&status), "NOT VERIFIED HEALTHY");
     let (out, _) = f.resume(&id, false);
     assert_eq!(out.status.code(), Some(2));
@@ -803,20 +850,39 @@ fn killed_during_apply_resume_waits_then_reconciles() {
         "{}",
         text(&out.stderr)
     );
+    assert_eq!(f.applies(), 1, "refused resume must not apply");
     // The orphaned apply finishes: the target takes the change.
     f.release("apply.latch");
     let desired = f.base.join("desired");
     wait_until(|| desired.exists());
+    // The lease can outlive the target write. Wait for actual liveness to end,
+    // not a sleep chosen to guess when the orphan's process will exit.
+    wait_until(|| dim(&f.status(&id), "operation")["state"] == "lost");
+    assert_eq!(label(&f.status(&id)), "UNKNOWN");
+    let deadline = Instant::now() + Duration::from_secs(30);
     let resumed = loop {
         let (out, status) = f.resume(&id, false);
         if out.status.code() != Some(2) {
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
             break status;
         }
+        assert!(Instant::now() < deadline, "{}", text(&out.stderr));
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(label(&resumed), "VERIFIED HEALTHY", "{resumed}");
     assert_eq!(dim(&resumed, "operation")["effect"], "observed");
     assert_eq!(f.applies(), 1);
+    let (out, repeated) = f.resume(&id, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(dim(&repeated, "operation")["effect"], "observed");
+    assert_eq!(
+        dim(&repeated, "operation")["attempts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(f.applies(), 1, "repeated reconciliation must not apply");
 }
 
 /// Killed while observing, after the acknowledgement: nothing is known of
@@ -1555,6 +1621,65 @@ fn resuming_an_undispatched_delivery_never_applies_over_an_unknown_effect() {
         undispatched.as_str(),
         "{status}"
     );
+}
+
+/// A missing, malformed or tampered request is unknown, never an absent
+/// delivery: neither new work nor an undispatched resume may apply over it.
+#[test]
+fn unreadable_request_never_hides_an_unresolved_apply() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("unreadable-request");
+    f.kill_at("after-request");
+    let pending = f.newest();
+    f.kill_at("after-apply-exit");
+    let lost = f.newest();
+    assert_eq!(f.applies(), 1);
+    let records = f
+        .repo
+        .join(".git/sykli/deliveries")
+        .join(&lost)
+        .join("records");
+    let mut paths: Vec<_> = fs::read_dir(&records)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    paths.sort();
+    let first = &paths[0];
+    let original = fs::read(first).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+    tampered["record"]["fact"]["request"]["target"] = json!("some-other-target");
+    for bytes in [
+        Some(b"corrupt request\n".to_vec()),
+        None,
+        Some(serde_json::to_vec(&tampered).unwrap()),
+    ] {
+        match bytes {
+            Some(bytes) => fs::write(first, bytes).unwrap(),
+            None => fs::remove_file(first).unwrap(),
+        }
+        for args in [
+            vec!["deliver", "--target", "fake", "--json"],
+            vec!["resume", "--delivery", &pending, "--json"],
+            vec!["status", "--delivery", &pending, "--json"],
+        ] {
+            let out = f.output(&args);
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                text(&out.stdout)
+            );
+            assert!(text(&out.stderr).contains(&lost), "{}", text(&out.stderr));
+            assert_eq!(f.applies(), 1, "unreadable is not absent");
+        }
+        fs::write(first, &original).unwrap();
+    }
+    // Restoring the evidence restores ordinary reconciliation, not a bypass.
+    let (out, _) = f.resume(&lost, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(f.applies(), 1);
 }
 
 /// A rollback delivers an earlier artifact again only under the same

@@ -1311,39 +1311,50 @@ struct Listed {
     request: Request,
 }
 
-/// Every delivery this clone keeps whose first record reads.
-fn list(common: &Path) -> Vec<Listed> {
-    let Ok(entries) = fs::read_dir(deliveries_directory(common)) else {
-        return Vec::new();
+/// A complete validated inventory, or an error. Unknown is never absent:
+/// callers use this inventory to authorize applies and judge target history.
+fn list(common: &Path) -> Result<Vec<Listed>, String> {
+    let directory = deliveries_directory(common);
+    let named = |error| format!("{}: {error}", directory.display());
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && fs::symlink_metadata(&directory)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(named(error)),
     };
     let mut found = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(named)?;
         let Some(id) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
         if digest(&id).is_err() {
             continue;
         }
-        let first = journal::record_path(&entry.path().join("records"), 1);
-        let request = fs::read(&first)
-            .map_err(err)
-            .and_then(|bytes| decode::<Envelope<Record>>(&bytes))
-            .and_then(|envelope| match envelope.record.fact {
-                Fact::Requested { request } => Ok(request.0),
-                _ => Err("its first record is not its request".into()),
-            });
-        if let Ok(request) = request {
-            found.push(Listed {
-                id,
-                path: entry.path(),
-                request,
-            });
-        }
+        let path = entry.path();
+        let history = Lease::journal_read(&path)
+            .and_then(|_journal| History::load(&path, &id))
+            .map_err(|error| {
+                format!(
+                    "delivery {id} at {} cannot be inventoried: {error}",
+                    path.display()
+                )
+            })?;
+        found.push(Listed {
+            id,
+            path,
+            request: history.request().clone(),
+        });
     }
     found.sort_by(|a, b| {
         (a.request.requested_at_ms, &a.id).cmp(&(b.request.requested_at_ms, &b.id))
     });
-    found
+    Ok(found)
 }
 
 /// The lock one `deliver` to `target` holds from its busy check until its
@@ -1387,7 +1398,7 @@ fn next_in_sequence(common: &Path, target: &str) -> Result<u64, String> {
             .map_err(|_| format!("{}: not a sequence number", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut last = 0;
-            for delivery in list(common).iter().filter(|d| d.request.target == target) {
+            for delivery in list(common)?.iter().filter(|d| d.request.target == target) {
                 let _journal = Lease::journal_read(&delivery.path)?;
                 let history = History::load(&delivery.path, &delivery.id)?;
                 let applied = history.last().map_or(0, |a| a.target_sequence);
@@ -1575,7 +1586,7 @@ fn superseded_by(
         return Ok(None);
     };
     let mut newest = None;
-    for other in list(common)
+    for other in list(common)?
         .into_iter()
         .filter(|other| other.request.target == request.target && other.id != id)
     {
@@ -1615,6 +1626,9 @@ impl Journaled for Attempt<'_> {
         self.lease.inherit(command);
     }
     fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String> {
+        // The shell already exists and holds its lease. Tests must distinguish
+        // that fact from the durable Started record, not race the scheduler.
+        crate::checkpoint("before-apply-start-record")?;
         self.coordinator.append(Fact::Started {
             attempt: self.id.clone(),
             generation: self.generation,
@@ -2494,7 +2508,7 @@ pub(crate) fn deliver(
     // delivery is applied over another whose effect is unknown and was never
     // reconciled with the target (invariant H, across deliveries).
     let target_lock = target_lock(&common, target)?;
-    let listed = list(&common);
+    let listed = list(&common)?;
     let applied_over = clear_to_apply(&listed, target, None, reapply_over)?;
     let previous = listed
         .iter()
@@ -2670,7 +2684,7 @@ pub(crate) fn resume(
         let request = coordinator.request();
         let common = PathBuf::from(&request.common_dir);
         let _target = target_lock(&common, &request.target)?;
-        clear_to_apply(&list(&common), &request.target, Some(id), &[])?;
+        clear_to_apply(&list(&common)?, &request.target, Some(id), &[])?;
     }
     let runtime = crate::shell_runtime()?;
     coordinator.take_over(&assumed)?;
@@ -2892,7 +2906,7 @@ pub(crate) fn status(id: &str) -> Result<Value, String> {
     };
     let live = Lease::observe(&directory.join("lease"))?;
     let superseded = superseded_by(&common, id, &history)?;
-    let known: BTreeMap<String, String> = list(&common)
+    let known: BTreeMap<String, String> = list(&common)?
         .into_iter()
         .map(|d| (d.id, d.request.intended))
         .collect();
@@ -3835,7 +3849,14 @@ fn prune(common: &Path, keep: &str) {
     if budget == 0 {
         return;
     }
-    let listed: Vec<Listed> = list(common).into_iter().filter(|d| d.id != keep).collect();
+    let listed = match list(common) {
+        Ok(listed) => listed,
+        Err(error) => {
+            eprintln!("sykli: delivery pruning deferred: {error}");
+            return;
+        }
+    };
+    let listed: Vec<Listed> = listed.into_iter().filter(|d| d.id != keep).collect();
     if listed.len() < budget {
         return;
     }
@@ -4702,13 +4723,14 @@ mod tests {
         let first_path = delivery_directory(&common, &first).unwrap();
         let held = Lease::journal(&first_path).unwrap();
         assert!(
-            clear_to_apply(
-                &list(&common),
-                "staging",
-                Some(&second),
-                std::slice::from_ref(&first)
-            )
-            .is_err_and(|error| error.contains("journal-busy"))
+            list(&common)
+                .and_then(|listed| clear_to_apply(
+                    &listed,
+                    "staging",
+                    Some(&second),
+                    std::slice::from_ref(&first)
+                ))
+                .is_err_and(|error| error.contains("journal-busy"))
         );
         assert!(
             superseded_by(&common, &second, &load(&second))
@@ -4728,6 +4750,42 @@ mod tests {
         drop(held);
         assert_eq!(next_in_sequence(&common, "staging").unwrap(), 5);
         let _ = fs::remove_dir_all(&common);
+    }
+
+    #[test]
+    fn incomplete_inventory_never_rebuilds_a_sequence_or_prunes_evidence() {
+        let common = std::env::temp_dir().join(format!(
+            "sykli-inventory-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(list(&common).unwrap().is_empty(), "genuine absence");
+        fs::create_dir_all(common.join("sykli")).unwrap();
+        let directory = deliveries_directory(&common);
+        fs::write(&directory, "not a directory").unwrap();
+        assert!(list(&common).is_err(), "I/O failure is not absence");
+        fs::remove_file(&directory).unwrap();
+        let mut request = request();
+        request.common_dir = common.to_string_lossy().into_owned();
+        let coordinator = Coordinator::create(request).unwrap();
+        let id = coordinator.id().to_owned();
+        drop(coordinator);
+        let path = delivery_directory(&common, &id).unwrap();
+        let first = journal::record_path(&path.join("records"), 1);
+        let original = fs::read(&first).unwrap();
+        assert_eq!(list(&common).unwrap().len(), 1);
+        fs::write(&first, "broken request").unwrap();
+        let error = next_in_sequence(&common, "staging").unwrap_err();
+        assert!(error.contains(&id), "{error}");
+        let sequence = target_directory(&common, "staging")
+            .unwrap()
+            .join("sequence/last");
+        assert!(!sequence.exists(), "no sequence from incomplete inventory");
+        prune(&common, "unused");
+        assert_eq!(fs::read(&first).unwrap(), b"broken request");
+        fs::write(&first, original).unwrap();
+        assert_eq!(list(&common).unwrap().len(), 1);
+        fs::remove_dir_all(common).unwrap();
     }
 
     #[test]

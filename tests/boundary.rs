@@ -1,6 +1,9 @@
 //! The Boundary: a receipt lets a commit through only when it is a clean,
 //! passing run of exactly that commit's tree.
 
+#[path = "support/stdio.rs"]
+mod stdio;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -274,21 +277,14 @@ const ZEROS: &str = "0000000000000000000000000000000000000000";
 
 /// Feed git's pre-push lines (`<local ref> <local sha> <remote ref> <remote sha>`).
 fn pre_push(root: &Path, remote: &str, lines: &[String]) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["hook", "pre-push", remote, "/nowhere/origin.git"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    for line in lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    child.wait_with_output().unwrap()
+    let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["hook", "pre-push", remote, "/nowhere/origin.git"])
+            .current_dir(root),
+        input.as_bytes(),
+    )
+    .unwrap()
 }
 
 fn update(sha: &str, remote_ref: &str) -> String {
@@ -1175,22 +1171,15 @@ fn a_symlinked_evidence_directory_is_refused_and_the_push_still_goes() {
 
 /// `sykli hook pre-push` with extra environment, for the receipt budget.
 fn pre_push_with(root: &Path, lines: &[String], env: &[(&str, &str)]) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
-        .envs(env.iter().copied())
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    for line in lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    child.wait_with_output().unwrap()
+    let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+            .envs(env.iter().copied())
+            .current_dir(root),
+        input.as_bytes(),
+    )
+    .unwrap()
 }
 
 /// Review of the kept evidence, finding 1: two first pushes at once must both
@@ -1324,23 +1313,16 @@ fn a_hooked_run_and_a_manual_run_of_the_same_tree_share_the_cache() {
 
 /// `sykli hook pre-push FLAGS... origin URL`, fed git's pre-push `lines`.
 fn pre_push_flags(root: &Path, flags: &[&str], lines: &[String]) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["hook", "pre-push"])
-        .args(flags)
-        .args(["origin", "/nowhere/origin.git"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    for line in lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    child.wait_with_output().unwrap()
+    let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["hook", "pre-push"])
+            .args(flags)
+            .args(["origin", "/nowhere/origin.git"])
+            .current_dir(root),
+        input.as_bytes(),
+    )
+    .unwrap()
 }
 
 /// The caller knows which branch it protects; `refs/remotes/origin/HEAD` is

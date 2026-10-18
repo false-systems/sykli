@@ -5,6 +5,9 @@
 //! down, and a caller that already knows the repository can say so
 //! (`--repo-root`, `--git-common-dir`) and spare the discovery.
 
+#[path = "support/stdio.rs"]
+mod stdio;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -128,27 +131,19 @@ impl Scratch {
         args: &[&str],
         stdin: Option<&str>,
     ) -> (Output, Vec<String>) {
-        use std::io::Write;
         let trace = self.base.join(format!(
             "trace-{}.json",
             self.traces.fetch_add(1, Ordering::SeqCst)
         ));
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(args)
-            .current_dir(directory)
-            .env("GIT_TRACE2_EVENT", &trace)
-            .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        if let Some(stdin) = stdin {
-            input.write_all(stdin.as_bytes()).unwrap();
-        }
-        drop(input);
-        let out = child.wait_with_output().unwrap();
+        let out = stdio::output(
+            Command::new(env!("CARGO_BIN_EXE_sykli"))
+                .args(args)
+                .current_dir(directory)
+                .env("GIT_TRACE2_EVENT", &trace)
+                .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig")),
+            stdin.unwrap_or_default().as_bytes(),
+        )
+        .unwrap();
         (out, started(&trace))
     }
 

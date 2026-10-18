@@ -4,6 +4,9 @@
 //! stay paths in that repository, and the contract and its lock are read from
 //! where they are.
 
+#[path = "support/stdio.rs"]
+mod stdio;
+
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -467,24 +470,18 @@ const ZEROS: &str = "0000000000000000000000000000000000000000";
 /// `sykli hook pre-push [--contract CONTRACT] origin URL`, fed git's line
 /// for pushing `sha` to `remote_ref`.
 fn pre_push(repo: &Path, contract: Option<&Path>, sha: &str, remote_ref: &str) -> Output {
-    use std::io::Write;
     let mut command = Command::new(env!("CARGO_BIN_EXE_sykli"));
     command.args(["hook", "pre-push"]);
     if let Some(contract) = contract {
         command.arg("--contract").arg(contract);
     }
-    let mut child = command
-        .args(["origin", "/nowhere/origin.git"])
-        .current_dir(repo)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    writeln!(stdin, "refs/heads/work {sha} {remote_ref} {ZEROS}").unwrap();
-    drop(stdin);
-    child.wait_with_output().unwrap()
+    stdio::output(
+        command
+            .args(["origin", "/nowhere/origin.git"])
+            .current_dir(repo),
+        format!("refs/heads/work {sha} {remote_ref} {ZEROS}\n").as_bytes(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -741,22 +738,16 @@ fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
 
 /// `sykli hook pre-push --contract CONTRACT FLAGS... origin URL` for one push.
 fn pre_push_flags(repo: &Path, contract: &Path, flags: &[&str], sha: &str, to: &str) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(["hook", "pre-push", "--contract"])
-        .arg(contract)
-        .args(flags)
-        .args(["origin", "/nowhere/origin.git"])
-        .current_dir(repo)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    writeln!(stdin, "refs/heads/work {sha} {to} {ZEROS}").unwrap();
-    drop(stdin);
-    child.wait_with_output().unwrap()
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["hook", "pre-push", "--contract"])
+            .arg(contract)
+            .args(flags)
+            .args(["origin", "/nowhere/origin.git"])
+            .current_dir(repo),
+        format!("refs/heads/work {sha} {to} {ZEROS}\n").as_bytes(),
+    )
+    .unwrap()
 }
 
 /// Three pushes of a commit with no receipt that the guessed default branch

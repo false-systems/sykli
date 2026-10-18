@@ -5,10 +5,13 @@
 //! outside it out of the snapshot, so a receipt could pass for a commit
 //! whose content never ran.
 
+#[path = "support/stdio.rs"]
+mod stdio;
+
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
 };
 
 const ZEROS: &str = "0000000000000000000000000000000000000000";
@@ -66,21 +69,13 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 fn sykli(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = child.stdin.take().unwrap();
-    if let Some(stdin) = stdin {
-        input.write_all(stdin.as_bytes()).unwrap();
-    }
-    drop(input);
-    child.wait_with_output().unwrap()
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(cwd),
+        stdin.unwrap_or_default().as_bytes(),
+    )
+    .unwrap()
 }
 
 fn text_of(bytes: &[u8]) -> String {
@@ -277,22 +272,14 @@ fn the_repositorys_own_root_and_a_linked_worktrees_root_are_accepted() {
 
 /// Run sykli with extra environment variables.
 fn sykli_env(cwd: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &Path)]) -> Output {
-    use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sykli"))
-        .args(args)
-        .envs(env.iter().map(|(name, value)| (*name, *value)))
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = child.stdin.take().unwrap();
-    if let Some(stdin) = stdin {
-        input.write_all(stdin.as_bytes()).unwrap();
-    }
-    drop(input);
-    child.wait_with_output().unwrap()
+    stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .envs(env.iter().map(|(name, value)| (*name, *value)))
+            .current_dir(cwd),
+        stdin.unwrap_or_default().as_bytes(),
+    )
+    .unwrap()
 }
 
 /// The review's reproduction: with the facts given and checked, an exported
