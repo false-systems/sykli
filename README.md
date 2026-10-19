@@ -702,6 +702,80 @@ itself through the Action on every pull request.
 
 ## Git hooks
 
+### Local checks before committing and pushing
+
+Sykli can run a project's format checks, linters, tests and other checkers
+locally, then use Git hooks to gate commits and pushes. It orchestrates your
+existing commands; it does not supply a linter, secret scanner or toolchain.
+Each repository owns its contract and can still run those commands directly.
+There is no required shared service or dependency on another repository.
+`init` discovers Cargo checks, existing npm scripts and Go checks. Other
+projects, including Elixir/Erlang, need explicitly authored tasks; Sykli runs
+their commands but does not infer or install their checkers.
+
+For an existing Rust Git repository with at least one commit, start with:
+
+```sh
+# Only if Cargo.lock is missing: create it before Sykli discovers the inputs.
+cargo generate-lockfile
+sykli init
+sykli plan --explain
+sykli run sykli.json
+sykli hook install
+git add Cargo.lock .gitignore sykli.json sykli.lock
+git commit -m "Enable local checks"
+```
+
+Install Rust's `rustfmt` and `clippy` components first. Skip `cargo
+generate-lockfile` when the lockfile already exists; regenerating it can change
+dependency resolution. If you already have a Sykli contract, review and edit it
+instead of running `init` again. Review the generated graph and staged changes
+before committing. Cargo discovery includes formatting, Clippy and tests, not
+only a fast formatting check. It captures files present at initialization:
+creating `Cargo.lock` during the first run instead would make that receipt
+stale and require updating the declared inputs. Declare later-added source,
+configuration and fixture files too, then run `sykli lock sykli.json` after
+editing the contract.
+
+| When | What Sykli actually does |
+|---|---|
+| Before commit | Runs the configured graph, reusing valid cached results, and verifies that it checked exactly the tree being committed. A failed checker blocks the commit. |
+| Before push | Verifies an existing passing receipt for the pushed commit on a gated branch. It does **not** execute a second graph or automatically run heavier tests. |
+| On demand | `sykli run PATH` runs the entire selected contract. Use this for slow integration, recovery or formal checks you have declared. |
+
+Keep the commit graph fast enough for everyday use; Sykli does not impose a
+fast/full split or select tasks based on the hook name. Separate contracts and
+explicit `--contract` hook entrypoints can implement different policies (see
+[external contracts](#keep-the-contract-outside-the-repository)). A pass from a
+fast contract does not satisfy a push hook configured to require a different
+full contract: run that full contract against the intended commit first.
+
+Use check-only commands such as `cargo fmt --check`, not automatic formatters
+that rewrite files during a commit. Partial staging is deliberately refused:
+tracked unstaged changes or non-ignored untracked files mean the files on disk
+are not the staged tree. Sykli does not stash changes or stage fixes for you.
+The first commit, and repositories without a contract, are not checked by the
+default pre-commit entrypoint. By default, pre-push gates the remote's default
+branch (falling back to `main`/`master`), not every feature branch.
+
+Adding a security or dependency checker means declaring its command and all
+relevant inputs, and installing that checker separately. A cached pass covers
+those declared inputs; it does not establish that a remote advisory database
+or an undeclared tool changed. A working-tree check is not a full-history
+secret scan. Local hooks are also not an enforcement boundary: callers can
+bypass them, so keep required CI or server-side policy where applicable.
+
+Before installing, check `git config --get core.hooksPath` and inspect any
+existing hooks. The installer refuses a configured `core.hooksPath` or a hook
+it does not own; do not use `--force` just to bypass that refusal. Integrate
+`sykli hook pre-commit` / `sykli hook pre-push` into the existing hook owner's
+configuration instead, preserving its other checks and forwarding Git's push
+arguments and stdin. Install per repository, not globally across unrelated
+projects. Git clients and editors must be able to find `sykli` and the checkers
+on their `PATH`.
+
+### Hook behavior and receipt retention
+
 A run checks the files on disk. A commit carries what is staged. The hooks
 check what is committed:
 
