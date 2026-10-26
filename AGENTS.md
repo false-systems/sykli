@@ -70,7 +70,7 @@ domain-separated SHA-256 over canonical JSON (`canonical::identity`), computed
 after `canonical::decode` has rejected duplicate keys and floats. Existing
 domains and schema meanings never change; incompatible changes are a new `.vN`.
 
-**Graph runs (`src/main.rs`, `src/lib.rs`, `src/init.rs`).** A
+**Graph runs (`src/main.rs`, `src/lib.rs`, `src/init.rs`, `src/cargo_inputs.rs`).** A
 `sykli-contract.v1` names tasks, commands, declared input files and `after`
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
@@ -140,7 +140,10 @@ repository once per process (one `git rev-parse`, or `--repo-root` and
 one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 (`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
 `.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
-undeclared-file checks (`Inventory`). `verify --commit` and `hook pre-push`
+undeclared-file checks (`Inventory`, through `repo::files`), which
+`validate` asks too (`undeclared_refusal`); `init` declares from the same
+listing, and what Cargo reads (by name, and through include literals) is
+`cargo_inputs` for both. `verify --commit` and `hook pre-push`
 read every commit fact in one batch (`commit_names`, `ContractNames`) and
 judge receipts against them (`judge`); the pre-push hook validates branch
 names in-process and reads `refs/remotes/REMOTE/HEAD` from the common

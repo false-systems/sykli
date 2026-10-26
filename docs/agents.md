@@ -134,13 +134,21 @@ General unmapped-path warnings keep exit 0. Cargo-root graphs have an additional
 mandatory prerequisite, requested by Yair after the remote-workers false-pass
 test: every tracked or untracked non-ignored Rust source, Cargo manifest/lock,
 known Rust/Cargo configuration file, and file beneath a `tests` directory must
-appear in at least one task's inputs. This inventory is discovered afresh on
+appear in at least one task's inputs, and so must every file of that inventory
+that one of its Rust sources names in an `include_str!`, `include_bytes!` or
+`include!` string literal, resolved from the source's directory as rustc
+resolves it (a literal in a comment counts too; a path built by a macro is not
+seen). `sykli init` declares all of these, and every other file git lists but
+top-level prose, licences and sykli's own contract and lock, so `run` accepts
+the contract it writes. This inventory is discovered afresh on
 every invocation, including committed files absent from the changed-path view;
 it is never itself cached against the existing input list. `.sykli/` is excluded.
 `run` exits 2 before executing tasks or reusing/writing cached passes when inputs
 are missing. Explain retains its JSON with `cargo_missing_inputs` under
 `input_coverage`, marks task cache states as input errors and exits 2, even if
 the task filter selected nothing. Re-locking alone does not fix missing inputs.
+Inside a git repository `validate` refuses the same contract, and one with an
+undeclared sibling (below), with exit 1 and `run`'s message in `errors`.
 
 This conservative check applies when the working directory has Cargo.toml and
 the graph declares that manifest or names `cargo` in a task command. It does

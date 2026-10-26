@@ -247,6 +247,20 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
+  exit 2) also refuse a contract that leaves out a file a Rust source names in
+  an `include_str!`, `include_bytes!` or `include!` string literal, resolved
+  from that source's directory as rustc resolves it, when git lists the file
+  (tracked, or untracked and not ignored). A file built into the binary, or a
+  README a crate's documentation includes, kept a cached pass when it
+  changed. Every literal counts, one in a comment too; a path built by a
+  macro (`concat!(env!("OUT_DIR"), ...)`) is not seen.
+- Inside a git repository, `validate` refuses what `run` refuses before any
+  task for undeclared files: the Cargo completeness rule, then the
+  undeclared-sibling check. It exits 1 with `run`'s message (in `errors`
+  with `--json`; `sykli-validate.v1` is unchanged), where it used to exit 0
+  on a contract `run` would not start. Outside a git repository nothing
+  changes.
 - Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
   `resume`, the pre-commit hook), a declared `env` value that contains `${`
   must name `${worktree_cache}` and close it, and must not contain `$${`
@@ -316,6 +330,23 @@ contract consumer can observe; internal refactors are not listed.
   `resume --run` are unchanged.
 
 ### Changed
+- `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
+  `test`) declares every file git lists under the directory sykli runs in:
+  the index, and the untracked files the Cargo completeness rule counts.
+  `init` used to declare Rust sources and Cargo's files under `src/`,
+  `tests/` and workspace members only, so it left out a vendored path
+  dependency (and `run` refused the contract `init` had just written), a
+  file the binary includes, a pin a test reads, and test data in a
+  top-level `fixtures/`: a change to any of them kept a cached pass. Left
+  out: `.sykli/`, Cargo's top-level `target/` (with a note when git lists
+  files there), symbolic links that lead out of the directory, and, at the
+  top level only, `*.md`, `LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`,
+  `sykli.json`, `sykli.lock` and the contract being written, unless a source
+  includes one. Editing a declared file that nothing reads now costs a cache
+  miss. Outside a git repository `init` walks the files, as before, without
+  hidden entries, symbolic links, `node_modules` or `target/`. npm and Go
+  detection are unchanged, and existing contracts are not rewritten: run
+  `sykli init --force` (or `init --contract PATH --force`) to adopt this.
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
   and SIGHUP reach tasks through sykli, which stops them, records them as
   interrupted whatever they exit with (a task that traps the signal and exits

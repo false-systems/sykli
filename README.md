@@ -104,9 +104,12 @@ sykli run --json > .sykli/receipt.json            # run the graph, keep the rece
 sykli verify .sykli/receipt.json --contract sykli.json
 ```
 
-`init` creates `.sykli/` for local state and adds it to `.gitignore`. Review the
-inputs it declares, especially configuration and fixtures, and declare files you
-add later. Task execution needs Git, a POSIX `sh` and your project's own
+`init` creates `.sykli/` for local state and adds it to `.gitignore`. In a Cargo
+repository each task declares every file git lists, since a build or a test can
+read a vendored crate, an included file or a fixture anywhere: only `.sykli/`,
+`target/` and, at the top level, `*.md`, licences and notices and sykli's own
+contract and lock are left out, unless a source includes one. Review the inputs
+it declares, and declare files you add later. Task execution needs Git, a POSIX `sh` and your project's own
 toolchain. On Windows, Git for Windows supplies `sh`.
 
 > [!NOTE]
@@ -241,13 +244,16 @@ unstaged and untracked non-ignored files, and `--base origin/main` adds
 committed changes relative to that ref. Contract and lock changes are labeled as
 evaluation metadata. In Cargo-root repositories, `run` refuses to execute or
 reuse passes when known source, configuration or test files in the current Git
-inventory are missing from every task's inputs. In every graph, it also refuses
-an undeclared sibling of a declared input: a tracked file directly inside a
-folder that holds one of a task's inputs, which that task does not declare.
-That catches a fixture added next to declared fixtures, once it is `git add`ed.
-It is a tripwire, not a dependency scan. It does not catch files in new
-subfolders or in parent folders, anything in the repository root, or
-untracked, ignored and generated files. Other unmapped paths are advisory.
+inventory, or listed files that a Rust source names in an `include_str!`,
+`include_bytes!` or `include!` literal, are missing from every task's inputs.
+In every graph, it also refuses an undeclared sibling of a declared input: a
+tracked file directly inside a folder that holds one of a task's inputs, which
+that task does not declare. That catches a fixture added next to declared
+fixtures, once it is `git add`ed. It is a tripwire, not a dependency scan. It
+does not catch files in new subfolders or in parent folders, anything in the
+repository root, or untracked, ignored and generated files. Inside a git
+repository `validate` refuses (exit 1) what `run` refuses here, so a contract it
+accepts is one `run` starts. Other unmapped paths are advisory.
 
 > [!IMPORTANT]
 > Sykli does not observe every file or tool your commands read. An undeclared
