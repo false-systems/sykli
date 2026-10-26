@@ -11,7 +11,8 @@
 //! kernel releases when the last descriptor of its holder closes, so a dead
 //! holder never leaves a stale lock and a PID is never trusted. A live holder
 //! releases it itself when it is done (`Lease`'s `Drop`), since a close alone
-//! waits for every copy of the descriptor, and a fork makes copies.
+//! waits for every copy of the descriptor, and a child process that another
+//! thread is spawning has a copy of each one until it execs.
 use crate::canonical::{Durability, canonical, decode, digest, identity, publish_with};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -197,11 +198,12 @@ pub(crate) fn close_inherited_on_exec() {
 }
 
 /// A held `flock`. The lock belongs to the open file description, which every
-/// copy of the descriptor shares, and a process that another thread forks
-/// has a copy of each one until it execs (close-on-exec closes them only
-/// then). So dropping a lease releases it explicitly (`LOCK_UN`), at once,
-/// rather than by a close the kernel honours only once the last copy is
-/// closed. A lease handed to a child (`inherit`) is the child's too: then
+/// copy of the descriptor shares, and a child process that another thread is
+/// spawning (a task or `git`, through `fork` or `posix_spawn` alike) has a
+/// copy of each one until it execs (close-on-exec closes them only then).
+/// So dropping a lease releases it explicitly (`LOCK_UN`), at once, rather
+/// than by a close the kernel honours only once the last copy is closed. A
+/// lease handed to a child (`inherit`) is the child's too: then
 /// dropping it only closes this process's descriptor, and the child keeps
 /// holding it.
 pub struct Lease {
@@ -494,8 +496,8 @@ mod tests {
         assert!(!path.exists(), "observation must not create a lease");
         File::create(&path).unwrap();
         let observed = Lease::observe(&path).unwrap();
-        // At once, though other tests fork meanwhile: the probe is released,
-        // not left to a close that waits for a forked child's copy.
+        // At once, though other tests spawn processes meanwhile: the probe is
+        // released, not left to a close that waits for a starting child's copy.
         let next_controller = Lease::acquire(&directory).unwrap();
         assert!(!observed);
         assert!(Lease::observe(&path).unwrap());
@@ -515,10 +517,12 @@ mod tests {
         directory
     }
 
-    /// A process that another thread forks has a copy of every descriptor
-    /// until it execs, and a lock belongs to the open file description that
-    /// copy shares. Dropping a lease in that window still releases it: the
-    /// next holder is never refused for a child that only had not exec'd yet.
+    /// A child process that another thread is spawning has a copy of every
+    /// descriptor until it execs, and a lock belongs to the open file
+    /// description that copy shares. Dropping a lease in that window still
+    /// releases it: the next holder is never refused for a child that only
+    /// had not exec'd yet. The test holds a child in the window, forked
+    /// (`pre_exec` makes `Command` fork) and not yet exec'd.
     #[test]
     fn a_dropped_lease_is_free_while_a_forked_child_still_has_its_descriptor() {
         let directory = scratch("forked");
@@ -532,7 +536,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// The same for the probe `observe` takes: a process another thread
+    /// The same for the probe `observe` takes: a child process another thread
     /// starts while the probe's descriptor is open has a copy of it, and
     /// the lease is still free once the probe has answered.
     #[test]

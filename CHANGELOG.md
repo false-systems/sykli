@@ -558,12 +558,13 @@ contract consumer can observe; internal refactors are not listed.
   be, they no longer ask for.
 - Durable runs (Linux and macOS): a lease or journal lock sykli lets go of
   is free at once. A `flock` lock belongs to the open file description, and
-  a process another of sykli's threads had just forked kept a copy of the
-  descriptor until it exec'd, so the lock stayed held that long after sykli
-  closed it. Meanwhile the next holder was refused (`lease-busy`, which
-  `resume` reports as `run-busy`), a journal append or `status --run` waited
+  a child process another of sykli's threads was spawning (a task or `git`,
+  through `fork` or `posix_spawn` alike) kept a copy of the descriptor until
+  it exec'd, so the lock stayed held that long after sykli closed it.
+  Meanwhile the next holder was refused (`lease-busy`, which `resume`
+  reports as `run-busy`), a journal append or `status --run` waited
   for the journal lock (and gave up with `journal-busy` after 2 seconds),
-  and a released lease read as held. A coordinator forks its tasks from
+  and a released lease read as held. A coordinator spawns its tasks from
   parallel threads while other threads append to the journal. sykli now
   unlocks (`LOCK_UN`) whatever it lets go of; a lease handed to a task or
   to a detached coordinator stays held by that process, as before.
