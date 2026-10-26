@@ -135,13 +135,21 @@ General unmapped-path warnings keep exit 0. Cargo-root graphs have an additional
 mandatory prerequisite, requested by Yair after the remote-workers false-pass
 test: every tracked or untracked non-ignored Rust source, Cargo manifest/lock,
 known Rust/Cargo configuration file, and file beneath a `tests` directory must
-appear in at least one task's inputs, and so must every file of that inventory
-that one of its Rust sources names in an `include_str!`, `include_bytes!` or
-`include!` string literal, resolved from the source's directory as rustc
-resolves it (a literal in a comment counts too; a path built by a macro is not
-seen). `sykli init` declares all of these, and every other file git lists but
-top-level prose, licences and sykli's own contract and lock, so `run` accepts
-the contract it writes. This inventory is discovered afresh on
+appear in at least one task's inputs. So must every file of that inventory
+that one of its Rust sources includes (`include_str!`, `include_bytes!`,
+`include!`), resolved from the source's directory as rustc resolves it, or
+from the nearest `Cargo.toml` for `concat!(env!("CARGO_MANIFEST_DIR"),
+"/path")`; and every document (below) a source names, a top-level one by its
+file name, a deeper one by its path, anywhere in its text. Sources are read as
+Rust: an invocation inside a string or a plain comment is not one, a doc
+comment's literal invocations count (doctests compile), and a comment before
+the literal is skipped. An include whose path is not a literal in one of those
+forms (a macro's variable, an expression) is refused with its file and line,
+since its file cannot be known: write the path as a literal. A path built from
+`OUT_DIR` names a file made at build time and is not asked for. `sykli init`
+declares all of these, and every other file git lists but documents and
+sykli's own contract and lock, so `run` accepts the contract it writes. This
+inventory is discovered afresh on
 every invocation, including committed files absent from the changed-path view;
 it is never itself cached against the existing input list. `.sykli/` is excluded.
 `run` exits 2 before executing tasks or reusing/writing cached passes when inputs
@@ -149,7 +157,30 @@ are missing. Explain retains its JSON with `cargo_missing_inputs` under
 `input_coverage`, marks task cache states as input errors and exits 2, even if
 the task filter selected nothing. Re-locking alone does not fix missing inputs.
 Inside a git repository `validate` refuses the same contract, and one with an
-undeclared sibling (below), with exit 1 and `run`'s message in `errors`.
+undeclared sibling (below), with exit 2, as `run` does, and `run`'s message in
+`errors`; exit 1 stays an invalid, unreadable or unpinned contract. Its verdict
+therefore depends on the work tree (an untracked `.rs` file changes it), not
+only on the contract and its lock. It does not check that declared inputs
+exist, and it runs nothing.
+
+**Documents** are files no build or test is expected to read: a file named
+`*.md`, one whose name starts with `LICENSE`, `LICENCE`, `COPYING` or `NOTICE`
+(any case), and anything under a directory named `docs` or `.github`, at any
+depth (`cargo_inputs::docs`). `sykli init` leaves them out unless a source
+includes or names one, and the undeclared-sibling check never asks for them,
+so a commit of documents never makes a contract refuse. A task that reads a
+folder of Markdown fixtures, or a document by a path built at run time,
+declares them by hand.
+
+A declared symbolic link that leads to no regular file in the repository (a
+directory, a file outside it, nothing) is recorded by its own text, as git
+stores it (`"link": true` in the input record, digest `sykli-input-link.v1`),
+so pointing it elsewhere misses the cache. `verify --commit` judges such a
+record by the commit's link text, after a third round of its `cat-file`
+session reads where the link leads, and refuses it where the link leads to a
+file. A link to a file is still recorded, and judged, by the file's bytes.
+`sykli init` declares every tracked link, and the file a link to a file leads
+to.
 
 This conservative check applies when the working directory has Cargo.toml and
 the graph declares that manifest or names `cargo` in a task command. It does
@@ -160,9 +191,9 @@ Every graph, Cargo or not, has a second prerequisite, a tripwire for one
 pattern: no undeclared sibling of a declared input. Every tracked file (in the
 index, so a new file counts once it is `git add`ed) directly inside a folder
 that holds one of a task's declared inputs must be one of that task's inputs
-too. A test that reads a whole fixture folder otherwise keeps its cached pass
-after a fixture is added. Only the repository root is exempt; a task's working
-directory is checked like any other folder. `run` exits 2 naming each file and
+too, unless it is a document (above). A test that reads a whole fixture folder
+otherwise keeps its cached pass after a fixture is added. Only the repository
+root is exempt; a task's working directory is checked like any other folder. `run` exits 2 naming each file and
 its task, and explain lists them as `folder_missing_inputs: [{path, task}]`
 under `input_coverage` (absent when there are none), marks task cache states as
 input errors and exits 2. Declare the file in that task's inputs, or move it
@@ -170,6 +201,7 @@ out of the folder, and re-lock.
 
 It is not a dependency scan, and it does not catch: files in new subfolders of
 an input folder, or in its parent folders; anything in the repository root;
+documents;
 untracked files (so editor and OS scratch files never refuse a run; the
 pre-commit hook refuses commits while untracked files exist), ignored or
 generated files; or anything outside the repository. A task that walks a

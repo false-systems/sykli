@@ -141,9 +141,15 @@ one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 (`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
 `.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
 undeclared-file checks (`Inventory`, through `repo::files`), which
-`validate` asks too (`undeclared_refusal`); `init` declares from the same
-listing, and what Cargo reads (by name, and through include literals) is
-`cargo_inputs` for both. `verify --commit` and `hook pre-push`
+`validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
+same listing. What Cargo reads (by name, the files sources include, the
+documents they name: `Sources`, a small Rust lexer) and what is a document
+(`docs`, which `init` leaves out and the sibling check never asks for) are
+`cargo_inputs` for both. A declared symbolic link to no file in the repository
+is recorded by its text (`link_text`, `InputRecord::link`) and judged by the
+commit's link text (`judge_link`), after a third round of the same `cat-file`
+asks where it leads (`link_target_names`, `PathFacts::around`).
+`verify --commit` and `hook pre-push`
 read every commit fact in one batch (`commit_names`, `ContractNames`) and
 judge receipts against them (`judge`); the pre-push hook validates branch
 names in-process and reads `refs/remotes/REMOTE/HEAD` from the common
