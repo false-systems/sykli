@@ -2457,11 +2457,21 @@ fn authored(contract: &Contract) -> Result<(), String> {
 /// or an `env` value: sykli cannot hash what a task reads there by that
 /// name, and a changed helper would reuse a stale pass (sykli#75). Declared
 /// files are reached as `$SYKLI_CONTRACT_DIR/PATH`.
+///
 /// Only what the contract says is looked at, by a plain match on the two
-/// spellings: the directory spelled otherwise (through `$HOME`, `~`, another
-/// link), in a value a task inherits, or on `PATH` is not seen, as nothing
-/// a task reads outside its declared files is.
+/// spellings, in text read as the task's shell would spell its paths
+/// (`spelled_out`). A path in the repository is not the directory's, even
+/// when the directory holds the repository: repository inputs cover it.
+/// Other spellings (a relative `../`, another link, another case, a value
+/// the task inherits, `PATH`, a path a helper names) are not seen, as
+/// nothing a task reads outside its declared files is.
+///
+/// With no git repository around the current directory there is no inside
+/// or outside to judge, and nothing can run: nothing here applies.
 fn placed(contract: &Contract, path: &Path) -> Result<(), String> {
+    let Ok(repository) = repo::repository() else {
+        return Ok(());
+    };
     if outside_repository(path).is_none() {
         return match contract
             .tasks
@@ -2479,48 +2489,117 @@ fn placed(contract: &Contract, path: &Path) -> Result<(), String> {
         };
     }
     let directory = contract_directory(path)?;
-    let mut spellings = vec![directory.to_string_lossy().into_owned()];
-    spellings.extend(
-        fs::canonicalize(&directory).map(|resolved| resolved.to_string_lossy().into_owned()),
-    );
-    if cfg!(windows) {
-        let slashed = spellings
-            .iter()
-            .map(|spelling| spelling.replace('\\', "/"))
-            .collect::<Vec<_>>();
-        spellings.extend(slashed);
-    }
+    let resolved = fs::canonicalize(&directory).ok();
+    // Where the directory holds the repository: the repository's root from
+    // it, so each spelling of the directory gives one of the root.
+    let below = resolved
+        .as_deref()
+        .zip(repository.resolved())
+        .and_then(|(directory, root)| root.strip_prefix(directory).ok())
+        .map(|below| below.to_string_lossy().replace('\\', "/"));
+    let slashed = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    let mut spellings = vec![slashed(&directory)];
+    spellings.extend(resolved.as_deref().map(slashed));
     for task in &contract.tasks {
-        let texts = std::iter::once(&task.run).chain(task.env.values());
-        if let Some(named) = texts
-            .flat_map(|text| {
-                spellings
-                    .iter()
-                    .filter(move |dir| names_directory(text, dir))
-            })
-            .next()
-        {
-            return Err(format!(
-                "task {:?} names the directory of its contract, {named}, which is outside the \
-                 repository: sykli cannot hash what a task reads there by that name; declare \
-                 each file the task uses there in its contract_inputs and name it as \
-                 \"$SYKLI_CONTRACT_DIR/PATH\"",
-                task.name
-            ));
+        let home = task
+            .env
+            .get("HOME")
+            .cloned()
+            .or_else(|| std::env::var("HOME").ok());
+        for text in std::iter::once(&task.run).chain(task.env.values()) {
+            let text = spelled_out(text, home.as_deref());
+            let named = spellings.iter().find(|spelling| {
+                let root = below.as_ref().map(|below| format!("{spelling}/{below}"));
+                names_directory(&text, spelling, root.as_deref())
+            });
+            if let Some(named) = named {
+                return Err(format!(
+                    "task {:?} names the directory of its contract, {named}, which is outside \
+                     the repository: sykli cannot hash what a task reads there by that name; \
+                     declare each file the task uses there in its contract_inputs and name it \
+                     as \"$SYKLI_CONTRACT_DIR/PATH\"",
+                    task.name
+                ));
+            }
         }
     }
     Ok(())
 }
 
+/// `text` with its paths spelled as a shell would reach them, as far as a
+/// plain rewrite can: `${HOME}`, `$HOME` (not a longer name) and a `~` that
+/// starts a word, alone or before `/`, read as `home`; `\` as `/` (sh on
+/// Windows takes both); and `//` and `/./` as `/`.
+fn spelled_out(text: &str, home: Option<&str>) -> String {
+    let mut text = text.to_string();
+    if let Some(home) = home {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(['$', '~']) {
+            let (head, tail) = rest.split_at(at);
+            out.push_str(head);
+            let before = out.chars().next_back();
+            let (taken, after) = if let Some(after) = tail.strip_prefix("${HOME}") {
+                (true, after)
+            } else if let Some(after) = tail
+                .strip_prefix("$HOME")
+                .filter(|after| !after.starts_with(word))
+            {
+                (true, after)
+            } else if let Some(after) = tail.strip_prefix('~').filter(|after| {
+                let starts = before.is_none_or(|c| c.is_whitespace() || "=:\"'(;&|".contains(c));
+                starts
+                    && after
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c == '/' || c.is_whitespace() || "\"';:&|)".contains(c))
+            }) {
+                (true, after)
+            } else {
+                (false, &tail[1..])
+            };
+            if taken {
+                out.push_str(home);
+            } else {
+                out.push_str(&tail[..1]);
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        text = out;
+    }
+    let mut text = text.replace('\\', "/");
+    loop {
+        let shorter = text.replace("/./", "/").replace("//", "/");
+        if shorter == text {
+            return text;
+        }
+        text = shorter;
+    }
+}
+
 /// Whether `text` names `directory` or a path in it: the directory's path
 /// not continued by more of a name on either side, so `/a/gate-old` and
-/// `/x/a/gate` do not name `/a/gate`.
-fn names_directory(text: &str, directory: &str) -> bool {
+/// `/x/a/gate` do not name `/a/gate`. A path in `root` (the repository,
+/// when the directory holds it) is not the directory's, unless a `..` in it
+/// climbs back out.
+fn names_directory(text: &str, directory: &str, root: Option<&str>) -> bool {
     let name = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~');
+    let delimiter = |c: char| c.is_whitespace() || "\"'`;&|<>():".contains(c);
     text.match_indices(directory).any(|(at, _)| {
         let before = text[..at].chars().next_back();
         let after = text[at + directory.len()..].chars().next();
-        !before.is_some_and(|c| name(c) || c == '/' || c == '\\') && !after.is_some_and(name)
+        if before.is_some_and(|c| name(c) || c == '/') || after.is_some_and(name) {
+            return false;
+        }
+        let path = &text[at..];
+        let path = &path[..path.find(delimiter).unwrap_or(path.len())];
+        let in_root = root.is_some_and(|root| {
+            path.strip_prefix(root)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        });
+        !in_root || path.contains("/..")
     })
 }
 
@@ -4107,10 +4186,18 @@ fn input_record(path: &Path) -> Result<InputRecord, String> {
 type InputRecords = BTreeMap<String, BTreeMap<String, Option<InputRecord>>>;
 
 /// A task's own copy of the contract inputs it declares, the directory its
-/// shell gets as `$SYKLI_CONTRACT_DIR`: each file copied from beside the
-/// contract, then required to be the bytes and execute bits the run
-/// recorded (and its key covers). A task therefore runs exactly what was
-/// hashed, and reaches no undeclared file beside the contract by that name.
+/// shell gets as `$SYKLI_CONTRACT_DIR`: each file's bytes copied from beside
+/// the contract and hashed as they are written, and required to be the
+/// bytes the run recorded (and its key covers). A task therefore runs
+/// exactly what was hashed, and reaches no undeclared file beside the
+/// contract by that name.
+///
+/// The copy is its owner's alone: a directory made exclusively under an
+/// unguessable name, 0700, its files 0600, or 0700 where the recorded file
+/// is executable by its owner (`fresh_directory`, `private_name`). A name
+/// another process took, such as a copy a killed sykli left, is passed
+/// over and never reused, so a leftover never stops a run.
+///
 /// Bound: one directory per running task, in the system's temporary
 /// directory, removed when the task's shell has ended (on drop); a sykli
 /// that is killed leaves it to that directory's own cleanup.
@@ -4124,25 +4211,28 @@ impl ContractCopy {
         from: &Path,
         records: &BTreeMap<String, Option<InputRecord>>,
     ) -> Result<Self, (String, &'static str)> {
-        let directory = std::env::temp_dir().join(format!(
-            "sykli-contract-{}-{}",
-            std::process::id(),
-            canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
         let failed = |error: String| (error, "input_error");
-        fs::create_dir(&directory)
-            .map_err(|error| failed(format!("{}: {error}", directory.display())))?;
+        let temporary = std::env::temp_dir();
+        let names = std::iter::repeat_with(|| format!("sykli-contract-{}", private_name()));
+        let directory = fresh_directory(&temporary, names.take(16))
+            .map_err(|error| failed(format!("{}: {error}", temporary.display())))?;
         let copy = ContractCopy { directory };
         for (input, record) in records {
+            let Some(record) = record else {
+                return Err(failed(format!("contract input {input} was not read")));
+            };
             let target = copy.directory.join(input);
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
+                private_builder()
+                    .recursive(true)
+                    .create(parent)
                     .map_err(|error| failed(format!("{}: {error}", parent.display())))?;
             }
             let source = from.join(input);
-            fs::copy(&source, &target)
+            let executable = record.mode.is_some_and(|bits| bits & 0o100 != 0);
+            let digest = copy_hashed(&source, &target, executable)
                 .map_err(|error| failed(format!("{}: {error}", source.display())))?;
-            if contract_input_record(&target).as_ref() != record.as_ref() {
+            if digest != record.sha256 {
                 return Err((
                     format!(
                         "contract input {input} changed beside the contract after the run read \
@@ -4153,6 +4243,77 @@ impl ContractCopy {
             }
         }
         Ok(copy)
+    }
+}
+
+/// A `DirBuilder` whose directories are their owner's alone (0700), where
+/// files have modes.
+fn private_builder() -> fs::DirBuilder {
+    #[allow(unused_mut)]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+}
+
+/// A new directory in `base`, its owner's alone, named by the first of
+/// `names` that nothing there has: made exclusively, so a name another
+/// process holds is passed over, never entered.
+fn fresh_directory(base: &Path, names: impl IntoIterator<Item = String>) -> io::Result<PathBuf> {
+    let mut taken = io::Error::new(io::ErrorKind::AlreadyExists, "no name was free");
+    for name in names {
+        let path = base.join(name);
+        match private_builder().create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(taken)
+}
+
+/// 32 hex digits no other process can guess: two hashers that std keys
+/// with the operating system's randomness, over this process, the time and
+/// a counter.
+fn private_name() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let words = [0, 1].map(|_| {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write_u64(unix_time_ms());
+        hasher.write_u64(canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        hasher.finish()
+    });
+    format!("{:016x}{:016x}", words[0], words[1])
+}
+
+/// Copy `source` to a new file `target` (0600, or 0700 when `executable`,
+/// where files have modes), hashing the bytes as they are written: the
+/// SHA-256 of exactly what the copy holds.
+fn copy_hashed(source: &Path, target: &Path, executable: bool) -> io::Result<String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(if executable { 0o700 } else { 0o600 });
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
+    let mut written = options.open(target)?;
+    let mut read = fs::File::open(source)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = read.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(format!("{:x}", hasher.finalize()));
+        }
+        hasher.update(&buffer[..count]);
+        written.write_all(&buffer[..count])?;
     }
 }
 
@@ -7082,7 +7243,7 @@ mod tests {
             "PATH=/home/a/gate:$PATH check",
             "/home/a/gate",
         ] {
-            assert!(names_directory(text, directory), "{text}");
+            assert!(names_directory(text, directory, None), "{text}");
         }
         for text in [
             "sh /home/a/gate-old/check.sh",
@@ -7091,8 +7252,67 @@ mod tests {
             "sh home/a/gate/check.sh",
             "sh \"$SYKLI_CONTRACT_DIR/check.sh\"",
         ] {
-            assert!(!names_directory(text, directory), "{text}");
+            assert!(!names_directory(text, directory, None), "{text}");
         }
+        // A directory that holds the repository: paths in the repository
+        // are the repository's, unless they climb back out.
+        let root = Some("/home/a/gate/repo");
+        for text in [
+            "CARGO_TARGET_DIR=/home/a/gate/repo/target cargo test",
+            "cd '/home/a/gate/repo' && true",
+            "PATH=/home/a/gate/repo/bin:$PATH x",
+        ] {
+            assert!(!names_directory(text, directory, root), "{text}");
+        }
+        for text in [
+            "sh /home/a/gate/check.sh",
+            "sh /home/a/gate/repo/../check.sh",
+            "sh /home/a/gate/repo-old/x.sh",
+            "cd /home/a/gate/repo && sh /home/a/gate/check.sh",
+        ] {
+            assert!(names_directory(text, directory, root), "{text}");
+        }
+    }
+
+    #[test]
+    fn paths_are_spelled_out_as_the_shell_reaches_them() {
+        let home = Some("/home/a");
+        for (text, spelled) in [
+            ("sh $HOME/gate/x", "sh /home/a/gate/x"),
+            ("sh \"${HOME}/gate/x\"", "sh \"/home/a/gate/x\""),
+            ("sh ~/gate/x", "sh /home/a/gate/x"),
+            ("X=~/gate:~ y", "X=/home/a/gate:/home/a y"),
+            ("sh /home//a/./gate/.//x", "sh /home/a/gate/x"),
+            ("echo $HOMEDIR ~user a~/b", "echo $HOMEDIR ~user a~/b"),
+            ("echo $$ $ ~", "echo $$ $ /home/a"),
+        ] {
+            assert_eq!(spelled_out(text, home), spelled, "{text}");
+        }
+        assert_eq!(spelled_out("sh $HOME/x ~/y", None), "sh $HOME/x ~/y");
+    }
+
+    /// A name another process holds (as a killed run's copy is) is passed
+    /// over for the next one, never entered; the directory is its owner's.
+    #[test]
+    fn a_fresh_directory_passes_over_a_name_that_is_taken() {
+        let base = std::env::temp_dir().join(format!("sykli-fresh-{}", private_name()));
+        fs::create_dir(&base).unwrap();
+        fs::create_dir(base.join("taken")).unwrap();
+        fs::write(base.join("taken/left.txt"), "left").unwrap();
+        let made = fresh_directory(&base, ["taken".to_string(), "free".to_string()]).unwrap();
+        assert_eq!(made, base.join("free"));
+        assert_eq!(fs::read(base.join("taken/left.txt")).unwrap(), b"left");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&made).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let none = fresh_directory(&base, ["taken".to_string(), "free".to_string()]);
+        assert_eq!(none.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_ne!(private_name(), private_name());
+        assert_eq!(private_name().len(), 32);
+        fs::remove_dir_all(&base).unwrap();
     }
 
     /// A task that declares no contract inputs keeps the key it had before

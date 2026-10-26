@@ -672,9 +672,9 @@ fn a_tasks_copy_is_its_owners_alone_and_leftovers_never_block_it() {
     fs::create_dir(&temporary).unwrap();
     let mut left = Vec::new();
     for name in [
+        "sykli-contract-0",
         "sykli-contract-1-1",
         "sykli-contract-2-4",
-        "sykli-contract-0",
     ] {
         fs::create_dir(temporary.join(name)).unwrap();
         left.push(name.to_string());
