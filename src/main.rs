@@ -972,28 +972,109 @@ fn leads_out_of_the_repository(path: &Path) -> bool {
     matches!(link_behind(path), Behind::Outside(_))
 }
 
-/// Where `path` leads when a symbolic link on its way leads out of the
-/// repository (sykli#54): `ext/file.txt` with `ext` a link to a directory
-/// elsewhere, or an output `out` whose link leads to a file elsewhere that
-/// the run has yet to make. Each link below the top level is judged as a
-/// declared link is (`link_behind`): by where it resolves, or, when nothing
-/// is there yet, by where its text leads. None inside the repository, or
-/// without one.
-fn led_out_of_the_repository(path: &Path) -> Option<PathBuf> {
-    let repository = repo::repository().ok()?;
-    let top = repository.root_here().ok()?;
-    let path = absolute(path).ok()?;
-    if let Ok(below) = path.strip_prefix(&top) {
-        let mut prefix = top;
-        for part in below.components() {
-            prefix.push(part);
-            if let Behind::Outside(target) = link_behind(&prefix) {
-                return Some(target);
+/// Where a declared path leads, every symbolic link on its way followed.
+enum Leads {
+    /// Inside the repository, or there is no repository to judge.
+    Inside,
+    /// Out of it: where a link on the way, or the path's end, leads.
+    Outside(PathBuf),
+    /// Through more than `LINK_HOPS` links: a loop, or as good as one.
+    Endless,
+}
+
+/// How many symbolic links one declared path may lead through, as Linux's
+/// `MAXSYMLINKS`.
+const LINK_HOPS: usize = 40;
+
+/// Where `path` leads (sykli#54): `ext/file.txt` with `ext` a link to a
+/// directory elsewhere, an output `out` whose link leads to a file
+/// elsewhere that the run has yet to make, or `hop` linked to `out`. It is
+/// resolved as the kernel resolves it, part by part from the resolved top
+/// level, following every link, chained or not, also one that leads to
+/// nothing yet, by its text. Wherever a link's text leads, once resolved,
+/// must be inside the repository, and so must the end; a chain of more than
+/// `LINK_HOPS` links is `Endless`.
+fn leads(path: &Path) -> Leads {
+    enum Part {
+        Root(OsString),
+        Up,
+        Name(OsString),
+        /// A link's text is resolved: where it led is judged here.
+        LinkEnd,
+    }
+    let parts = |path: &Path| {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    Some(Part::Root(component.as_os_str().to_owned()))
+                }
+                Component::ParentDir => Some(Part::Up),
+                Component::Normal(name) => Some(Part::Name(name.to_owned())),
+                Component::CurDir => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let Ok(repository) = repo::repository() else {
+        return Leads::Inside;
+    };
+    let (Ok(top), Some(root), Ok(path)) = (
+        repository.root_here(),
+        repository.resolved(),
+        absolute(path),
+    ) else {
+        return Leads::Inside;
+    };
+    // Outside unless it is the root or below it, spelled as resolved (a
+    // link's text may spell the same place another way, as Windows does).
+    let outside = |place: &Path| {
+        !place.starts_with(root) && !located(place).is_some_and(|place| place.starts_with(root))
+    };
+    let Ok(below) = path.strip_prefix(&top) else {
+        return match located(&path).filter(|resolved| outside(resolved)) {
+            Some(target) => Leads::Outside(target),
+            None => Leads::Inside,
+        };
+    };
+    let mut pending: VecDeque<Part> = parts(below).into();
+    let mut resolved = root.to_path_buf();
+    let mut hops = 0;
+    while let Some(part) = pending.pop_front() {
+        match part {
+            Part::Root(root_part) => resolved.push(root_part),
+            Part::Up => {
+                resolved.pop();
+            }
+            Part::LinkEnd => {
+                if outside(&resolved) {
+                    return Leads::Outside(resolved);
+                }
+            }
+            Part::Name(name) => {
+                let next = resolved.join(name);
+                match fs::read_link(&next) {
+                    // A link: its text is resolved from its own directory,
+                    // where `resolved` is, before the rest of the path.
+                    Ok(text) => {
+                        hops += 1;
+                        if hops > LINK_HOPS {
+                            return Leads::Endless;
+                        }
+                        pending.push_front(Part::LinkEnd);
+                        for part in parts(&text).into_iter().rev() {
+                            pending.push_front(part);
+                        }
+                    }
+                    // Not a link, or nothing there yet.
+                    Err(_) => resolved = next,
+                }
             }
         }
     }
-    let root = repository.resolved()?;
-    located(&path).filter(|resolved| !resolved.starts_with(root))
+    if outside(&resolved) {
+        Leads::Outside(resolved)
+    } else {
+        Leads::Inside
+    }
 }
 
 /// Refuse a task whose working directory, declared input or declared output
@@ -1021,15 +1102,27 @@ fn through_links_out(task: &Task) -> Result<(), String> {
         );
     }
     for (what, declared, path) in paths {
-        if let Some(target) = led_out_of_the_repository(&path) {
-            return Err(format!(
-                "task {:?} {what} {declared:?}, which a symbolic link on its way leads to {}, \
-                 outside the repository: no commit holds what is there, so sykli cannot bind it \
-                 and no receipt of it could verify; declare paths inside the repository \
-                 instead, and re-lock",
-                task.name,
-                target.display()
-            ));
+        match leads(&path) {
+            Leads::Inside => {}
+            Leads::Outside(target) => {
+                return Err(format!(
+                    "task {:?} {what} {declared:?}, which a symbolic link on its way leads to {}, \
+                     outside the repository: no commit holds what is there, so sykli cannot \
+                     bind it and no receipt of it could verify; declare paths inside the \
+                     repository instead, and re-lock",
+                    task.name,
+                    target.display()
+                ));
+            }
+            Leads::Endless => {
+                return Err(format!(
+                    "task {:?} {what} {declared:?}, which leads through more than {LINK_HOPS} \
+                     symbolic links (a loop): sykli cannot tell whether it stays inside or \
+                     leads outside the repository, so it cannot bind it; declare paths inside \
+                     the repository instead, and re-lock",
+                    task.name
+                ));
+            }
         }
     }
     Ok(())
@@ -5150,7 +5243,10 @@ fn random_key() -> io::Result<[u8; 32]> {
 /// system has no hard links (exFAT, some FUSE or SMB mounts), it is renamed
 /// into place unless a key is there already (`place_by_rename`): two first
 /// runs that race there may each digest one run under their own key, and
-/// the later one is kept, which costs a cache miss.
+/// the later one is kept, which costs a cache miss. On Linux and macOS a
+/// run never gets here, as its journal already needs hard links in the same
+/// directory (`publish_with`); it is kept for Windows, where a run is not
+/// journaled and nothing else there needs them.
 fn read_or_make_key(path: &Path) -> Result<[u8; 32], String> {
     if let Some(key) = read_key(path)? {
         return Ok(key);
