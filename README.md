@@ -275,6 +275,12 @@ dependency scan. It does not catch files in new subfolders or in parent folders,
 anything in the repository root, documents, or untracked, ignored and generated
 files. Other unmapped paths are advisory.
 
+None of these checks asks for the contract being run or its `sykli.lock`, wherever
+they are kept (`ci/sykli.json` beside `ci/check.sh`): they are what the run
+evaluates, bound by the contract hash and the lock digest, not files a task
+reads. A task that does read them declares them. A `sykli.rs` emitter is a
+Rust source of its crate and is still asked for in a Cargo graph.
+
 Inside a git repository, `validate` refuses (exit 2, as `run` does) a contract
 for these undeclared files, so its verdict depends on the work tree as well as
 on the contract and its lock (exit 1). That is all it adds: it does not check

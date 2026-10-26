@@ -128,7 +128,8 @@ enum Command {
         document a string literal names but no task declares only warns (exit 0). In every\n\
         graph, each tracked file beside a task's declared\n\
         inputs must be declared, except documents, licences and CI configuration; and a\n\
-        declared link to a directory needs every file under it declared. It does not check\n\
+        declared link to a directory needs every file under it declared. None of these asks\n\
+        for the JSON contract being validated or its sykli.lock. It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
         the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
@@ -575,8 +576,16 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
 /// also lists the untracked files that are not ignored (`--others`), which
 /// `--stage` prints without a mode and object id. Nothing runs until a check
 /// needs it.
+///
+/// The contract being run, when it is a JSON file, and the lock beside it
+/// are left out of the listing (sykli#73): they are what the run evaluates,
+/// bound by the contract hash and the lock digest, not files a task reads,
+/// so none of the checks asks for them, wherever the contract is kept. An
+/// emitter (`sykli.rs`) is a Rust source of its crate, which Cargo builds,
+/// and is still asked for.
 struct Inventory {
     cargo: bool,
+    evaluated: Vec<PathBuf>,
     listed: std::cell::OnceCell<Result<Listed, String>>,
 }
 
@@ -587,9 +596,17 @@ struct Listed {
 }
 
 impl Inventory {
-    fn new(contract: &Contract) -> Result<Self, String> {
+    fn new(contract: &Contract, contract_path: &Path) -> Result<Self, String> {
+        let mut evaluated = vec![absolute(&lock_path(contract_path))?];
+        let json = contract_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        if json {
+            evaluated.push(absolute(contract_path)?);
+        }
         Ok(Inventory {
             cargo: is_cargo_graph(contract)?,
+            evaluated,
             listed: std::cell::OnceCell::new(),
         })
     }
@@ -603,6 +620,11 @@ impl Inventory {
                     paths
                         .into_iter()
                         .map(|path| absolute(&root.join(path)))
+                        .filter(|path| {
+                            !path
+                                .as_ref()
+                                .is_ok_and(|path| self.evaluated.contains(path))
+                        })
                         .collect::<Result<Vec<_>, _>>()
                 };
                 Ok(Listed {
@@ -719,8 +741,8 @@ fn cargo_missing_inputs(
 /// `link_missing_inputs`), if it does, after warning of each document a
 /// source names that no task declares. `validate` asks the same inside a git
 /// repository, so a contract it accepts is one `run` starts.
-fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
-    let inventory = Inventory::new(contract)?;
+fn undeclared_refusal(contract: &Contract, path: &Path) -> Result<Option<String>, String> {
+    let inventory = Inventory::new(contract, path)?;
     let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
     for named in &named {
         eprintln!("warning: {}", named_warning(named));
@@ -1076,7 +1098,7 @@ fn input_coverage(
     base: Option<&str>,
 ) -> Result<InputCoverage, String> {
     let repository = coverage_root()?;
-    let inventory = Inventory::new(contract)?;
+    let inventory = Inventory::new(contract, contract_path)?;
     let base_commit = match base {
         Some(base) => Some(git(&[
             "rev-parse",
@@ -1553,7 +1575,7 @@ fn main() -> ExitCode {
                     // outside a git repository there is no inventory to
                     // judge, and `run` cannot start at all.
                     if repo::repository().is_ok() {
-                        match undeclared_refusal(&loaded.0) {
+                        match undeclared_refusal(&loaded.0, &contract) {
                             Ok(None) => {}
                             Ok(Some(refusal)) | Err(refusal) => return Err((2, refusal)),
                         }
@@ -3480,7 +3502,7 @@ fn run(
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());
     }
-    if let Some(refusal) = undeclared_refusal(contract)? {
+    if let Some(refusal) = undeclared_refusal(contract, contract_path)? {
         return Err(refusal);
     }
     let subject = subject(contract, contract_path)?;

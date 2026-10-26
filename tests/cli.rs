@@ -1714,10 +1714,7 @@ fn a_contract_in_a_folder_is_not_asked_for_by_its_own_run() {
         let plan = sykli(&["plan", &contract, "--explain", "--json"]);
         assert_eq!(plan.status.code(), Some(0), "{folder}");
         let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-        assert_eq!(
-            plan["input_coverage"]["folder_missing_inputs"],
-            serde_json::json!([])
-        );
+        assert!(plan["input_coverage"]["folder_missing_inputs"].is_null());
         assert_eq!(
             plan["input_coverage"]["cargo_missing_inputs"],
             serde_json::json!([])
