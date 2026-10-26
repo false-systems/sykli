@@ -1638,6 +1638,108 @@ fn an_undeclared_file_in_a_folder_a_task_reads_refuses_the_run() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// sykli#73: a contract kept in a folder beside the files its tasks read
+/// (`ci/sykli.json`, with `ci/sykli.lock`) refused its own run, because the
+/// folder rule asked for the contract and its lock as undeclared files, as
+/// did the Cargo rule for a contract under `tests/`. The contract being run
+/// and its lock are what the run evaluates, not what a task reads, so
+/// neither rule asks for them; any other file there still refuses.
+#[test]
+fn a_contract_in_a_folder_is_not_asked_for_by_its_own_run() {
+    let root = graph_repo(
+        "contract-folder",
+        r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
+    );
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    for (folder, cargo) in [("ci", false), ("tests/gate", true)] {
+        let inputs = if cargo {
+            format!(r#"["Cargo.toml","{folder}/check.sh"]"#)
+        } else {
+            format!(r#"["{folder}/check.sh"]"#)
+        };
+        fs::create_dir_all(root.join(folder)).unwrap();
+        if cargo {
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+        }
+        fs::write(root.join(folder).join("check.sh"), "echo checked\n").unwrap();
+        let contract = format!("{folder}/sykli.json");
+        fs::write(
+            root.join(&contract),
+            format!(
+                r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"check","run":"sh {folder}/check.sh","inputs":{inputs}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(sykli(&["lock", &contract]).status.success());
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", folder]);
+
+        let validate = sykli(&["validate", &contract]);
+        assert_eq!(
+            validate.status.code(),
+            Some(0),
+            "{folder}: {}",
+            String::from_utf8_lossy(&validate.stderr)
+        );
+        let run = sykli(&["run", &contract, "--json"]);
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{folder}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let plan = sykli(&["plan", &contract, "--explain", "--json"]);
+        assert_eq!(plan.status.code(), Some(0), "{folder}");
+        let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(
+            plan["input_coverage"]["folder_missing_inputs"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            plan["input_coverage"]["cargo_missing_inputs"],
+            serde_json::json!([])
+        );
+
+        // Any other file beside them is still asked for.
+        fs::write(root.join(folder).join("other.txt"), "other").unwrap();
+        git(&["add", "."]);
+        let run = sykli(&["run", &contract]);
+        assert_eq!(run.status.code(), Some(2), "{folder}");
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert!(said.contains(&format!("{folder}/other.txt")), "{said}");
+        assert!(
+            !said.contains("sykli.json") && !said.contains("sykli.lock"),
+            "{said}"
+        );
+        git(&["rm", "--quiet", "--cached", &format!("{folder}/other.txt")]);
+        fs::remove_file(root.join(folder).join("other.txt")).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Only the repository root is exempt: a task whose working directory is a
 /// subfolder reads that folder like a root task declaring files in it.
 #[test]
