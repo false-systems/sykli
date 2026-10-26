@@ -570,6 +570,8 @@ fn validate_and_run_refuse_a_contract_that_leaves_out_an_included_or_vendored_fi
 
 /// Each file init declares is in every cargo task's key: a change to any of
 /// them misses the cache. A change to the prose it leaves out does not.
+/// `plan --explain` reads the keys `run` would, without running, so each
+/// file is changed, judged and restored; `run` confirms the first and last.
 #[cfg(unix)]
 #[test]
 fn a_change_to_any_file_init_declares_misses_the_cache() {
@@ -586,37 +588,54 @@ fn a_change_to_any_file_init_declares_misses_the_cache() {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let path = format!("{}:{}", bin.display(), env::var("PATH").unwrap());
-    let outcomes = || {
+    let statuses = |args: &[&str], field: &str| {
         let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(["run", "sykli.json", "--json"])
+            .args(args)
             .env("PATH", &path)
             .current_dir(&root)
             .output()
             .unwrap();
-        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout)
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
-        receipt["tasks"]
+        let (list, pointer) = match field {
+            "outcome" => ("tasks", "/outcome"),
+            _ => ("explanations", "/cache/status"),
+        };
+        value[list]
             .as_array()
             .unwrap()
             .iter()
-            .map(|task| task["outcome"].as_str().unwrap().to_string())
+            .map(|task| task.pointer(pointer).unwrap().as_str().unwrap().to_string())
             .collect::<Vec<_>>()
     };
-    assert_eq!(outcomes(), ["passed", "passed", "passed"]);
-    assert_eq!(outcomes(), ["cached", "cached", "cached"]);
-    for input in inputs(task(&contract(&root), "test")) {
-        let file = root.join(&input);
-        let mut bytes = fs::read(&file).unwrap();
-        bytes.extend_from_slice(b"\n");
-        fs::write(&file, bytes).unwrap();
+    let run = || statuses(&["run", "sykli.json", "--json"], "outcome");
+    let explain = || statuses(&["plan", "--explain", "--json"], "cache");
+    assert_eq!(run(), ["passed", "passed", "passed"]);
+    assert_eq!(run(), ["cached", "cached", "cached"]);
+    assert_eq!(explain(), ["available", "available", "available"]);
+    let declared = inputs(task(&contract(&root), "test"));
+    assert_eq!(declared, DECLARED);
+    for input in &declared {
+        let file = root.join(input);
+        let original = fs::read(&file).unwrap();
+        let mut changed = original.clone();
+        changed.extend_from_slice(b"\n");
+        fs::write(&file, changed).unwrap();
+        // `fmt` has no entry for its new key, and `clippy` and `test`, which
+        // run after it, wait for it: none is served from the cache.
         assert_eq!(
-            outcomes(),
-            ["passed", "passed", "passed"],
+            explain(),
+            ["missing", "deferred", "deferred"],
             "a change to {input} kept a cached pass"
         );
+        fs::write(&file, original).unwrap();
     }
+    assert_eq!(explain(), ["available", "available", "available"]);
     write(&root, "CHANGELOG.md", "# changes, edited\n");
-    assert_eq!(outcomes(), ["cached", "cached", "cached"]);
+    assert_eq!(explain(), ["available", "available", "available"]);
+    assert_eq!(run(), ["cached", "cached", "cached"]);
+    write(&root, "src/launch.zsh", "print launched again\n");
+    assert_eq!(run(), ["passed", "passed", "passed"]);
     fs::remove_dir_all(&bin).unwrap();
     fs::remove_dir_all(root).unwrap();
 }

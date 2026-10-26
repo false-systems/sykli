@@ -686,9 +686,10 @@ fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
         tasks.iter().map(|task| &task["name"]).collect::<Vec<_>>(),
         ["fmt", "clippy", "test"]
     );
+    // Every tracked file, the fixture's `file.txt` too: a test may read it.
     assert_eq!(
         tasks[2]["inputs"],
-        serde_json::json!(["Cargo.toml", "src/main.rs", "tests/it.rs"])
+        serde_json::json!(["Cargo.toml", "file.txt", "src/main.rs", "tests/it.rs"])
     );
     // Nothing in the repository was touched: no .sykli/, no .gitignore.
     assert_eq!(scratch.status(), "");
