@@ -144,11 +144,14 @@ undeclared-file checks (`Inventory`, through `repo::files`), which
 `validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
 same listing. What Cargo reads (by name, the files sources include, the
 documents they name: `Sources`, a small Rust lexer) and what is a document
-(`docs`, which `init` leaves out and the sibling check never asks for) are
-`cargo_inputs` for both. A declared symbolic link to no file in the repository
-is recorded by its text (`link_text`, `InputRecord::link`) and judged by the
-commit's link text (`judge_link`), after a third round of the same `cat-file`
-asks where it leads (`link_target_names`, `PathFacts::around`).
+(`docs`, which the sibling check never asks for; `init` declares them) are
+`cargo_inputs` for both. A declared symbolic link to a file is read through;
+one to a directory in the repository or to nothing is recorded by its text
+(`link_text`, `InputRecord::link`), with every file under such a directory
+required of the same task, and one to a directory outside the repository is
+refused (`link_missing_inputs`). A text record is judged by the commit's link
+text (`judge_link`), after a third round of the same `cat-file` asks where it
+leads (`link_target_names`, `PathFacts::around`).
 `verify --commit` and `hook pre-push`
 read every commit fact in one batch (`commit_names`, `ContractNames`) and
 judge receipts against them (`judge`); the pre-push hook validates branch

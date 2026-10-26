@@ -147,8 +147,8 @@ the literal is skipped. An include whose path is not a literal in one of those
 forms (a macro's variable, an expression) is refused with its file and line,
 since its file cannot be known: write the path as a literal. A path built from
 `OUT_DIR` names a file made at build time and is not asked for. `sykli init`
-declares all of these, and every other file git lists but documents and
-sykli's own contract and lock, so `run` accepts the contract it writes. This
+declares all of these, and every other file git tracks, documents included,
+but sykli's own contract and lock, so `run` accepts the contract it writes. This
 inventory is discovered afresh on
 every invocation, including committed files absent from the changed-path view;
 it is never itself cached against the existing input list. `.sykli/` is excluded.
@@ -161,26 +161,41 @@ undeclared sibling (below), with exit 2, as `run` does, and `run`'s message in
 `errors`; exit 1 stays an invalid, unreadable or unpinned contract. Its verdict
 therefore depends on the work tree (an untracked `.rs` file changes it), not
 only on the contract and its lock. It does not check that declared inputs
-exist, and it runs nothing.
+exist, and it runs no task (given a `sykli.rs` emitter, it runs the emitter to
+read the contract).
 
-**Documents** are files no build or test is expected to read: a file named
-`*.md`, one whose name starts with `LICENSE`, `LICENCE`, `COPYING` or `NOTICE`
-(any case), and anything under a directory named `docs` or `.github`, at any
-depth (`cargo_inputs::docs`). `sykli init` leaves them out unless a source
-includes or names one, and the undeclared-sibling check never asks for them,
-so a commit of documents never makes a contract refuse. A task that reads a
-folder of Markdown fixtures, or a document by a path built at run time,
-declares them by hand.
+**Documents** are a file named `*.md`, one whose name starts with `LICENSE`,
+`LICENCE`, `COPYING` or `NOTICE` (any case), and anything under a directory
+named `docs` or `.github`, at any depth (`cargo_inputs::docs`). The
+undeclared-sibling check never asks for them, so a commit that adds documents
+never makes a contract refuse. That is their only special case: `sykli init`
+declares them like any other tracked file (a test may read a folder of
+Markdown cases), and the Cargo rule requires one a source includes or names.
+The gap that remains: a new document beside declared ones, or one a
+hand-written contract leaves out, is in no key, so a test that reads its
+folder through `read_dir` keeps its cached pass until the contract declares it
+(`init --force`).
 
-A declared symbolic link that leads to no regular file in the repository (a
-directory, a file outside it, nothing) is recorded by its own text, as git
-stores it (`"link": true` in the input record, digest `sykli-input-link.v1`),
-so pointing it elsewhere misses the cache. `verify --commit` judges such a
-record by the commit's link text, after a third round of its `cat-file`
-session reads where the link leads, and refuses it where the link leads to a
-file. A link to a file is still recorded, and judged, by the file's bytes.
-`sykli init` declares every tracked link, and the file a link to a file leads
-to.
+Symbolic links, by what they lead to (`link_text`, `directory_behind`):
+- **A file**, inside the repository or out of it: read through, as every input
+  always was. A change to the file misses the cache; `verify --commit` judges
+  the file a link inside the repository leads to, and refuses one outside it.
+- **A directory in the repository**: recorded by its own text, as git stores
+  it (`"link": true` in the input record, digest `sykli-input-link.v1`), so
+  pointing it elsewhere misses the cache. Every tracked file under the
+  directory must be declared by the same task (`link_missing_inputs`, listed
+  as `link_missing_inputs: [{path, task, link}]` by explain), or `validate`,
+  `run` and explain refuse, exit 2.
+- **A directory outside the repository**: no commit holds its files, so it
+  cannot be declared. `init` leaves it out, the Cargo rule and the sibling
+  check do not ask for it, and a contract that declares it is refused.
+- **Nothing** (dangling): recorded by its own text.
+
+`verify --commit` judges a text record by the commit's link text, after a
+third round of its `cat-file` session reads where the link leads, and refuses
+it where the link leads to a file or out of the repository. `sykli init`
+declares every tracked link but one to a directory outside the repository, and
+the file a link to a file leads to.
 
 This conservative check applies when the working directory has Cargo.toml and
 the graph declares that manifest or names `cargo` in a task command. It does

@@ -275,14 +275,19 @@ contract consumer can observe; internal refactors are not listed.
   work tree too. Outside a git repository nothing changes. A caller that
   reads exit 1 as "re-lock" is still right; exit 2 means "declare the files
   named", which re-locking alone does not fix.
-- A declared symbolic link that leads to no regular file in the repository
-  (a directory, a file outside it, nothing) is recorded by its own text, as
-  git stores it: its input record carries `"link": true` and the text's
-  SHA-256, and its digest is `sykli-input-link.v1`. Such a declared input
-  used to error the task (`missing or not a file`). `verify --commit` and
-  the pre-push hook judge such a record by the commit's link text, and
-  refuse it where the link leads to a file, which a run reads instead.
-  Pointing such a link elsewhere now misses the cache and the receipt.
+- A declared symbolic link to a directory in the repository, or to nothing,
+  is recorded by its own text, as git stores it: its input record carries
+  `"link": true` and the text's SHA-256, and its digest is
+  `sykli-input-link.v1`. Such a declared input used to error the task
+  (`missing or not a file`). Pointing such a link elsewhere now misses the
+  cache and the receipt. For a link to a directory, `validate`, `run` and
+  `plan --explain` (`link_missing_inputs: [{path, task, link}]`) refuse,
+  exit 2, until the same task declares every tracked file under the
+  directory. A declared link to a directory outside the repository is
+  refused: no commit holds its files. `verify --commit` and the pre-push
+  hook judge a text record by the commit's link text, and refuse it where
+  the link leads to a file or out of the repository. A link to a file,
+  inside the repository or out of it, is read through and judged as before.
 - Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
   `resume`, the pre-commit hook), a declared `env` value that contains `${`
   must name `${worktree_cache}` and close it, and must not contain `$${`
@@ -353,30 +358,31 @@ contract consumer can observe; internal refactors are not listed.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
-  `test`) declares every file git lists under the directory sykli runs in:
-  the index, every tracked symbolic link whatever it leads to (and the file
-  a link to a file leads to), and the untracked files the Cargo completeness
-  rule counts. `init` used to declare Rust sources and Cargo's files under
-  `src/`, `tests/` and workspace members only, so it left out a vendored
-  path dependency (and `run` refused the contract `init` had just written),
-  a file the binary includes, a pin a test reads, and test data in a
-  top-level `fixtures/`: a change to any of them kept a cached pass. Left
-  out: `.sykli/`, Cargo's top-level `target/` (with a note when git lists
-  files there), sykli's own contract and lock and the contract being
-  written, and documents (`*.md`, `LICENSE*`, `LICENCE*`, `COPYING*`,
-  `NOTICE*`, anything under `docs/` or `.github/`, at any depth) unless a
-  source includes or names one. The undeclared-sibling check exempts the
-  same documents, so a commit of documents never makes `init`'s contract
-  refuse; without that, `init` declaring a file in nearly every folder would
-  have made any new file there refuse. Editing a declared file that nothing
-  reads now costs a cache miss. Outside a git repository `init` walks the
+  `test`) declares every file git tracks under the directory sykli runs in,
+  documents included (a test may read a folder of Markdown cases), every
+  tracked symbolic link but one to a directory outside the repository (and
+  the file a link to a file leads to), and the untracked files the Cargo
+  completeness rule counts. `init` used to declare Rust sources and Cargo's
+  files under `src/`, `tests/` and workspace members only, so it left out a
+  vendored path dependency (and `run` refused the contract `init` had just
+  written), a file the binary includes, a pin a test reads, and test data
+  in a top-level `fixtures/`: a change to any of them kept a cached pass.
+  Left out: `.sykli/`, Cargo's top-level `target/` (with a note when git
+  lists files there), and sykli's own contract and lock and the contract
+  being written. Editing a declared file that nothing reads, a document
+  included, now costs a cache miss. Outside a git repository `init` walks the
   files, as before, without hidden entries, symbolic links, `node_modules`
   or `target/`. npm and Go detection are unchanged, and existing contracts
   are not rewritten: run `sykli init --force` (or `init --contract PATH
   --force`) to adopt this.
-- The undeclared-sibling check no longer asks for documents (as above), in
-  every graph: a task that reads a folder of Markdown fixtures declares them
-  itself.
+- The undeclared-sibling check no longer asks for documents (`*.md`,
+  `LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or
+  `.github/`, at any depth), in every graph, so a commit that adds
+  documents never makes a contract refuse; with `init` declaring a file in
+  nearly every folder, any new file there would have. What stays open: a
+  new document beside declared ones, or one a hand-written contract leaves
+  out, is in no key, so a test that reads its folder with `read_dir` keeps
+  its cached pass until the contract declares it (`init --force`).
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
   and SIGHUP reach tasks through sykli, which stops them, records them as
   interrupted whatever they exit with (a task that traps the signal and exits
@@ -430,8 +436,10 @@ contract consumer can observe; internal refactors are not listed.
 - A submodule, which is a directory in git's index and cannot be declared,
   no longer makes `run` refuse a contract: the Cargo completeness rule
   required one under a `tests` directory, and the undeclared-sibling check
-  one beside a declared input. A tracked symbolic link that leads to no file
-  both rules required too, and now it can be declared (above).
+  one beside a declared input. A tracked symbolic link to a directory in the
+  repository, or to nothing, both rules required too, and now it can be
+  declared (above); one to a directory outside the repository, which cannot
+  be, they no longer ask for.
 - Existing v2 lock files must pin the named contract; empty maps and missing
   entries no longer silently run unpinned, including `verify --commit`.
   `sykli lock` can add the missing entry without discarding sibling pins.
