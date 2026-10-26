@@ -121,7 +121,6 @@
         "tests/runs.rs",
         "tests/worktree_cache.rs",
         "tests/snapshot.rs",
-        "tests/qa/sykli.json",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
         "AGENTS.md",
