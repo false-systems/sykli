@@ -57,6 +57,32 @@ fn help_lists_the_flags_other_tools_detect() {
     }
 }
 
+/// `status --contract` names the contract `--commit` judges by; `--run`
+/// reads a run's journal, which records its own contract. Given with
+/// `--run`, it was accepted and ignored, so a caller could believe the run
+/// was judged by it. It is refused (exit 2) and the refusal names both
+/// flags; `verify --contract` without `--commit` still judges the checkout.
+#[cfg(unix)]
+#[test]
+fn status_refuses_a_contract_with_run() {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["status", "--run", "run_x", "--contract", "other.json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("--contract") && said.contains("--run"),
+        "{said}"
+    );
+    assert!(!said.contains("is not a run id"), "{said}");
+    let help = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["status", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Only with --commit"));
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_mode_invalidates_cache_and_receipt_inputs() {
