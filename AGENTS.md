@@ -159,8 +159,10 @@ repository once per process (one `git rev-parse`, or `--repo-root` and
 one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 (`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
 `.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
-undeclared-file checks (`Inventory`, through `repo::files`; it leaves out
-the JSON contract being run and its lock, sykli#73), which
+undeclared-file checks (`Inventory`, through `repo::files`; the Cargo files by name and the
+sibling check leave out the JSON contract being run and its lock, however
+spelled, `evaluated`, sykli#73, and an include of either is still asked
+for), which
 `validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
 same listing. What Cargo reads (by name, the files sources include, the
 documents their string literals name, which only warn: `Sources`, a small Rust

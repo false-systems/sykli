@@ -628,11 +628,14 @@ contract consumer can observe; internal refactors are not listed.
   (`ci/sykli.json` with `ci/sykli.lock`, beside `ci/check.sh`) is no longer
   refused by its own run, `validate` or `plan --explain` (sykli#73): the
   undeclared-sibling check asked for the contract and its lock, and the
-  Cargo completeness rule did the same for one under `tests/`. Neither rule,
-  nor the one for a declared link to a directory, asks for the JSON
-  contract being run or its lock: they are bound by the contract hash and
-  the lock digest. A task that reads them still declares them, and any
-  other file beside them is still asked for. A `sykli.rs` emitter is a Rust
+  Cargo completeness rule did the same for one under `tests/`. Neither
+  rule asks for the JSON contract being run or its lock by name or folder,
+  however the path is spelled (through a link such as macOS's `/tmp`):
+  they are bound by the contract hash and the lock digest. A file a Rust
+  source includes is still asked for, the contract included (a task's key
+  does not cover the contract), and so is a file under a declared link to a
+  directory. A task that reads them still declares them, and any other
+  file beside them is still asked for. A `sykli.rs` emitter is a Rust
   source of its crate and is still asked for in a Cargo graph.
 
 ### Removed

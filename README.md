@@ -288,10 +288,13 @@ dependency scan. It does not catch files in new subfolders or in parent folders,
 anything in the repository root, documents, or untracked, ignored and generated
 files. Other unmapped paths are advisory.
 
-None of these checks asks for the contract being run or its `sykli.lock`, wherever
-they are kept (`ci/sykli.json` beside `ci/check.sh`): they are what the run
-evaluates, bound by the contract hash and the lock digest, not files a task
-reads. A task that does read them declares them. A `sykli.rs` emitter is a
+Neither the Cargo rule's files by name nor the sibling check asks for the
+JSON contract being run or its `sykli.lock`, wherever they are kept
+(`ci/sykli.json` beside `ci/check.sh`) and however the path is spelled: they
+are what the run evaluates, bound by the contract hash and the lock digest.
+A file a Rust source includes is still asked for, the contract too, since a
+task's key does not cover the contract; so is a file under a declared link to
+a directory. A task that reads them declares them. A `sykli.rs` emitter is a
 Rust source of its crate and is still asked for in a Cargo graph.
 
 Inside a git repository, `validate` refuses (exit 2, as `run` does) a contract

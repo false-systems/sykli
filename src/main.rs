@@ -128,8 +128,9 @@ enum Command {
         document a string literal names but no task declares only warns (exit 0). In every\n\
         graph, each tracked file beside a task's declared\n\
         inputs must be declared, except documents, licences and CI configuration; and a\n\
-        declared link to a directory needs every file under it declared. None of these asks\n\
-        for the JSON contract being validated or its sykli.lock. It does not check\n\
+        declared link to a directory needs every file under it declared. Neither the Cargo\n\
+        files by name nor the sibling rule asks for the JSON contract being validated or\n\
+        its sykli.lock (an include of either is still asked for). It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
         the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
@@ -578,13 +579,18 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
 /// needs it.
 ///
 /// The contract being run, when it is a JSON file, and the lock beside it
-/// are left out of the listing (sykli#73): they are what the run evaluates,
-/// bound by the contract hash and the lock digest, not files a task reads,
-/// so none of the checks asks for them, wherever the contract is kept. An
-/// emitter (`sykli.rs`) is a Rust source of its crate, which Cargo builds,
-/// and is still asked for.
+/// are what the run evaluates, bound by the contract hash and the lock
+/// digest (sykli#73): the rules that ask for a file by its name (Cargo's) or
+/// by its folder (the sibling check) never ask for them, wherever the
+/// contract is kept and however its path is spelled (`evaluated`). What a
+/// Rust source includes is still asked for, the contract too: it is
+/// compiled into the build, and a task's key does not cover the contract.
+/// So is every file under a declared link to a directory. An emitter
+/// (`sykli.rs`) is a Rust source of its crate, which Cargo builds, and is
+/// still asked for.
 struct Inventory {
     cargo: bool,
+    /// The contract and its lock, as given and as the listing spells them.
     evaluated: Vec<PathBuf>,
     listed: std::cell::OnceCell<Result<Listed, String>>,
 }
@@ -597,18 +603,29 @@ struct Listed {
 
 impl Inventory {
     fn new(contract: &Contract, contract_path: &Path) -> Result<Self, String> {
-        let mut evaluated = vec![absolute(&lock_path(contract_path))?];
+        let mut named = vec![lock_path(contract_path)];
         let json = contract_path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
         if json {
-            evaluated.push(absolute(contract_path)?);
+            named.push(contract_path.to_path_buf());
+        }
+        let mut evaluated = Vec::new();
+        for path in named {
+            evaluated.push(absolute(&path)?);
+            evaluated.extend(as_listed(&path));
         }
         Ok(Inventory {
             cargo: is_cargo_graph(contract)?,
             evaluated,
             listed: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Whether `path`, as the listing spells it, is the contract being run
+    /// or its lock.
+    fn evaluated(&self, path: &Path) -> bool {
+        self.evaluated.iter().any(|evaluated| evaluated == path)
     }
 
     fn listed(&self) -> Result<&Listed, String> {
@@ -620,11 +637,6 @@ impl Inventory {
                     paths
                         .into_iter()
                         .map(|path| absolute(&root.join(path)))
-                        .filter(|path| {
-                            !path
-                                .as_ref()
-                                .is_ok_and(|path| self.evaluated.contains(path))
-                        })
                         .collect::<Result<Vec<_>, _>>()
                 };
                 Ok(Listed {
@@ -636,6 +648,30 @@ impl Inventory {
             .as_ref()
             .map_err(Clone::clone)
     }
+}
+
+/// `path` spelled as the listing spells files: its directory resolved, below
+/// the repository's top level as the current directory spells it
+/// (`coverage_root`), so that a contract named through a link to the
+/// repository (macOS's `/tmp`) is the same file. Its own name is kept: a
+/// contract named by a link is pinned by the lock beside the link. None
+/// outside the repository.
+fn as_listed(path: &Path) -> Option<PathBuf> {
+    let repository = repo::repository().ok()?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let resolved = located(directory)?;
+    let below = resolved.strip_prefix(repository.resolved()?).ok()?;
+    absolute(
+        &repository
+            .root_here()
+            .ok()?
+            .join(below)
+            .join(path.file_name()?),
+    )
+    .ok()
 }
 
 /// A document a string literal in a Rust source names, which no task
@@ -703,7 +739,10 @@ fn cargo_missing_inputs(
     };
     for path in &files {
         let relative = path.strip_prefix(root).unwrap_or(path);
-        if cargo_inputs::by_name(relative) || sources.included().contains(*path) {
+        // The contract being run and its lock are not asked for by name,
+        // but are when a source includes them (sykli#73).
+        let by_name = cargo_inputs::by_name(relative) && !inventory.evaluated(path);
+        if by_name || sources.included().contains(*path) {
             wanted.insert((*path).clone());
         } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
             if let Some(at) = sources.named_at(&shown(path)) {
@@ -827,9 +866,10 @@ fn folder_missing_inputs(
     for file in &listed.cached {
         // Documents, licences and CI configuration are never asked for
         // (`cargo_inputs::docs`), so a commit that adds documents never
-        // refuses a run.
+        // refuses a run; nor are the contract being run and its lock.
         if file.starts_with(root.join(".sykli"))
             || cargo_inputs::docs(file.strip_prefix(root).unwrap_or(file))
+            || inventory.evaluated(file)
         {
             continue;
         }
