@@ -157,9 +157,10 @@ It comes down to three things:
 | **Verify** | A check that a receipt is consistent with the tree and contract in front of you. | `sykli verify` |
 
 **Reuse is earned, not assumed.** A task's cache key covers its declaration,
-the contents and execute bits of its declared inputs, the runtime fingerprint,
-digests of inherited environment values, and the cache keys of every task it
-runs `after`. A downstream task never reuses a pass recorded against upstream
+the contents and execute bits of its declared inputs (and of its contract
+inputs, files beside a contract kept outside the repository), the runtime
+fingerprint, digests of inherited environment values, and the cache keys of
+every task it runs `after`. A downstream task never reuses a pass recorded against upstream
 outputs it did not see, and a matching entry must validate before it is used.
 In a Cargo graph the runtime fingerprint also covers the Rust toolchain the
 task shell resolves (`rustc -vV`, `cargo -V`), so a pass recorded under one
@@ -204,9 +205,11 @@ plus declared `env` values and named `inherit` variables. Inherited values reach
 the task, but only their digests reach the receipt, where they count toward the
 task's identity. A declared value may name `${worktree_cache}`, a directory of
 the worktree's own
-([one build directory per worktree](#one-build-directory-per-worktree)). Task
-output is captured, so commands are responsible for what they print. Sykli runs
-local commands with your permissions.
+([one build directory per worktree](#one-build-directory-per-worktree)). A task
+that declares `contract_inputs` also gets `SYKLI_CONTRACT_DIR`, where those
+files are ([outside the repository](#keep-the-contract-outside-the-repository)).
+Task output is captured, so commands are responsible for what they print. Sykli
+runs local commands with your permissions.
 
 </details>
 
@@ -635,11 +638,30 @@ directory:
   repository's root, as in a committed contract, and the undeclared-sibling
   check and the Cargo completeness gate apply as usual. Paths you type, such as
   `plan --changed`, mean what they mean where you type them.
-- A task may depend only on files in the repository, which it declares, and
-  on tools it finds on `PATH`. Files kept beside an outside contract, such as
-  a helper script a task runs, cannot be declared and are not hashed, so
-  changing one does not invalidate a cached pass. Keep such helpers in the
-  repository and declare them, or install them as tools.
+- A task may depend on files in the repository, which it declares as
+  `inputs`, on files kept beside the contract, which it declares as
+  `contract_inputs`, and on tools it finds on `PATH`. A contract input is a
+  path from the contract's directory (relative, no `..`), such as a helper
+  script:
+
+  ```json
+  { "name": "check", "run": "sh \"$SYKLI_CONTRACT_DIR/check.sh\"", "inputs": ["src/lib.rs"], "contract_inputs": ["check.sh"] }
+  ```
+
+  Its bytes and execute bits join the task's cache key, so a changed helper
+  misses the cache, and the receipt records them in the task's
+  `contract_inputs`. The task finds them in `$SYKLI_CONTRACT_DIR`, a
+  directory of its own that holds a copy of exactly the files it declares,
+  as they were hashed, and is removed when the task ends; a task that
+  declares none has no such variable. A task that names the contract's
+  directory itself in its `run` or an `env` value, as the contract's path
+  spells it or resolved, is refused by `validate`, `lock`, `plan` and `run`,
+  since sykli cannot hash what it reads there by that name. What sykli
+  cannot see is not hashed, as nothing outside a task's declared files is:
+  the directory spelled another way (through `$HOME`), a value the task
+  inherits, a tool on `PATH`. A contract inside the repository declares the
+  files beside it as `inputs`, and `contract_inputs` there is refused.
+  `plan --changed` selects by repository inputs only.
 - The lock is the `sykli.lock` beside the contract as you name it, as always,
   and `sykli lock "$gate"` writes it there. An existing v2 lock must contain
   the named contract, even when it already pins other contracts: run `sykli
@@ -662,6 +684,9 @@ directory:
   covers the whole lock file, which holds one entry per contract in its
   directory, so keep one contract per directory: locking a second contract
   beside the first changes the file and refuses the first one's receipts.
+  Each task's contract inputs are read from beside the contract too, with or
+  without `--commit`, and must be what the receipt records, or verify exits
+  3 (`contract inputs`).
 - `sykli hook pre-commit --contract PATH` runs that contract on the staged
   tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates pushes with
   it, whatever the pushed commits carry. Name the branches it protects with
@@ -735,7 +760,8 @@ and it is worth keeping them apart:
   ones the receipt claims: read from the checkout, or with `--commit` from the
   commit itself, never taken from the receipt. An input a checkout converts
   (line endings, a smudge filter) is compared with what a checkout of the
-  commit makes of its blob, and the output says so.
+  commit makes of its blob, and the output says so. A contract input is
+  read from beside the contract, with or without `--commit`.
 - **What it does not establish.** Where the receipt came from. Who produced it.
   That its tasks were observed running, or ran at all. Anything a task read
   that is not a declared input: the toolchain, the environment, undeclared

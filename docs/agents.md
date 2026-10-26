@@ -56,11 +56,15 @@ sykli warns when only the link's target has one), and receipts and the cache
 stay in the repository's `.sykli/`. `init --contract` touches nothing in the
 repository: it neither creates `.sykli/` (run `mkdir -p .sykli` before
 redirecting a receipt there) nor adds it to `.gitignore`. A task may depend
-only on repository files, which it declares, and tools on `PATH`: files kept
-beside an outside contract cannot be declared and are not hashed, so changing
-one leaves cached passes standing. `verify` reads such a contract and its
-lock from their files, with or without `--commit`; with `--commit` the
-commit's tree is still checked. Every receipt records `lock_digest`, the
+on repository files, which it declares as `inputs`, on files beside an
+outside contract, which it declares as `contract_inputs` (paths from the
+contract's directory) and runs as `$SYKLI_CONTRACT_DIR/PATH`, and on tools
+on `PATH`. Contract inputs join the task's key and its receipt record, and
+`$SYKLI_CONTRACT_DIR` holds a copy of exactly those files, so a changed
+helper misses the cache and an undeclared one is not there; a task that
+names the contract's directory itself is refused. `verify` reads such a
+contract, its lock and its contract inputs from their files, with or
+without `--commit`; with `--commit` the commit's tree is still checked. Every receipt records `lock_digest`, the
 SHA-256 of the lock file it ran with (null without one), and for a contract
 outside the repository verify requires it to match the lock file beside the
 contract now: a receipt from another version of the contract or its lock

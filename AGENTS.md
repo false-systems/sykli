@@ -133,6 +133,18 @@ paths and enter that toplevel first (`enter_for_contract`); hooks absolutize
 (SHA-256 of the lock file, read once with the pin in `load_pinned`); `verify`
 reads an outside contract and its lock from their files even with
 `--commit`, and only for such a contract compares `lock_digest` (exit 4).
+A task of such a contract declares the files beside it that it reads as
+`contract_inputs`, paths from the contract's directory: the run reads them
+once into the subject (`contract_input_records`, no tree entry), their
+digests join the task's key (only when it has any, so other keys are
+unchanged), each task's records go into its receipt and the journal's
+subject, and its shell gets `SYKLI_CONTRACT_DIR`, a copy of exactly those
+files checked against the records and removed when it ends
+(`ContractCopy`). `placed` (`validate`, `lock`, `plan`, `run`) refuses them in a
+contract inside the repository, and refuses a task of an outside contract
+that names the contract's directory in `run` or `env` (sykli#75); `verify`
+and `judge` compare them with the files beside the contract
+(`contract_inputs_check`, exit 3).
 Git is asked as little as possible, and `tests/git_calls.rs` holds the
 budgets (counted through `GIT_TRACE2_EVENT`). `src/repo.rs` finds the
 repository once per process (one `git rev-parse`, or `--repo-root` and

@@ -2447,14 +2447,16 @@ fn authored(contract: &Contract) -> Result<(), String> {
     contract.tasks.iter().try_for_each(worktree_cache::check)
 }
 
-/// What a contract must also meet where it is written or run, given where
-/// it is (`path`), as `authored` is applied. Only a contract outside the
-/// repository declares `contract_inputs`: beside one inside it, files are in
-/// the repository and declared as `inputs`. And no task of a contract
-/// outside it names the contract's directory (as the path names it, or
-/// resolved) in its command or an `env` value: sykli cannot hash what a task
-/// reads there by that name, and a changed helper would reuse a stale pass
-/// (sykli#75). Declared files are reached as `$SYKLI_CONTRACT_DIR/PATH`.
+/// What a contract must also meet where it is written or run (`validate`,
+/// `lock`, `plan`, `run`; a resumed or detached run runs what `run`
+/// placed), given where it is (`path`); never where a contract is judged,
+/// like `authored`. Only a contract outside the repository declares
+/// `contract_inputs`: beside one inside it, files are in the repository and
+/// declared as `inputs`. And no task of a contract outside it names the
+/// contract's directory (as the path names it, or resolved) in its command
+/// or an `env` value: sykli cannot hash what a task reads there by that
+/// name, and a changed helper would reuse a stale pass (sykli#75). Declared
+/// files are reached as `$SYKLI_CONTRACT_DIR/PATH`.
 /// Only what the contract says is looked at, by a plain match on the two
 /// spellings: the directory spelled otherwise (through `$HOME`, `~`, another
 /// link), in a value a task inherits, or on `PATH` is not seen, as nothing

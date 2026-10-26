@@ -245,6 +245,33 @@ contract consumer can observe; internal refactors are not listed.
   write, or an edited sykli hook, is replaced only with `--force` (exit 1
   otherwise, nothing written), which keeps the old file as `NAME.pre-sykli`,
   and a `core.hooksPath` that sends git elsewhere is refused.
+- `contract_inputs` on a task of a contract kept outside the repository
+  (sykli#75): files beside the contract that the task reads, as paths from
+  the contract's directory, validated as `inputs` are (relative, no `..`).
+  A helper script there could not be declared, so a changed one reused the
+  old pass (`cached`, exit 0).
+  - Each is read once per run. Its bytes and execute bits join the task's
+    cache key, so any change misses the cache; a task that declares none
+    keeps the key it had. A missing one errors the task (`input_error`), as
+    a missing input does.
+  - The task reaches them as `$SYKLI_CONTRACT_DIR/PATH`: a directory of its
+    own in the system's temporary directory, holding a copy of exactly the
+    declared files, each checked to be the recorded bytes and execute bits,
+    and removed when the task ends. A helper therefore runs what was hashed
+    and finds no undeclared neighbour there. A task that declares none has
+    no `SYKLI_CONTRACT_DIR`.
+  - Receipts record them per task as `contract_inputs` (`sha256`, `mode`,
+    no tree entry; absent on tasks without any). The subject and its digests
+    are unchanged. A run's journal keeps them, so a detached or resumed
+    coordinator gives the task the same files, and `resume` refuses a run
+    whose contract inputs changed.
+  - `verify`, with or without `--commit`, `status --commit` and the
+    pre-push hook read each from beside the contract as it is now (no commit
+    carries it, as none carries the contract) and refuse a receipt whose
+    records differ from it or are missing (exit 3, check `contract inputs`).
+  - A contract inside the repository may not declare them: its neighbours
+    are repository files, declared as `inputs`. `plan --changed` still
+    selects by repository inputs only.
 
 ### Breaking
 - Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
@@ -314,6 +341,15 @@ contract consumer can observe; internal refactors are not listed.
   `plan` (`--target`) and `init` (`--production`). Each now fails as an
   unknown command or argument (exit 2). `status --run`, `status --commit` and
   `resume --run` are unchanged.
+- Where a contract outside the repository is written or run (`validate`,
+  `lock`, `plan`, `run`, the pre-commit hook), a task whose `run` or `env`
+  value names the contract's own directory, as the contract's path spells it
+  or resolved, is refused (`validate` exits 1, the others 2), since sykli
+  cannot hash what the task reads there by that name (sykli#75). Declare the
+  files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
+  Only the contract's text is matched: the directory spelled another way, a
+  value a task inherits or a tool on `PATH` is not seen. Where a contract is
+  judged, nothing changes.
 
 ### Changed
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
