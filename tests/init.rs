@@ -1084,6 +1084,85 @@ fn a_link_out_of_the_repository_cannot_be_declared() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// sykli#54: a declared path that is relative and has no `..` can still
+/// leave the repository through a symbolic link on its way. With `ext`
+/// linked to a directory outside, the input `ext/file.txt` validated, was
+/// hashed into the key and the receipt from outside, and the run passed; an
+/// output `ext/bundle.js` or a workdir `ext` was written outside. Each is
+/// refused by `validate`, `plan --explain` and `run` (exit 2) before any task
+/// runs, naming the path; a link on the way that stays inside the repository
+/// is not.
+#[cfg(unix)]
+#[test]
+fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
+    let outside = temp_root("through");
+    fs::write(outside.join("file.txt"), "outside\n").unwrap();
+    let root = linked_repository(
+        "through-links",
+        &[("file.txt", "one\n"), ("inside/real/file.txt", "inside\n")],
+        &[("ext", outside.to_str().unwrap()), ("alias", "inside/real")],
+        None,
+    );
+    let refusals = [
+        (
+            "inputs",
+            serde_json::json!(["file.txt", "ext/file.txt"]),
+            "ext/file.txt",
+        ),
+        (
+            "inputs",
+            serde_json::json!(["file.txt", "ext/new/gone.txt"]),
+            "ext/new/gone.txt",
+        ),
+        (
+            "outputs",
+            serde_json::json!(["ext/bundle.js"]),
+            "ext/bundle.js",
+        ),
+        ("workdir", serde_json::json!("ext"), "\"ext\""),
+    ];
+    for (field, value, named) in refusals {
+        let mut task = serde_json::json!({
+            "name": "t",
+            "run": "echo built > bundle.js; touch ran",
+            "inputs": ["file.txt"],
+        });
+        task[field] = value;
+        fs::write(
+            root.join("sykli.json"),
+            serde_json::json!({"schema": "sykli-contract.v1", "tasks": [task]}).to_string(),
+        )
+        .unwrap();
+        let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let refused = |text: &str| text.contains(named) && text.contains("outside the repository");
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(2), "validate, {field} {named}: {stderr}");
+        assert!(refused(&stderr), "{stderr}");
+        let (code, stdout, _) = sykli(&root, &["plan", "--explain", "--json"]);
+        assert_eq!(code, Some(2), "plan, {field} {named}");
+        assert!(refused(&stdout), "{stdout}");
+        let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+        assert_eq!(code, Some(2), "run, {field} {named}: {stderr}");
+        assert!(refused(&stderr), "{stderr}");
+        assert!(!root.join(".sykli/receipts").exists(), "no task ran");
+        assert!(!outside.join("ran").exists() && !outside.join("bundle.js").exists());
+    }
+
+    // A link on the way that stays in the repository is not refused.
+    fs::write(
+        root.join("sykli.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"cat alias/file.txt","inputs":["alias/file.txt"]}]}"#,
+    )
+    .unwrap();
+    let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    fs::remove_dir_all(outside).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A document a string literal in a source names, which no task declares,
 /// warns with where it is named, and `validate`, `plan --explain` and `run`
 /// go on: a help text that says "see AGENTS.md" reads nothing. A comment or
