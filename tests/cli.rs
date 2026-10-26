@@ -14,6 +14,49 @@ fn help_states_the_identity() {
     assert!(text.contains("declared work graphs"));
 }
 
+/// Other tools decide what this sykli can do from its help: a flag counts
+/// when a line of `<command> --help` lists it (`--flag`, then a space, `<`,
+/// `=`, `[` or the end of the line), never when a sentence mentions it. These
+/// are the flags they look for; dropping or renaming one turns the ability
+/// off for them without an error.
+#[test]
+fn help_lists_the_flags_other_tools_detect() {
+    let facts = ["--repo-root", "--git-common-dir"];
+    let mut detected: Vec<(Vec<&str>, Vec<&str>)> = vec![
+        (vec!["run"], vec!["--detach", "--json"]),
+        (vec!["verify"], vec!["--commit", "--contract", "--json"]),
+        (vec!["validate"], vec![]),
+        (vec!["lock"], vec![]),
+        (vec!["init"], vec!["--contract"]),
+        (vec!["hook", "pre-push"], vec!["--contract", "--branch"]),
+    ];
+    if cfg!(unix) {
+        detected.push((
+            vec!["status"],
+            vec!["--run", "--commit", "--contract", "--json"],
+        ));
+    }
+    for (command, flags) in detected {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(&command)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{command:?} --help");
+        let help = String::from_utf8(out.stdout).unwrap();
+        for flag in flags.iter().chain(&facts) {
+            let listed = help.lines().any(|line| {
+                line.trim_start().strip_prefix(flag).is_some_and(|rest| {
+                    rest.chars()
+                        .next()
+                        .is_none_or(|next| next.is_whitespace() || "<=[".contains(next))
+                })
+            });
+            assert!(listed, "{command:?} --help lists no {flag}:\n{help}");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_mode_invalidates_cache_and_receipt_inputs() {
