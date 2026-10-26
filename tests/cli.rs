@@ -1824,6 +1824,76 @@ fn a_contract_in_a_folder_is_not_asked_for_by_its_own_run() {
         git(&["rm", "--quiet", "--cached", &format!("{folder}/other.txt")]);
         fs::remove_file(root.join(folder).join("other.txt")).unwrap();
     }
+    // The contract named through a link to the repository (macOS's /tmp is
+    // one) is the same contract, and still not asked for.
+    #[cfg(unix)]
+    {
+        let alias = root.with_extension("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let contract = alias.join("ci/sykli.json");
+        let validate = sykli(&["validate", contract.to_str().unwrap()]);
+        assert_eq!(
+            validate.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&validate.stderr)
+        );
+        fs::remove_file(alias).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// What a Rust source includes is compiled into the build, so the Cargo
+/// rule asks for it whatever it is, the contract included: a task's key
+/// does not cover the contract, and with `include_str!("../sykli.json")`
+/// undeclared an edit of the contract kept the task's cached pass. Only the
+/// rules that ask for files by their name or folder leave the contract out.
+#[test]
+fn a_contract_a_source_includes_is_still_asked_for() {
+    let root = graph_repo(
+        "contract-included",
+        r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
+    );
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.rs"),
+        "const C: &str = include_str!(\"../sykli.json\");\nfn main() {\n    println!(\"{}\", C.len());\n}\n",
+    )
+    .unwrap();
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    for (inputs, code) in [
+        (r#"["Cargo.toml","src/main.rs"]"#, 2),
+        (r#"["Cargo.toml","src/main.rs","sykli.json"]"#, 0),
+    ] {
+        fs::write(
+            root.join("sykli.json"),
+            format!(
+                r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"t","run":"cargo run -q","inputs":{inputs}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(sykli(&["lock", "sykli.json"]).status.success());
+        let validate = sykli(&["validate", "sykli.json"]);
+        let said = String::from_utf8_lossy(&validate.stderr);
+        assert_eq!(validate.status.code(), Some(code), "{inputs}: {said}");
+        if code == 2 {
+            assert!(
+                said.contains("Cargo inputs are undeclared") && said.contains("sykli.json"),
+                "{said}"
+            );
+        }
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
