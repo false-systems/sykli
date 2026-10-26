@@ -1,0 +1,33 @@
+repo:
+  name: sykli
+  role: content-addressed evaluator for declared work graphs
+  not:
+  - work tracker
+  - verification authority
+  - agent runner
+  - datastore
+  - server
+  - interpreter
+context:
+  default_budget: 8000
+  important_docs:
+  - README.md
+  read_first: []
+  safe_to_ignore: []
+validation:
+  replace_inferred: false
+  fast: []
+  strict: []
+  full: []
+  privileged: []
+stewardship:
+  auto_sweep: true
+  sessions_retention_days: 7
+  runs_retention_days: 14
+  history_max_records: 500
+boundaries:
+- "Own graph parsing, validation, planning, execution, caching, and receipts."
+- "Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for."
+- "A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily."
+- "Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch."
+- "**Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; \"the operator can delete it\" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list."
