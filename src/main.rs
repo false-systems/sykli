@@ -126,8 +126,10 @@ enum Command {
         graph, every Rust source, Cargo file and file under tests/, every file a source\n\
         includes, and every document a source names must be declared, and an include must\n\
         name its path as a literal. In every graph, each tracked file beside a task's declared\n\
-        inputs must be declared, except documents, licences and CI configuration. It does not\n\
-        check that declared inputs exist, and it runs nothing.\n\n\
+        inputs must be declared, except documents, licences and CI configuration; and a\n\
+        declared link to a directory needs every file under it declared. It does not check\n\
+        that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
+        the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
         an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
         These rules apply where a contract is written or run, not where `verify` or\n\
@@ -515,6 +517,9 @@ struct InputCoverage {
     /// Absent when empty, so complete graphs report what they always did.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     folder_missing_inputs: Vec<FolderInput>,
+    /// Absent when empty: files under a directory a declared link leads to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_missing_inputs: Vec<LinkInput>,
 }
 
 impl InputCoverage {
@@ -524,6 +529,8 @@ impl InputCoverage {
             Some(cargo_coverage_error(&self.cargo_missing_inputs))
         } else if !self.folder_missing_inputs.is_empty() {
             Some(folder_coverage_error(&self.folder_missing_inputs))
+        } else if !self.link_missing_inputs.is_empty() {
+            Some(link_coverage_error(&self.link_missing_inputs))
         } else {
             None
         }
@@ -639,7 +646,8 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
     }
     let mut missing = BTreeSet::new();
     for path in wanted {
-        if declared.contains_key(&path) {
+        // A link to a directory outside the repository is never declarable.
+        if declared.contains_key(&path) || leads_out_of_the_repository(&path) {
             continue;
         }
         match fs::symlink_metadata(&path) {
@@ -669,6 +677,10 @@ fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
     let folders = folder_missing_inputs(contract, &inventory)?;
     if !folders.is_empty() {
         return Ok(Some(folder_coverage_error(&folders)));
+    }
+    let linked = link_missing_inputs(contract, &inventory)?;
+    if !linked.is_empty() {
+        return Ok(Some(link_coverage_error(&linked)));
     }
     Ok(None)
 }
@@ -738,8 +750,8 @@ fn folder_missing_inputs(
     let mut missing = BTreeSet::new();
     for file in &listed.cached {
         // Documents, licences and CI configuration are never asked for
-        // (`cargo_inputs::docs`, which `init` leaves out by), so a commit of
-        // documents never refuses a run.
+        // (`cargo_inputs::docs`), so a commit that adds documents never
+        // refuses a run.
         if file.starts_with(root.join(".sykli"))
             || cargo_inputs::docs(file.strip_prefix(root).unwrap_or(file))
         {
@@ -749,7 +761,12 @@ fn folder_missing_inputs(
             continue;
         };
         for (name, declared, folders) in &tasks {
-            if !folders.contains(folder) || declared.contains(file) {
+            // A link to a directory outside the repository is never
+            // declarable.
+            if !folders.contains(folder)
+                || declared.contains(file)
+                || leads_out_of_the_repository(file)
+            {
                 continue;
             }
             match fs::symlink_metadata(file) {
@@ -782,6 +799,149 @@ fn folder_coverage_error(missing: &[FolderInput]) -> String {
     }
     format!(
         "tracked files next to a task's declared inputs that the task does not declare: {}; add each to its task's inputs (or move it out of that folder) and re-lock before running (no cached results used)",
+        listed.join(", ")
+    )
+}
+
+/// Where a symbolic link leads, when it leads to a directory.
+enum Behind {
+    /// A directory in the repository, as a path from its top level.
+    Inside(PathBuf),
+    /// A directory outside the repository, resolved.
+    Outside(PathBuf),
+    /// Not a symbolic link to a directory.
+    Other,
+}
+
+fn directory_behind(path: &Path) -> Behind {
+    let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !linked || !path.is_dir() {
+        return Behind::Other;
+    }
+    let Ok(target) = fs::canonicalize(path) else {
+        return Behind::Other;
+    };
+    let root = repo::repository()
+        .ok()
+        .and_then(|repository| repository.resolved());
+    match root.and_then(|root| target.strip_prefix(root).ok()) {
+        Some(inside) => Behind::Inside(inside.to_path_buf()),
+        None => Behind::Outside(target),
+    }
+}
+
+/// Whether `path` is a symbolic link to a directory outside the repository,
+/// whose files no commit holds: never a declarable input, so the rules that
+/// ask for files beside declared ones, or for Cargo's, never ask for it.
+fn leads_out_of_the_repository(path: &Path) -> bool {
+    matches!(directory_behind(path), Behind::Outside(_))
+}
+
+/// A file under the directory a task's declared symbolic link leads to,
+/// which the task does not declare.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct LinkInput {
+    path: String,
+    task: String,
+    link: String,
+}
+
+/// A declared symbolic link to a directory is recorded by its text
+/// (`link_text`), so the files a task reads through it are in no key unless
+/// the task declares them: every tracked file under that directory must be
+/// one of the task's inputs too (`init` declares them). A link to a directory
+/// outside the repository leads to files no commit holds, which sykli cannot
+/// bind, so a contract that declares one is refused.
+fn link_missing_inputs(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<Vec<LinkInput>, String> {
+    let mut links = Vec::new();
+    for task in &contract.tasks {
+        let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        let mut directories = Vec::new();
+        for input in &task.inputs {
+            match directory_behind(&workdir.join(input)) {
+                Behind::Inside(directory) => directories.push((input, directory)),
+                Behind::Outside(target) => {
+                    return Err(format!(
+                        "task {:?} declares {input}, a symbolic link to {}, a directory outside \
+                         the repository: no commit holds its files, so sykli cannot bind them; \
+                         declare the files the task reads inside the repository instead, and \
+                         re-lock",
+                        task.name,
+                        target.display()
+                    ));
+                }
+                Behind::Other => {}
+            }
+        }
+        if !directories.is_empty() {
+            let declared = task
+                .inputs
+                .iter()
+                .map(|input| absolute(&workdir.join(input)))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            links.push((&task.name, declared, directories));
+        }
+    }
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listed = inventory.listed()?;
+    let root = &listed.root;
+    let mut missing = BTreeSet::new();
+    for file in &listed.cached {
+        if file.starts_with(root.join(".sykli")) {
+            continue;
+        }
+        let relative = file.strip_prefix(root).unwrap_or(file);
+        for (task, declared, directories) in &links {
+            if declared.contains(file) {
+                continue;
+            }
+            for (link, directory) in directories {
+                if !relative.starts_with(directory) {
+                    continue;
+                }
+                match fs::symlink_metadata(file) {
+                    // A submodule: a directory in the index, never a file.
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => {
+                        missing.insert(LinkInput {
+                            path: relative.to_string_lossy().replace('\\', "/"),
+                            task: (*task).clone(),
+                            link: (*link).clone(),
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("cannot inspect {}: {error}", file.display()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+fn link_coverage_error(missing: &[LinkInput]) -> String {
+    const SHOWN: usize = 10;
+    let mut listed = missing
+        .iter()
+        .take(SHOWN)
+        .map(|input| {
+            format!(
+                "{} (task {}, through {})",
+                input.path, input.task, input.link
+            )
+        })
+        .collect::<Vec<_>>();
+    if missing.len() > SHOWN {
+        listed.push(format!("and {} more", missing.len() - SHOWN));
+    }
+    format!(
+        "tracked files under a directory that a task's declared symbolic link leads to, which the task does not declare: {}; a link to a directory is declared by its text, so declare each file under it in that task's inputs and re-lock before running (no cached results used)",
         listed.join(", ")
     )
 }
@@ -914,6 +1074,7 @@ fn input_coverage(
         paths,
         cargo_missing_inputs: cargo_missing_inputs(contract, &inventory)?,
         folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
+        link_missing_inputs: link_missing_inputs(contract, &inventory)?,
     })
 }
 
@@ -3905,12 +4066,12 @@ struct InputRecord {
     /// (an ignored or generated file). Not part of the digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     object: Option<String>,
-    /// The input is a symbolic link that leads to no regular file in the
-    /// repository (a directory, a file outside it, nothing), so the run
-    /// recorded the link itself: `sha256` is that of its text, as git stores
-    /// it, and `mode` is absent. Its digest is `sykli-input-link.v1`. A link
-    /// to a file in the repository is recorded by that file's bytes, as
-    /// every input always was, and this is absent.
+    /// The input is a symbolic link to a directory in the repository, or to
+    /// nothing, so the run recorded the link itself: `sha256` is that of its
+    /// text, as git stores it, and `mode` is absent. Its digest is
+    /// `sykli-input-link.v1`. A link to a file, inside the repository or
+    /// out of it, is recorded by that file's bytes, as every input always
+    /// was, and this is absent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     link: bool,
 }
@@ -3927,25 +4088,17 @@ impl InputRecord {
     }
 }
 
-/// The text of the symbolic link at `path`, as git stores it, when `path`
-/// is one that leads to no regular file inside the repository; None for
-/// anything else. Such a link is declared by its text: what it leads to
-/// cannot be (a directory, a file outside the repository, nothing), and
-/// pointing it elsewhere must change the input.
+/// The text of the symbolic link at `path`, as git stores it, when the run
+/// records the link itself: it leads to a directory, or to nothing. None
+/// for anything else, a link to a file included, wherever the file is: that
+/// is read through, as every input always was. A declared link is declared
+/// by its text only where what it leads to cannot be read as a file; the
+/// files under a directory it leads to must be declared beside it, and one
+/// that leads to a directory outside the repository is refused
+/// (`link_missing_inputs`), both before any task.
 fn link_text(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
-    if !linked {
-        return Ok(None);
-    }
-    let root = repo::repository()
-        .ok()
-        .and_then(|repository| repository.resolved());
-    let inside = fs::canonicalize(path)
-        .ok()
-        .filter(|target| target.is_file())
-        .zip(root)
-        .is_some_and(|(target, root)| target.starts_with(root));
-    if inside {
+    if !linked || path.is_file() {
         return Ok(None);
     }
     let text = fs::read_link(path)
@@ -5489,7 +5642,7 @@ fn found_at(tree_ish: &str, path: &str, answers: &Answers) -> Found {
 /// whatever that name is, a symbolic link to a directory included, so it is
 /// refused, as are an absolute target and one that leaves the repository.
 fn link_target(link: &str, target: &str) -> Result<String, String> {
-    let outside = || OUTSIDE.to_string();
+    let outside = || "outside the repository".to_string();
     if target.is_empty() || target.starts_with('/') {
         return Err(outside());
     }
@@ -5521,10 +5674,6 @@ fn link_target(link: &str, target: &str) -> Result<String, String> {
     }
     Ok(parts.join("/"))
 }
-
-/// Why `link_target` cannot follow a link whose target is absolute or
-/// leaves the repository.
-const OUTSIDE: &str = "outside the repository";
 
 /// What one tree has at every declared input's path, and the target each
 /// symbolic link among them names.
@@ -5884,10 +6033,11 @@ impl InputsAt {
 
     /// Judge a record of a symbolic link's own text (`InputRecord::link`),
     /// already found to name the commit's entry at `path`: the commit must
-    /// have a link there with that text, leading to no regular file (outside
-    /// the repository, to a directory, a submodule, nothing, or a link a task
-    /// declares, judged on its own), as the run found it. A link to a file
-    /// is judged by the file, never by its text: a run reads the file.
+    /// have a link there with that text, leading, by its names, inside the
+    /// repository to no regular file (a directory, a submodule, nothing, or
+    /// a link a task declares, judged on its own), as the run found it. A
+    /// link to a file is judged by the file, never by its text: a run reads
+    /// the file. A link out of the repository is refused.
     fn judge_link(&self, path: &str, entry: &str, record: &InputRecord, short: &str) -> Judgment {
         let read = format!(
             "the text of a symbolic link (sha256 {}) recorded by the run",
@@ -5911,9 +6061,11 @@ impl InputsAt {
                 read,
             );
         };
+        // A link out of the repository leads where no commit can show, so
+        // its text vouches for nothing a run read: refused, as a link to a
+        // file outside the repository always was.
         let target = match link_target(path, text) {
             Ok(target) => target,
-            Err(why) if why == OUTSIDE => return Judgment::Judged,
             Err(why) => {
                 return Judgment::Refused(
                     format!("where {path} leads in commit {short}: to {text}, {why}"),

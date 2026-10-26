@@ -80,18 +80,17 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
 /// dependency, a file a source includes, data its tests read (in `tests/`,
 /// a top-level `fixtures/`, beside a pin), and nothing can tell all of them
 /// apart from the files nothing reads. So every cargo task declares every
-/// file git lists here (`listing`), symbolic links whatever they lead to,
-/// except documents, licences and CI configuration (`cargo_inputs::docs`,
-/// which the undeclared-sibling check never asks for either) and sykli's own
-/// contract and lock at the top level. What the completeness rule requires
-/// is declared all the same: Cargo's files by name, every file a source
-/// includes, and every document a source names (a test that reads
-/// `README.md`). So `run` accepts the contract `init` writes, and a commit
-/// of documents keeps it accepted. An untracked file is declared only when
-/// the rule counts it, and an include whose path cannot be known refuses
-/// here as it does in `run`. A file that is declared and read by nothing
-/// costs cache hits when it changes; one that is read and not declared
-/// keeps a cached pass it does not deserve.
+/// file git tracks here (`listing`), documents included (a test may read a
+/// folder of Markdown cases), and every symbolic link but one to a directory
+/// outside the repository, which cannot be bound; all it leaves out is
+/// `.sykli/`, `target/`, and sykli's own contract and lock at the top
+/// level. An untracked file is declared only when the completeness rule
+/// counts it (Cargo's files by name, every file a source includes, every
+/// document a source names), so `run` accepts the contract `init` writes,
+/// and an include whose path cannot be known refuses here as it does in
+/// `run`. A file that is declared and read by nothing costs cache hits when
+/// it changes; one that is read and not declared keeps a cached pass it
+/// does not deserve.
 fn cargo(
     root: &Path,
     contract: Option<&str>,
@@ -135,11 +134,10 @@ fn cargo(
             continue;
         }
         let relative = Path::new(path);
-        let docs = cargo_inputs::docs(relative);
         let required = cargo_inputs::by_name(relative)
             || included.contains(path)
-            || (docs && sources.names(path));
-        let wanted = required || (tracked && !docs && !metadata(path, contract));
+            || (cargo_inputs::docs(relative) && sources.names(path));
+        let wanted = required || (tracked && !metadata(path, contract));
         if wanted && declarable(root, path) {
             inputs.insert(path.clone());
         }
@@ -202,13 +200,28 @@ fn metadata(path: &str, contract: Option<&str>) -> bool {
     matches!(path, "sykli.json" | "sykli.lock") || contract == Some(path)
 }
 
-/// Whether `path` can be declared: a regular file, or a symbolic link,
-/// whatever it leads to (a run records a link that leads to no file in the
-/// repository by its own text). A file gone from the work tree, a directory
-/// or a submodule cannot.
+/// Whether `path` can be declared: a regular file, or a symbolic link (read
+/// through to a file, wherever it is; recorded by its text when it leads to
+/// a directory in the repository or to nothing). A link to a directory
+/// outside the repository cannot be, since no commit holds its files; nor
+/// can a file gone from the work tree, a directory or a submodule.
 fn declarable(root: &Path, path: &str) -> bool {
-    fs::symlink_metadata(root.join(path))
-        .is_ok_and(|meta| meta.is_file() || meta.file_type().is_symlink())
+    let file = root.join(path);
+    let Ok(meta) = fs::symlink_metadata(&file) else {
+        return false;
+    };
+    if meta.is_file() {
+        return true;
+    }
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    let outside = file.is_dir()
+        && fs::canonicalize(&file)
+            .ok()
+            .zip(fs::canonicalize(root).ok())
+            .is_some_and(|(target, root)| !target.starts_with(root));
+    !outside
 }
 
 /// The regular file inside `root` that the symbolic link at `path` leads

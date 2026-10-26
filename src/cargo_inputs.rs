@@ -1,8 +1,8 @@
 //! What a Cargo build reads, as `init` declares it and the completeness
-//! rule requires it (`validate`, `run`, `plan --explain`), and what nothing
-//! is expected to read, which `init` leaves out and the undeclared-sibling
-//! check never asks for. One definition of each, so the contract `init`
-//! writes is one the rules accept, and stays accepted when documents change.
+//! rule requires it (`validate`, `run`, `plan --explain`), and which files
+//! are documents, which the undeclared-sibling check never asks for. One
+//! definition of each, so the contract `init` writes is one the rules
+//! accept, and stays accepted when documents are added.
 //!
 //! A Cargo build reads Cargo's own files (`by_name`), the files its Rust
 //! sources include, and any file a source names by its path (`Sources`).
@@ -44,11 +44,12 @@ pub(crate) fn by_name(relative: &Path) -> bool {
 /// Whether `relative` is documentation, a licence or CI configuration, at
 /// any depth: a file named `*.md`, or whose name starts with `LICENSE`,
 /// `LICENCE`, `COPYING` or `NOTICE` (in any case), or a file under a
-/// directory named `docs` or `.github`. No build or test is expected to read
-/// these, so `init` leaves them out and the undeclared-sibling check does not
-/// ask for them, and a commit of documents never makes a contract refuse.
-/// A file a Rust source includes or names (`Sources`), or that Cargo reads
-/// by name (`by_name`), is declared and required all the same.
+/// directory named `docs` or `.github`. The undeclared-sibling check does
+/// not ask for these, so a commit that adds documents never makes a contract
+/// refuse. `init` declares them like any other file (a test may read a
+/// folder of Markdown cases), and the Cargo rule requires one that a Rust
+/// source includes or names (`Sources`), or that Cargo reads by name
+/// (`by_name`).
 pub(crate) fn docs(relative: &Path) -> bool {
     let names = relative
         .components()
