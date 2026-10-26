@@ -248,8 +248,14 @@ enum Command {
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
-        /// With --commit: the contract to judge by, as for `verify`
-        #[arg(long, default_value = "sykli.rs", requires = "commit")]
+        /// The contract to judge by, as for `verify`. Only with --commit: a run
+        /// (--run) records the contract it ran
+        #[arg(
+            long,
+            default_value = "sykli.rs",
+            requires = "commit",
+            conflicts_with = "run"
+        )]
         contract: PathBuf,
         /// Print one versioned JSON document on stdout (sykli-run-status.v1 with --run,
         /// sykli-commit-status.v1 with --commit); an error goes to stderr and exits 2
