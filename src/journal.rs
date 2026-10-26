@@ -465,6 +465,78 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-{name}-{}-{}-{}",
+            std::process::id(),
+            now(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        directory
+    }
+
+    /// A process that another thread forks has a copy of every descriptor
+    /// until it execs, and a lock belongs to the open file description that
+    /// copy shares. Dropping a lease in that window still releases it: the
+    /// next holder is never refused for a child that only had not exec'd yet.
+    #[test]
+    fn a_dropped_lease_is_free_while_a_forked_child_still_has_its_descriptor() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let directory = scratch("forked");
+        let lease = Lease::acquire(&directory).unwrap();
+        // The child says it has forked, then waits to be told to exec.
+        let (forked, mut has_forked) = UnixStream::pair().unwrap();
+        let (go_on, mut tell) = UnixStream::pair().unwrap();
+        let forker = std::thread::spawn(move || {
+            let mut command = ProcessCommand::new("true");
+            // SAFETY: one write and one read on sockets; nothing allocates.
+            unsafe {
+                command.pre_exec(move || {
+                    (&forked).write_all(&[1])?;
+                    (&go_on).read_exact(&mut [0])
+                });
+            }
+            command.status()
+        });
+        has_forked.read_exact(&mut [0]).unwrap();
+        drop(lease);
+        let next = Lease::acquire_existing(&directory);
+        tell.write_all(&[1]).unwrap();
+        assert!(forker.join().unwrap().unwrap().success());
+        assert!(matches!(next, Ok(Some(_))), "{:?}", next.err());
+        drop(next);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A lease handed to a child stays held by it once this process drops
+    /// its own copy: a task that outlives its coordinator reads as running.
+    #[test]
+    fn a_lease_handed_to_a_child_stays_held_once_this_copy_is_dropped() {
+        let directory = scratch("handed");
+        let lease = Lease::acquire(&directory).unwrap();
+        let mut command = ProcessCommand::new("sh");
+        lease.inherit(&mut command);
+        // The child holds it until its stdin closes.
+        let mut child = command
+            .args(["-c", "read line || true"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(lease);
+        let refused = Lease::acquire_existing(&directory).map(|lease| lease.is_some());
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.starts_with("lease-busy")),
+            "{refused:?}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     /// Shared holders exclude a remover and not each other; a holder that
     /// waited while a remover moved the directory aside gets nothing, and
     /// starts again from a directory that is there.
