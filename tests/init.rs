@@ -570,10 +570,11 @@ fn in_a_git_repository_init_declares_every_file_a_cargo_build_or_test_can_read()
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A contract that leaves out a file a source includes or names, or a
-/// vendored crate's Cargo files, is refused by `validate` as `run` refuses
-/// it, before any task, and with the same exit code (2). A contract its lock
-/// does not pin is still exit 1.
+/// A contract that leaves out a file a source includes, or a vendored
+/// crate's Cargo files, is refused by `validate` as `run` refuses it, before
+/// any task, and with the same exit code (2). A document a test names in a
+/// string only warns, naming where. A contract its lock does not pin is
+/// still exit 1.
 #[test]
 fn validate_and_run_refuse_a_contract_that_leaves_out_a_file_its_sources_read() {
     let root = crate_repository("refuse-includes");
@@ -586,10 +587,6 @@ fn validate_and_run_refuse_a_contract_that_leaves_out_a_file_its_sources_read() 
         "GUIDE.md",
         // Included from the vendored crate's manifest directory.
         "vendor/dep/README.md",
-        // Named by a test: a top-level document by its name, one in `docs/`
-        // by its path.
-        "README.md",
-        "docs/guide.md",
         // The vendored crate's own Cargo files.
         "vendor/dep/Cargo.toml",
         "vendor/dep/src/lib.rs",
@@ -627,6 +624,32 @@ fn validate_and_run_refuse_a_contract_that_leaves_out_a_file_its_sources_read() 
         assert_eq!(code, Some(2), "run without {left_out}: {stderr}");
         assert!(names(&stderr), "{stderr}");
         assert!(!root.join(".sykli/receipts").exists(), "no task ran");
+    }
+    // A document a test names in a string warns, with where, and passes.
+    for (left_out, at) in [
+        ("README.md", "tests/pins.rs:5"),
+        ("docs/guide.md", "tests/pins.rs:6"),
+    ] {
+        let mut edited = written.clone();
+        for task in edited["tasks"].as_array_mut().unwrap() {
+            task["inputs"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|input| input != left_out);
+        }
+        fs::write(
+            root.join("sykli.json"),
+            serde_json::to_vec_pretty(&edited).unwrap(),
+        )
+        .unwrap();
+        let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(0), "validate without {left_out}: {stderr}");
+        let warning = format!(
+            "warning: {left_out} is named in {at} but not declared; declare it if a task reads it"
+        );
+        assert!(stderr.contains(&warning), "{stderr}");
     }
     // Lock drift keeps its own exit code.
     fs::write(
@@ -1061,12 +1084,14 @@ fn a_link_out_of_the_repository_cannot_be_declared() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A document is required only when a string literal in a source names it,
-/// as a test that reads it does: a comment or a doc comment that mentions
-/// one requires nothing, and a path that ends in a document's name does not
-/// name the top-level one.
+/// A document a string literal in a source names, which no task declares,
+/// warns with where it is named, and `validate`, `plan --explain` and `run`
+/// go on: a help text that says "see AGENTS.md" reads nothing. A comment or
+/// a doc comment that mentions a document says nothing at all, and a path
+/// that ends in a document's name does not name the top-level one. An
+/// include of an undeclared file still refuses.
 #[test]
-fn a_document_is_required_when_a_string_names_it_not_when_a_comment_does() {
+fn a_document_a_string_names_warns_and_an_include_still_refuses() {
     let root = temp_root("mentions");
     for (path, contents) in [
         (
@@ -1075,7 +1100,11 @@ fn a_document_is_required_when_a_string_names_it_not_when_a_comment_does() {
         ),
         (
             "src/lib.rs",
-            "//! How to work here is in AGENTS.md.\n/// See README.md and docs/setup.md.\npub fn f() {\n    // CLAUDE.md says so too.\n    let _ = \"home/.claude/CLAUDE.md\";\n}\n",
+            "//! How to work here is in AGENTS.md.\n/// See README.md and docs/setup.md.\npub fn help() {\n    // CLAUDE.md says so too.\n    println!(\"see AGENTS.md\");\n    let _ = \"home/.claude/CLAUDE.md\";\n}\n",
+        ),
+        (
+            "tests/readme.rs",
+            "#[test]\nfn readme() {\n    std::fs::read(\"README.md\").unwrap();\n}\n",
         ),
         ("AGENTS.md", "# agents\n"),
         ("CLAUDE.md", "# claude\n"),
@@ -1087,30 +1116,58 @@ fn a_document_is_required_when_a_string_names_it_not_when_a_comment_does() {
     write(
         &root,
         "sykli.json",
-        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.toml","src/lib.rs"]}]}"#,
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"true","inputs":["Cargo.toml","src/lib.rs","tests/readme.rs"]}]}"#,
     );
+    fs::write(root.join(".gitignore"), ".sykli/\n").unwrap();
     git(&root, &["init", "--quiet"]);
     git(&root, &["add", "."]);
     git(&root, &["commit", "--quiet", "-m", "mentions"]);
+    let warns = |text: &str| {
+        let named = |path: &str, at: &str| {
+            text.contains(&format!(
+                "warning: {path} is named in {at} but not declared; declare it if a task reads it"
+            ))
+        };
+        named("AGENTS.md", "src/lib.rs:5")
+            && named("README.md", "tests/readme.rs:3")
+            && !text.contains("CLAUDE.md")
+            && !text.contains("docs/setup.md")
+    };
     let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
-    assert_eq!(code, Some(0), "mentions require nothing: {stderr}");
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(warns(&stderr), "{stderr}");
+    let (code, stdout, stderr) = sykli(&root, &["plan", "--explain", "--json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        plan["input_coverage"]["named_inputs"],
+        serde_json::json!([
+            {"path": "AGENTS.md", "named_at": "src/lib.rs:5"},
+            {"path": "README.md", "named_at": "tests/readme.rs:3"},
+        ])
+    );
+    let (code, stdout, _) = sykli(&root, &["plan", "--explain"]);
+    assert_eq!(code, Some(0));
+    assert!(warns(&stdout), "{stdout}");
+    let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(warns(&stderr), "{stderr}");
 
+    // An include of a file no task declares still refuses.
     write(
         &root,
-        "tests/readme.rs",
-        "#[test]\nfn readme() {\n    std::fs::read(\"README.md\").unwrap();\n}\n",
+        "src/lib.rs",
+        "pub const TEXT: &str = include_str!(\"text.txt\");\n",
     );
-    write(
-        &root,
-        "sykli.json",
-        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.toml","src/lib.rs","tests/readme.rs"]}]}"#,
-    );
+    write(&root, "src/text.txt", "text\n");
     let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
     assert_eq!(code, Some(2), "{stderr}");
-    assert!(stderr.contains("\"README.md\""), "{stderr}");
-    for unasked in ["AGENTS.md", "CLAUDE.md", "docs/setup.md"] {
-        assert!(!stderr.contains(unasked), "{unasked}: {stderr}");
-    }
+    assert!(
+        stderr.replace("\\\\", "/").contains("src/text.txt"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
     fs::remove_dir_all(root).unwrap();
 }
 
