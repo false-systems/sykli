@@ -128,11 +128,14 @@ enum Command {
         document a string literal names but no task declares only warns (exit 0). In every\n\
         graph, each tracked file beside a task's declared\n\
         inputs must be declared, except documents, licences and CI configuration; and a\n\
-        declared link to a directory needs every file under it declared. It does not check\n\
+        declared link to a directory needs every file under it declared. Neither the Cargo\n\
+        files by name nor the sibling rule asks for the JSON contract being validated or\n\
+        its sykli.lock (an include of either is still asked for). It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
         the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
-        an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
+        an unclosed one, a $${, $worktree_cache without braces in an env value, or\n\
+        ${worktree_cache} anywhere but an env value is invalid.\n\
         These rules apply where a contract is written or run, not where `verify` or\n\
         `status --commit` judge a contract that an earlier version ran.")]
     Validate {
@@ -178,7 +181,8 @@ enum Command {
         keys cover the value as declared, never the directory. On Linux and macOS a run\n\
         holds the directory, and a later run removes it once its worktree is gone\n\
         (removed, moved or pruned, and not locked). Any other ${...} in an env value, an\n\
-        unclosed one, a $${, or ${worktree_cache} anywhere but an env value exits 2.")]
+        unclosed one, a $${, $worktree_cache without braces in an env value, or\n\
+        ${worktree_cache} anywhere but an env value exits 2.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -246,8 +250,14 @@ enum Command {
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
-        /// With --commit: the contract to judge by, as for `verify`
-        #[arg(long, default_value = "sykli.rs", requires = "commit")]
+        /// The contract to judge by, as for `verify`. Only with --commit: a run
+        /// (--run) records the contract it ran
+        #[arg(
+            long,
+            default_value = "sykli.rs",
+            requires = "commit",
+            conflicts_with = "run"
+        )]
         contract: PathBuf,
         /// Print one versioned JSON document on stdout (sykli-run-status.v1 with --run,
         /// sykli-commit-status.v1 with --commit); an error goes to stderr and exits 2
@@ -567,8 +577,21 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
 /// also lists the untracked files that are not ignored (`--others`), which
 /// `--stage` prints without a mode and object id. Nothing runs until a check
 /// needs it.
+///
+/// The contract being run, when it is a JSON file, and the lock beside it
+/// are what the run evaluates, bound by the contract hash and the lock
+/// digest (sykli#73): the rules that ask for a file by its name (Cargo's) or
+/// by its folder (the sibling check) never ask for them, wherever the
+/// contract is kept and however its path is spelled (`evaluated`). What a
+/// Rust source includes is still asked for, the contract too: it is
+/// compiled into the build, and a task's key does not cover the contract.
+/// So is every file under a declared link to a directory. An emitter
+/// (`sykli.rs`) is a Rust source of its crate, which Cargo builds, and is
+/// still asked for.
 struct Inventory {
     cargo: bool,
+    /// The contract and its lock, as given and as the listing spells them.
+    evaluated: Vec<PathBuf>,
     listed: std::cell::OnceCell<Result<Listed, String>>,
 }
 
@@ -579,11 +602,30 @@ struct Listed {
 }
 
 impl Inventory {
-    fn new(contract: &Contract) -> Result<Self, String> {
+    fn new(contract: &Contract, contract_path: &Path) -> Result<Self, String> {
+        let mut named = vec![lock_path(contract_path)];
+        let json = contract_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        if json {
+            named.push(contract_path.to_path_buf());
+        }
+        let mut evaluated = Vec::new();
+        for path in named {
+            evaluated.push(absolute(&path)?);
+            evaluated.extend(as_listed(&path));
+        }
         Ok(Inventory {
             cargo: is_cargo_graph(contract)?,
+            evaluated,
             listed: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Whether `path`, as the listing spells it, is the contract being run
+    /// or its lock.
+    fn evaluated(&self, path: &Path) -> bool {
+        self.evaluated.iter().any(|evaluated| evaluated == path)
     }
 
     fn listed(&self) -> Result<&Listed, String> {
@@ -606,6 +648,30 @@ impl Inventory {
             .as_ref()
             .map_err(Clone::clone)
     }
+}
+
+/// `path` spelled as the listing spells files: its directory resolved, below
+/// the repository's top level as the current directory spells it
+/// (`coverage_root`), so that a contract named through a link to the
+/// repository (macOS's `/tmp`) is the same file. Its own name is kept: a
+/// contract named by a link is pinned by the lock beside the link. None
+/// outside the repository.
+fn as_listed(path: &Path) -> Option<PathBuf> {
+    let repository = repo::repository().ok()?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let resolved = located(directory)?;
+    let below = resolved.strip_prefix(repository.resolved()?).ok()?;
+    absolute(
+        &repository
+            .root_here()
+            .ok()?
+            .join(below)
+            .join(path.file_name()?),
+    )
+    .ok()
 }
 
 /// A document a string literal in a Rust source names, which no task
@@ -673,7 +739,10 @@ fn cargo_missing_inputs(
     };
     for path in &files {
         let relative = path.strip_prefix(root).unwrap_or(path);
-        if cargo_inputs::by_name(relative) || sources.included().contains(*path) {
+        // The contract being run and its lock are not asked for by name,
+        // but are when a source includes them (sykli#73).
+        let by_name = cargo_inputs::by_name(relative) && !inventory.evaluated(path);
+        if by_name || sources.included().contains(*path) {
             wanted.insert((*path).clone());
         } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
             if let Some(at) = sources.named_at(&shown(path)) {
@@ -711,8 +780,8 @@ fn cargo_missing_inputs(
 /// `link_missing_inputs`), if it does, after warning of each document a
 /// source names that no task declares. `validate` asks the same inside a git
 /// repository, so a contract it accepts is one `run` starts.
-fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
-    let inventory = Inventory::new(contract)?;
+fn undeclared_refusal(contract: &Contract, path: &Path) -> Result<Option<String>, String> {
+    let inventory = Inventory::new(contract, path)?;
     let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
     for named in &named {
         eprintln!("warning: {}", named_warning(named));
@@ -797,9 +866,10 @@ fn folder_missing_inputs(
     for file in &listed.cached {
         // Documents, licences and CI configuration are never asked for
         // (`cargo_inputs::docs`), so a commit that adds documents never
-        // refuses a run.
+        // refuses a run; nor are the contract being run and its lock.
         if file.starts_with(root.join(".sykli"))
             || cargo_inputs::docs(file.strip_prefix(root).unwrap_or(file))
+            || inventory.evaluated(file)
         {
             continue;
         }
@@ -902,6 +972,162 @@ fn leads_out_of_the_repository(path: &Path) -> bool {
     matches!(link_behind(path), Behind::Outside(_))
 }
 
+/// Where a declared path leads, every symbolic link on its way followed.
+enum Leads {
+    /// Inside the repository, or there is no repository to judge.
+    Inside,
+    /// Out of it: where a link on the way, or the path's end, leads.
+    Outside(PathBuf),
+    /// Through more than `LINK_HOPS` links: a loop, or as good as one.
+    Endless,
+}
+
+/// How many symbolic links one declared path may lead through, as Linux's
+/// `MAXSYMLINKS`.
+const LINK_HOPS: usize = 40;
+
+/// Where `path` leads (sykli#54): `ext/file.txt` with `ext` a link to a
+/// directory elsewhere, an output `out` whose link leads to a file
+/// elsewhere that the run has yet to make, or `hop` linked to `out`. It is
+/// resolved as the kernel resolves it, part by part from the resolved top
+/// level, following every link, chained or not, also one that leads to
+/// nothing yet, by its text. Wherever a link's text leads, once resolved,
+/// must be inside the repository, and so must the end; a chain of more than
+/// `LINK_HOPS` links is `Endless`.
+fn leads(path: &Path) -> Leads {
+    enum Part {
+        Root(OsString),
+        Up,
+        Name(OsString),
+        /// A link's text is resolved: where it led is judged here.
+        LinkEnd,
+    }
+    let parts = |path: &Path| {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    Some(Part::Root(component.as_os_str().to_owned()))
+                }
+                Component::ParentDir => Some(Part::Up),
+                Component::Normal(name) => Some(Part::Name(name.to_owned())),
+                Component::CurDir => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let Ok(repository) = repo::repository() else {
+        return Leads::Inside;
+    };
+    let (Ok(top), Some(root), Ok(path)) = (
+        repository.root_here(),
+        repository.resolved(),
+        absolute(path),
+    ) else {
+        return Leads::Inside;
+    };
+    // Outside unless it is the root or below it, spelled as resolved (a
+    // link's text may spell the same place another way, as Windows does).
+    let outside = |place: &Path| {
+        !place.starts_with(root) && !located(place).is_some_and(|place| place.starts_with(root))
+    };
+    let Ok(below) = path.strip_prefix(&top) else {
+        return match located(&path).filter(|resolved| outside(resolved)) {
+            Some(target) => Leads::Outside(target),
+            None => Leads::Inside,
+        };
+    };
+    let mut pending: VecDeque<Part> = parts(below).into();
+    let mut resolved = root.to_path_buf();
+    let mut hops = 0;
+    while let Some(part) = pending.pop_front() {
+        match part {
+            Part::Root(root_part) => resolved.push(root_part),
+            Part::Up => {
+                resolved.pop();
+            }
+            Part::LinkEnd => {
+                if outside(&resolved) {
+                    return Leads::Outside(resolved);
+                }
+            }
+            Part::Name(name) => {
+                let next = resolved.join(name);
+                match fs::read_link(&next) {
+                    // A link: its text is resolved from its own directory,
+                    // where `resolved` is, before the rest of the path.
+                    Ok(text) => {
+                        hops += 1;
+                        if hops > LINK_HOPS {
+                            return Leads::Endless;
+                        }
+                        pending.push_front(Part::LinkEnd);
+                        for part in parts(&text).into_iter().rev() {
+                            pending.push_front(part);
+                        }
+                    }
+                    // Not a link, or nothing there yet.
+                    Err(_) => resolved = next,
+                }
+            }
+        }
+    }
+    if outside(&resolved) {
+        Leads::Outside(resolved)
+    } else {
+        Leads::Inside
+    }
+}
+
+/// Refuse a task whose working directory, declared input or declared output
+/// a symbolic link on its way leads out of the repository (sykli#54). Such a
+/// path is relative and climbs nowhere, so the contract's own check passes
+/// it, yet a run would hash a file no commit holds into the key and the
+/// receipt, or write an output, or work, outside. It is judged here, against
+/// the work tree, before any task runs: a link a task makes while it runs is
+/// not seen.
+fn through_links_out(task: &Task) -> Result<(), String> {
+    let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+    let mut paths = vec![(
+        "works in",
+        workdir.display().to_string(),
+        workdir.to_path_buf(),
+    )];
+    for (what, declared) in [
+        ("declares the input", &task.inputs),
+        ("declares the output", &task.outputs),
+    ] {
+        paths.extend(
+            declared
+                .iter()
+                .map(|path| (what, path.clone(), workdir.join(path))),
+        );
+    }
+    for (what, declared, path) in paths {
+        match leads(&path) {
+            Leads::Inside => {}
+            Leads::Outside(target) => {
+                return Err(format!(
+                    "task {:?} {what} {declared:?}, which a symbolic link on its way leads to {}, \
+                     outside the repository: no commit holds what is there, so sykli cannot \
+                     bind it and no receipt of it could verify; declare paths inside the \
+                     repository instead, and re-lock",
+                    task.name,
+                    target.display()
+                ));
+            }
+            Leads::Endless => {
+                return Err(format!(
+                    "task {:?} {what} {declared:?}, which leads through more than {LINK_HOPS} \
+                     symbolic links (a loop): sykli cannot tell whether it stays inside or \
+                     leads outside the repository, so it cannot bind it; declare paths inside \
+                     the repository instead, and re-lock",
+                    task.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A file under the directory a task's declared symbolic link leads to,
 /// which the task does not declare.
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -942,6 +1168,7 @@ fn link_missing_inputs(
                 Behind::Other => {}
             }
         }
+        through_links_out(task)?;
         if !directories.is_empty() {
             let declared = task
                 .inputs
@@ -1068,7 +1295,7 @@ fn input_coverage(
     base: Option<&str>,
 ) -> Result<InputCoverage, String> {
     let repository = coverage_root()?;
-    let inventory = Inventory::new(contract)?;
+    let inventory = Inventory::new(contract, contract_path)?;
     let base_commit = match base {
         Some(base) => Some(git(&[
             "rev-parse",
@@ -1282,9 +1509,23 @@ fn explain_plan(
                 .iter()
                 .map(|name| (name.as_str(), stable_keys[name.as_str()].as_str()))
                 .collect();
-            match cache_key(task, &runtime, &after, &contract_inputs) {
+            // Only a run makes the inherit key; with none yet, nothing is
+            // cached under it, and explaining never makes it.
+            let unkeyed = if task.inherit.is_empty() {
+                Ok(false)
+            } else {
+                made_inherit_key().map(|key| key.is_none())
+            };
+            match unkeyed.and_then(|unkeyed| {
+                (!unkeyed)
+                    .then(|| cache_key(task, &runtime, &after, &contract_inputs))
+                    .transpose()
+            }) {
+                Ok(None) => CacheExplanation::Missing {
+                    code: CacheMiss::EntryMissing,
+                },
                 Err(message) => CacheExplanation::InputError { message },
-                Ok(key) => match cache.inspect(task, &key, &runtime.fingerprint) {
+                Ok(Some(key)) => match cache.inspect(task, &key, &runtime.fingerprint) {
                     Ok(entry) => {
                         // Restoring outputs can change downstream inputs, even on a cache hit.
                         if task.outputs.is_empty() {
@@ -1370,7 +1611,13 @@ fn located(path: &Path) -> Option<PathBuf> {
     let path = absolute(path).ok()?;
     path.ancestors().find_map(|ancestor| {
         let resolved = fs::canonicalize(ancestor).ok()?;
-        Some(resolved.join(path.strip_prefix(ancestor).ok()?))
+        let rest = path.strip_prefix(ancestor).ok()?;
+        // Joining nothing would end the path in a separator.
+        Some(if rest.as_os_str().is_empty() {
+            resolved
+        } else {
+            resolved.join(rest)
+        })
     })
 }
 
@@ -1545,7 +1792,7 @@ fn main() -> ExitCode {
                     // outside a git repository there is no inventory to
                     // judge, and `run` cannot start at all.
                     if repo::repository().is_ok() {
-                        match undeclared_refusal(&loaded.0) {
+                        match undeclared_refusal(&loaded.0, &contract) {
                             Ok(None) => {}
                             Ok(Some(refusal)) | Err(refusal) => return Err((2, refusal)),
                         }
@@ -2677,8 +2924,8 @@ fn emit_contract(path: &Path) -> Result<Vec<u8>, String> {
 ///
 /// This is a check on what a contract may *declare*. A declared path that stays
 /// inside the tree can still resolve outside it through a symlink; that is a
-/// property of the tree at execution time, not of the contract, and is tracked
-/// separately.
+/// property of the work tree, not of the contract, and is refused where the
+/// work tree is judged, before any task runs (`through_links_out`, sykli#54).
 fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), String> {
     validate_path_within(task, field, path, "the repository")
 }
@@ -3160,9 +3407,12 @@ struct TaskReceipt {
     stdout_digest: String,
     stderr_digest: String,
     output_digests: BTreeMap<String, String>,
-    /// Digests of inherited environment values, by name; `absent` when unset.
+    /// Keyed digests of inherited environment values, by name; `absent` when
+    /// unset (`inherited_keyed_digests`). Receipts before it recorded a plain
+    /// SHA-256 as `inherited_digests`, which nothing read and is no longer
+    /// written: a guess at a short value could be checked against it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    inherited_digests: BTreeMap<String, String>,
+    inherited_keyed_digests: BTreeMap<String, String>,
     outcome: Outcome,
     importable: bool,
     class: Option<String>,
@@ -3472,7 +3722,7 @@ fn run(
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());
     }
-    if let Some(refusal) = undeclared_refusal(contract)? {
+    if let Some(refusal) = undeclared_refusal(contract, contract_path)? {
         return Err(refusal);
     }
     let subject = subject(contract, contract_path)?;
@@ -4035,6 +4285,8 @@ fn launch(
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
     let declared = worktree_cache::environment(task)?;
+    // Before the task starts: its key needed them already (`cache_key`).
+    let inherited_keyed_digests = inherited_keyed_digests(task)?;
     let errored = |error: &str, class: &'static str| {
         Ok(Launched::Ran {
             record: Box::new(empty_task_receipt(
@@ -4279,7 +4531,7 @@ fn launch(
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             output_digests,
-            inherited_digests: inherited_digests(task),
+            inherited_keyed_digests,
             outcome,
             importable,
             class,
@@ -4386,7 +4638,8 @@ fn empty_task_receipt(
         stdout_digest: sha256(&[]),
         stderr_digest: sha256(&[]),
         output_digests: BTreeMap::new(),
-        inherited_digests: inherited_digests(task),
+        // A task that errored because the key cannot be read records none.
+        inherited_keyed_digests: inherited_keyed_digests(task).unwrap_or_default(),
         outcome,
         importable: outcome != Outcome::Errored,
         class: Some(class.into()),
@@ -4783,7 +5036,7 @@ fn cache_key(
         inputs,
         runtime: &runtime.fingerprint,
         after,
-        inherited: inherited_digests(task)
+        inherited: inherited_keyed_digests(task)?
             .iter()
             .map(|(name, digest)| (name.as_str(), digest.clone()))
             .collect(),
@@ -4793,19 +5046,253 @@ fn cache_key(
     Ok(sha256(&bytes))
 }
 
-/// Digests of the inherited variables' current values, never the values.
-/// An unset variable digests as `absent`, which is not any value's digest.
-fn inherited_digests(task: &Task) -> BTreeMap<String, String> {
-    task.inherit
+/// Digests of the inherited variables' current values, never the values,
+/// as a receipt's `inherited_keyed_digests`: each is HMAC-SHA256 of
+/// `sykli-inherited.v1`, the name and the value (NUL-separated) under the
+/// clone's own key (`inherit_key`). An unset variable digests as `absent`,
+/// which is not any value's digest.
+///
+/// A plain SHA-256 of a value, which receipts recorded as
+/// `inherited_digests` before, is a check anyone holding a receipt can run
+/// a guess against, and CI uploads receipts: a short token falls to trying
+/// every candidate. A salt written into the receipt would not stop that, as
+/// the salt is then as public as the digest. Keyed by a secret no receipt
+/// holds, the digest still tells two runs of one clone apart, so the cache
+/// misses when a value changes, and tells nobody else anything. The price:
+/// digests are comparable only within one clone (another clone, a fresh
+/// CI checkout, has its own key), and nobody can check a receipt's digest
+/// against a value they know. The key is only as secret as the clone: any
+/// task the clone runs can read it (on a runner that keeps `.git` between
+/// jobs, a pull request's code too), and whoever has read it can try
+/// guesses against every digest the clone publishes.
+///
+/// A task that inherits nothing asks for no key; one that does makes it
+/// when it is missing, and errors when it cannot be read or made.
+fn inherited_keyed_digests(task: &Task) -> Result<BTreeMap<String, String>, String> {
+    if task.inherit.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let key = inherit_key()?;
+    Ok(task
+        .inherit
         .iter()
         .map(|name| {
             let digest = match std::env::var_os(name) {
-                Some(value) => sha256(value.as_encoded_bytes()),
+                Some(value) => {
+                    let mut message = b"sykli-inherited.v1\0".to_vec();
+                    message.extend_from_slice(name.as_bytes());
+                    message.push(0);
+                    message.extend_from_slice(value.as_encoded_bytes());
+                    hmac_sha256(key, &message)
+                }
                 None => "absent".to_string(),
             };
             (name.clone(), digest)
         })
-        .collect()
+        .collect())
+}
+
+/// HMAC-SHA256 (RFC 2104) of `message` under `key`, as lowercase hex.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let padded = |pad: u8| block.map(|byte| byte ^ pad);
+    let inner = Sha256::new()
+        .chain_update(padded(0x36))
+        .chain_update(message)
+        .finalize();
+    let outer = Sha256::new()
+        .chain_update(padded(0x5c))
+        .chain_update(inner)
+        .finalize();
+    format!("{outer:x}")
+}
+
+/// Where the key that inherited values are digested under is kept: in the
+/// common git directory, beside the runs, so every worktree of a clone
+/// shares it, and never in a worktree's `.sykli/`, which a person may copy,
+/// cache or upload with its receipts.
+const INHERIT_KEY: &str = "sykli/inherit-key";
+
+/// The clone's key, read once per process; the key a run made first.
+static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// The clone's key for `inherited_keyed_digests`, made by the first run that
+/// needs it.
+///
+/// Bound: one file of 64 hex digits (32 bytes) per clone, made once and
+/// never rewritten; it goes when the clone does. Deleting it costs a cache
+/// miss for each task that inherits, and makes earlier digests incomparable
+/// with later ones. A fresh clone makes its own, so a CI job that restores
+/// `.sykli/` into a fresh clone misses the cache for every task that
+/// inherits, on every run.
+fn inherit_key() -> Result<&'static [u8; 32], String> {
+    if let Some(key) = KEY.get() {
+        return Ok(key);
+    }
+    let key = read_or_make_key(&inherit_key_path()?)?;
+    Ok(KEY.get_or_init(|| key))
+}
+
+/// The clone's key if a run has made it, never making one: for
+/// `plan --explain`, which only reads. Without one, nothing is cached under
+/// it.
+fn made_inherit_key() -> Result<Option<&'static [u8; 32]>, String> {
+    if let Some(key) = KEY.get() {
+        return Ok(Some(key));
+    }
+    let key = read_key(&inherit_key_path()?)?;
+    Ok(key.map(|key| KEY.get_or_init(|| key)))
+}
+
+fn inherit_key_path() -> Result<PathBuf, String> {
+    let repository = repo::repository().map_err(|_| {
+        "a task inherits a variable, whose value is digested under a key kept in the git \
+         common directory, and there is no git repository here"
+            .to_string()
+    })?;
+    Ok(repository.common_dir.join(INHERIT_KEY))
+}
+
+/// The key at `path`, or None when there is none.
+fn read_key(path: &Path) -> Result<Option<[u8; 32]>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let mut key = [0u8; 32];
+    let decoded = text.len() == 64
+        && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && key
+            .iter_mut()
+            .zip(text.as_bytes().chunks(2))
+            .all(|(byte, pair)| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .map(|value| *byte = value)
+                    .is_some()
+            });
+    if !decoded {
+        return Err(format!(
+            "{}: not a key sykli wrote; remove it, and the next run makes a new one",
+            path.display()
+        ));
+    }
+    Ok(Some(key))
+}
+
+#[cfg(windows)]
+mod windows_random {
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        pub(super) fn BCryptGenRandom(
+            algorithm: *mut std::ffi::c_void,
+            buffer: *mut u8,
+            size: u32,
+            flags: u32,
+        ) -> i32;
+    }
+}
+
+/// 32 bytes from the operating system's generator: `/dev/urandom` on Unix,
+/// and on Windows `BCryptGenRandom` with the system-preferred generator,
+/// declared here (`bcrypt.dll`, part of Windows), so no crate is needed.
+fn random_key() -> io::Result<[u8; 32]> {
+    let mut key = [0u8; 32];
+    #[cfg(unix)]
+    fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
+    #[cfg(windows)]
+    {
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x2;
+        // SAFETY: no algorithm handle, with the flag that asks for the
+        // system's generator; `key` is writable for its whole length.
+        let status = unsafe {
+            windows_random::BCryptGenRandom(
+                std::ptr::null_mut(),
+                key.as_mut_ptr(),
+                key.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::other(format!(
+                "BCryptGenRandom failed with NTSTATUS {status:#x}"
+            )));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no source of randomness for the inherit key on this platform",
+    ));
+    #[cfg(any(unix, windows))]
+    Ok(key)
+}
+
+/// The key at `path`, made there first when there is none: 32 bytes from
+/// the operating system (`random_key`), written whole as hex to a private
+/// temporary, synced, and linked into place, so a reader never sees part of
+/// one and two processes that race agree on the first. Where the file
+/// system has no hard links (exFAT, some FUSE or SMB mounts), it is renamed
+/// into place unless a key is there already (`place_by_rename`): two first
+/// runs that race there may each digest one run under their own key, and
+/// the later one is kept, which costs a cache miss. On Linux and macOS a
+/// run never gets here, as its journal already needs hard links in the same
+/// directory (`publish_with`); it is kept for Windows, where a run is not
+/// journaled and nothing else there needs them.
+fn read_or_make_key(path: &Path) -> Result<[u8; 32], String> {
+    if let Some(key) = read_key(path)? {
+        return Ok(key);
+    }
+    let shown = |error: io::Error| format!("{}: {error}", path.display());
+    let directory = path.parent().ok_or("the key has no directory")?;
+    fs::create_dir_all(directory).map_err(shown)?;
+    let key = random_key().map_err(shown)?;
+    let text = key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let temporary = directory.join(format!(".inherit-key-{}", private_name()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            canonical::sync(&file, canonical::Durability::Fsync)
+        })
+        .and_then(|()| match fs::hard_link(&temporary, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(_) => place_by_rename(&temporary, path),
+        });
+    // The temporary never outlives this call, whatever happened.
+    let _ = fs::remove_file(&temporary);
+    written.map_err(shown)?;
+    let _ = canonical::sync_directory(directory, canonical::Durability::Fsync);
+    read_key(path)?.ok_or_else(|| format!("{}: made, then gone", path.display()))
+}
+
+/// Move `temporary` to `path` unless something is there already, for a file
+/// system without hard links. The check and the rename are two steps, so a
+/// key another process places between them is replaced.
+fn place_by_rename(temporary: &Path, path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Ok(());
+    }
+    fs::rename(temporary, path)
 }
 
 /// Every task's declared inputs as the run reads them, each with the tree
@@ -5161,7 +5648,7 @@ impl Cache for LocalCache {
             stdout_digest: sha256(&[]),
             stderr_digest: sha256(&[]),
             output_digests,
-            inherited_digests: inherited_digests(task),
+            inherited_keyed_digests: inherited_keyed_digests(task).ok()?,
             outcome: Outcome::Cached,
             importable: true,
             class: None,
@@ -7881,6 +8368,92 @@ mod tests {
         assert_ne!(private_name(), private_name());
         assert_eq!(private_name().len(), 32);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// RFC 4231, test cases 1, 2 and 6 (a key longer than a block).
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        assert_eq!(
+            hmac_sha256(&[0x0b; 20], b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hmac_sha256(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    /// The key is made once, whole, and read back the same by every process
+    /// that asks; one that is not what sykli writes is refused, never
+    /// replaced, so a run never digests under a key it did not make.
+    #[test]
+    fn the_inherit_key_is_made_once_and_never_replaced() {
+        let base = std::env::temp_dir().join(format!("sykli-key-{}", private_name()));
+        let path = base.join("sykli/inherit-key");
+        let keys = std::thread::scope(|scope| {
+            (0..4)
+                .map(|_| scope.spawn(|| read_or_make_key(&path)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(keys.iter().all(|key| *key == keys[0]));
+        let hex = keys[0]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(fs::read_to_string(&path).unwrap(), hex);
+        assert_eq!(read_key(&path).unwrap(), Some(keys[0]));
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "no temporary is left"
+        );
+        for bad in [
+            "short".to_string(),
+            format!("+{}", &hex[1..]),
+            format!("{hex}\n"),
+        ] {
+            fs::write(&path, &bad).unwrap();
+            let refused = read_or_make_key(&path).unwrap_err();
+            assert!(refused.contains("not a key sykli wrote"), "{refused}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), bad);
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The key is 32 bytes from the operating system, never derived from
+    /// anything a process holds: two draws differ.
+    #[test]
+    fn the_inherit_key_comes_from_the_operating_system() {
+        let (one, two) = (random_key().unwrap(), random_key().unwrap());
+        assert_eq!(one.len(), 32);
+        assert_ne!(one, two);
+        assert_ne!(one, [0; 32]);
+    }
+
+    /// Without hard links the key is renamed into place, never over one
+    /// that is there already.
+    #[test]
+    fn without_hard_links_a_key_is_renamed_into_place_once() {
+        let base = std::env::temp_dir().join(format!("sykli-rename-{}", private_name()));
+        fs::create_dir_all(&base).unwrap();
+        let (path, first, second) = (base.join("key"), base.join("a"), base.join("b"));
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        place_by_rename(&first, &path).unwrap();
+        place_by_rename(&second, &path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+        assert!(!first.exists() && second.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     /// A task that declares no contract inputs keeps the key it had before

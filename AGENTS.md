@@ -58,7 +58,8 @@ nothing is globbed.
 - No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls
   (`flock`, `fcntl`, `setsid`, `setpgid`, `kill`, `killpg`, `signal`) are
   declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via
-  libc.
+  libc. On Windows, `BCryptGenRandom` (bcrypt.dll, for the inherit key) is
+  declared once, in `windows_random` in `src/main.rs`.
 - `src/journal.rs` and `src/runs.rs` are `#[cfg(unix)]` (on Windows `runs` is a
   stub of uninhabited types), and so are `status` and `resume`; anything only
   Unix code uses must be `cfg_attr(not(unix), allow(dead_code))`.
@@ -75,7 +76,10 @@ domains and schema meanings never change; incompatible changes are a new `.vN`.
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
 `inherit` variables (inherited values reach the task; only their digests reach
-the receipt). A declared `env` value may name `${worktree_cache}`
+the receipt, keyed: HMAC-SHA256 under 32 random bytes of the clone's own,
+`sykli/inherit-key` in the common git directory, made only by a run,
+`inherited_keyed_digests`; the plain `inherited_digests` is no longer written,
+so no receipt holds a digest a guess can be checked against). A declared `env` value may name `${worktree_cache}`
 (`src/worktree_cache.rs`): `<git-common-dir>/sykli/worktrees/<id>/cache`, the
 16-hex id from the worktree's incarnation: its resolved top level and git
 directory (read from its `.git`, no git process) and the token in that git
@@ -157,7 +161,10 @@ repository once per process (one `git rev-parse`, or `--repo-root` and
 one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 (`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
 `.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
-undeclared-file checks (`Inventory`, through `repo::files`), which
+undeclared-file checks (`Inventory`, through `repo::files`; the Cargo files by name and the
+sibling check leave out the JSON contract being run and its lock, however
+spelled, `evaluated`, sykli#73, and an include of either is still asked
+for), which
 `validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
 same listing. What Cargo reads (by name, the files sources include, the
 documents their string literals name, which only warn: `Sources`, a small Rust
@@ -167,7 +174,10 @@ lexer) and what is a document
 one to a directory in the repository or to nothing is recorded by its text
 (`link_text`, `InputRecord::link`), with every file under such a directory
 required of the same task, and one that leads out of the repository is
-refused (`link_missing_inputs`). A text record is judged by the commit's link
+refused (`link_missing_inputs`), as is a workdir, input or output that a
+link on its way leads out of it (`through_links_out`, `leads`: every link
+followed by its text, chained or dangling, at most `LINK_HOPS`; sykli#54;
+judged before any task, so a link a task makes while it runs is not seen). A text record is judged by the commit's link
 text (`judge_link`), after a third round of the same `cat-file` asks where it
 leads (`link_target_names`, `PathFacts::around`).
 `verify --commit` and `hook pre-push`

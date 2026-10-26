@@ -57,6 +57,32 @@ fn help_lists_the_flags_other_tools_detect() {
     }
 }
 
+/// `status --contract` names the contract `--commit` judges by; `--run`
+/// reads a run's journal, which records its own contract. Given with
+/// `--run`, it was accepted and ignored, so a caller could believe the run
+/// was judged by it. It is refused (exit 2) and the refusal names both
+/// flags; `verify --contract` without `--commit` still judges the checkout.
+#[cfg(unix)]
+#[test]
+fn status_refuses_a_contract_with_run() {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["status", "--run", "run_x", "--contract", "other.json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("--contract") && said.contains("--run"),
+        "{said}"
+    );
+    assert!(!said.contains("is not a run id"), "{said}");
+    let help = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["status", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Only with --commit"));
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_mode_invalidates_cache_and_receipt_inputs() {
@@ -640,7 +666,9 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
     };
     let first = run("alpha");
     assert_eq!(first["tasks"][0]["stdout"], "alpha");
-    let digests = &first["tasks"][0]["inherited_digests"];
+    // The old field, a plain SHA-256, is no longer written.
+    assert!(first["tasks"][0]["inherited_digests"].is_null(), "{first}");
+    let digests = &first["tasks"][0]["inherited_keyed_digests"];
     assert_eq!(digests["SYKLI_UNSET_TEST"], "absent");
     let digest = digests["SYKLI_INHERIT_TEST"].as_str().unwrap();
     assert_eq!(digest.len(), 64);
@@ -654,7 +682,7 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
     );
     let cached = run("alpha");
     assert_eq!(cached["tasks"][0]["outcome"], "cached");
-    assert_eq!(cached["tasks"][0]["inherited_digests"], *digests);
+    assert_eq!(cached["tasks"][0]["inherited_keyed_digests"], *digests);
     let changed = run("beta");
     assert_eq!(
         changed["tasks"][0]["outcome"], "passed",
@@ -675,6 +703,112 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("inherits"));
     fs::remove_dir_all(root).unwrap();
+}
+
+/// An inherited value's digest in a receipt was its plain SHA-256, and CI
+/// uploads receipts: a short token could be found from it by trying every
+/// candidate. The digest is now keyed by a secret of the clone's own, which
+/// no receipt holds, so a receipt carries nothing a guess can be checked
+/// against. It is the same on every run of one clone (the cache still hits
+/// for the same value and misses for another), and another clone, with its
+/// own key, digests the same value differently. A contract that inherits
+/// nothing makes no key.
+#[test]
+fn an_inherited_value_leaves_no_guessable_digest_in_a_receipt() {
+    use sha2::{Digest, Sha256};
+    let contract = r#"{"schema":"sykli-contract.v1","tasks":[{"name":"use","run":"test -n \"$SYKLI_TOKEN_TEST\"","inherit":["SYKLI_TOKEN_TEST"]}]}"#;
+    let root = graph_repo("inherit-key", contract);
+    let key = root.join(".git/sykli/inherit-key");
+    let run = |root: &std::path::Path, value: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .env("SYKLI_TOKEN_TEST", value)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let plain = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+    let explain = |root: &std::path::Path| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["plan", "--explain", "--json"])
+            .env("SYKLI_TOKEN_TEST", "1234")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        plan["explanations"][0]["cache"]["status"].clone()
+    };
+
+    // plan --explain only reads: before any run there is no key, so nothing
+    // can be cached under it, and it makes none.
+    assert_eq!(explain(&root), "missing");
+    assert!(!key.exists(), "plan --explain made the key");
+    let first = run(&root, "1234");
+    assert!(first["tasks"][0]["inherited_digests"].is_null(), "{first}");
+    assert_eq!(explain(&root), "available");
+    let digest = first["tasks"][0]["inherited_keyed_digests"]["SYKLI_TOKEN_TEST"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(digest.len(), 64);
+    let receipt = first.to_string();
+    for guess in ["1234", "SYKLI_TOKEN_TEST=1234", "SYKLI_TOKEN_TEST\u{0}1234"] {
+        assert!(!receipt.contains(&plain(guess)), "{guess}: {receipt}");
+    }
+    assert!(key.is_file(), "the key is kept in the common git directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is its owner's alone");
+    }
+    assert!(!receipt.contains(fs::read_to_string(&key).unwrap().trim()));
+
+    let again = run(&root, "1234");
+    assert_eq!(again["tasks"][0]["outcome"], "cached");
+    assert_eq!(
+        again["tasks"][0]["inherited_keyed_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str()
+    );
+    let changed = run(&root, "1235");
+    assert_eq!(changed["tasks"][0]["outcome"], "passed");
+    assert_ne!(
+        changed["tasks"][0]["inherited_keyed_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str()
+    );
+
+    let clone = root.with_extension("clone");
+    let cloned = Command::new("git")
+        .args(["clone", "--quiet"])
+        .arg(&root)
+        .arg(&clone)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success());
+    let other = run(&clone, "1234");
+    assert_ne!(
+        other["tasks"][0]["inherited_keyed_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str(),
+        "another clone has its own key"
+    );
+
+    // Nothing inherited, no key.
+    let plain_root = graph_repo(
+        "no-inherit-key",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    );
+    run(&plain_root, "1234");
+    assert!(!plain_root.join(".git/sykli/inherit-key").exists());
+    for directory in [root, clone, plain_root] {
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 /// sykli#64: a Cargo graph runs on whatever compiler rustup resolves. Moving
@@ -1609,6 +1743,177 @@ fn an_undeclared_file_in_a_folder_a_task_reads_refuses_the_run() {
     )
     .unwrap();
     assert_eq!(run_json(&root).0, Some(0));
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// sykli#73: a contract kept in a folder beside the files its tasks read
+/// (`ci/sykli.json`, with `ci/sykli.lock`) refused its own run, because the
+/// folder rule asked for the contract and its lock as undeclared files, as
+/// did the Cargo rule for a contract under `tests/`. The contract being run
+/// and its lock are what the run evaluates, not what a task reads, so
+/// neither rule asks for them; any other file there still refuses.
+#[test]
+fn a_contract_in_a_folder_is_not_asked_for_by_its_own_run() {
+    let root = graph_repo(
+        "contract-folder",
+        r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
+    );
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    for (folder, cargo) in [("ci", false), ("tests/gate", true)] {
+        let inputs = if cargo {
+            format!(r#"["Cargo.toml","{folder}/check.sh"]"#)
+        } else {
+            format!(r#"["{folder}/check.sh"]"#)
+        };
+        fs::create_dir_all(root.join(folder)).unwrap();
+        if cargo {
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+        }
+        fs::write(root.join(folder).join("check.sh"), "echo checked\n").unwrap();
+        let contract = format!("{folder}/sykli.json");
+        fs::write(
+            root.join(&contract),
+            format!(
+                r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"check","run":"sh {folder}/check.sh","inputs":{inputs}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(sykli(&["lock", &contract]).status.success());
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", folder]);
+
+        let validate = sykli(&["validate", &contract]);
+        assert_eq!(
+            validate.status.code(),
+            Some(0),
+            "{folder}: {}",
+            String::from_utf8_lossy(&validate.stderr)
+        );
+        let run = sykli(&["run", &contract, "--json"]);
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{folder}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let plan = sykli(&["plan", &contract, "--explain", "--json"]);
+        assert_eq!(plan.status.code(), Some(0), "{folder}");
+        let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert!(plan["input_coverage"]["folder_missing_inputs"].is_null());
+        assert_eq!(
+            plan["input_coverage"]["cargo_missing_inputs"],
+            serde_json::json!([])
+        );
+
+        // Any other file beside them is still asked for.
+        fs::write(root.join(folder).join("other.txt"), "other").unwrap();
+        git(&["add", "."]);
+        let run = sykli(&["run", &contract]);
+        assert_eq!(run.status.code(), Some(2), "{folder}");
+        let said = String::from_utf8_lossy(&run.stderr);
+        // Named as each rule spells it (the Cargo rule keeps Windows separators).
+        assert!(said.contains("other.txt"), "{said}");
+        assert!(
+            !said.contains("sykli.json") && !said.contains("sykli.lock"),
+            "{said}"
+        );
+        git(&["rm", "--quiet", "--cached", &format!("{folder}/other.txt")]);
+        fs::remove_file(root.join(folder).join("other.txt")).unwrap();
+    }
+    // The contract named through a link to the repository (macOS's /tmp is
+    // one) is the same contract, and still not asked for.
+    #[cfg(unix)]
+    {
+        let alias = root.with_extension("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let contract = alias.join("ci/sykli.json");
+        let validate = sykli(&["validate", contract.to_str().unwrap()]);
+        assert_eq!(
+            validate.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&validate.stderr)
+        );
+        fs::remove_file(alias).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// What a Rust source includes is compiled into the build, so the Cargo
+/// rule asks for it whatever it is, the contract included: a task's key
+/// does not cover the contract, and with the contract included by the
+/// source and undeclared, an edit of the contract kept the task's cached
+/// pass. (A doc comment's include counts, so this one names none.) Only the
+/// rules that ask for files by their name or folder leave the contract out.
+#[test]
+fn a_contract_a_source_includes_is_still_asked_for() {
+    let root = graph_repo(
+        "contract-included",
+        r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
+    );
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.rs"),
+        "const C: &str = include_str!(\"../sykli.json\");\nfn main() {\n    println!(\"{}\", C.len());\n}\n",
+    )
+    .unwrap();
+    let sykli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    for (inputs, code) in [
+        (r#"["Cargo.toml","src/main.rs"]"#, 2),
+        (r#"["Cargo.toml","src/main.rs","sykli.json"]"#, 0),
+    ] {
+        fs::write(
+            root.join("sykli.json"),
+            format!(
+                r#"{{"schema":"sykli-contract.v1","tasks":[{{"name":"t","run":"cargo run -q","inputs":{inputs}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(sykli(&["lock", "sykli.json"]).status.success());
+        let validate = sykli(&["validate", "sykli.json"]);
+        let said = String::from_utf8_lossy(&validate.stderr);
+        assert_eq!(validate.status.code(), Some(code), "{inputs}: {said}");
+        if code == 2 {
+            assert!(
+                said.contains("Cargo inputs are undeclared") && said.contains("sykli.json"),
+                "{said}"
+            );
+        }
+    }
     fs::remove_dir_all(root).unwrap();
 }
 

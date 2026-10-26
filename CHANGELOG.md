@@ -420,6 +420,57 @@ contract consumer can observe; internal refactors are not listed.
   inside the repository is not refused unless it has a `..` in it. With no
   git repository around the current directory, nothing is refused. Where a
   contract is judged, nothing changes.
+- A receipt records each inherited value as `inherited_keyed_digests`, and
+  no longer writes `inherited_digests`. The old field held the plain
+  SHA-256 of the value, and CI uploads receipts: a short token could be
+  found by trying every candidate against it. Nothing in sykli read it
+  (`verify` never did), and an older receipt that has it still verifies.
+  The new field (64 hex digits, or `absent`), and the cache key of a task
+  that inherits, is HMAC-SHA256 of `sykli-inherited.v1`, the name and the
+  value, under a key of the clone's own: 32 bytes from the operating system
+  (`/dev/urandom`; `BCryptGenRandom` on Windows), kept as hex in
+  `<git-common-dir>/sykli/inherit-key` (0600 where files have modes), made
+  by the first run that needs it and never rewritten. A salt recorded in
+  the receipt would be as public as the digest, so the key is kept where no
+  receipt goes. What it costs:
+  - Digests are comparable only between runs of one clone, and nobody can
+    check one against a value they know.
+  - The key is only as secret as the clone. Any task the clone runs can
+    read it, on a runner that keeps `.git` between jobs a pull request's
+    code too, and whoever has read it can try guesses against every digest
+    the clone publishes.
+  - Each task that inherits misses the cache once in a clone that lasts. A
+    fresh clone makes a new key, so a CI job that restores `.sykli/` into a
+    fresh clone misses the cache for every task that inherits, on every run.
+  - A contract that inherits nothing makes no key, and its keys are
+    unchanged. `plan --explain` never makes the key: before a run has, it
+    reports a task that inherits as `missing`. Where the file system has no
+    hard links, the key is renamed into place instead, and two first runs
+    racing there may each use their own key once.
+  - A task's own output is not covered: a value it prints is in its
+    captured output and `stdout_digest`.
+- Where a contract is written or run (`validate` exit 1; `lock`, `plan`,
+  `run` exit 2), `$worktree_cache` without braces in an `env` value is
+  refused, and the refusal names `${worktree_cache}`. sykli never expanded
+  it: the task got it as written, and a build tool made a directory named
+  `$worktree_cache/` inside the work tree while the run passed. A name that
+  goes on (`$worktree_cache_dir`) is not the placeholder and is kept.
+- `status --run ID --contract PATH` is refused (exit 2, naming both flags).
+  `--contract` names the contract `--commit` judges by; with `--run` it was
+  accepted and ignored. `status --commit` and `verify --contract` are
+  unchanged.
+- Inside a git repository, `validate`, `plan --explain` and `run` (exit 2)
+  refuse a task whose workdir, declared input or declared output a symbolic
+  link on its way leads out of the repository: an input `ext/file.txt` with
+  `ext` a link to a directory elsewhere validated, was hashed into the key
+  and the receipt from outside, and passed, and an output or a workdir there
+  was written outside (sykli#54). Every link on the way is followed by its
+  text, chained or not, also one that leads to nothing yet (an output's link
+  before the run that makes it): where each one leads, and the end, must be
+  inside the repository, and a path through more than 40 links (a loop) is
+  refused too. It is judged against the work tree before any task runs, so
+  a link a task makes while it runs is not seen. A link, or a chain, that
+  stays inside the repository is not refused.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
@@ -588,6 +639,19 @@ contract consumer can observe; internal refactors are not listed.
   repository, spelled through a symbolic link (macOS's `/var` for
   `/private/var`), refused it as outside the repository (exit 2); it is now
   read from the commit.
+- A contract kept in a folder beside the files its tasks read
+  (`ci/sykli.json` with `ci/sykli.lock`, beside `ci/check.sh`) is no longer
+  refused by its own run, `validate` or `plan --explain` (sykli#73): the
+  undeclared-sibling check asked for the contract and its lock, and the
+  Cargo completeness rule did the same for one under `tests/`. Neither
+  rule asks for the JSON contract being run or its lock by name or folder,
+  however the path is spelled (through a link such as macOS's `/tmp`):
+  they are bound by the contract hash and the lock digest. A file a Rust
+  source includes is still asked for, the contract included (a task's key
+  does not cover the contract), and so is a file under a declared link to a
+  directory. A task that reads them still declares them, and any other
+  file beside them is still asked for. A `sykli.rs` emitter is a Rust
+  source of its crate and is still asked for in a Cargo graph.
 
 ### Removed
 - Typed production, shipped in 0.6.0: `targets`, `produce`,
@@ -603,6 +667,12 @@ contract consumer can observe; internal refactors are not listed.
   longer runs `gh` or makes any network request.
 - The CI shadow experiment: `examples/ci_shadow.rs`, its CI steps and
   `docs/ci-shadow.md`.
+- What 0.6.0's removed features left in a worktree, `.sykli/production`
+  (production attempts and their build trees) and `.sykli/evidence`
+  (evidence bundles), is read, written and removed by nothing now. Neither
+  grows any more, and both are safe to delete by hand:
+  `rm -rf .sykli/production .sykli/evidence`. sykli does not delete them
+  itself, so that no run carries a removal path for a one-time leftover.
 - The removed code is kept on the `archive/delivery-production` branch.
 
 ## [0.6.0] - 2026-09-09

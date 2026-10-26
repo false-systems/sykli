@@ -104,7 +104,9 @@ sykli run --json > .sykli/receipt.json            # run the graph, keep the rece
 sykli verify .sykli/receipt.json --contract sykli.json
 ```
 
-`init` creates `.sykli/` for local state and adds it to `.gitignore`. In a Cargo
+`init` creates `.sykli/` for local state and adds it to `.gitignore`.
+(`.sykli/production` and `.sykli/evidence`, left by 0.6.0's removed
+features, are read by nothing and safe to delete.) In a Cargo
 repository each task declares every file git tracks, [documents](#documents)
 and symbolic links included, since a build or a test can read a vendored crate,
 an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
@@ -197,8 +199,16 @@ Every path a task declares (`inputs`, `outputs`, `workdir`) is relative to the
 repository and stays inside it. Absolute paths and `..` are refused when the
 contract is validated, before anything runs, so a receipt is always a claim
 about the repository it sits in, even when the contract is kept
-[outside it](#keep-the-contract-outside-the-repository). `sykli validate`
-checks a contract without running it.
+[outside it](#keep-the-contract-outside-the-repository). Inside a git
+repository, `validate`, `plan --explain` and `run` also refuse (exit 2) a
+declared path that a symbolic link on its way leads out of the repository:
+an input `ext/file.txt`, an output `ext/bundle.js` or a workdir `ext` when
+`ext` links to a directory elsewhere, or an output `out` when `out` links to
+a file elsewhere that the run has yet to make, or `hop` when it links to `out`
+(every link on the way is followed by its text, chained or not, and a path
+through more than 40 links is refused). This is judged against the work tree
+before any task runs, so a link a task makes while it runs is not seen.
+`sykli validate` checks a contract without running it.
 
 <details>
 <summary><strong>What a task sees when it runs</strong></summary>
@@ -208,7 +218,15 @@ checks a contract without running it.
 Tasks run under `sh -c` with no stdin. They receive `PATH`, `HOME` and `TMPDIR`,
 plus declared `env` values and named `inherit` variables. Inherited values reach
 the task, but only their digests reach the receipt, where they count toward the
-task's identity. A declared value may name `${worktree_cache}`, a directory of
+task's identity (`inherited_keyed_digests`). A digest is keyed by 32 random
+bytes of the clone's own (`$(git rev-parse --git-common-dir)/sykli/inherit-key`,
+made by the first run that needs it), so a receipt you publish holds nothing a
+guess at a short token can be checked against. Digests are comparable only
+between runs of one clone, and a fresh clone misses the cache for every task
+that inherits, even with `.sykli/` restored into it. The key is only as secret
+as the clone: any task the clone runs can read it, including a pull request's
+code on a runner that keeps `.git` between jobs, and with it the digests the
+clone publishes can be guessed at again. A declared value may name `${worktree_cache}`, a directory of
 the worktree's own
 ([one build directory per worktree](#one-build-directory-per-worktree)). A task
 that declares `contract_inputs` also gets `SYKLI_CONTRACT_DIR`, where those
@@ -274,6 +292,15 @@ added next to declared fixtures, once it is `git add`ed. It is a tripwire, not a
 dependency scan. It does not catch files in new subfolders or in parent folders,
 anything in the repository root, documents, or untracked, ignored and generated
 files. Other unmapped paths are advisory.
+
+Neither the Cargo rule's files by name nor the sibling check asks for the
+JSON contract being run or its `sykli.lock`, wherever they are kept
+(`ci/sykli.json` beside `ci/check.sh`) and however the path is spelled: they
+are what the run evaluates, bound by the contract hash and the lock digest.
+A file a Rust source includes is still asked for, the contract too, since a
+task's key does not cover the contract; so is a file under a declared link to
+a directory. A task that reads them declares them. A `sykli.rs` emitter is a
+Rust source of its crate and is still asked for in a Cargo graph.
 
 Inside a git repository, `validate` refuses (exit 2, as `run` does) a contract
 for these undeclared files, so its verdict depends on the work tree as well as
@@ -542,8 +569,10 @@ write into it, just as it can write receipts.
 the others exit 2.
 
 - In an `env` value, any `${…}` other than `${worktree_cache}`, or an unclosed
-  one. Such a value is never passed on literally. A `$` that opens no `${`
-  is kept as written (`$ORIGIN`, `$LINENO`).
+  one. Such a value is never passed on literally. Nor is `$worktree_cache`
+  without braces, which sykli does not expand: write `${worktree_cache}`. Any
+  other `$` that opens no `${` is kept as written (`$ORIGIN`, `$LINENO`,
+  `$worktree_cache_dir`).
 - In an `env` value, `$${`. It is reserved for an escape of `${`, so that
   adding one later never changes what a valid contract means. There is no
   escape for a literal `${` yet.

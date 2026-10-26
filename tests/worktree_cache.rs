@@ -380,6 +380,60 @@ fn an_unknown_or_unclosed_placeholder_is_refused_before_anything_runs() {
     assert_eq!(outcome(&ran), "passed", "{ran}");
 }
 
+/// `$worktree_cache` without braces in an `env` value is no placeholder
+/// sykli expands, and handed to a task as written, a build tool made a
+/// directory named `$worktree_cache/` inside the work tree and the run
+/// passed. It is refused where a contract is written or run, before anything
+/// runs, and the refusal names `${worktree_cache}`. A name that goes on
+/// (`$worktree_cache_x`) is not the placeholder and still reaches the task.
+#[test]
+fn the_placeholder_without_braces_in_env_is_refused() {
+    for value in [
+        "$worktree_cache/cargo-target",
+        "$worktree_cache",
+        "a:$worktree_cache:b",
+        "${worktree_cache}/one:$worktree_cache/two",
+        "$$worktree_cache",
+    ] {
+        assert_refused(value, "$worktree_cache without braces", |b| {
+            json!([{
+                "name": "t",
+                "run": format!("mkdir -p \"$X\" && touch '{b}/ran'"),
+                "inputs": ["file.txt"],
+                "env": {"X": value},
+            }])
+        });
+    }
+    let fixture = Fixture::new("unbraced");
+    fixture.write("file.txt", "one\n");
+    fixture.contract(|b| {
+        json!([{
+            "name": "t",
+            "run": format!("mkdir -p \"$X\" && touch '{b}/ran'"),
+            "inputs": ["file.txt"],
+            "env": {"X": "$worktree_cache/cargo-target"},
+        }])
+    });
+    let out = fixture
+        .sykli(&fixture.repo, &["run", "sykli.json", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(!fixture.repo.join("$worktree_cache").exists());
+
+    fixture.contract(|_| {
+        json!([{
+            "name": "t",
+            "run": "test \"$X\" = '$worktree_cache_x/y'",
+            "inputs": ["file.txt"],
+            "env": {"X": "$worktree_cache_x/y"},
+        }])
+    });
+    fixture.commit_locked(&["sykli.json"]);
+    let ran = fixture.run(&fixture.repo, "sykli.json", 0);
+    assert_eq!(outcome(&ran), "passed", "{ran}");
+}
+
 /// sykli expands `${worktree_cache}` only in `env` values. Anywhere else a
 /// task's shell would make it empty (`${worktree_cache}/cargo-target` is
 /// `/cargo-target`, one directory for every worktree), so it is refused,

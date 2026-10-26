@@ -32,11 +32,13 @@
 //! `run`, `resume`, the pre-commit hook): in an `env` value any other
 //! `${…}`, one left unclosed, or a `$${` (kept free for an escape of `${`
 //! later, so that one never changes what a valid contract means) is
-//! refused, never handed to a task literally; and the placeholder is refused
-//! anywhere else in a task, where a shell would make it empty. A `$` that
-//! opens no `${` is kept as written. **Where a contract is judged as
-//! evidence** (`verify`, `status --commit`, the pre-push hook), none of this
-//! applies: a contract run before these rules keeps the meaning it ran with.
+//! refused, never handed to a task literally, and so is `$worktree_cache`
+//! without braces, which sykli does not expand; and the placeholder is
+//! refused anywhere else in a task, where a shell would make it empty. Any
+//! other `$` that opens no `${` is kept as written. **Where a contract is
+//! judged as evidence** (`verify`, `status --commit`, the pre-push hook),
+//! none of this applies: a contract run before these rules keeps the
+//! meaning it ran with.
 //!
 //! **What a cache key covers is the declaration**, `${worktree_cache}` as
 //! written, never the directory it names (the task is keyed as declared). A
@@ -114,7 +116,8 @@ fn pieces(value: &str) -> Result<Vec<Piece<'_>>, String> {
 
 /// What a task may say about placeholders where its contract is written or
 /// run (never where it is judged): in an `env` value, only
-/// `${worktree_cache}`, closed, and no `$${` (kept free for an escape);
+/// `${worktree_cache}`, closed, no `$${` (kept free for an escape), and no
+/// `$worktree_cache` without braces, which a task would get as written;
 /// anywhere else, not the placeholder at all, which a shell would make empty.
 pub(crate) fn check(task: &Task) -> Result<(), String> {
     for (name, value) in &task.env {
@@ -126,6 +129,13 @@ pub(crate) fn check(task: &Task) -> Result<(), String> {
             ));
         }
         pieces(value).map_err(|error| format!("task {:?} env {name} uses {error}", task.name))?;
+        if names_unbraced(value) {
+            return Err(format!(
+                "task {:?} env {name} names ${WORKTREE_CACHE} without braces, which sykli does \
+                 not expand (a task would get it as written); write ${{{WORKTREE_CACHE}}}",
+                task.name
+            ));
+        }
     }
     let mut elsewhere = vec![("its run command", task.run.as_str())];
     if let Some(workdir) = task.workdir.as_ref().and_then(|path| path.to_str()) {
@@ -160,6 +170,22 @@ fn names_placeholder(text: &str) -> bool {
         let after = &rest[at + WORKTREE_CACHE.len()..];
         let ends = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
         if ends && (before.ends_with('$') || before.ends_with("${")) {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
+/// Whether `text` names the placeholder as `$worktree_cache`, without
+/// braces, the name not going on: in an `env` value sykli expands only
+/// `${worktree_cache}`, so this one would reach the task as written.
+fn names_unbraced(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(at) = rest.find(WORKTREE_CACHE) {
+        let after = &rest[at + WORKTREE_CACHE.len()..];
+        let ends = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        if ends && rest[..at].ends_with('$') {
             return true;
         }
         rest = after;
