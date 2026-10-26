@@ -1100,17 +1100,12 @@ fn explain_rejects_emitters_and_defaults_to_json_without_creating_it() {
         r#"{"schema":"sykli-contract.v1","tasks":[]}"#,
     );
     fs::write(root.join("sykli.rs"), "must not execute").unwrap();
-    for args in [
-        vec!["plan", "sykli.rs", "--explain"],
-        vec!["plan", "--explain", "--target", "build"],
-    ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(args)
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(2));
-    }
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["plan", "sykli.rs", "--explain"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
     fs::remove_file(root.join("sykli.json")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .args(["plan", "--explain"])

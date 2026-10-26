@@ -943,7 +943,7 @@ impl Coordinator {
 
     fn reopen_at(directory: PathBuf, run: &str, assume_ended: bool) -> Result<Self, String> {
         let lease = Lease::acquire(&directory).map_err(|error| {
-            if error.starts_with("production-busy") {
+            if error.starts_with("lease-busy") {
                 format!("run-busy: run {run}'s coordinator is still running")
             } else {
                 error
