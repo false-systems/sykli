@@ -8,6 +8,17 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- In a Cargo graph, a warning for a document (`*.md`, `LICENSE*`,
+  `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or `.github/`,
+  at any depth) that a string literal in a Rust source names but no task
+  declares: `validate` and `run` print `PATH is named in FILE:LINE but not
+  declared; declare it if a task reads it` on stderr, `plan --explain` in
+  its text and as `named_inputs: [{path, named_at}]` under
+  `input_coverage`, and all of them go on. A test that reads `README.md`
+  names it so, and so does a help text that says "see AGENTS.md", which
+  reads nothing; hence a warning, never a refusal. A top-level document is
+  named by its file name alone, a deeper one by its path; a comment or a doc
+  comment names nothing.
 - `${worktree_cache}` in a task's declared `env` values: a directory that
   belongs to the worktree the run is in,
   `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is 16 hex digits of
@@ -248,21 +259,15 @@ contract consumer can observe; internal refactors are not listed.
 
 ### Breaking
 - In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
-  exit 2) also refuse a contract that leaves out, of the files git lists
-  (tracked, or untracked and not ignored):
-  - a file a Rust source includes (`include_str!`, `include_bytes!`,
-    `include!`) by a string literal, resolved from that source's directory
-    as rustc resolves it, or by `concat!(env!("CARGO_MANIFEST_DIR"),
-    "/path")`, from the nearest `Cargo.toml`. A file built into the binary,
-    or a README a crate's documentation includes, kept a cached pass when it
-    changed. Sources are read as Rust: an invocation in a string or a plain
-    comment is none, a doc comment's literal ones count;
-  - a document (`*.md`, `LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`,
-    anything under `docs/` or `.github/`, at any depth) that a string
-    literal in a Rust source names, as a test that reads it does
-    (`fs::read("README.md")`): a top-level one by its file name alone, a
-    deeper one by its path. A comment or a doc comment that mentions a
-    document names nothing.
+  exit 2) also refuse a contract that leaves out a file git lists (tracked,
+  or untracked and not ignored) that a Rust source includes
+  (`include_str!`, `include_bytes!`, `include!`) by a string literal,
+  resolved from that source's directory as rustc resolves it, or by
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`, from the nearest
+  `Cargo.toml`. A file built into the binary, or a README a crate's
+  documentation includes, kept a cached pass when it changed. Sources are
+  read as Rust: an invocation in a string or a plain comment is none, a doc
+  comment's literal ones count.
 - In a Cargo graph, an include whose path is not a string literal in one of
   those forms (a macro's variable, an expression) refuses `init` (exit 1),
   `validate`, `run` and `plan --explain` (exit 2), naming its file and line,

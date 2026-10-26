@@ -139,10 +139,14 @@ appear in at least one task's inputs. So must every file of that inventory
 that one of its Rust sources includes (`include_str!`, `include_bytes!`,
 `include!`), resolved from the source's directory as rustc resolves it, or
 from the nearest `Cargo.toml` for `concat!(env!("CARGO_MANIFEST_DIR"),
-"/path")`; and every document (below) a string literal in a source names, as a
-test that reads it does: a top-level one by its file name alone, a deeper one
-by its path (or a path that ends in it). A comment or a doc comment that
-mentions a document names nothing. Sources are read as
+"/path")`. A document (below) that a string literal in a source names, as a
+test that reads it does, but no task declares, warns and never refuses
+(`named_inputs: [{path, named_at}]` under explain's `input_coverage`, and
+`PATH is named in FILE:LINE but not declared; declare it if a task reads it` on
+`validate`'s and `run`'s stderr), since a help or message text names files too:
+a top-level one by its file name alone, a deeper one by its path (or a path
+that ends in it). A comment or a doc comment that mentions a document names
+nothing. Sources are read as
 Rust: an invocation inside a string or a plain comment is not one, a doc
 comment's literal invocations count (doctests compile), and a comment before
 the literal is skipped. An include whose path is not a literal in one of those
@@ -172,7 +176,8 @@ named `docs` or `.github`, at any depth (`cargo_inputs::docs`). The
 undeclared-sibling check never asks for them, so a commit that adds documents
 never makes a contract refuse. That is their only special case: `sykli init`
 declares them like any other tracked file (a test may read a folder of
-Markdown cases), and the Cargo rule requires one a source includes or names.
+Markdown cases); the Cargo rule requires one a source includes, and warns of
+one a string names.
 The gap that remains: a new document beside declared ones, or one a
 hand-written contract leaves out, is in no key, so a test that reads its
 folder through `read_dir` keeps its cached pass until the contract declares it

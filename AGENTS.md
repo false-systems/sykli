@@ -143,7 +143,8 @@ one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 undeclared-file checks (`Inventory`, through `repo::files`), which
 `validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
 same listing. What Cargo reads (by name, the files sources include, the
-documents they name: `Sources`, a small Rust lexer) and what is a document
+documents their string literals name, which only warn: `Sources`, a small Rust
+lexer) and what is a document
 (`docs`, which the sibling check never asks for; `init` declares them) are
 `cargo_inputs` for both. A declared symbolic link to a file in the repository is read through;
 one to a directory in the repository or to nothing is recorded by its text

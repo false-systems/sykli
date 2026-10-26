@@ -254,11 +254,15 @@ from every task's inputs:
   which is resolved from the nearest `Cargo.toml`. An include whose path is
   anything else (a macro's variable, an expression) is refused with its file
   and line, since its file cannot be known; a path built from `OUT_DIR` names
-  a file made at build time and is not asked for;
-- a [document](#documents) a string literal in a Rust source names, as a test
-  that reads it does (`fs::read("README.md")`): a top-level one by its file
-  name, a deeper one by its path. A comment or a doc comment that mentions a
-  document names nothing.
+  a file made at build time and is not asked for.
+
+A [document](#documents) that a string literal in a Rust source names, as a test
+that reads it does (`fs::read("README.md")`), but no task declares, only warns:
+`validate`, `plan --explain` and `run` print `README.md is named in
+tests/x.rs:LINE but not declared; declare it if a task reads it` and go on,
+since a help or message text names files too. A top-level document is named by
+its file name, a deeper one by its path; a comment or a doc comment that
+mentions a document names nothing.
 
 In every graph, it also refuses an undeclared sibling of a declared input: a
 tracked file directly inside a folder that holds one of a task's inputs, which
@@ -280,7 +284,8 @@ anything under a directory named `docs` or `.github`, at any depth. The
 undeclared-sibling check never asks for them, so a commit that adds documents
 never makes a contract refuse. `init` declares them like any other file, since
 a test may read a folder of Markdown cases, so editing one misses the cache. A
-document a Rust source includes or names is required in Cargo graphs. What
+document a Rust source includes is required in Cargo graphs; one a string in a
+source names warns until it is declared. What
 stays open: a new document beside declared ones, or one a hand-written
 contract leaves out, is in no key, so a test that reads its folder (with
 `read_dir`, or a path built at run time) keeps its cached pass until the
