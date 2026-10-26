@@ -2593,8 +2593,11 @@ fn names_directory(text: &str, directory: &str, root: Option<&str>) -> bool {
         if before.is_some_and(|c| name(c) || c == '/') || after.is_some_and(name) {
             return false;
         }
+        // The path runs on from the directory (whose own spelling may hold
+        // a delimiter, as `C:` does) to the end of the word.
         let path = &text[at..];
-        let path = &path[..path.find(delimiter).unwrap_or(path.len())];
+        let past = &path[directory.len()..];
+        let path = &path[..directory.len() + past.find(delimiter).unwrap_or(past.len())];
         let in_root = root.is_some_and(|root| {
             path.strip_prefix(root)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -7264,6 +7267,10 @@ mod tests {
         ] {
             assert!(!names_directory(text, directory, root), "{text}");
         }
+        // A spelling with a drive, as on Windows, is a path all the same.
+        let (drive, below) = ("C:/a/gate", Some("C:/a/gate/repo"));
+        assert!(!names_directory("test -f 'C:/a/gate/repo/x'", drive, below));
+        assert!(names_directory("test -f 'C:/a/gate/x'", drive, below));
         for text in [
             "sh /home/a/gate/check.sh",
             "sh /home/a/gate/repo/../check.sh",
