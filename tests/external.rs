@@ -518,6 +518,189 @@ fn a_helper_named_beside_an_outside_contract_never_reuses_a_stale_pass() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
+/// `validate` of a contract whose task runs `run`, with `env`, from the
+/// repository, with HOME set to `home` for sykli.
+fn validate_with_home(
+    scratch: &Scratch,
+    contract: &Path,
+    task: serde_json::Value,
+    home: &Path,
+) -> Output {
+    let contract_text = serde_json::json!({"schema": "sykli-contract.v1", "tasks": [task]});
+    fs::write(contract, contract_text.to_string()).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["validate", contract.to_str().unwrap()])
+        .current_dir(&scratch.repo)
+        .env("HOME", home)
+        .output()
+        .unwrap()
+}
+
+/// The contract's directory spelled through the HOME the task gets (its
+/// declared one, else sykli's: `$HOME`, `${HOME}` or a leading `~`), or with
+/// `//` or `/./` in its path, is refused as its plain path is.
+#[test]
+fn the_contract_directory_is_refused_through_home_and_extra_slashes() {
+    let scratch = Scratch::new("spellings");
+    let contract = scratch.config.join("sykli.json");
+    let base = scratch.base.display().to_string();
+    let task = |run: &str| serde_json::json!({"name": "check", "run": run});
+    for run in [
+        "sh $HOME/config/check.sh".to_string(),
+        "sh \"${HOME}/config/check.sh\"".to_string(),
+        "sh ~/config/check.sh".to_string(),
+        "HELPERS=~/config sh -c 'sh \"$HELPERS/check.sh\"'".to_string(),
+        format!("sh {base}//config/check.sh"),
+        format!("sh {base}/./config/check.sh"),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(&run), &scratch.base);
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+        assert!(text(&out.stderr).contains("names the directory"), "{run}");
+    }
+    // The task's own HOME is the one its shell expands.
+    let declared = serde_json::json!({
+        "name": "check", "run": "sh $HOME/config/check.sh", "env": {"HOME": base},
+    });
+    let out = validate_with_home(&scratch, &contract, declared, &scratch.repo);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    // Another variable, another directory, or a HOME that leads elsewhere
+    // names something else.
+    for (run, home) in [
+        ("sh $HOMEDIR/config/check.sh", &scratch.base),
+        ("sh $HOME/config-old/check.sh", &scratch.base),
+        ("sh ~user/config/check.sh", &scratch.base),
+        ("sh $HOME/config/check.sh", &scratch.repo),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(run), home);
+        assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
+    }
+}
+
+/// With no git repository around the current directory there is no inside
+/// or outside to judge (and nothing can run), so a contract that declares
+/// contract inputs validates and locks there as any other contract does.
+#[test]
+fn contract_inputs_validate_and_lock_where_there_is_no_repository() {
+    let scratch = Scratch::new("norepo");
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, helper_contract(RUNS_HELPER, &["check.sh"])).unwrap();
+    let ceiling = scratch.base.parent().unwrap();
+    for cwd in [&scratch.config, &scratch.base] {
+        for (command, code) in [("validate", 0), ("lock", 0)] {
+            let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+                .args([command, contract.to_str().unwrap()])
+                .current_dir(cwd)
+                .env("GIT_CEILING_DIRECTORIES", ceiling)
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(code),
+                "{command} in {}: {}",
+                cwd.display(),
+                text(&out.stderr)
+            );
+        }
+    }
+    // From the repository it judges, it is the same contract.
+    let (_, value) = receipt(&scratch, &scratch.repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+}
+
+/// A contract kept in a directory that holds the repository may name paths
+/// in the repository (they are repository paths, declared as inputs), but
+/// not the files beside it, nor reach them out of the repository by `..`.
+#[test]
+fn a_repository_inside_the_contract_directory_is_named_freely() {
+    let scratch = Scratch::new("enclosing");
+    let repo = &scratch.repo;
+    let contract = scratch.base.join("sykli.json");
+    let repo_path = repo.display().to_string();
+    let task = |run: String, env: serde_json::Value| serde_json::json!({"name": "check", "run": run, "env": env, "inputs": ["file.txt"]});
+    for (run, env) in [
+        (
+            format!("test -f '{repo_path}/file.txt'"),
+            serde_json::json!({}),
+        ),
+        (
+            "true".to_string(),
+            serde_json::json!({"CARGO_TARGET_DIR": format!("{repo_path}/target")}),
+        ),
+        (format!("cd {repo_path} && true"), serde_json::json!({})),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(run.clone(), env), repo);
+        assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
+    }
+    let out = sykli(repo, &["lock", contract.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+
+    for run in [
+        format!("sh {}/check.sh", scratch.base.display()),
+        format!("sh {repo_path}/../check.sh"),
+    ] {
+        let out = validate_with_home(
+            &scratch,
+            &contract,
+            task(run.clone(), serde_json::json!({})),
+            repo,
+        );
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+    }
+}
+
+/// The task's copy of its contract inputs is its owner's alone (a 0700
+/// directory, 0600 files, the owner's execute bit kept where the file has
+/// one), in the temporary directory the run is given, and gone when the
+/// task ends. Directories other runs left there, as a sykli that was killed
+/// leaves its copy, never stand in a new run's way.
+#[cfg(unix)]
+#[test]
+fn a_tasks_copy_is_its_owners_alone_and_leftovers_never_block_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("private");
+    let repo = &scratch.repo;
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let tool = scratch.config.join("tool.sh");
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = r#"ls -ld "$SYKLI_CONTRACT_DIR" "$SYKLI_CONTRACT_DIR/check.sh" "$SYKLI_CONTRACT_DIR/tool.sh" && sh "$SYKLI_CONTRACT_DIR/check.sh" && "$SYKLI_CONTRACT_DIR/tool.sh""#;
+    let contract = scratch.contract(&helper_contract(run, &["check.sh", "tool.sh"]));
+    let temporary = scratch.base.join("tmp");
+    fs::create_dir(&temporary).unwrap();
+    let mut left = Vec::new();
+    for name in [
+        "sykli-contract-1-1",
+        "sykli-contract-2-4",
+        "sykli-contract-0",
+    ] {
+        fs::create_dir(temporary.join(name)).unwrap();
+        left.push(name.to_string());
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().unwrap(), "--json"])
+        .current_dir(repo)
+        .env("TMPDIR", &temporary)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let listing = value["tasks"][0]["stdout"].as_str().unwrap().to_string();
+    let modes = listing
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap_or(""))
+        .collect::<Vec<_>>();
+    assert_eq!(modes.len(), 3, "{listing}");
+    assert!(modes[0].starts_with("drwx------"), "{listing}");
+    assert!(modes[1].starts_with("-rw-------"), "{listing}");
+    assert!(modes[2].starts_with("-rwx------"), "{listing}");
+    assert!(listing.contains(temporary.to_str().unwrap()), "{listing}");
+    // Its own copy is gone; what others left is left as it was.
+    assert_eq!(names(&temporary), left);
+}
+
 /// A file declared in `contract_inputs` is read from beside the contract:
 /// its bytes and execute bits join the task's key, the receipt records it,
 /// and the task reaches it as `$SYKLI_CONTRACT_DIR/NAME`.
