@@ -678,6 +678,10 @@ contract consumer can observe; internal refactors are not listed.
   `rm -rf .sykli/production .sykli/evidence`. sykli does not delete them
   itself, so that no run carries a removal path for a one-time leftover.
 - The removed code is kept on the `archive/delivery-production` branch.
+- `tests/qa/sykli.json`, the QA contract 0.6.0 added for this repository's
+  own changes. It could not run: the Cargo completeness rule refused it,
+  exit 2, before any task. A behaviour change now comes with a failing test
+  in the suite (CONTRIBUTING.md).
 
 ## [0.6.0] - 2026-09-09
 
