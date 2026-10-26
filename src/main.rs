@@ -2528,8 +2528,10 @@ fn placed(contract: &Contract, path: &Path) -> Result<(), String> {
 
 /// `text` with its paths spelled as a shell would reach them, as far as a
 /// plain rewrite can: `${HOME}`, `$HOME` (not a longer name) and a `~` that
-/// starts a word, alone or before `/`, read as `home`; `\` as `/` (sh on
-/// Windows takes both); and `//` and `/./` as `/`.
+/// starts a word, alone or before `/`, read as `home`; then quotes removed,
+/// as the shell's quote removal does (`"$HOME"/gate` is `$HOME/gate`), and a
+/// `\` removed as an escape, or on Windows read as `/` (sh there takes
+/// both); and `//` and `/./` read as `/`.
 fn spelled_out(text: &str, home: Option<&str>) -> String {
     let mut text = text.to_string();
     if let Some(home) = home {
@@ -2569,7 +2571,12 @@ fn spelled_out(text: &str, home: Option<&str>) -> String {
         out.push_str(rest);
         text = out;
     }
-    let mut text = text.replace('\\', "/");
+    let mut text = text.replace(['"', '\''], "");
+    text = if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.replace('\\', "")
+    };
     loop {
         let shorter = text.replace("/./", "/").replace("//", "/");
         if shorter == text {
@@ -2581,16 +2588,21 @@ fn spelled_out(text: &str, home: Option<&str>) -> String {
 
 /// Whether `text` names `directory` or a path in it: the directory's path
 /// not continued by more of a name on either side, so `/a/gate-old` and
-/// `/x/a/gate` do not name `/a/gate`. A path in `root` (the repository,
-/// when the directory holds it) is not the directory's, unless a `..` in it
-/// climbs back out.
+/// `/x/a/gate` do not name `/a/gate`; a variable just before it (`$P/a/gate`)
+/// may be empty, so it does not hide the path. A path in `root` (the
+/// repository, when the directory holds it) is not the directory's, unless
+/// it has a `..` in it (strictly: even one that stays inside).
 fn names_directory(text: &str, directory: &str, root: Option<&str>) -> bool {
     let name = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~');
     let delimiter = |c: char| c.is_whitespace() || "\"'`;&|<>():".contains(c);
     text.match_indices(directory).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
+        let head = &text[..at];
+        let variable = head
+            .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            .ends_with('$');
+        let before = head.chars().next_back();
         let after = text[at + directory.len()..].chars().next();
-        if before.is_some_and(|c| name(c) || c == '/') || after.is_some_and(name) {
+        if (before.is_some_and(|c| name(c) || c == '/') && !variable) || after.is_some_and(name) {
             return false;
         }
         // The path runs on from the directory (whose own spelling may hold
@@ -4202,8 +4214,10 @@ type InputRecords = BTreeMap<String, BTreeMap<String, Option<InputRecord>>>;
 /// over and never reused, so a leftover never stops a run.
 ///
 /// Bound: one directory per running task, in the system's temporary
-/// directory, removed when the task's shell has ended (on drop); a sykli
-/// that is killed leaves it to that directory's own cleanup.
+/// directory, removed when the task's shell has ended (on drop). One a
+/// killed sykli left is removed by the next run that makes a copy once it
+/// has stood unchanged for a day (`prune_stale_copies`, Linux and macOS),
+/// else by that directory's own cleanup.
 struct ContractCopy {
     directory: PathBuf,
 }
@@ -4219,6 +4233,11 @@ impl ContractCopy {
         let names = std::iter::repeat_with(|| format!("sykli-contract-{}", private_name()));
         let directory = fresh_directory(&temporary, names.take(16))
             .map_err(|error| failed(format!("{}: {error}", temporary.display())))?;
+        #[cfg(unix)]
+        {
+            static PRUNED: std::sync::Once = std::sync::Once::new();
+            PRUNED.call_once(|| prune_stale_copies(&temporary, &directory));
+        }
         let copy = ContractCopy { directory };
         for (input, record) in records {
             let Some(record) = record else {
@@ -4260,6 +4279,50 @@ fn private_builder() -> fs::DirBuilder {
         builder.mode(0o700);
     }
     builder
+}
+
+/// How long a copy may stand unchanged before a later run takes it for one
+/// a killed sykli left.
+#[cfg(unix)]
+const STALE_COPY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove the copies a killed sykli left: `sykli-contract-*` directories in
+/// `base` owned by the owner of `ours` (the copy this process just made)
+/// and unchanged for over a day (`STALE_COPY`). Done once per process,
+/// before its first copy is used. Another user's directories, a symbolic
+/// link and anything younger, which a task may still be reading, are never
+/// touched.
+#[cfg(unix)]
+fn prune_stale_copies(base: &Path, ours: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(owner) = fs::metadata(ours).map(|meta| meta.uid()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == ours
+            || !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sykli-contract-")
+        {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE_COPY);
+        if meta.is_dir() && meta.uid() == owner && stale {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// A new directory in `base`, its owner's alone, named by the first of
@@ -7286,16 +7349,67 @@ mod tests {
         let home = Some("/home/a");
         for (text, spelled) in [
             ("sh $HOME/gate/x", "sh /home/a/gate/x"),
-            ("sh \"${HOME}/gate/x\"", "sh \"/home/a/gate/x\""),
+            ("sh \"${HOME}/gate/x\"", "sh /home/a/gate/x"),
             ("sh ~/gate/x", "sh /home/a/gate/x"),
             ("X=~/gate:~ y", "X=/home/a/gate:/home/a y"),
             ("sh /home//a/./gate/.//x", "sh /home/a/gate/x"),
             ("echo $HOMEDIR ~user a~/b", "echo $HOMEDIR ~user a~/b"),
             ("echo $$ $ ~", "echo $$ $ /home/a"),
+            // Quotes are removed as the shell removes them.
+            ("sh \"$HOME\"/gate/x", "sh /home/a/gate/x"),
+            ("sh $HOME\"/gate/x\"", "sh /home/a/gate/x"),
+            ("sh '/home/a'/gate/x", "sh /home/a/gate/x"),
+            ("printf '%s' \"don't\"", "printf %s dont"),
         ] {
             assert_eq!(spelled_out(text, home), spelled, "{text}");
         }
         assert_eq!(spelled_out("sh $HOME/x ~/y", None), "sh $HOME/x ~/y");
+        let escaped = spelled_out("sh /home/a/ga\\te/x", home);
+        if cfg!(windows) {
+            assert_eq!(escaped, "sh /home/a/ga/te/x");
+        } else {
+            assert_eq!(escaped, "sh /home/a/gate/x");
+        }
+        // A variable just before the path may be empty: it hides nothing.
+        assert!(names_directory("sh $P/home/a/gate/x", "/home/a/gate", None));
+        assert!(names_directory(
+            "sh ${P}/home/a/gate/x",
+            "/home/a/gate",
+            None
+        ));
+        assert!(!names_directory("sh x/home/a/gate/x", "/home/a/gate", None));
+    }
+
+    /// Only this user's copies that stood unchanged for over a day go; a
+    /// younger one, another name and a link to an old one stay.
+    #[cfg(unix)]
+    #[test]
+    fn stale_copies_of_this_user_are_pruned_and_nothing_else() {
+        let base = std::env::temp_dir().join(format!("sykli-prune-{}", private_name()));
+        fs::create_dir(&base).unwrap();
+        let ours = fresh_directory(&base, ["sykli-contract-ours".to_string()]).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        let aged = |name: &str| {
+            let path = base.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("f"), "x").unwrap();
+            fs::File::open(&path).unwrap().set_modified(old).unwrap();
+            path
+        };
+        let stale = aged("sykli-contract-stale");
+        let other = aged("other-old");
+        let young = base.join("sykli-contract-young");
+        fs::create_dir(&young).unwrap();
+        let elsewhere = aged("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, base.join("sykli-contract-link")).unwrap();
+        fs::File::open(&ours).unwrap().set_modified(old).unwrap();
+        prune_stale_copies(&base, &ours);
+        assert!(!stale.exists());
+        for kept in [&ours, &other, &young, &elsewhere.join("f")] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        assert!(fs::symlink_metadata(base.join("sykli-contract-link")).is_ok());
+        fs::remove_dir_all(&base).unwrap();
     }
 
     /// A name another process holds (as a killed run's copy is) is passed

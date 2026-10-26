@@ -655,15 +655,20 @@ directory:
   as they were hashed, and is removed when the task ends. The directory is
   yours alone (0700, made under an unguessable name in the temporary
   directory), and so are the files (0600, or 0700 where yours to execute).
-  A task that declares none has no such variable.
+  One that a killed sykli left behind is removed by a later run once it has
+  stood unchanged for a day (Linux and macOS). A task that declares none
+  has no such variable.
 
   A task that names the contract's directory itself in its `run` or an
   `env` value is refused by `validate`, `lock`, `plan` and `run`, since
   sykli cannot hash what it reads there by that name. The match is on the
   contract's path as you name it and as it resolves, in the task's text
-  read with its `$HOME`, `${HOME}` and a leading `~` expanded and `//` and
-  `/./` read as `/`. When the contract's directory holds the repository, a
-  path inside the repository is the repository's, covered by its `inputs`.
+  read as its shell would: its `$HOME`, `${HOME}` and a leading `~`
+  expanded, quotes and `\` escapes removed (`"$HOME"/gate` is
+  `$HOME/gate`), and `//` and `/./` read as `/`. A variable just before
+  the path does not hide it. When the contract's directory holds the
+  repository, a path inside the repository is the repository's, covered by
+  its `inputs`, unless it has a `..` in it.
   With no git repository around the current directory, nothing here is
   judged (`run` needs one). A contract inside the repository declares the
   files beside it as `inputs`, and `contract_inputs` there is refused.
@@ -681,7 +686,8 @@ directory:
   - the same name in another case, on a file system that ignores case
     (macOS's default);
   - a command found through `PATH`, inherited or set by the task;
-  - a value the task inherits.
+  - a value the task inherits, or a shell expansion other than the HOME
+    ones above (`${HOME:-…}`, `$(…)`, a variable the command sets).
 
   Declare every helper in `contract_inputs`, and reach each one only through
   `$SYKLI_CONTRACT_DIR`, from the task and from other helpers alike

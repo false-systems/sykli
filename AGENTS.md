@@ -141,14 +141,15 @@ unchanged), each task's records go into its receipt and the journal's
 subject, and its shell gets `SYKLI_CONTRACT_DIR`, a copy of exactly those
 files hashed as they are copied, checked against the records and removed
 when it ends (`ContractCopy`: 0700 under an unguessable name, made
-exclusively, `fresh_directory`, `private_name`). `placed` (`validate`,
+exclusively, `fresh_directory`, `private_name`; the user's own stale ones,
+unchanged for a day, pruned by `prune_stale_copies`). `placed` (`validate`,
 `lock`, `plan`, `run`; nothing without a repository) refuses them in a
 contract inside the repository, and refuses a task of an outside contract
 that names the contract's directory in `run` or `env` (sykli#75), in text
-read with the task's HOME and a leading `~` expanded and `//`, `/./`
-collapsed (`spelled_out`), a path in a repository the directory holds
-excepted; `verify` and `judge` compare them with the files beside the
-contract (`contract_inputs_check`, exit 3).
+read with the task's HOME and a leading `~` expanded, quotes and escapes
+removed, and `//`, `/./` collapsed (`spelled_out`), a path in a repository
+the directory holds excepted; `verify` and `judge` compare them with the
+files beside the contract (`contract_inputs_check`, exit 3).
 Git is asked as little as possible, and `tests/git_calls.rs` holds the
 budgets (counted through `GIT_TRACE2_EVENT`). `src/repo.rs` finds the
 repository once per process (one `git rev-parse`, or `--repo-root` and

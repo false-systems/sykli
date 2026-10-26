@@ -265,7 +265,8 @@ contract consumer can observe; internal refactors are not listed.
     an unguessable name and is 0700. Its files are 0600, or 0700 where the
     owner may execute the original. A name another process holds, such as
     the copy a killed sykli left, is passed over, so a leftover never stops
-    a run.
+    a run. The first copy a run makes also removes the user's own copies
+    that have stood unchanged for over a day (Linux and macOS).
   - What sykli cannot see is not hashed. A helper that names a neighbour by
     its path, a relative path, another link or case of the directory, a
     `PATH` lookup and an inherited value still reuse a stale pass when the
@@ -358,11 +359,13 @@ contract consumer can observe; internal refactors are not listed.
   or resolved, is refused (`validate` exits 1, the others 2), since sykli
   cannot hash what the task reads there by that name (sykli#75). Declare the
   files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
-  The text is read with the task's `$HOME`, `${HOME}` and a leading `~`
-  expanded (its declared `HOME`, else sykli's), and `//` and `/./` read as
-  `/`. When the directory holds the repository, a path inside the repository
-  is not refused. With no git repository around the current directory,
-  nothing is refused. Where a contract is judged, nothing changes.
+  The text is read as the task's shell would read it: its `$HOME`, `${HOME}`
+  and a leading `~` expanded (its declared `HOME`, else sykli's), quotes and
+  `\` escapes removed, and `//` and `/./` read as `/`. A variable just before
+  the path does not hide it. When the directory holds the repository, a path
+  inside the repository is not refused unless it has a `..` in it. With no
+  git repository around the current directory, nothing is refused. Where a
+  contract is judged, nothing changes.
 
 ### Changed
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM

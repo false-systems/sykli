@@ -686,7 +686,8 @@ fn a_repository_inside_the_contract_directory_is_named_freely() {
 /// directory, 0600 files, the owner's execute bit kept where the file has
 /// one), in the temporary directory the run is given, and gone when the
 /// task ends. Directories other runs left there, as a sykli that was killed
-/// leaves its copy, never stand in a new run's way.
+/// leaves its copy, never stand in a new run's way, and the user's own
+/// copies left unchanged for over a day are removed.
 #[cfg(unix)]
 #[test]
 fn a_tasks_copy_is_its_owners_alone_and_leftovers_never_block_it() {
@@ -710,6 +711,15 @@ fn a_tasks_copy_is_its_owners_alone_and_leftovers_never_block_it() {
         fs::create_dir(temporary.join(name)).unwrap();
         left.push(name.to_string());
     }
+    // One of this user's copies unchanged for two days is stale: removed.
+    let stale = temporary.join("sykli-contract-stale");
+    fs::create_dir(&stale).unwrap();
+    fs::write(stale.join("check.sh"), "exit 0\n").unwrap();
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    fs::File::open(&stale)
+        .unwrap()
+        .set_modified(two_days_ago)
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .args(["run", contract.to_str().unwrap(), "--json"])
         .current_dir(repo)
