@@ -397,10 +397,10 @@ fn git(root: &Path, args: &[&str]) {
 
 /// A crate whose build and tests read more than `src/`: a vendored crate it
 /// depends on by path, the pin a test reads beside it, a file the binary
-/// includes, test data in a top-level `fixtures/`, and docs and CI
-/// configuration (as a test that checks a workflow reads it). At the top level
-/// is prose and a licence that nothing reads, except the README, which the
-/// crate's documentation includes.
+/// includes, a guide the documentation includes, a README the vendored
+/// crate's documentation includes from its manifest directory, test data in
+/// a top-level `fixtures/`, and a README and a guide in `docs/` a test reads.
+/// Documents, licences and CI configuration nothing names stay out.
 const CRATE: &[(&str, &str)] = &[
     (
         "Cargo.toml",
@@ -410,36 +410,42 @@ const CRATE: &[(&str, &str)] = &[
     (".gitignore", "/target\n"),
     (
         "src/main.rs",
-        "#![doc = include_str!(\"../README.md\")]\nconst LAUNCH: &str = include_str!(\"launch.zsh\");\nfn main() {\n    print!(\"{LAUNCH}\");\n}\n",
+        "#![doc = include_str!(\"../GUIDE.md\")]\nconst LAUNCH: &str = include_str!(\"launch.zsh\");\nfn main() {\n    print!(\"{LAUNCH}\");\n}\n",
     ),
     ("src/launch.zsh", "print launched\n"),
     (
         "vendor/dep/Cargo.toml",
         "[package]\nname = \"dep\"\nversion = \"0.1.0\"\n",
     ),
-    ("vendor/dep/src/lib.rs", "pub fn f() {}\n"),
+    (
+        "vendor/dep/src/lib.rs",
+        "#![doc = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/README.md\"))]\npub fn f() {}\n",
+    ),
+    ("vendor/dep/README.md", "# dep\n"),
     ("vendor/dep.contract", "tag v1\n"),
     (
         "tests/pins.rs",
-        "#[test]\nfn pinned() {\n    std::fs::read(\"vendor/dep.contract\").unwrap();\n    std::fs::read(\"fixtures/case/input.txt\").unwrap();\n}\n",
+        "#[test]\nfn pinned() {\n    std::fs::read(\"vendor/dep.contract\").unwrap();\n    std::fs::read(\"fixtures/case/input.txt\").unwrap();\n    std::fs::read(\"README.md\").unwrap();\n    std::fs::read(\"docs/guide.md\").unwrap();\n}\n",
     ),
     ("fixtures/case/input.txt", "input\n"),
     ("docs/guide.md", "guide\n"),
+    ("docs/adr/0001.md", "# decided\n"),
     (".github/workflows/ci.yml", "on: push\n"),
     ("README.md", "# x\n"),
+    ("GUIDE.md", "# how\n"),
     ("CHANGELOG.md", "# changes\n"),
     ("LICENSE", "MIT\n"),
     ("target/debug/x", "built, and ignored\n"),
 ];
 
 /// What `sykli init` declares for every cargo task of `CRATE`, with
-/// `tests/new.txt` untracked: every file git lists but the prose and licence
-/// at the top level, so the README, which a source includes, is declared.
+/// `tests/new.txt` untracked: every file git lists but the documents,
+/// licences and CI configuration that no source names.
 const DECLARED: &[&str] = &[
-    ".github/workflows/ci.yml",
     ".gitignore",
     "Cargo.lock",
     "Cargo.toml",
+    "GUIDE.md",
     "README.md",
     "docs/guide.md",
     "fixtures/case/input.txt",
@@ -449,6 +455,7 @@ const DECLARED: &[&str] = &[
     "tests/pins.rs",
     "vendor/dep.contract",
     "vendor/dep/Cargo.toml",
+    "vendor/dep/README.md",
     "vendor/dep/src/lib.rs",
 ];
 
@@ -472,6 +479,46 @@ fn every_task_declares(contract: &serde_json::Value, expected: &[&str]) {
     for name in ["fmt", "clippy", "test"] {
         assert_eq!(inputs(task(contract, name)), expected, "task {name}");
     }
+}
+
+/// A stand-in toolchain beside `root`, `cargo` and `rustc` reporting a
+/// version and passing, and the `PATH` that finds it first.
+#[cfg(unix)]
+fn toolchain(root: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.with_extension("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for tool in ["cargo", "rustc"] {
+        let path = bin.join(tool);
+        fs::write(&path, format!("#!/bin/sh\necho '{tool} 1.98.0'\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    format!("{}:{}", bin.display(), env::var("PATH").unwrap())
+}
+
+/// Each task's outcome (`run --json`) or cache status (`plan --explain
+/// --json`), with `path` as `PATH`.
+#[cfg(unix)]
+fn statuses(root: &Path, path: &str, args: &[&str]) -> Vec<String> {
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(args)
+        .env("PATH", path)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    let (list, pointer) = if args[0] == "run" {
+        ("tasks", "/outcome")
+    } else {
+        ("explanations", "/cache/status")
+    };
+    value[list]
+        .as_array()
+        .unwrap_or_else(|| panic!("{value}"))
+        .iter()
+        .map(|task| task.pointer(pointer).unwrap().as_str().unwrap().to_string())
+        .collect()
 }
 
 /// Found on real repositories: `init` left out a vendored crate (and `run`
@@ -514,20 +561,27 @@ fn in_a_git_repository_init_declares_every_file_a_cargo_build_or_test_can_read()
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A contract that leaves out a file a source includes, or a vendored
-/// crate's Cargo files, is refused by `validate` as `run` refuses it, before
-/// any task: `validate` no longer passes what `run` will not start.
+/// A contract that leaves out a file a source includes or names, or a
+/// vendored crate's Cargo files, is refused by `validate` as `run` refuses
+/// it, before any task, and with the same exit code (2). A contract its lock
+/// does not pin is still exit 1.
 #[test]
-fn validate_and_run_refuse_a_contract_that_leaves_out_an_included_or_vendored_file() {
+fn validate_and_run_refuse_a_contract_that_leaves_out_a_file_its_sources_read() {
     let root = crate_repository("refuse-includes");
     let (code, _, stderr) = sykli(&root, &["init"]);
     assert_eq!(code, Some(0), "{stderr}");
     let written = contract(&root);
-    // `src/launch.zsh` sits beside a declared source, `README.md` at the top
-    // level, which only the include rule sees.
     for left_out in [
+        // Included beside its source, and through `..`.
         "src/launch.zsh",
+        "GUIDE.md",
+        // Included from the vendored crate's manifest directory.
+        "vendor/dep/README.md",
+        // Named by a test: a top-level document by its name, one in `docs/`
+        // by its path.
         "README.md",
+        "docs/guide.md",
+        // The vendored crate's own Cargo files.
         "vendor/dep/Cargo.toml",
         "vendor/dep/src/lib.rs",
     ] {
@@ -551,10 +605,10 @@ fn validate_and_run_refuse_a_contract_that_leaves_out_an_included_or_vendored_fi
         };
 
         let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
-        assert_eq!(code, Some(1), "validate without {left_out}: {stderr}");
+        assert_eq!(code, Some(2), "validate without {left_out}: {stderr}");
         assert!(names(&stderr), "{stderr}");
         let (code, stdout, _) = sykli(&root, &["validate", "sykli.json", "--json"]);
-        assert_eq!(code, Some(1));
+        assert_eq!(code, Some(2));
         let verdict: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(verdict["schema"], "sykli-validate.v1");
         assert_eq!(verdict["valid"], false);
@@ -565,51 +619,32 @@ fn validate_and_run_refuse_a_contract_that_leaves_out_an_included_or_vendored_fi
         assert!(names(&stderr), "{stderr}");
         assert!(!root.join(".sykli/receipts").exists(), "no task ran");
     }
+    // Lock drift keeps its own exit code.
+    fs::write(
+        root.join("sykli.json"),
+        serde_json::to_vec_pretty(&written).unwrap(),
+    )
+    .unwrap();
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("sykli lock"), "{stderr}");
     fs::remove_dir_all(root).unwrap();
 }
 
 /// Each file init declares is in every cargo task's key: a change to any of
-/// them misses the cache. A change to the prose it leaves out does not.
-/// `plan --explain` reads the keys `run` would, without running, so each
-/// file is changed, judged and restored; `run` confirms the first and last.
+/// them misses the cache. A change to a document, licence or workflow that no
+/// source names does not. `plan --explain` reads the keys `run` would,
+/// without running, so each file is changed, judged and restored; `run`
+/// confirms both ends.
 #[cfg(unix)]
 #[test]
 fn a_change_to_any_file_init_declares_misses_the_cache() {
-    use std::os::unix::fs::PermissionsExt;
     let root = crate_repository("misses");
     let (code, _, stderr) = sykli(&root, &["init"]);
     assert_eq!(code, Some(0), "{stderr}");
-    // A stand-in toolchain: `cargo` and `rustc` report a version and pass.
-    let bin = root.with_extension("bin");
-    fs::create_dir(&bin).unwrap();
-    for tool in ["cargo", "rustc"] {
-        let path = bin.join(tool);
-        fs::write(&path, format!("#!/bin/sh\necho '{tool} 1.98.0'\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let path = format!("{}:{}", bin.display(), env::var("PATH").unwrap());
-    let statuses = |args: &[&str], field: &str| {
-        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(args)
-            .env("PATH", &path)
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
-        let (list, pointer) = match field {
-            "outcome" => ("tasks", "/outcome"),
-            _ => ("explanations", "/cache/status"),
-        };
-        value[list]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|task| task.pointer(pointer).unwrap().as_str().unwrap().to_string())
-            .collect::<Vec<_>>()
-    };
-    let run = || statuses(&["run", "sykli.json", "--json"], "outcome");
-    let explain = || statuses(&["plan", "--explain", "--json"], "cache");
+    let path = toolchain(&root);
+    let run = || statuses(&root, &path, &["run", "sykli.json", "--json"]);
+    let explain = || statuses(&root, &path, &["plan", "--explain", "--json"]);
     assert_eq!(run(), ["passed", "passed", "passed"]);
     assert_eq!(run(), ["cached", "cached", "cached"]);
     assert_eq!(explain(), ["available", "available", "available"]);
@@ -632,11 +667,239 @@ fn a_change_to_any_file_init_declares_misses_the_cache() {
     }
     assert_eq!(explain(), ["available", "available", "available"]);
     write(&root, "CHANGELOG.md", "# changes, edited\n");
+    write(&root, "docs/adr/0001.md", "# decided, edited\n");
+    write(&root, ".github/workflows/ci.yml", "on: [push]\n");
+    write(&root, "LICENSE", "MIT, edited\n");
     assert_eq!(explain(), ["available", "available", "available"]);
     assert_eq!(run(), ["cached", "cached", "cached"]);
-    write(&root, "src/launch.zsh", "print launched again\n");
+    write(&root, "README.md", "# x, edited\n");
     assert_eq!(run(), ["passed", "passed", "passed"]);
-    fs::remove_dir_all(&bin).unwrap();
+    fs::remove_dir_all(root.with_extension("bin")).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// After `init`, a commit that only adds documents, licences or CI
+/// configuration, anywhere, never makes the contract `init` wrote refuse:
+/// the undeclared-sibling check exempts exactly what `init` leaves out.
+#[test]
+fn a_commit_of_documents_keeps_the_contract_init_wrote() {
+    let root = crate_repository("docs-only");
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let gate = temp_root("docs-only-gate").join("gate/sykli.json");
+    let gate_path = gate.to_str().unwrap().to_string();
+    let (code, _, stderr) = sykli(&root, &["init", "--contract", &gate_path]);
+    assert_eq!(code, Some(0), "{stderr}");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "contract"]);
+    for (path, contents) in [
+        ("docs/adr/0002.md", "# decided again\n"),
+        ("docs/diagram.svg", "<svg/>\n"),
+        (".github/workflows/release.yml", "on: release\n"),
+        (".github/CODEOWNERS", "* @someone\n"),
+        ("src/NOTES.md", "notes beside the sources\n"),
+        ("fixtures/case/README.md", "what the case is\n"),
+        ("vendor/dep/LICENSE-APACHE", "Apache\n"),
+        ("vendor/dep/docs/usage.txt", "usage\n"),
+    ] {
+        write(&root, path, contents);
+    }
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "documents only"]);
+    for contract in ["sykli.json", gate_path.as_str()] {
+        let (code, _, stderr) = sykli(&root, &["validate", contract]);
+        assert_eq!(code, Some(0), "validate {contract}: {stderr}");
+        let (code, stdout, stderr) = sykli(&root, &["plan", contract, "--explain", "--json"]);
+        assert_eq!(code, Some(0), "plan {contract}: {stderr}");
+        let plan: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert!(
+            plan["input_coverage"]["folder_missing_inputs"].is_null(),
+            "{plan}"
+        );
+        assert_eq!(
+            plan["input_coverage"]["cargo_missing_inputs"],
+            serde_json::json!([])
+        );
+    }
+    #[cfg(unix)]
+    {
+        let path = toolchain(&root);
+        // Both contracts declare the same tasks, so the second reuses the
+        // first's passes.
+        for (contract, outcome) in [("sykli.json", "passed"), (gate_path.as_str(), "cached")] {
+            assert_eq!(
+                statuses(&root, &path, &["run", contract, "--json"]),
+                [outcome, outcome, outcome],
+                "run {contract}"
+            );
+        }
+        fs::remove_dir_all(root.with_extension("bin")).unwrap();
+    }
+    fs::remove_dir_all(gate.parent().unwrap().parent().unwrap()).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A tracked symbolic link is declared whatever it leads to: a link that
+/// leads to no file in the repository (a directory, a file outside it,
+/// nothing) by its own text, as git stores it, so pointing it elsewhere
+/// misses the cache; a link to a file in the repository by that file's
+/// bytes, as before. The contract `init` writes validates, runs and
+/// verifies against its commit.
+#[cfg(unix)]
+#[test]
+fn a_tracked_symbolic_link_is_declared_whatever_it_leads_to() {
+    use std::os::unix::fs::symlink;
+    let root = temp_root("links");
+    let outside = root.with_extension("outside.txt");
+    fs::write(&outside, "outside\n").unwrap();
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, "assets/v1/logo.txt", "one\n");
+    write(&root, "assets/v2/logo.txt", "two\n");
+    write(&root, "assets/notes.txt", "beside the link\n");
+    symlink("v1", root.join("assets/current")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    symlink("../assets", root.join("tests/shared")).unwrap();
+    symlink(&outside, root.join("tests/outside.txt")).unwrap();
+    symlink("missing.txt", root.join("tests/dangling.txt")).unwrap();
+    symlink("../assets/v1/logo.txt", root.join("src/logo.txt")).unwrap();
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "links"]);
+
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("symbolic link"), "{stderr}");
+    let declared = inputs(task(&contract(&root), "test"));
+    for link in [
+        "assets/current",
+        "tests/shared",
+        "tests/outside.txt",
+        "tests/dangling.txt",
+        "src/logo.txt",
+    ] {
+        assert!(declared.contains(&link.to_string()), "{link}: {declared:?}");
+    }
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "contract"]);
+
+    let path = toolchain(&root);
+    let receipt = |name: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .env("PATH", &path)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::write(root.join(".sykli").join(name), &out.stdout).unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        receipt["tasks"][0]["outcome"].as_str().unwrap().to_string()
+    };
+    let verified = |name: &str| {
+        let receipt = format!(".sykli/{name}");
+        sykli(
+            &root,
+            &[
+                "verify",
+                &receipt,
+                "--contract",
+                "sykli.json",
+                "--commit",
+                "HEAD",
+            ],
+        )
+    };
+    assert_eq!(receipt("first.json"), "passed");
+    let (code, stdout, _) = verified("first.json");
+    assert_eq!(code, Some(0), "{stdout}");
+
+    // Pointed elsewhere, each link that leads to no file misses the cache,
+    // and the old receipt no longer verifies for the new commit.
+    let explain = || statuses(&root, &path, &["plan", "--explain", "--json"]);
+    assert_eq!(explain(), ["available", "available", "available"]);
+    for (link, target) in [
+        ("assets/current", "v2"),
+        ("tests/shared", "../assets/v1"),
+        ("tests/dangling.txt", "gone.txt"),
+    ] {
+        let file = root.join(link);
+        let before = fs::read_link(&file).unwrap();
+        fs::remove_file(&file).unwrap();
+        symlink(target, &file).unwrap();
+        assert_eq!(
+            explain(),
+            ["missing", "deferred", "deferred"],
+            "pointing {link} to {target} kept a cached pass"
+        );
+        fs::remove_file(&file).unwrap();
+        symlink(before, &file).unwrap();
+    }
+    fs::remove_file(root.join("assets/current")).unwrap();
+    symlink("v2", root.join("assets/current")).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "current is v2"]);
+    let (code, _, _) = verified("first.json");
+    assert_eq!(code, Some(3), "a receipt from before the link moved");
+    assert_eq!(receipt("second.json"), "passed");
+    let (code, stdout, _) = verified("second.json");
+    assert_eq!(code, Some(0), "{stdout}");
+    fs::remove_dir_all(root.with_extension("bin")).unwrap();
+    fs::remove_file(outside).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// An include whose path is not a string literal cannot be required, so it
+/// is refused, never passed over: with its file and line, by `init`,
+/// `validate` and `run` alike. A path generated at build time
+/// (`OUT_DIR`) is not in git and is not refused.
+#[test]
+fn an_include_whose_path_is_not_a_literal_is_refused_with_its_file_and_line() {
+    let root = temp_root("opaque");
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root,
+        "src/lib.rs",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\nmacro_rules! text {\n    ($p:literal) => {\n        include_str!($p)\n    };\n}\npub const A: &str = text!(\"a.txt\");\n",
+    );
+    write(&root, "src/a.txt", "a\n");
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "opaque"]);
+    let names = |text: &str| {
+        let text = text.replace('\\', "/");
+        text.contains("src/lib.rs:4") && text.contains("not a string literal")
+    };
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(names(&stderr), "{stderr}");
+    assert!(!root.join("sykli.json").exists());
+    write(
+        &root,
+        "sykli.json",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.toml","src/a.txt","src/lib.rs"]}]}"#,
+    );
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(names(&stderr), "{stderr}");
+    let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(names(&stderr), "{stderr}");
     fs::remove_dir_all(root).unwrap();
 }
 
