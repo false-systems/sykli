@@ -1,0 +1,33 @@
+repo:
+  name: sykli
+  role: content-addressed evaluator for declared work graphs
+  not:
+  - work tracker
+  - verification authority
+  - agent runner
+  - datastore
+  - server
+  - interpreter
+context:
+  default_budget: 8000
+  important_docs:
+  - README.md
+  read_first: []
+  safe_to_ignore: []
+validation:
+  replace_inferred: false
+  fast: []
+  strict: []
+  full: []
+  privileged: []
+stewardship:
+  auto_sweep: true
+  sessions_retention_days: 7
+  runs_retention_days: 14
+  history_max_records: 500
+boundaries:
+- "Own only graph parsing, validation, planning, execution, caching, and receipts."
+- "Receipts claim what ran; verifying them, deciding closure, storing them and running workers belong to other tools."
+- "Stay a local, offline, single-run CLI: no server, network service, daemon, coordination, or agent execution."
+- "A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily."
+- "Contract growth requires a named user and the re-entry conditions in docs/adr/0005-deletions.md."
