@@ -928,54 +928,6 @@ fn init_declares_links_to_a_directory_or_to_nothing_by_their_text() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A link to a file outside the repository is read through, as on main: a
-/// change to that file misses the cache, and since a commit cannot show
-/// the file, `verify --commit` refuses the receipt.
-#[cfg(unix)]
-#[test]
-fn a_link_to_a_file_outside_the_repository_is_read_through_and_never_verified() {
-    let outside = temp_root("outside-file").join("o.txt");
-    fs::write(&outside, "ext\n").unwrap();
-    let root = linked_repository(
-        "outside-file-link",
-        &[],
-        &[("ext.txt", outside.to_str().unwrap())],
-        Some(
-            r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q ext ext.txt","inputs":["ext.txt"]}]}"#,
-        ),
-    );
-    let path = env::var("PATH").unwrap();
-    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
-    assert_eq!(code, Some(0), "{stderr}");
-    assert_eq!(
-        kept_receipt(&root, &path, "sykli.json", "first.json"),
-        "passed"
-    );
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join(".sykli/first.json")).unwrap()).unwrap();
-    assert!(receipt["tasks"][0]["inputs"]["ext.txt"]["link"].is_null());
-    let (code, stdout, _) = sykli(
-        &root,
-        &[
-            "verify",
-            ".sykli/first.json",
-            "--contract",
-            "sykli.json",
-            "--commit",
-            "HEAD",
-        ],
-    );
-    assert_eq!(code, Some(3), "{stdout}");
-    assert!(stdout.contains("outside the repository"), "{stdout}");
-    fs::write(&outside, "other\n").unwrap();
-    assert_eq!(
-        kept_receipt(&root, &path, "sykli.json", "second.json"),
-        "failed"
-    );
-    fs::remove_dir_all(outside.parent().unwrap()).unwrap();
-    fs::remove_dir_all(root).unwrap();
-}
-
 /// A link to a directory is declared by its text, so the files a run reads
 /// through it are in no key unless the task declares them: a contract that
 /// declares the link without every tracked file under the directory is
@@ -1024,17 +976,32 @@ fn a_link_to_a_directory_requires_the_files_under_it() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A link to a directory outside the repository leads to files no commit
-/// holds, which sykli cannot bind: `init` does not declare it, the rules
-/// that ask for files beside declared ones or under `tests/` do not ask for
-/// it, and a contract that declares it is refused.
+/// A link that leads out of the repository, to a file, a directory or
+/// nothing there, by an absolute path or by climbing out, leads where no
+/// commit can show, so its receipts could never verify: `init` leaves it
+/// out with a note, the rules that ask for files under `tests/` or beside
+/// declared ones do not ask for it, and a contract that declares it is
+/// refused by `validate` and `run` before any task (on main, `run` passed a
+/// link to an outside file and `verify --commit` refused every receipt).
 #[cfg(unix)]
 #[test]
-fn a_link_to_a_directory_outside_the_repository_cannot_be_declared() {
-    let outside = temp_root("outside-dir");
-    fs::write(outside.join("data.txt"), "data\n").unwrap();
+fn a_link_out_of_the_repository_cannot_be_declared() {
+    let outside = temp_root("outside");
+    fs::write(outside.join("o.txt"), "ext\n").unwrap();
+    let name = outside.file_name().unwrap().to_str().unwrap().to_string();
+    let absolute_missing = outside.join("missing.txt");
+    let links = [
+        ("tests/ext", outside.to_str().unwrap().to_string()),
+        (
+            "tests/ext.txt",
+            outside.join("o.txt").to_str().unwrap().to_string(),
+        ),
+        ("tests/dabs", absolute_missing.to_str().unwrap().to_string()),
+        ("tests/up.txt", format!("../../{name}/o.txt")),
+        ("tests/up-missing", format!("../../{name}/gone.txt")),
+    ];
     let root = linked_repository(
-        "outside-dir-link",
+        "outside-links",
         &[
             (
                 "Cargo.toml",
@@ -1043,39 +1010,107 @@ fn a_link_to_a_directory_outside_the_repository_cannot_be_declared() {
             ("src/main.rs", "fn main() {}\n"),
             ("tests/it.rs", "#[test]\nfn it() {}\n"),
         ],
-        &[("tests/ext", outside.to_str().unwrap())],
+        &links
+            .iter()
+            .map(|(link, target)| (*link, target.as_str()))
+            .collect::<Vec<_>>(),
         None,
     );
     let (code, _, stderr) = sykli(&root, &["init"]);
     assert_eq!(code, Some(0), "{stderr}");
-    let declared = inputs(task(&contract(&root), "test"));
-    assert!(!declared.contains(&"tests/ext".to_string()), "{declared:?}");
+    let written = contract(&root);
+    let declared = inputs(task(&written, "test"));
+    for (link, _) in &links {
+        assert!(
+            !declared.contains(&link.to_string()),
+            "{link}: {declared:?}"
+        );
+        assert!(
+            stderr.contains(&format!("{link} is a symbolic link out of the repository")),
+            "{stderr}"
+        );
+    }
     let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
     assert_eq!(code, Some(0), "{stderr}");
 
-    let mut edited = contract(&root);
-    for task in edited["tasks"].as_array_mut().unwrap() {
-        task["inputs"]
-            .as_array_mut()
-            .unwrap()
-            .push("tests/ext".into());
+    for (link, _) in &links {
+        let mut edited = written.clone();
+        for task in edited["tasks"].as_array_mut().unwrap() {
+            task["inputs"].as_array_mut().unwrap().push((*link).into());
+        }
+        fs::write(
+            root.join("sykli.json"),
+            serde_json::to_vec_pretty(&edited).unwrap(),
+        )
+        .unwrap();
+        let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let refused = |text: &str| {
+            text.contains(&format!("{link}, a symbolic link to"))
+                && text.contains("outside the repository")
+        };
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(2), "validate with {link}: {stderr}");
+        assert!(refused(&stderr), "{stderr}");
+        let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+        assert_eq!(code, Some(2), "run with {link}: {stderr}");
+        assert!(refused(&stderr), "{stderr}");
+        assert!(!root.join(".sykli/receipts").exists(), "no task ran");
     }
-    fs::write(
-        root.join("sykli.json"),
-        serde_json::to_vec_pretty(&edited).unwrap(),
-    )
-    .unwrap();
-    let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
-    assert_eq!(code, Some(0), "{stderr}");
-    let refused =
-        |text: &str| text.contains("tests/ext") && text.contains("outside the repository");
+    fs::remove_dir_all(outside).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A document is required only when a string literal in a source names it,
+/// as a test that reads it does: a comment or a doc comment that mentions
+/// one requires nothing, and a path that ends in a document's name does not
+/// name the top-level one.
+#[test]
+fn a_document_is_required_when_a_string_names_it_not_when_a_comment_does() {
+    let root = temp_root("mentions");
+    for (path, contents) in [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "//! How to work here is in AGENTS.md.\n/// See README.md and docs/setup.md.\npub fn f() {\n    // CLAUDE.md says so too.\n    let _ = \"home/.claude/CLAUDE.md\";\n}\n",
+        ),
+        ("AGENTS.md", "# agents\n"),
+        ("CLAUDE.md", "# claude\n"),
+        ("README.md", "# x\n"),
+        ("docs/setup.md", "# setup\n"),
+    ] {
+        write(&root, path, contents);
+    }
+    write(
+        &root,
+        "sykli.json",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.toml","src/lib.rs"]}]}"#,
+    );
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "mentions"]);
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "mentions require nothing: {stderr}");
+
+    write(
+        &root,
+        "tests/readme.rs",
+        "#[test]\nfn readme() {\n    std::fs::read(\"README.md\").unwrap();\n}\n",
+    );
+    write(
+        &root,
+        "sykli.json",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.toml","src/lib.rs","tests/readme.rs"]}]}"#,
+    );
     let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
     assert_eq!(code, Some(2), "{stderr}");
-    assert!(refused(&stderr), "{stderr}");
-    let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
-    assert_eq!(code, Some(2), "{stderr}");
-    assert!(refused(&stderr), "{stderr}");
-    fs::remove_dir_all(outside).unwrap();
+    assert!(stderr.contains("\"README.md\""), "{stderr}");
+    for unasked in ["AGENTS.md", "CLAUDE.md", "docs/setup.md"] {
+        assert!(!stderr.contains(unasked), "{unasked}: {stderr}");
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
