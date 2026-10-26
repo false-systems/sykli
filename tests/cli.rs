@@ -703,6 +703,95 @@ fn inherited_variables_reach_the_task_but_only_their_digests_reach_the_receipt()
     fs::remove_dir_all(root).unwrap();
 }
 
+/// An inherited value's digest in a receipt was its plain SHA-256, and CI
+/// uploads receipts: a short token could be found from it by trying every
+/// candidate. The digest is now keyed by a secret of the clone's own, which
+/// no receipt holds, so a receipt carries nothing a guess can be checked
+/// against. It is the same on every run of one clone (the cache still hits
+/// for the same value and misses for another), and another clone, with its
+/// own key, digests the same value differently. A contract that inherits
+/// nothing makes no key.
+#[test]
+fn an_inherited_value_leaves_no_guessable_digest_in_a_receipt() {
+    use sha2::{Digest, Sha256};
+    let contract = r#"{"schema":"sykli-contract.v1","tasks":[{"name":"use","run":"test -n \"$SYKLI_TOKEN_TEST\"","inherit":["SYKLI_TOKEN_TEST"]}]}"#;
+    let root = graph_repo("inherit-key", contract);
+    let key = root.join(".git/sykli/inherit-key");
+    let run = |root: &std::path::Path, value: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", "sykli.json", "--json"])
+            .env("SYKLI_TOKEN_TEST", value)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let plain = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+
+    let first = run(&root, "1234");
+    let digest = first["tasks"][0]["inherited_digests"]["SYKLI_TOKEN_TEST"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(digest.len(), 64);
+    let receipt = first.to_string();
+    for guess in ["1234", "SYKLI_TOKEN_TEST=1234", "SYKLI_TOKEN_TEST\u{0}1234"] {
+        assert!(!receipt.contains(&plain(guess)), "{guess}: {receipt}");
+    }
+    assert!(key.is_file(), "the key is kept in the common git directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is its owner's alone");
+    }
+    assert!(!receipt.contains(fs::read_to_string(&key).unwrap().trim()));
+
+    let again = run(&root, "1234");
+    assert_eq!(again["tasks"][0]["outcome"], "cached");
+    assert_eq!(
+        again["tasks"][0]["inherited_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str()
+    );
+    let changed = run(&root, "1235");
+    assert_eq!(changed["tasks"][0]["outcome"], "passed");
+    assert_ne!(
+        changed["tasks"][0]["inherited_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str()
+    );
+
+    let clone = root.with_extension("clone");
+    let cloned = Command::new("git")
+        .args(["clone", "--quiet"])
+        .arg(&root)
+        .arg(&clone)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success());
+    let other = run(&clone, "1234");
+    assert_ne!(
+        other["tasks"][0]["inherited_digests"]["SYKLI_TOKEN_TEST"],
+        digest.as_str(),
+        "another clone has its own key"
+    );
+
+    // Nothing inherited, no key.
+    let plain_root = graph_repo(
+        "no-inherit-key",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"true"}]}"#,
+    );
+    run(&plain_root, "1234");
+    assert!(!plain_root.join(".git/sykli/inherit-key").exists());
+    for directory in [root, clone, plain_root] {
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
 /// sykli#64: a Cargo graph runs on whatever compiler rustup resolves. Moving
 /// rustup's default changes neither the shell, `PATH` nor any declared input,
 /// so without the toolchain in the key a pass recorded under one rustc was
