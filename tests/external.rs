@@ -627,7 +627,7 @@ fn a_repository_inside_the_contract_directory_is_named_freely() {
             "true".to_string(),
             serde_json::json!({"CARGO_TARGET_DIR": format!("{repo_path}/target")}),
         ),
-        (format!("cd {repo_path} && true"), serde_json::json!({})),
+        (format!("cd '{repo_path}' && true"), serde_json::json!({})),
     ] {
         let out = validate_with_home(&scratch, &contract, task(run.clone(), env), repo);
         assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
