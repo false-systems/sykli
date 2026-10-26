@@ -9,10 +9,6 @@
         "docs/verification/test-stdin.md",
         "tests/stdin.rs",
         "tests/support/stdio.rs",
-        "docs/verification/DeliveryInventory.lean",
-        "docs/verification/delivery-inventory.md",
-        "docs/verification/delivery-crash.md",
-        "docs/verification/DeliveryCrash.lean",
         "Cargo.toml",
         "rust-toolchain.toml",
         "src/init.rs",
@@ -39,9 +35,7 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs",
-        "src/production/delivery.rs",
-        "tests/delivery.rs"
+        "tests/snapshot.rs"
       ]
     },
     {
@@ -73,10 +67,6 @@
         "docs/verification/test-stdin.md",
         "tests/stdin.rs",
         "tests/support/stdio.rs",
-        "docs/verification/DeliveryInventory.lean",
-        "docs/verification/delivery-inventory.md",
-        "docs/verification/delivery-crash.md",
-        "docs/verification/DeliveryCrash.lean",
         "Cargo.lock",
         "rust-toolchain.toml",
         "Cargo.toml",
@@ -104,9 +94,7 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs",
-        "src/production/delivery.rs",
-        "tests/delivery.rs"
+        "tests/snapshot.rs"
       ]
     },
     {
@@ -120,10 +108,6 @@
         "docs/verification/test-stdin.md",
         "tests/stdin.rs",
         "tests/support/stdio.rs",
-        "docs/verification/DeliveryInventory.lean",
-        "docs/verification/delivery-inventory.md",
-        "docs/verification/delivery-crash.md",
-        "docs/verification/DeliveryCrash.lean",
         "Cargo.lock",
         "rust-toolchain.toml",
         "Cargo.toml",
@@ -158,9 +142,7 @@
         "action/binary.sh",
         "action/plan.sh",
         "action/summary.sh",
-        "action/verify.sh",
-        "src/production/delivery.rs",
-        "tests/delivery.rs"
+        "action/verify.sh"
       ]
     }
   ]
