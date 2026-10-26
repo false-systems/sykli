@@ -74,7 +74,8 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// A receipt's subject as a run's journal keeps it, inputs and HEAD's commit
-/// included, so a later coordinator can write the receipt this run began.
+/// included, so a later coordinator can write the receipt this run began;
+/// the contract inputs too, written only when a task declares any.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubjectRecord {
@@ -86,6 +87,8 @@ pub(crate) struct SubjectRecord {
     submodules_modified: bool,
     head_commit: Option<String>,
     inputs: InputRecords,
+    #[serde(default, skip_serializing_if = "InputRecords::is_empty")]
+    pub(crate) contract_inputs: InputRecords,
 }
 
 impl From<&Subject> for SubjectRecord {
@@ -99,21 +102,7 @@ impl From<&Subject> for SubjectRecord {
             submodules_modified: subject.submodules_modified,
             head_commit: subject.head_commit.clone(),
             inputs: subject.inputs.clone(),
-        }
-    }
-}
-
-impl From<&SubjectRecord> for Subject {
-    fn from(record: &SubjectRecord) -> Self {
-        Subject {
-            repository: record.repository.clone(),
-            tree_oid: record.tree_oid.clone(),
-            inputs_digest: record.inputs_digest.clone(),
-            head_tree_oid: record.head_tree_oid.clone(),
-            dirty: record.dirty,
-            submodules_modified: record.submodules_modified,
-            inputs: record.inputs.clone(),
-            head_commit: record.head_commit.clone(),
+            contract_inputs: subject.contract_inputs.clone(),
         }
     }
 }
@@ -181,8 +170,25 @@ impl Request {
         })
     }
 
+    /// The subject the run recorded, with the directory of the contract it
+    /// was read from, where its contract inputs are.
     pub(crate) fn subject(&self) -> Subject {
-        (&self.subject).into()
+        let record = &self.subject;
+        Subject {
+            repository: record.repository.clone(),
+            tree_oid: record.tree_oid.clone(),
+            inputs_digest: record.inputs_digest.clone(),
+            head_tree_oid: record.head_tree_oid.clone(),
+            dirty: record.dirty,
+            submodules_modified: record.submodules_modified,
+            inputs: record.inputs.clone(),
+            head_commit: record.head_commit.clone(),
+            contract_directory: Path::new(&self.contract_path)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            contract_inputs: record.contract_inputs.clone(),
+        }
     }
 }
 
@@ -2129,6 +2135,7 @@ mod tests {
                 submodules_modified: false,
                 head_commit: None,
                 inputs: InputRecords::new(),
+                contract_inputs: InputRecords::new(),
             },
             tasks: vec!["t".into()],
             runtime: "shell".into(),

@@ -32,6 +32,11 @@ pub struct Task {
     /// Values reach the command; only their digests reach the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherit: Vec<String>,
+    /// Files beside a contract kept outside the repository, as paths from
+    /// the contract's directory. They join the task's key and receipt, and
+    /// the task reaches them as `$SYKLI_CONTRACT_DIR/PATH`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract_inputs: Vec<String>,
 }
 
 pub struct Pipeline {
@@ -59,6 +64,7 @@ impl Pipeline {
             outputs: Vec::new(),
             runtime: None,
             inherit: Vec::new(),
+            contract_inputs: Vec::new(),
         });
         TaskBuilder {
             task: self.contract.tasks.last_mut().unwrap(),

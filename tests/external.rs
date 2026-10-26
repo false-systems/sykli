@@ -437,6 +437,622 @@ fn a_receipt_for_a_contract_outside_the_repository_must_name_its_lock() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
 }
 
+/// A contract of one task, `check`, that reads `file.txt` from the
+/// repository and declares `contract_inputs` beside the contract (none: no
+/// field, as a contract written before the field was).
+fn helper_contract(run: &str, contract_inputs: &[&str]) -> String {
+    let mut task = serde_json::json!({"name": "check", "run": run, "inputs": ["file.txt"]});
+    if !contract_inputs.is_empty() {
+        task["contract_inputs"] = contract_inputs.into();
+    }
+    serde_json::json!({"schema": "sykli-contract.v1", "tasks": [task]}).to_string()
+}
+
+/// How a task runs a helper it declares beside its contract.
+const RUNS_HELPER: &str = r#"sh "$SYKLI_CONTRACT_DIR/check.sh""#;
+
+/// sykli#75: a helper script beside the contract, run by its path. It is
+/// not a declared input, so nothing about it reached the task's key, and
+/// after it changed from `exit 0` to `exit 1` the next run reported the old
+/// pass as `cached` and exited 0. A task may not name the contract's
+/// directory: sykli cannot hash what it reads there by that name.
+#[test]
+fn a_helper_named_beside_an_outside_contract_never_reuses_a_stale_pass() {
+    let scratch = Scratch::new("helper");
+    let repo = &scratch.repo;
+    let script = scratch.config.join("check.sh");
+    fs::write(&script, "exit 0\n").unwrap();
+    let contract = scratch.config.join("sykli.json");
+    let path = contract.to_str().unwrap();
+    let by_path = format!("sh '{}'", script.display());
+    fs::write(&contract, helper_contract(&by_path, &[])).unwrap();
+    let _ = sykli(repo, &["lock", path]);
+    let _ = sykli(repo, &["run", path]);
+    fs::write(&script, "exit 1\n").unwrap();
+    let again = sykli(repo, &["run", path]);
+    assert_ne!(
+        again.status.code(),
+        Some(0),
+        "a changed helper passed: {}{}",
+        text(&again.stdout),
+        text(&again.stderr)
+    );
+    assert!(!text(&again.stdout).contains("cached"));
+
+    // Refused wherever a contract is written or run, before anything runs,
+    // and declaring the file does not make its path a way to reach it.
+    for declared in [&[][..], &["check.sh"][..]] {
+        fs::write(&contract, helper_contract(&by_path, declared)).unwrap();
+        let out = sykli(repo, &["validate", path]);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        let message = text(&out.stderr);
+        assert!(message.contains("names the directory"), "{message}");
+        assert!(message.contains("$SYKLI_CONTRACT_DIR"), "{message}");
+        for command in [&["run", path][..], &["lock", path], &["plan", path]] {
+            let out = sykli(repo, command);
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{command:?}: {}",
+                text(&out.stderr)
+            );
+            assert!(text(&out.stderr).contains("names the directory"));
+        }
+    }
+    // Named through an environment value, the same.
+    let in_env = serde_json::json!({
+        "schema": "sykli-contract.v1",
+        "tasks": [{"name": "check", "run": "sh \"$HELPERS/check.sh\"",
+                   "env": {"HELPERS": scratch.config.to_str().unwrap()}}],
+    });
+    fs::write(&contract, in_env.to_string()).unwrap();
+    assert_eq!(sykli(repo, &["validate", path]).status.code(), Some(1));
+    // A directory whose name only starts with the contract's is another one.
+    let sibling = format!("{}-other", scratch.config.display());
+    fs::write(
+        &contract,
+        helper_contract(&format!("test ! -e '{sibling}'"), &[]),
+    )
+    .unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// `validate` of a contract whose task runs `run`, with `env`, from the
+/// repository, with HOME set to `home` for sykli.
+fn validate_with_home(
+    scratch: &Scratch,
+    contract: &Path,
+    task: serde_json::Value,
+    home: &Path,
+) -> Output {
+    let contract_text = serde_json::json!({"schema": "sykli-contract.v1", "tasks": [task]});
+    fs::write(contract, contract_text.to_string()).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["validate", contract.to_str().unwrap()])
+        .current_dir(&scratch.repo)
+        .env("HOME", home)
+        .output()
+        .unwrap()
+}
+
+/// The contract's directory spelled through the HOME the task gets (its
+/// declared one, else sykli's: `$HOME`, `${HOME}` or a leading `~`), or with
+/// `//` or `/./` in its path, is refused as its plain path is.
+#[test]
+fn the_contract_directory_is_refused_through_home_and_extra_slashes() {
+    let scratch = Scratch::new("spellings");
+    let contract = scratch.config.join("sykli.json");
+    let base = scratch.base.display().to_string();
+    let task = |run: &str| serde_json::json!({"name": "check", "run": run});
+    for run in [
+        "sh $HOME/config/check.sh".to_string(),
+        "sh \"${HOME}/config/check.sh\"".to_string(),
+        "sh ~/config/check.sh".to_string(),
+        "HELPERS=~/config sh -c 'sh \"$HELPERS/check.sh\"'".to_string(),
+        format!("sh {base}//config/check.sh"),
+        format!("sh {base}/./config/check.sh"),
+        // Quotes that split the path are removed, as the shell removes them.
+        "sh \"$HOME\"/config/check.sh".to_string(),
+        "sh \"${HOME}\"/config/check.sh".to_string(),
+        "sh $HOME\"/config/check.sh\"".to_string(),
+        "sh ~/\"config\"/check.sh".to_string(),
+        format!("sh '{base}'/config/check.sh"),
+        format!("sh \"{base}/con\"fig/check.sh"),
+        // A variable before the path may be empty, quoted or not.
+        format!("sh \"$PREFIX\"{base}/config/check.sh"),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(&run), &scratch.base);
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+        assert!(text(&out.stderr).contains("names the directory"), "{run}");
+    }
+    // A backslash escape is removed too, where it is not a separator.
+    if cfg!(unix) {
+        let run = format!("sh {base}/con\\fig/check.sh");
+        let out = validate_with_home(&scratch, &contract, task(&run), &scratch.base);
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+    }
+    // The task's own HOME is the one its shell expands.
+    let declared = serde_json::json!({
+        "name": "check", "run": "sh $HOME/config/check.sh", "env": {"HOME": base},
+    });
+    let out = validate_with_home(&scratch, &contract, declared, &scratch.repo);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    // Another variable, another directory, or a HOME that leads elsewhere
+    // names something else.
+    for (run, home) in [
+        ("sh $HOMEDIR/config/check.sh", &scratch.base),
+        ("sh $HOME/config-old/check.sh", &scratch.base),
+        ("sh ~user/config/check.sh", &scratch.base),
+        ("sh $HOME/config/check.sh", &scratch.repo),
+        // A quote inside an ordinary argument is only a quote.
+        (
+            "printf '%s\\n' \"don't\" \"$HOME\"/config-old/check.sh",
+            &scratch.base,
+        ),
+        ("echo \"it's $HOME/configs\"", &scratch.base),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(run), home);
+        assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
+    }
+}
+
+/// With no git repository around the current directory there is no inside
+/// or outside to judge (and nothing can run), so a contract that declares
+/// contract inputs validates and locks there as any other contract does.
+#[test]
+fn contract_inputs_validate_and_lock_where_there_is_no_repository() {
+    let scratch = Scratch::new("norepo");
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, helper_contract(RUNS_HELPER, &["check.sh"])).unwrap();
+    let ceiling = scratch.base.parent().unwrap();
+    for cwd in [&scratch.config, &scratch.base] {
+        for (command, code) in [("validate", 0), ("lock", 0)] {
+            let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+                .args([command, contract.to_str().unwrap()])
+                .current_dir(cwd)
+                .env("GIT_CEILING_DIRECTORIES", ceiling)
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(code),
+                "{command} in {}: {}",
+                cwd.display(),
+                text(&out.stderr)
+            );
+        }
+    }
+    // From the repository it judges, it is the same contract.
+    let (_, value) = receipt(&scratch, &scratch.repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+}
+
+/// A contract kept in a directory that holds the repository may name paths
+/// in the repository (they are repository paths, declared as inputs), but
+/// not the files beside it, nor reach them out of the repository by `..`.
+#[test]
+fn a_repository_inside_the_contract_directory_is_named_freely() {
+    let scratch = Scratch::new("enclosing");
+    let repo = &scratch.repo;
+    let contract = scratch.base.join("sykli.json");
+    let repo_path = repo.display().to_string();
+    let task = |run: String, env: serde_json::Value| serde_json::json!({"name": "check", "run": run, "env": env, "inputs": ["file.txt"]});
+    for (run, env) in [
+        (
+            format!("test -f '{repo_path}/file.txt'"),
+            serde_json::json!({}),
+        ),
+        (
+            "true".to_string(),
+            serde_json::json!({"CARGO_TARGET_DIR": format!("{repo_path}/target")}),
+        ),
+        (
+            format!("test -f \"{repo_path}\"/file.txt"),
+            serde_json::json!({}),
+        ),
+        (format!("cd '{repo_path}' && true"), serde_json::json!({})),
+    ] {
+        let out = validate_with_home(&scratch, &contract, task(run.clone(), env), repo);
+        assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
+    }
+    let out = sykli(repo, &["lock", contract.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+
+    // Unpinned, so each edit below is judged for what it names.
+    fs::remove_file(scratch.base.join("sykli.lock")).unwrap();
+    for run in [
+        format!("sh {}/check.sh", scratch.base.display()),
+        format!("sh {repo_path}/../check.sh"),
+        // A quote that ends before the `..` does not end the path.
+        format!("sh \"{repo_path}\"/../check.sh"),
+        format!("sh '{repo_path}'/../check.sh"),
+    ] {
+        let out = validate_with_home(
+            &scratch,
+            &contract,
+            task(run.clone(), serde_json::json!({})),
+            repo,
+        );
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+        assert!(text(&out.stderr).contains("names the directory"), "{run}");
+    }
+}
+
+/// The task's copy of its contract inputs is its owner's alone (a 0700
+/// directory, 0600 files, the owner's execute bit kept where the file has
+/// one), in the temporary directory the run is given, and gone when the
+/// task ends. Directories other runs left there, as a sykli that was killed
+/// leaves its copy, never stand in a new run's way, and the user's own
+/// copies left unchanged for over a day are removed.
+#[cfg(unix)]
+#[test]
+fn a_tasks_copy_is_its_owners_alone_and_leftovers_never_block_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("private");
+    let repo = &scratch.repo;
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let tool = scratch.config.join("tool.sh");
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = r#"ls -ld "$SYKLI_CONTRACT_DIR" "$SYKLI_CONTRACT_DIR/check.sh" "$SYKLI_CONTRACT_DIR/tool.sh" && sh "$SYKLI_CONTRACT_DIR/check.sh" && "$SYKLI_CONTRACT_DIR/tool.sh""#;
+    let contract = scratch.contract(&helper_contract(run, &["check.sh", "tool.sh"]));
+    let temporary = scratch.base.join("tmp");
+    fs::create_dir(&temporary).unwrap();
+    let mut left = Vec::new();
+    for name in [
+        "sykli-contract-0",
+        "sykli-contract-1-1",
+        "sykli-contract-2-4",
+    ] {
+        fs::create_dir(temporary.join(name)).unwrap();
+        left.push(name.to_string());
+    }
+    // One of this user's copies unchanged for two days is stale: removed.
+    let stale = temporary.join("sykli-contract-stale");
+    fs::create_dir(&stale).unwrap();
+    fs::write(stale.join("check.sh"), "exit 0\n").unwrap();
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    fs::File::open(&stale)
+        .unwrap()
+        .set_modified(two_days_ago)
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["run", contract.to_str().unwrap(), "--json"])
+        .current_dir(repo)
+        .env("TMPDIR", &temporary)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let listing = value["tasks"][0]["stdout"].as_str().unwrap().to_string();
+    let modes = listing
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap_or(""))
+        .collect::<Vec<_>>();
+    assert_eq!(modes.len(), 3, "{listing}");
+    assert!(modes[0].starts_with("drwx------"), "{listing}");
+    assert!(modes[1].starts_with("-rw-------"), "{listing}");
+    assert!(modes[2].starts_with("-rwx------"), "{listing}");
+    assert!(listing.contains(temporary.to_str().unwrap()), "{listing}");
+    // Its own copy is gone; what others left is left as it was.
+    assert_eq!(names(&temporary), left);
+}
+
+/// A file declared in `contract_inputs` is read from beside the contract:
+/// its bytes and execute bits join the task's key, the receipt records it,
+/// and the task reaches it as `$SYKLI_CONTRACT_DIR/NAME`.
+#[test]
+fn a_declared_file_beside_an_outside_contract_joins_the_key_and_the_receipt() {
+    let scratch = Scratch::new("contractinputs");
+    let repo = &scratch.repo;
+    let script = scratch.config.join("check.sh");
+    fs::write(&script, "exit 0\n").unwrap();
+    let contract = scratch.contract(&helper_contract(RUNS_HELPER, &["check.sh"]));
+    let path = contract.to_str().unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+    let recorded = value["tasks"][0]["contract_inputs"].clone();
+    let record = &recorded["check.sh"];
+    assert_eq!(record["sha256"].as_str(), Some(sha256(&script).as_str()));
+    if cfg!(unix) {
+        assert_eq!(record["mode"], 0, "{record}");
+    }
+    // Not in any tree, so no entry; the repository's records are as before.
+    assert!(record.get("object").is_none(), "{record}");
+    let inputs = value["tasks"][0]["inputs"].as_object().unwrap();
+    assert_eq!(inputs.keys().collect::<Vec<_>>(), ["file.txt"]);
+    // Reused, the record says what the reused pass was keyed by.
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "cached", "{value}");
+    assert_eq!(value["tasks"][0]["contract_inputs"], recorded);
+
+    // Any change to the helper misses the cache.
+    fs::write(&script, "# still passing\nexit 0\n").unwrap();
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_, value) = receipt(&scratch, repo, &contract);
+        assert_eq!(value["outcome"], "passed", "{value}");
+        assert_eq!(
+            value["tasks"][0]["contract_inputs"]["check.sh"]["mode"],
+            0o111
+        );
+    }
+    fs::write(&script, "exit 1\n").unwrap();
+    let out = sykli(repo, &["run", path]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "failed", "{value}");
+
+    // A missing one is an input error, as a missing repository input is.
+    fs::remove_file(&script).unwrap();
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "errored", "{value}");
+    assert_eq!(value["tasks"][0]["class"], "input_error", "{value}");
+    assert!(value["tasks"][0]["contract_inputs"]["check.sh"].is_null());
+
+    // Nothing was written into the repository or beside the contract.
+    assert_eq!(scratch.status(), "");
+    assert_eq!(names(&scratch.config), ["sykli.json", "sykli.lock"]);
+}
+
+/// `$SYKLI_CONTRACT_DIR` holds exactly the declared files, as they were
+/// hashed, so a helper cannot read an undeclared file beside the contract
+/// through it: sykli could not know about that file, so it must not let a
+/// pass depend on it. The directory is the task's own and is gone when the
+/// task ends; a task that declares no contract inputs has none.
+#[test]
+fn a_task_reaches_only_the_files_beside_its_contract_that_it_declares() {
+    let scratch = Scratch::new("onlydeclared");
+    let repo = &scratch.repo;
+    fs::write(
+        scratch.config.join("check.sh"),
+        ". \"$SYKLI_CONTRACT_DIR/lib.sh\"\nhelper\n",
+    )
+    .unwrap();
+    fs::write(scratch.config.join("lib.sh"), "helper() { true; }\n").unwrap();
+    let run = format!("echo \"$SYKLI_CONTRACT_DIR\"; {RUNS_HELPER}");
+    let contract = scratch.contract(&helper_contract(&run, &["check.sh"]));
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "failed", "{value}");
+
+    let contract = scratch.contract(&helper_contract(&run, &["check.sh", "lib.sh"]));
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+    let private = PathBuf::from(value["tasks"][0]["stdout"].as_str().unwrap().trim());
+    assert!(private.is_absolute(), "{value}");
+    assert!(!private.exists(), "{} outlived its task", private.display());
+    assert!(!private.starts_with(&scratch.config) && !private.starts_with(repo));
+    fs::write(scratch.config.join("lib.sh"), "helper() { :; }\n").unwrap();
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+
+    let none = r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"test -z \"${SYKLI_CONTRACT_DIR+set}\""}]}"#;
+    let contract = scratch.contract(none);
+    let (_, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+    assert!(
+        value["tasks"][0].get("contract_inputs").is_none(),
+        "{value}"
+    );
+}
+
+/// `verify` reads each contract input from beside the contract as it is
+/// now, with or without `--commit` (no commit carries it), and refuses a
+/// receipt whose run read other bytes, or that does not record them.
+#[test]
+fn verify_judges_the_files_beside_an_outside_contract_as_they_are_now() {
+    let scratch = Scratch::new("verifyhelper");
+    let repo = &scratch.repo;
+    let script = scratch.config.join("check.sh");
+    fs::write(&script, "exit 0\n").unwrap();
+    let contract = scratch.contract(&helper_contract(RUNS_HELPER, &["check.sh"]));
+    let (path, value) = receipt(&scratch, repo, &contract);
+    assert_eq!(value["outcome"], "passed", "{value}");
+    for commit in [None, Some("HEAD")] {
+        let out = verify(repo, &path, &contract, commit);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+        assert!(
+            text(&out.stdout).contains("ok: contract inputs"),
+            "{}",
+            text(&out.stdout)
+        );
+    }
+
+    fs::write(&script, "exit 0 # edited after the run\n").unwrap();
+    for commit in [None, Some("HEAD")] {
+        let out = verify(repo, &path, &contract, commit);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stdout));
+        let reason = refusal(&out);
+        assert!(reason.starts_with("refused: contract inputs"), "{reason}");
+        assert!(reason.contains("check.sh"), "{reason}");
+    }
+    fs::write(&script, "exit 0\n").unwrap();
+    assert_eq!(verify(repo, &path, &contract, None).status.code(), Some(0));
+
+    // A receipt edited to record other bytes, or none, is refused too.
+    let mut edited = value.clone();
+    edited["tasks"][0]["contract_inputs"]["check.sh"]["sha256"] = "0".repeat(64).into();
+    let forged = scratch.base.join("forged.json");
+    fs::write(&forged, serde_json::to_vec(&edited).unwrap()).unwrap();
+    let mut stripped = value.clone();
+    stripped["tasks"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("contract_inputs");
+    let older = scratch.base.join("stripped.json");
+    fs::write(&older, serde_json::to_vec(&stripped).unwrap()).unwrap();
+    for receipt in [&forged, &older] {
+        for commit in [None, Some("HEAD")] {
+            let out = verify(repo, receipt, &contract, commit);
+            assert_eq!(out.status.code(), Some(3), "{}", text(&out.stdout));
+            assert!(refusal(&out).starts_with("refused: contract inputs"));
+        }
+    }
+}
+
+/// Both refusals hold together for an outside contract with contract
+/// inputs. `validate` exits 1 for one whose task names the contract's
+/// directory, which is a contract problem, checked first. It exits 2, as
+/// `run` refuses before any task, for undeclared repository files beside a
+/// declared input. `run` exits 2 for either.
+#[test]
+fn contract_inputs_keep_the_undeclared_file_rules_and_their_exit_codes() {
+    let scratch = Scratch::new("bothrules");
+    let repo = &scratch.repo;
+    fs::create_dir(repo.join("fixtures")).unwrap();
+    fs::write(repo.join("fixtures/a.txt"), "a\n").unwrap();
+    fs::write(repo.join("fixtures/b.txt"), "b\n").unwrap();
+    commit(repo, "fixtures");
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let contract = scratch.config.join("sykli.json");
+    let path = contract.to_str().unwrap();
+    let task = |run: &str| {
+        serde_json::json!({"schema": "sykli-contract.v1", "tasks": [{
+            "name": "check", "run": run, "inputs": ["fixtures/a.txt"],
+            "contract_inputs": ["check.sh"],
+        }]})
+        .to_string()
+    };
+    fs::write(&contract, task(RUNS_HELPER)).unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("fixtures/b.txt (task check)"));
+    assert_eq!(sykli(repo, &["run", path]).status.code(), Some(2));
+
+    let by_path = format!("{RUNS_HELPER}; sh '{}/check.sh'", scratch.config.display());
+    fs::write(&contract, task(&by_path)).unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("names the directory"));
+    let out = sykli(repo, &["run", path]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("names the directory"));
+}
+
+/// Files beside a contract inside the repository are in the repository:
+/// they are declared as `inputs`, and a contract input there is refused. A
+/// contract input must stay inside the contract's directory.
+#[test]
+fn contract_inputs_are_files_inside_the_directory_of_an_outside_contract() {
+    let scratch = Scratch::new("placement");
+    let repo = &scratch.repo;
+    fs::write(repo.join("check.sh"), "exit 0\n").unwrap();
+    fs::write(
+        repo.join("sykli.json"),
+        helper_contract(RUNS_HELPER, &["check.sh"]),
+    )
+    .unwrap();
+    let out = sykli(repo, &["validate", "sykli.json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("contract_inputs"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(sykli(repo, &["run", "sykli.json"]).status.code(), Some(2));
+
+    let contract = scratch.config.join("sykli.json");
+    fs::write(
+        &contract,
+        helper_contract(RUNS_HELPER, &["../repo/check.sh"]),
+    )
+    .unwrap();
+    let out = sykli(repo, &["validate", contract.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("must stay inside the contract's directory"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// A detached run's coordinator, and a resumed run, read the contract's
+/// directory from the run's record and give the task the same files; a run
+/// is not resumed once a file beside its contract changed.
+#[cfg(unix)]
+#[test]
+fn detached_and_resumed_runs_reach_the_declared_files_beside_the_contract() {
+    let scratch = Scratch::new("detachhelper");
+    let repo = &scratch.repo;
+    let script = scratch.config.join("check.sh");
+    fs::write(&script, "exit 0\n").unwrap();
+    let contract = scratch.contract(&helper_contract(RUNS_HELPER, &["check.sh"]));
+    let path = contract.to_str().unwrap();
+    let out = sykli(repo, &["run", path, "--detach", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let run = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let status = || -> serde_json::Value {
+        let out = sykli(repo, &["status", "--run", &run, "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while status()["state"] != "completed" {
+        assert!(std::time::Instant::now() < deadline, "{}", status());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let done = status();
+    assert_eq!(done["outcome"], "passed", "{done}");
+    let kept = PathBuf::from(done["receipt"]["kept"]["path"].as_str().unwrap());
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&kept).unwrap()).unwrap();
+    assert_eq!(
+        value["tasks"][0]["contract_inputs"]["check.sh"]["sha256"].as_str(),
+        Some(sha256(&script).as_str())
+    );
+    assert_eq!(
+        verify(repo, &kept, &contract, Some("HEAD")).status.code(),
+        Some(0)
+    );
+
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let interrupted = |content: &str| {
+        fs::write(&script, content).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["run", path, "--json"])
+            .current_dir(repo)
+            .env("SYKLI_TEST_FAIL_AT", "after-dispatch")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        text(&out.stderr)
+            .lines()
+            .find_map(|line| line.strip_prefix("run: ").map(str::to_owned))
+            .unwrap_or_else(|| panic!("no run id: {}", text(&out.stderr)))
+    };
+    let run = interrupted("exit 0 # resumed\n");
+    let out = sykli(repo, &["resume", "--run", &run, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["outcome"], "passed", "{value}");
+    assert!(value["tasks"][0]["contract_inputs"]["check.sh"].is_object());
+
+    let run = interrupted("exit 0 # interrupted\n");
+    fs::write(&script, "exit 0 # changed before the resume\n").unwrap();
+    let out = sykli(repo, &["resume", "--run", &run]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("beside the contract"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 #[test]
 fn a_contract_inside_the_repository_is_read_from_the_commit_however_it_is_named() {
     let scratch = Scratch::new("inside");

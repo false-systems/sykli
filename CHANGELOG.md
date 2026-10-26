@@ -256,6 +256,45 @@ contract consumer can observe; internal refactors are not listed.
   write, or an edited sykli hook, is replaced only with `--force` (exit 1
   otherwise, nothing written), which keeps the old file as `NAME.pre-sykli`,
   and a `core.hooksPath` that sends git elsewhere is refused.
+- `contract_inputs` on a task of a contract kept outside the repository
+  (sykli#75): files beside the contract that the task reads, as paths from
+  the contract's directory, validated as `inputs` are (relative, no `..`).
+  A helper script there could not be declared, so a changed one reused the
+  old pass (`cached`, exit 0).
+  - Each is read once per run. Its bytes and execute bits join the task's
+    cache key, so any change misses the cache; a task that declares none
+    keeps the key it had. A missing one errors the task (`input_error`), as
+    a missing input does.
+  - The task reaches them as `$SYKLI_CONTRACT_DIR/PATH`: a directory of its
+    own in the system's temporary directory, holding a copy of exactly the
+    declared files, each hashed as it is copied and checked to be the
+    recorded bytes, and removed when the task ends. The task runs what was
+    hashed, and a helper that reaches a neighbour through
+    `$SYKLI_CONTRACT_DIR` finds only declared ones there. A task that
+    declares none has no `SYKLI_CONTRACT_DIR`.
+  - The copy is its owner's alone. The directory is made exclusively under
+    an unguessable name and is 0700. Its files are 0600, or 0700 where the
+    owner may execute the original. A name another process holds, such as
+    the copy a killed sykli left, is passed over, so a leftover never stops
+    a run. The first copy a run makes also removes the user's own copies
+    that have stood unchanged for over a day (Linux and macOS).
+  - What sykli cannot see is not hashed. A helper that names a neighbour by
+    its path, a relative path, another link or case of the directory, a
+    `PATH` lookup and an inherited value still reuse a stale pass when the
+    file changes. The README lists them: declare every helper and reach it
+    only through `$SYKLI_CONTRACT_DIR`.
+  - Receipts record them per task as `contract_inputs` (`sha256`, `mode`,
+    no tree entry; absent on tasks without any). The subject and its digests
+    are unchanged. A run's journal keeps them, so a detached or resumed
+    coordinator gives the task the same files, and `resume` refuses a run
+    whose contract inputs changed.
+  - `verify`, with or without `--commit`, `status --commit` and the
+    pre-push hook read each from beside the contract as it is now (no commit
+    carries it, as none carries the contract) and refuse a receipt whose
+    records differ from it or are missing (exit 3, check `contract inputs`).
+  - A contract inside the repository may not declare them: its neighbours
+    are repository files, declared as `inputs`. `plan --changed` still
+    selects by repository inputs only.
 
 ### Breaking
 - In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
@@ -368,6 +407,19 @@ contract consumer can observe; internal refactors are not listed.
   `plan` (`--target`) and `init` (`--production`). Each now fails as an
   unknown command or argument (exit 2). `status --run`, `status --commit` and
   `resume --run` are unchanged.
+- Where a contract outside the repository is written or run (`validate`,
+  `lock`, `plan`, `run`, the pre-commit hook), a task whose `run` or `env`
+  value names the contract's own directory, as the contract's path spells it
+  or resolved, is refused (`validate` exits 1, the others 2), since sykli
+  cannot hash what the task reads there by that name (sykli#75). Declare the
+  files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
+  The text is read as the task's shell would read it: its `$HOME`, `${HOME}`
+  and a leading `~` expanded (its declared `HOME`, else sykli's), quotes and
+  `\` escapes removed, and `//` and `/./` read as `/`. A variable just before
+  the path does not hide it. When the directory holds the repository, a path
+  inside the repository is not refused unless it has a `..` in it. With no
+  git repository around the current directory, nothing is refused. Where a
+  contract is judged, nothing changes.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
