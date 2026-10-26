@@ -1139,9 +1139,9 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
         let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
         assert_eq!(code, Some(2), "validate, {field} {named}: {stderr}");
         assert!(refused(&stderr), "{stderr}");
-        let (code, stdout, _) = sykli(&root, &["plan", "--explain", "--json"]);
-        assert_eq!(code, Some(2), "plan, {field} {named}");
-        assert!(refused(&stdout), "{stdout}");
+        let (code, _, stderr) = sykli(&root, &["plan", "--explain", "--json"]);
+        assert_eq!(code, Some(2), "plan, {field} {named}: {stderr}");
+        assert!(refused(&stderr), "{stderr}");
         let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
         assert_eq!(code, Some(2), "run, {field} {named}: {stderr}");
         assert!(refused(&stderr), "{stderr}");

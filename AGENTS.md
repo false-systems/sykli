@@ -168,7 +168,9 @@ lexer) and what is a document
 one to a directory in the repository or to nothing is recorded by its text
 (`link_text`, `InputRecord::link`), with every file under such a directory
 required of the same task, and one that leads out of the repository is
-refused (`link_missing_inputs`). A text record is judged by the commit's link
+refused (`link_missing_inputs`), as is a workdir, input or output that a
+link on its way leads out of it (`through_links_out`, sykli#54; judged
+before any task, so a link a task makes while it runs is not seen). A text record is judged by the commit's link
 text (`judge_link`), after a third round of the same `cat-file` asks where it
 leads (`link_target_names`, `PathFacts::around`).
 `verify --commit` and `hook pre-push`

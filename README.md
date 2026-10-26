@@ -197,8 +197,13 @@ Every path a task declares (`inputs`, `outputs`, `workdir`) is relative to the
 repository and stays inside it. Absolute paths and `..` are refused when the
 contract is validated, before anything runs, so a receipt is always a claim
 about the repository it sits in, even when the contract is kept
-[outside it](#keep-the-contract-outside-the-repository). `sykli validate`
-checks a contract without running it.
+[outside it](#keep-the-contract-outside-the-repository). Inside a git
+repository, `validate`, `plan --explain` and `run` also refuse (exit 2) a
+declared path that a symbolic link on its way leads out of the repository:
+an input `ext/file.txt`, an output `ext/bundle.js` or a workdir `ext` when
+`ext` links to a directory elsewhere. This is judged against the work tree
+before any task runs, so a link a task makes while it runs is not seen.
+`sykli validate` checks a contract without running it.
 
 <details>
 <summary><strong>What a task sees when it runs</strong></summary>

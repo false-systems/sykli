@@ -932,6 +932,55 @@ fn leads_out_of_the_repository(path: &Path) -> bool {
     matches!(link_behind(path), Behind::Outside(_))
 }
 
+/// Where `path` leads once every symbolic link on its way is followed, when
+/// that is out of the repository (sykli#54): `ext/file.txt` with `ext` a
+/// link to a directory elsewhere. A path that does not exist yet is judged
+/// by its nearest existing ancestor (`located`). None inside the repository,
+/// or without one.
+fn led_out_of_the_repository(path: &Path) -> Option<PathBuf> {
+    let root = repo::repository().ok()?.resolved()?;
+    located(path).filter(|resolved| !resolved.starts_with(root))
+}
+
+/// Refuse a task whose working directory, declared input or declared output
+/// a symbolic link on its way leads out of the repository (sykli#54). Such a
+/// path is relative and climbs nowhere, so the contract's own check passes
+/// it, yet a run would hash a file no commit holds into the key and the
+/// receipt, or write an output, or work, outside. It is judged here, against
+/// the work tree, before any task runs: a link a task makes while it runs is
+/// not seen.
+fn through_links_out(task: &Task) -> Result<(), String> {
+    let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+    let mut paths = vec![(
+        "works in",
+        workdir.display().to_string(),
+        workdir.to_path_buf(),
+    )];
+    for (what, declared) in [
+        ("declares the input", &task.inputs),
+        ("declares the output", &task.outputs),
+    ] {
+        paths.extend(
+            declared
+                .iter()
+                .map(|path| (what, path.clone(), workdir.join(path))),
+        );
+    }
+    for (what, declared, path) in paths {
+        if let Some(target) = led_out_of_the_repository(&path) {
+            return Err(format!(
+                "task {:?} {what} {declared:?}, which a symbolic link on its way leads to {}, \
+                 outside the repository: no commit holds what is there, so sykli cannot bind it \
+                 and no receipt of it could verify; declare paths inside the repository \
+                 instead, and re-lock",
+                task.name,
+                target.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A file under the directory a task's declared symbolic link leads to,
 /// which the task does not declare.
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -972,6 +1021,7 @@ fn link_missing_inputs(
                 Behind::Other => {}
             }
         }
+        through_links_out(task)?;
         if !directories.is_empty() {
             let declared = task
                 .inputs
@@ -1400,7 +1450,13 @@ fn located(path: &Path) -> Option<PathBuf> {
     let path = absolute(path).ok()?;
     path.ancestors().find_map(|ancestor| {
         let resolved = fs::canonicalize(ancestor).ok()?;
-        Some(resolved.join(path.strip_prefix(ancestor).ok()?))
+        let rest = path.strip_prefix(ancestor).ok()?;
+        // Joining nothing would end the path in a separator.
+        Some(if rest.as_os_str().is_empty() {
+            resolved
+        } else {
+            resolved.join(rest)
+        })
     })
 }
 
@@ -2707,8 +2763,8 @@ fn emit_contract(path: &Path) -> Result<Vec<u8>, String> {
 ///
 /// This is a check on what a contract may *declare*. A declared path that stays
 /// inside the tree can still resolve outside it through a symlink; that is a
-/// property of the tree at execution time, not of the contract, and is tracked
-/// separately.
+/// property of the work tree, not of the contract, and is refused where the
+/// work tree is judged, before any task runs (`through_links_out`, sykli#54).
 fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), String> {
     validate_path_within(task, field, path, "the repository")
 }
