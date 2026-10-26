@@ -420,8 +420,10 @@ fn a_json_contract_is_the_default_when_there_is_no_emitter() {
         String::from_utf8_lossy(&output.stderr)
     );
     let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["schema"], "sykli-validate.v1");
     assert_eq!(verdict["contract"], "sykli.json");
     assert_eq!(verdict["valid"], true);
+    assert_eq!(verdict["contract_hash"].as_str().map(str::len), Some(64));
     // An explicit path is never rewritten.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_sykli"))
         .current_dir(&dir)
@@ -429,6 +431,28 @@ fn a_json_contract_is_the_default_when_there_is_no_emitter() {
         .output()
         .unwrap();
     assert!(!output.status.success());
+    // An invalid contract is a verdict too, with its errors, and exits 1.
+    std::fs::write(
+        dir.join("bad.json"),
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"a","run":"true","after":["missing"]}]}"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .current_dir(&dir)
+        .args(["validate", "bad.json", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["schema"], "sykli-validate.v1");
+    assert_eq!(verdict["valid"], false);
+    assert!(verdict["contract_hash"].is_null());
+    assert!(
+        verdict["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "{verdict}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
