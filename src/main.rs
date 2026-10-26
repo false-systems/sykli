@@ -123,9 +123,10 @@ enum Command {
         2  refused for undeclared files, as `run` refuses it (also exit 2), or that check failed\n\n\
         Inside a git repository, validate also makes the check `run` makes before any task, so\n\
         its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
-        graph, every Rust source, Cargo file and file under tests/, every file a source\n\
-        includes, and every document a string literal names must be declared, and an include must\n\
-        name its path as a literal. In every graph, each tracked file beside a task's declared\n\
+        graph, every Rust source, Cargo file and file under tests/, and every file a source\n\
+        includes must be declared, and an include must name its path as a literal; a\n\
+        document a string literal names but no task declares only warns (exit 0). In every\n\
+        graph, each tracked file beside a task's declared\n\
         inputs must be declared, except documents, licences and CI configuration; and a\n\
         declared link to a directory needs every file under it declared. It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
@@ -520,6 +521,10 @@ struct InputCoverage {
     /// Absent when empty: files under a directory a declared link leads to.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     link_missing_inputs: Vec<LinkInput>,
+    /// Absent when empty: documents a string literal in a Rust source names
+    /// that no task declares. They warn; they never make `refusal` refuse.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    named_inputs: Vec<NamedInput>,
 }
 
 impl InputCoverage {
@@ -598,11 +603,32 @@ impl Inventory {
     }
 }
 
-fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Vec<String>, String> {
+/// A document a string literal in a Rust source names, which no task
+/// declares. It warns, never refuses: a help or message text names files a
+/// task never reads, so the name alone does not make it an input.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct NamedInput {
+    path: String,
+    named_at: String,
+}
+
+fn named_warning(named: &NamedInput) -> String {
+    format!(
+        "{} is named in {} but not declared; declare it if a task reads it",
+        named.path, named.named_at
+    )
+}
+
+/// The Cargo inputs no task declares, which refuse, and the documents a
+/// source names that no task declares, which warn.
+fn cargo_missing_inputs(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<(Vec<String>, Vec<NamedInput>), String> {
     // This is checked on every invocation, before execution can reuse cached passes. Its
     // input is the current file inventory, not the contract's existing list.
     if !inventory.cargo {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let listed = inventory.listed()?;
     let root = &listed.root;
@@ -614,9 +640,9 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
         .chain(&listed.others)
         .filter(|path| !path.starts_with(&state))
         .collect::<BTreeSet<_>>();
-    // Cargo's files by name, every listed file a listed Rust source includes,
-    // and every document a source names (`cargo_inputs`, which `init`
-    // declares by). An include that names no knowable file refuses.
+    // Cargo's files by name and every listed file a listed Rust source
+    // includes refuse (`cargo_inputs`, which `init` declares by), and so does
+    // an include that names no knowable file; a document a string names warns.
     let shown = |path: &Path| {
         path.strip_prefix(root)
             .unwrap_or(path)
@@ -635,13 +661,24 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
         return Err(refusal);
     }
     let mut wanted = BTreeSet::new();
+    let mut named = BTreeSet::new();
+    let declarable = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir())
+            && !leads_out_of_the_repository(path)
+    };
     for path in &files {
         let relative = path.strip_prefix(root).unwrap_or(path);
-        if cargo_inputs::by_name(relative)
-            || sources.included().contains(*path)
-            || (cargo_inputs::docs(relative) && sources.names(&shown(path)))
-        {
+        if cargo_inputs::by_name(relative) || sources.included().contains(*path) {
             wanted.insert((*path).clone());
+        } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
+            if let Some(at) = sources.named_at(&shown(path)) {
+                if declarable(path) {
+                    named.insert(NamedInput {
+                        path: shown(path),
+                        named_at: at.to_string(),
+                    });
+                }
+            }
         }
     }
     let mut missing = BTreeSet::new();
@@ -661,16 +698,20 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
             Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
         }
     }
-    Ok(missing.into_iter().collect())
+    Ok((missing.into_iter().collect(), named.into_iter().collect()))
 }
 
 /// Why `run` refuses this contract before any task, for files it leaves
-/// undeclared (`cargo_missing_inputs`, then `folder_missing_inputs`), if it
-/// does. `validate` asks the same inside a git repository, so a contract it
-/// accepts is one `run` starts.
+/// undeclared (`cargo_missing_inputs`, `folder_missing_inputs`, then
+/// `link_missing_inputs`), if it does, after warning of each document a
+/// source names that no task declares. `validate` asks the same inside a git
+/// repository, so a contract it accepts is one `run` starts.
 fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
     let inventory = Inventory::new(contract)?;
-    let missing = cargo_missing_inputs(contract, &inventory)?;
+    let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
+    for named in &named {
+        eprintln!("warning: {}", named_warning(named));
+    }
     if !missing.is_empty() {
         return Ok(Some(cargo_coverage_error(&missing)));
     }
@@ -1089,10 +1130,12 @@ fn input_coverage(
             })
         })
         .collect::<Result<_, String>>()?;
+    let (cargo_missing_inputs, named_inputs) = cargo_missing_inputs(contract, &inventory)?;
     Ok(InputCoverage {
         base_commit,
         paths,
-        cargo_missing_inputs: cargo_missing_inputs(contract, &inventory)?,
+        cargo_missing_inputs,
+        named_inputs,
         folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
         link_missing_inputs: link_missing_inputs(contract, &inventory)?,
     })
@@ -1702,6 +1745,9 @@ fn main() -> ExitCode {
                                         path.tasks.join(", ")
                                     ),
                                 }
+                            }
+                            for named in &coverage.named_inputs {
+                                println!("  warning: {}", named_warning(named));
                             }
                             println!(
                                 "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."

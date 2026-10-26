@@ -7,7 +7,7 @@
 //! A Cargo build reads Cargo's own files (`by_name`), the files its Rust
 //! sources include, and any file a source names by its path (`Sources`).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 /// Whether `relative`, a path from the directory the contract's paths start
@@ -47,9 +47,9 @@ pub(crate) fn by_name(relative: &Path) -> bool {
 /// directory named `docs` or `.github`. The undeclared-sibling check does
 /// not ask for these, so a commit that adds documents never makes a contract
 /// refuse. `init` declares them like any other file (a test may read a
-/// folder of Markdown cases), and the Cargo rule requires one that a Rust
-/// source includes or names (`Sources`), or that Cargo reads by name
-/// (`by_name`).
+/// folder of Markdown cases); the Cargo rule requires one that a Rust source
+/// includes, or that Cargo reads by name (`by_name`), and warns of one a
+/// string in a source names (`Sources::named_at`).
 pub(crate) fn docs(relative: &Path) -> bool {
     let names = relative
         .components()
@@ -77,10 +77,12 @@ pub(crate) fn docs(relative: &Path) -> bool {
 pub(crate) struct Sources {
     included: BTreeSet<PathBuf>,
     opaque: Vec<String>,
-    /// File names a string literal names alone (`"README.md"`).
-    bare: HashSet<String>,
-    /// Paths a string literal names, and their endings of two names or more.
-    paths: HashSet<String>,
+    /// File names a string literal names alone (`"README.md"`), with where
+    /// the first such literal is (`src/x.rs:LINE`).
+    bare: HashMap<String, String>,
+    /// Paths a string literal names, and their endings of two names or more,
+    /// with where the first such literal is.
+    paths: HashMap<String, String>,
 }
 
 impl Sources {
@@ -89,9 +91,14 @@ impl Sources {
     /// refusal names it.
     pub(crate) fn read(&mut self, source: &Path, text: &str, shown: &str) {
         let base = source.parent().unwrap_or_else(|| Path::new(""));
-        let (includes, literals) = scan(text);
-        for literal in literals {
-            index(literal, &mut self.bare, &mut self.paths);
+        let Scanned { includes, literals } = scan(text);
+        for (line, literal) in literals {
+            index(
+                literal,
+                &format!("{shown}:{line}"),
+                &mut self.bare,
+                &mut self.paths,
+            );
         }
         for (line, include) in includes {
             let resolved = match include {
@@ -141,20 +148,22 @@ impl Sources {
         &self.included
     }
 
-    /// Whether a string literal in a source names `relative` (a path with `/`
-    /// separators), as a test that reads a document does
-    /// (`fs::read("README.md")`). A comment or a doc comment that mentions a
-    /// document names nothing. A file at the top level is named by its file
-    /// name alone (`"README.md"`, `"./README.md"`, `"/README.md"` after
-    /// `CARGO_MANIFEST_DIR`), never by a deeper path that ends in it; a
-    /// deeper one by its path (`"docs/guide.md"`), or a path that ends in
-    /// it. A path built from pieces is not seen.
-    pub(crate) fn names(&self, relative: &str) -> bool {
+    /// Where a string literal in a source names `relative` (a path with `/`
+    /// separators), as `src/x.rs:LINE`, as a test that reads a document does
+    /// (`fs::read("README.md")`), and as a help or message text that names one
+    /// does too: so a document found this way only ever warns. A comment or a
+    /// doc comment that mentions a document names nothing. A file at the top
+    /// level is named by its file name alone (`"README.md"`, `"./README.md"`,
+    /// `"/README.md"` after `CARGO_MANIFEST_DIR`), never by a deeper path that
+    /// ends in it; a deeper one by its path (`"docs/guide.md"`), or a path
+    /// that ends in it. A path built from pieces is not seen.
+    pub(crate) fn named_at(&self, relative: &str) -> Option<&str> {
         if relative.contains('/') {
-            self.paths.contains(relative)
+            self.paths.get(relative)
         } else {
-            self.bare.contains(relative)
+            self.bare.get(relative)
         }
+        .map(String::as_str)
     }
 
     /// Why the files the sources read cannot be known, if they cannot: an
@@ -172,6 +181,13 @@ impl Sources {
             )
         })
     }
+}
+
+/// What `scan` finds in a source, each with its line (from 1): the include
+/// invocations, and the string literals in code, as written.
+struct Scanned<'a> {
+    includes: Vec<(usize, Include)>,
+    literals: Vec<(usize, &'a str)>,
 }
 
 /// What one include invocation names.
@@ -193,10 +209,21 @@ enum Include {
 /// compiles, but only their literal invocations count: a doc comment that
 /// describes an include in prose names no file. An argument built from
 /// `OUT_DIR` names a file made at build time, which is not in git and is not
-/// returned. Also every string literal in code, as written, for `index`.
-fn scan(text: &str) -> (Vec<(usize, Include)>, Vec<&str>) {
+/// returned. Also every string literal in code, as written, with its line,
+/// for `index`.
+fn scan(text: &str) -> Scanned<'_> {
     let bytes = text.as_bytes();
-    let line = |at: usize| 1 + text[..at].bytes().filter(|byte| *byte == b'\n').count();
+    // The line at a position, counted on from the last position asked
+    // about, since positions are asked about in order.
+    let mut counted = (0usize, 1usize);
+    let mut line = |at: usize| {
+        counted.1 += text[counted.0..at]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        counted.0 = at;
+        counted.1
+    };
     let mut found = Vec::new();
     let mut literals = Vec::new();
     let mut at = 0;
@@ -224,7 +251,7 @@ fn scan(text: &str) -> (Vec<(usize, Include)>, Vec<&str>) {
             continue;
         }
         if let Some(end) = literal_end(text, at) {
-            literals.push(&text[at..end]);
+            literals.push((line(at), &text[at..end]));
             at = end;
             continue;
         }
@@ -249,7 +276,10 @@ fn scan(text: &str) -> (Vec<(usize, Include)>, Vec<&str>) {
         }
         at += rest.chars().next().map_or(1, char::len_utf8);
     }
-    (found, literals)
+    Scanned {
+        includes: found,
+        literals,
+    }
 }
 
 /// The literal invocations in a doc comment. Their line is not kept: only
@@ -480,9 +510,15 @@ fn identifier(byte: u8) -> bool {
 /// digits, `.`, `_`, `-`, `+`, `@`, `~`, and `/` or `\`, either one a
 /// separator), `/`-separated, without the `/`, `./` and `../` it starts
 /// with: a single name into `bare`; a path, with each of its endings of two
-/// names or more, into `paths`. So `"home/.claude/CLAUDE.md"` names
+/// names or more, into `paths`, each with `at`, where the literal is, unless
+/// an earlier literal named it. So `"home/.claude/CLAUDE.md"` names
 /// `.claude/CLAUDE.md` but never a top-level `CLAUDE.md`.
-fn index(literal: &str, bare: &mut HashSet<String>, paths: &mut HashSet<String>) {
+fn index(
+    literal: &str,
+    at: &str,
+    bare: &mut HashMap<String, String>,
+    paths: &mut HashMap<String, String>,
+) {
     let path = |c: char| {
         c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~' | '/' | '\\')
     };
@@ -505,12 +541,15 @@ fn index(literal: &str, bare: &mut HashSet<String>, paths: &mut HashSet<String>)
             continue;
         }
         if !rest.contains('/') {
-            bare.insert(rest.to_string());
+            bare.entry(rest.to_string())
+                .or_insert_with(|| at.to_string());
             continue;
         }
         let mut ending = rest;
         while ending.contains('/') {
-            paths.insert(ending.trim_end_matches('/').to_string());
+            paths
+                .entry(ending.trim_end_matches('/').to_string())
+                .or_insert_with(|| at.to_string());
             match ending.find('/') {
                 Some(separator) => ending = &ending[separator + 1..],
                 None => break,
@@ -774,8 +813,11 @@ mod tests {
             "docs/windows.md",
             ".claude/CLAUDE.md",
         ] {
-            assert!(sources.names(named), "{named}");
+            assert!(sources.named_at(named).is_some(), "{named}");
         }
+        // Where the first literal that names it is.
+        assert_eq!(sources.named_at("README.md"), Some("tests/docs.rs:6"));
+        assert_eq!(sources.named_at("COPYING"), Some("tests/docs.rs:9"));
         for unnamed in [
             // Mentioned in a comment or a doc comment only.
             "AGENTS.md",
@@ -791,7 +833,7 @@ mod tests {
             "other/docs/guide.md",
             "s/guide.md",
         ] {
-            assert!(!sources.names(unnamed), "{unnamed}");
+            assert!(sources.named_at(unnamed).is_none(), "{unnamed}");
         }
     }
 

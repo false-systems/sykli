@@ -85,8 +85,8 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
 /// out of the repository, which cannot be bound; all it leaves out is
 /// `.sykli/`, `target/`, and sykli's own contract and lock at the top
 /// level. An untracked file is declared only when the completeness rule
-/// counts it (Cargo's files by name, every file a source includes, every
-/// document a source names), so `run` accepts the contract `init` writes,
+/// counts it (Cargo's files by name, and every file a source includes), so
+/// `run` accepts the contract `init` writes,
 /// and an include whose path cannot be known refuses here as it does in
 /// `run`. A file that is declared and read by nothing costs cache hits when
 /// it changes; one that is read and not declared keeps a cached pass it
@@ -134,9 +134,7 @@ fn cargo(
             continue;
         }
         let relative = Path::new(path);
-        let required = cargo_inputs::by_name(relative)
-            || included.contains(path)
-            || (cargo_inputs::docs(relative) && sources.names(path));
+        let required = cargo_inputs::by_name(relative) || included.contains(path);
         let wanted = required || (tracked && !metadata(path, contract));
         if wanted && declarable(root, path, notes) {
             inputs.insert(path.clone());
