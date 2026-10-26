@@ -150,7 +150,11 @@ enum Command {
         group. Elsewhere runs are not durable and nothing changes.\n\n\
         A contract outside the repository judges the git repository around the current\n\
         directory: its inputs are paths from that repository's root, its lock is the\n\
-        sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.\n\n\
+        sykli.lock beside the contract, and the receipt still goes to the repository's .sykli/.\n\
+        Files beside it that a task reads are declared in the task's contract_inputs (paths\n\
+        from the contract's directory) and named as $SYKLI_CONTRACT_DIR/PATH: a directory of\n\
+        the task's own holding exactly those files, as its key and receipt record them,\n\
+        removed when the task ends. A task that names the contract's directory exits 2.\n\n\
         A task's declared env values may name ${worktree_cache}: a directory that belongs to\n\
         this worktree, <git-common-dir>/sykli/worktrees/<id>/cache, outside the work tree,\n\
         made when a run needs it; a worktree made again at the same path gets a new one.\n\
@@ -326,7 +330,8 @@ enum Command {
         checkout; REV is resolved in the repository around the current directory.\n\
         A contract outside that repository is read from its file, with or without\n\
         --commit, and the receipt must have run with the sykli.lock beside it\n\
-        (the receipt's lock_digest).\n\
+        (the receipt's lock_digest); each of its tasks' contract_inputs is read from\n\
+        beside it too, and must be what the receipt records (exit 3).\n\
         With --commit each declared input is judged against the commit at its exact\n\
         path: the tree entry, bytes and execute bit the run recorded must be the\n\
         commit's (bytes as stored, or as a checkout of the commit converts them: line\n\
@@ -986,6 +991,7 @@ impl std::fmt::Display for CacheExplanation {
 
 fn explain_plan(
     contract: &Contract,
+    contract_path: &Path,
     levels: &[Vec<usize>],
     changed: &[PathBuf],
     selected: &[String],
@@ -993,6 +999,7 @@ fn explain_plan(
     let repository = git(&["rev-parse", "--show-toplevel"])
         .map_err(|_| "plan --explain requires a git repository".to_string())?;
     let runtime = graph_runtime(contract)?;
+    let contract_inputs = contract_input_records(contract, &contract_directory(contract_path)?);
     let cache = LocalCache::new(Path::new(&repository));
     let changed: HashSet<_> = changed
         .iter()
@@ -1028,7 +1035,7 @@ fn explain_plan(
                 .iter()
                 .map(|name| (name.as_str(), stable_keys[name.as_str()].as_str()))
                 .collect();
-            match cache_key(task, &runtime, &after) {
+            match cache_key(task, &runtime, &after, &contract_inputs) {
                 Err(message) => CacheExplanation::InputError { message },
                 Ok(key) => match cache.inspect(task, &key, &runtime.fingerprint) {
                     Ok(entry) => {
@@ -1278,7 +1285,10 @@ fn main() -> ExitCode {
             }
         },
         Command::Validate { contract, json } => {
-            match load(&contract).and_then(|loaded| authored(&loaded.0).map(|()| loaded)) {
+            match load(&contract).and_then(|loaded| {
+                authored(&loaded.0)?;
+                placed(&loaded.0, &contract).map(|()| loaded)
+            }) {
                 Ok((_, _, contract_hash)) => {
                     if json {
                         println!(
@@ -1375,9 +1385,10 @@ fn main() -> ExitCode {
             };
             match loaded.and_then(|(loaded, levels, hash)| {
                 authored(&loaded)?;
+                placed(&loaded, &contract)?;
                 let tasks = affected(&loaded, &levels, &changed)?;
                 let mut explanations = if explain {
-                    Some(explain_plan(&loaded, &levels, &changed, &tasks)?)
+                    Some(explain_plan(&loaded, &contract, &levels, &changed, &tasks)?)
                 } else {
                     None
                 };
@@ -1629,7 +1640,7 @@ fn resume_run(run: &str, assume_ended: bool, json: bool) -> Result<Ran, String> 
              start a new run"
         ));
     }
-    let subject = subject(&contract)?;
+    let subject = subject(&contract, Path::new(&request.contract_path))?;
     if subject.tree_oid != request.subject.tree_oid
         || subject.inputs_digest != request.subject.inputs_digest
     {
@@ -1637,6 +1648,13 @@ fn resume_run(run: &str, assume_ended: bool, json: bool) -> Result<Ran, String> 
             "the source changed since run {run} was requested (tree {}, now {}); its receipt \
              would claim a tree that did not produce it; start a new run",
             request.subject.tree_oid, subject.tree_oid
+        ));
+    }
+    if subject.contract_inputs != request.subject.contract_inputs {
+        return Err(format!(
+            "a contract input beside the contract {} changed since run {run} was requested; \
+             start a new run",
+            request.contract_path
         ));
     }
     worktree_cache::prepare(&contract)?;
@@ -2316,6 +2334,7 @@ fn lock_path(contract: &Path) -> PathBuf {
 fn write_lock(contract: &Path) -> Result<PathBuf, String> {
     let (loaded, _, contract_hash) = load_unlocked(contract)?;
     authored(&loaded)?;
+    placed(&loaded, contract)?;
     let path = lock_path(contract);
     // A v1 lock could only ever pin one contract; migrating keeps that pin
     // under this contract's name and upgrades the file to v2.
@@ -2395,6 +2414,12 @@ fn emit_contract(path: &Path) -> Result<Vec<u8>, String> {
 /// property of the tree at execution time, not of the contract, and is tracked
 /// separately.
 fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), String> {
+    validate_path_within(task, field, path, "the repository")
+}
+
+/// `validate_contract_path` for a path from `root`: a contract input stays
+/// inside the contract's directory as an input stays inside the repository.
+fn validate_path_within(task: &str, field: &str, path: &Path, root: &str) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err(format!("task {task:?} declares an empty {field} path"));
     }
@@ -2402,7 +2427,7 @@ fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), St
         match component {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(format!(
-                    "task {task:?} {field} path {:?} must stay inside the repository",
+                    "task {task:?} {field} path {:?} must stay inside {root}",
                     path.display().to_string()
                 ));
             }
@@ -2420,6 +2445,115 @@ fn validate_contract_path(task: &str, field: &str, path: &Path) -> Result<(), St
 /// it ran with.
 fn authored(contract: &Contract) -> Result<(), String> {
     contract.tasks.iter().try_for_each(worktree_cache::check)
+}
+
+/// What a contract must also meet where it is written or run, given where
+/// it is (`path`), as `authored` is applied. Only a contract outside the
+/// repository declares `contract_inputs`: beside one inside it, files are in
+/// the repository and declared as `inputs`. And no task of a contract
+/// outside it names the contract's directory (as the path names it, or
+/// resolved) in its command or an `env` value: sykli cannot hash what a task
+/// reads there by that name, and a changed helper would reuse a stale pass
+/// (sykli#75). Declared files are reached as `$SYKLI_CONTRACT_DIR/PATH`.
+/// Only what the contract says is looked at, by a plain match on the two
+/// spellings: the directory spelled otherwise (through `$HOME`, `~`, another
+/// link), in a value a task inherits, or on `PATH` is not seen, as nothing
+/// a task reads outside its declared files is.
+fn placed(contract: &Contract, path: &Path) -> Result<(), String> {
+    if outside_repository(path).is_none() {
+        return match contract
+            .tasks
+            .iter()
+            .find(|task| !task.contract_inputs.is_empty())
+        {
+            Some(task) => Err(format!(
+                "task {:?} declares contract_inputs, files beside a contract outside the git \
+                 repository around the current directory, and {} is not outside it: declare \
+                 the files it reads in the repository as inputs",
+                task.name,
+                path.display()
+            )),
+            None => Ok(()),
+        };
+    }
+    let directory = contract_directory(path)?;
+    let mut spellings = vec![directory.to_string_lossy().into_owned()];
+    spellings.extend(
+        fs::canonicalize(&directory).map(|resolved| resolved.to_string_lossy().into_owned()),
+    );
+    if cfg!(windows) {
+        let slashed = spellings
+            .iter()
+            .map(|spelling| spelling.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        spellings.extend(slashed);
+    }
+    for task in &contract.tasks {
+        let texts = std::iter::once(&task.run).chain(task.env.values());
+        if let Some(named) = texts
+            .flat_map(|text| {
+                spellings
+                    .iter()
+                    .filter(move |dir| names_directory(text, dir))
+            })
+            .next()
+        {
+            return Err(format!(
+                "task {:?} names the directory of its contract, {named}, which is outside the \
+                 repository: sykli cannot hash what a task reads there by that name; declare \
+                 each file the task uses there in its contract_inputs and name it as \
+                 \"$SYKLI_CONTRACT_DIR/PATH\"",
+                task.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `text` names `directory` or a path in it: the directory's path
+/// not continued by more of a name on either side, so `/a/gate-old` and
+/// `/x/a/gate` do not name `/a/gate`.
+fn names_directory(text: &str, directory: &str) -> bool {
+    let name = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~');
+    text.match_indices(directory).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + directory.len()..].chars().next();
+        !before.is_some_and(|c| name(c) || c == '/' || c == '\\') && !after.is_some_and(name)
+    })
+}
+
+/// The directory a contract is in, absolute, as the path names it (a link
+/// is not followed): where its lock is, and where its contract inputs are.
+fn contract_directory(path: &Path) -> Result<PathBuf, String> {
+    let path = absolute(path)?;
+    path.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} has no directory", path.display()))
+}
+
+/// Each task's contract inputs as the run reads them from `directory`, only
+/// for the tasks that declare any.
+fn contract_input_records(contract: &Contract, directory: &Path) -> InputRecords {
+    contract
+        .tasks
+        .iter()
+        .filter(|task| !task.contract_inputs.is_empty())
+        .map(|task| {
+            let records = task
+                .contract_inputs
+                .iter()
+                .map(|input| (input.clone(), contract_input_record(&directory.join(input))))
+                .collect();
+            (task.name.clone(), records)
+        })
+        .collect()
+}
+
+/// One contract input as a run reads it: the record a repository input has,
+/// without a tree entry (it is in no tree), or None when it is not a file
+/// that can be read.
+fn contract_input_record(path: &Path) -> Option<InputRecord> {
+    path.is_file().then(|| input_record(path).ok()).flatten()
 }
 
 fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
@@ -2450,6 +2584,14 @@ fn validate(contract: &Contract) -> Result<Vec<Vec<usize>>, String> {
         }
         for output in &task.outputs {
             validate_contract_path(&task.name, "output", Path::new(output))?;
+        }
+        for input in &task.contract_inputs {
+            validate_path_within(
+                &task.name,
+                "contract input",
+                Path::new(input),
+                "the contract's directory",
+            )?;
         }
         if names.insert(task.name.as_str(), index).is_some() {
             return Err(format!("duplicate task name {:?}", task.name));
@@ -2613,6 +2755,14 @@ struct Subject {
     #[serde(skip)]
     #[cfg_attr(not(unix), allow(dead_code))]
     head_commit: Option<String>,
+    /// The directory of the contract, where its contract inputs are.
+    #[serde(skip)]
+    contract_directory: PathBuf,
+    /// The contract inputs as the run read them, once, by task (only tasks
+    /// that declare any); each task's go into its own receipt record. They
+    /// are in no tree, so the subject's digests do not cover them.
+    #[serde(skip)]
+    contract_inputs: InputRecords,
 }
 
 /// One task's record in a receipt. A durable run also keeps each one as the
@@ -2666,6 +2816,12 @@ struct TaskReceipt {
     /// written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inputs: Option<BTreeMap<String, Option<InputRecord>>>,
+    /// Each declared contract input (a file beside a contract outside the
+    /// repository) as the run read it, recorded so `verify` can compare it
+    /// with the file there; no tree entry, since it is in no tree. Only on
+    /// tasks that declare any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contract_inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 #[derive(Serialize)]
@@ -2949,6 +3105,7 @@ fn run(
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
     authored(contract)?;
+    placed(contract, contract_path)?;
     #[cfg(not(unix))]
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());
@@ -2962,7 +3119,7 @@ fn run(
     if !folders.is_empty() {
         return Err(folder_coverage_error(&folders));
     }
-    let subject = subject(contract)?;
+    let subject = subject(contract, contract_path)?;
     // Before the run is recorded: a directory that cannot be made or held
     // is a run that cannot be evaluated, not a task that errored.
     worktree_cache::prepare(contract)?;
@@ -3109,9 +3266,11 @@ fn conclude(
         Outcome::Failed
     };
     // Every task, executed or reused, records the inputs as this run read
-    // them, the same records the subject's inputs digest covers.
+    // them, the same records the subject's inputs digest covers, and the
+    // contract inputs its key covers.
     for record in &mut receipt.tasks {
         record.inputs = receipt.subject.inputs.get(&record.name).cloned();
+        record.contract_inputs = receipt.subject.contract_inputs.get(&record.name).cloned();
     }
     let (path, digest, bytes) = write_receipt(&receipt)?;
     checkpoint("after-receipt")?;
@@ -3248,7 +3407,7 @@ fn execute(
                 decided[index] = Some(settle(errored(&changed, "input_changed"), None)?);
                 continue;
             }
-            match cache_key(task, runtime, &after) {
+            match cache_key(task, runtime, &after, &subject.contract_inputs) {
                 Ok(key) => {
                     if let Some(mut record) = cache.restore(task, &key, runtime) {
                         progress.line("cached", &task.name);
@@ -3339,7 +3498,19 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let launched = launch(task, runtime, progress, MAX_CAPTURE_BYTES, attempt.as_ref())?;
+    let subject = baseline.subject;
+    let declared = subject
+        .contract_inputs
+        .get(&task.name)
+        .map(|records| (subject.contract_directory.as_path(), records));
+    let launched = launch(
+        task,
+        runtime,
+        progress,
+        MAX_CAPTURE_BYTES,
+        attempt.as_ref(),
+        declared,
+    )?;
     let (mut record, ended) = match launched {
         Launched::Ran { record, ended } => (*record, ended),
         Launched::Stopped { exit_code, signal } => {
@@ -3427,6 +3598,18 @@ impl<'a> Baseline<'a> {
                 bytes != then || self.modes.get(&full).copied().flatten() != execute_bits(&path)
             })
             .cloned()
+            .chain(
+                self.subject
+                    .contract_inputs
+                    .get(&task.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(input, record)| {
+                        let path = self.subject.contract_directory.join(input);
+                        contract_input_record(&path).as_ref() != record.as_ref()
+                    })
+                    .map(|(input, _)| format!("{input} (beside the contract)")),
+            )
             .collect::<Vec<_>>();
         (!changed.is_empty()).then(|| {
             format!(
@@ -3491,9 +3674,30 @@ fn launch(
     progress: Progress,
     capture_limit: usize,
     attempt: Option<&runs::Attempt<'_>>,
+    contract_inputs: Option<(&Path, &BTreeMap<String, Option<InputRecord>>)>,
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
     let declared = worktree_cache::environment(task)?;
+    let errored = |error: &str, class: &'static str| {
+        Ok(Launched::Ran {
+            record: Box::new(empty_task_receipt(
+                task,
+                runtime,
+                Outcome::Errored,
+                error,
+                class,
+                false,
+            )),
+            ended: Instant::now(),
+        })
+    };
+    // Removed when this function returns, once the shell has ended.
+    let copy =
+        match contract_inputs.map(|(directory, records)| ContractCopy::new(directory, records)) {
+            None => None,
+            Some(Ok(copy)) => Some(copy),
+            Some(Err((error, class))) => return errored(&error, class),
+        };
     // Instant for the duration, wall clock for the claim: Instant is monotonic
     // and cannot be read as a time of day, SystemTime can jump but is what a
     // freshness policy compares against.
@@ -3542,25 +3746,17 @@ fn launch(
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Last, so neither a declared nor an inherited value replaces it.
+    if let Some(copy) = &copy {
+        command.env("SYKLI_CONTRACT_DIR", &copy.directory);
+    }
     if let Some(workdir) = &task.workdir {
         command.current_dir(workdir);
     }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => {
-            return Ok(Launched::Ran {
-                record: Box::new(empty_task_receipt(
-                    task,
-                    runtime,
-                    Outcome::Errored,
-                    &error.to_string(),
-                    "spawn_error",
-                    false,
-                )),
-                ended: Instant::now(),
-            });
-        }
+        Err(error) => return errored(&error.to_string(), "spawn_error"),
     };
     let group = child.id() as i32;
     #[cfg(unix)]
@@ -3736,6 +3932,7 @@ fn launch(
             provenance: None,
             cache_key: None,
             inputs: None,
+            contract_inputs: None,
         }),
         ended,
     })
@@ -3842,6 +4039,7 @@ fn empty_task_receipt(
         provenance: None,
         cache_key: None,
         inputs: None,
+        contract_inputs: None,
     }
 }
 
@@ -3906,6 +4104,62 @@ fn input_record(path: &Path) -> Result<InputRecord, String> {
 /// declared, with its record, or None when it cannot be read (missing).
 type InputRecords = BTreeMap<String, BTreeMap<String, Option<InputRecord>>>;
 
+/// A task's own copy of the contract inputs it declares, the directory its
+/// shell gets as `$SYKLI_CONTRACT_DIR`: each file copied from beside the
+/// contract, then required to be the bytes and execute bits the run
+/// recorded (and its key covers). A task therefore runs exactly what was
+/// hashed, and reaches no undeclared file beside the contract by that name.
+/// Bound: one directory per running task, in the system's temporary
+/// directory, removed when the task's shell has ended (on drop); a sykli
+/// that is killed leaves it to that directory's own cleanup.
+struct ContractCopy {
+    directory: PathBuf,
+}
+
+impl ContractCopy {
+    /// The copy, or why the task errors instead of running, and its class.
+    fn new(
+        from: &Path,
+        records: &BTreeMap<String, Option<InputRecord>>,
+    ) -> Result<Self, (String, &'static str)> {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-contract-{}-{}",
+            std::process::id(),
+            canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let failed = |error: String| (error, "input_error");
+        fs::create_dir(&directory)
+            .map_err(|error| failed(format!("{}: {error}", directory.display())))?;
+        let copy = ContractCopy { directory };
+        for (input, record) in records {
+            let target = copy.directory.join(input);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| failed(format!("{}: {error}", parent.display())))?;
+            }
+            let source = from.join(input);
+            fs::copy(&source, &target)
+                .map_err(|error| failed(format!("{}: {error}", source.display())))?;
+            if contract_input_record(&target).as_ref() != record.as_ref() {
+                return Err((
+                    format!(
+                        "contract input {input} changed beside the contract after the run read \
+                         it; its result would not be evidence for what the run recorded"
+                    ),
+                    "input_changed",
+                ));
+            }
+        }
+        Ok(copy)
+    }
+}
+
+impl Drop for ContractCopy {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
 /// The digest a receipt's subject records over all declared inputs: each
 /// task's inputs and their `sykli-input.v2` digests (null when missing).
 fn inputs_digest_of(records: &InputRecords) -> Result<String, String> {
@@ -3946,6 +4200,7 @@ fn cache_key(
     task: &Task,
     runtime: &ShellRuntime,
     after: &BTreeMap<&str, &str>,
+    contract_inputs: &InputRecords,
 ) -> Result<String, String> {
     #[derive(Serialize)]
     struct Key<'a> {
@@ -3954,6 +4209,9 @@ fn cache_key(
         runtime: &'a str,
         after: &'a BTreeMap<&'a str, &'a str>,
         inherited: BTreeMap<&'a str, String>,
+        /// Absent when the task declares none, so no other key changes.
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        contract_inputs: BTreeMap<&'a str, String>,
     }
 
     let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -3966,6 +4224,22 @@ fn cache_key(
         }
         inputs.insert(input.as_str(), input_digest(&path)?);
     }
+    // From the records the run read once, never read again here: the key
+    // is what the receipt records, and the task gets exactly those bytes.
+    let mut declared = BTreeMap::new();
+    for input in &task.contract_inputs {
+        let record = contract_inputs
+            .get(&task.name)
+            .and_then(|records| records.get(input))
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                format!(
+                    "declared contract input {input:?} is missing beside the contract or not a file"
+                )
+            })?;
+        declared.insert(input.as_str(), record.digest()?);
+    }
     let bytes = serde_json::to_vec(&Key {
         task,
         inputs,
@@ -3975,6 +4249,7 @@ fn cache_key(
             .iter()
             .map(|(name, digest)| (name.as_str(), digest.clone()))
             .collect(),
+        contract_inputs: declared,
     })
     .map_err(|error| error.to_string())?;
     Ok(sha256(&bytes))
@@ -4355,6 +4630,7 @@ impl Cache for LocalCache {
             provenance: Some(entry.receipt),
             cache_key: None,
             inputs: None,
+            contract_inputs: None,
         })
     }
 
@@ -4649,10 +4925,12 @@ fn environment_digest(mut environment: Vec<(OsString, OsString)>) -> String {
     sha256(&bytes)
 }
 
-fn subject(contract: &Contract) -> Result<Subject, String> {
+fn subject(contract: &Contract, contract_path: &Path) -> Result<Subject, String> {
     let repository = repo::repository().map_err(|_| {
         "not inside a git repository; sykli binds every receipt to a git tree".to_string()
     })?;
+    let contract_directory = contract_directory(contract_path)?;
+    let contract_inputs = contract_input_records(contract, &contract_directory);
     let declared = input_paths(contract)?;
     let paths = declared
         .iter()
@@ -4677,6 +4955,8 @@ fn subject(contract: &Contract) -> Result<Subject, String> {
         submodules_modified,
         inputs,
         head_commit,
+        contract_directory,
+        contract_inputs,
     })
 }
 
@@ -4978,6 +5258,9 @@ struct TaskSummary {
     /// Each declared input as the run read it; absent from older receipts.
     #[serde(default)]
     inputs: Option<BTreeMap<String, Option<InputRecord>>>,
+    /// Each declared contract input as the run read it.
+    #[serde(default)]
+    contract_inputs: Option<BTreeMap<String, Option<InputRecord>>>,
 }
 
 /// A receipt's records must agree with themselves and with the contract they
@@ -5091,6 +5374,7 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
     let outside = outside_repository(contract_path).is_some();
     let (contract, _, contract_hash) = load_unlocked(contract_path)?;
     let (lock, digest) = read_lock_digest(contract_path)?;
+    let beside_contract = outside;
     let outside = outside.then_some((contract_path, digest));
     if !contract_checks(&mut checks, &receipt, &contract_hash, lock, outside) {
         return Ok(checks);
@@ -5101,7 +5385,7 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
         checks.push(check);
         return Ok(checks);
     }
-    let subject = subject(&contract)?;
+    let subject = subject(&contract, contract_path)?;
     checks.extend([
         Check::equals(
             "tree",
@@ -5123,6 +5407,18 @@ fn verify_checkout(receipt_path: &Path, contract_path: &Path) -> Result<Vec<Chec
     if let Some(check) = checkout_records_check(&receipt, &subject.inputs) {
         checks.push(check);
         return Ok(checks);
+    }
+    // Outside the repository, the contract inputs as they are beside it now.
+    let beside = beside_contract.then_some((
+        subject.contract_directory.as_path(),
+        &subject.contract_inputs,
+    ));
+    if let Some(check) = contract_inputs_check(&receipt, &contract, beside) {
+        let ok = check.ok;
+        checks.push(check);
+        if !ok {
+            return Ok(checks);
+        }
     }
     record_checks(&mut checks, &receipt, &contract);
     Ok(checks)
@@ -5190,6 +5486,9 @@ pub(crate) struct Judged {
     hash: String,
     lock: Option<String>,
     outside: Option<(PathBuf, Option<String>)>,
+    /// For a contract outside the repository, its directory and the
+    /// contract inputs there now; None for one inside it.
+    contract_inputs: Option<(PathBuf, InputRecords)>,
 }
 
 impl Judged {
@@ -5197,11 +5496,19 @@ impl Judged {
     fn from_file(path: &Path, outside: bool) -> Result<Self, String> {
         let (contract, _, hash) = load_unlocked(path)?;
         let (lock, digest) = read_lock_digest(path)?;
+        let contract_inputs = if outside {
+            let directory = contract_directory(path)?;
+            let records = contract_input_records(&contract, &directory);
+            Some((directory, records))
+        } else {
+            None
+        };
         Ok(Judged {
             contract,
             hash,
             lock,
             outside: outside.then(|| (path.to_path_buf(), digest)),
+            contract_inputs,
         })
     }
 
@@ -6003,7 +6310,8 @@ const TRUST: &str = "established: a valid receipt schema; records consistent wit
      the contract; the contract's identity; the tree, and every declared input's bytes and execute \
      bit, read from the checkout, or with --commit from the commit (save an input the run itself \
      generates), never from the receipt (an input a checkout converts, as a checkout of the commit \
-     converts it)\n\
+     converts it); every contract input's, read from beside a contract outside the repository, \
+     with or without --commit\n\
      not established: where the receipt came from, who produced it, that its tasks ran, or \
      anything they read that is not a declared input. Receipts are unsigned: an outcome rewritten \
      to passed, or a receipt recomputed in full for a commit with consistent digests, verifies; \
@@ -6224,6 +6532,7 @@ impl ContractNames {
             hash,
             lock,
             outside: None,
+            contract_inputs: None,
         })
     }
 }
@@ -6297,8 +6606,122 @@ pub(crate) fn judge(
     if checks.iter().any(|check| !check.ok) {
         return Ok(checks);
     }
+    let beside = judged
+        .contract_inputs
+        .as_ref()
+        .map(|(directory, records)| (directory.as_path(), records));
+    if let Some(check) = contract_inputs_check(&receipt, &judged.contract, beside) {
+        let ok = check.ok;
+        checks.push(check);
+        if !ok {
+            return Ok(checks);
+        }
+    }
     record_checks(&mut checks, &receipt, &judged.contract);
     Ok(checks)
+}
+
+/// The contract inputs stage, when the contract or the receipt has any:
+/// each task's records name exactly the contract inputs it declares, and
+/// each is what the file beside the contract is now (`beside`: the
+/// contract's directory and what was read there). With or without
+/// `--commit` alike, since no commit carries them, as the contract and its
+/// lock are read from their files. A contract inside the repository
+/// (`beside` None) cannot declare them, and a receipt claiming them for one
+/// cannot be judged. A stale or missing record is exit 3, as an input's is.
+fn contract_inputs_check(
+    receipt: &ReceiptSummary,
+    contract: &Contract,
+    beside: Option<(&Path, &InputRecords)>,
+) -> Option<Check> {
+    let declares = contract
+        .tasks
+        .iter()
+        .any(|task| !task.contract_inputs.is_empty());
+    if !declares
+        && receipt
+            .tasks
+            .iter()
+            .all(|task| task.contract_inputs.is_none())
+    {
+        return None;
+    }
+    let refuse = |expected: String, actual: String, failure_code: u8| {
+        Some(Check {
+            name: "contract inputs",
+            expected,
+            actual,
+            ok: false,
+            failure_code,
+        })
+    };
+    let show = |record: Option<&InputRecord>| match record {
+        Some(record) => format!(
+            "sha256 {}, mode {}",
+            record.sha256,
+            record
+                .mode
+                .map_or("none".into(), |bits| format!("{bits:#o}"))
+        ),
+        None => "nothing".into(),
+    };
+    let Some((directory, now)) = beside else {
+        return refuse(
+            "contract inputs only for a contract outside the repository, read from beside it"
+                .into(),
+            "contract inputs declared or recorded for a contract inside the repository".into(),
+            NOT_VERIFIABLE,
+        );
+    };
+    let none = BTreeMap::new();
+    let mut judged = 0;
+    for task in &contract.tasks {
+        let Some(record) = receipt.tasks.iter().find(|record| record.name == task.name) else {
+            continue;
+        };
+        let records = record.contract_inputs.as_ref().unwrap_or(&none);
+        let declared = task.contract_inputs.iter().collect::<BTreeSet<_>>();
+        if records.keys().collect::<BTreeSet<_>>() != declared {
+            return refuse(
+                format!(
+                    "task {}'s contract inputs as the contract declares them, {declared:?}",
+                    task.name
+                ),
+                format!("{:?} recorded", records.keys().collect::<Vec<_>>()),
+                TREE_MISMATCH,
+            );
+        }
+        for (input, ran) in records {
+            let here = now
+                .get(&task.name)
+                .and_then(|records| records.get(input))
+                .and_then(Option::as_ref);
+            if here != ran.as_ref() {
+                return refuse(
+                    format!(
+                        "task {}'s contract input {input} as it is beside the contract now: {}",
+                        task.name,
+                        show(here)
+                    ),
+                    format!("{} recorded by the run", show(ran.as_ref())),
+                    TREE_MISMATCH,
+                );
+            }
+            judged += 1;
+        }
+    }
+    let actual = format!(
+        "{judged} contract input{} judged beside the contract in {}",
+        if judged == 1 { "" } else { "s" },
+        directory.display()
+    );
+    Some(Check {
+        name: "contract inputs",
+        expected: actual.clone(),
+        actual,
+        ok: true,
+        failure_code: TREE_MISMATCH,
+    })
 }
 
 /// The contract and lock stages; whether they passed. `outside` is a contract
@@ -6592,7 +7015,7 @@ mod tests {
         progress: Progress,
         capture_limit: usize,
     ) -> TaskReceipt {
-        launch(task, runtime, progress, capture_limit, None)
+        launch(task, runtime, progress, capture_limit, None, None)
             .and_then(|launched| match launched {
                 Launched::Ran { record, .. } => Ok(*record),
                 Launched::Stopped { .. } => Err("stopped on a signal".to_string()),
@@ -6625,6 +7048,8 @@ mod tests {
             submodules_modified: false,
             inputs: BTreeMap::new(),
             head_commit: None,
+            contract_directory: PathBuf::new(),
+            contract_inputs: BTreeMap::new(),
         };
         let undecided = std::iter::repeat_with(|| None)
             .take(contract.tasks.len())
@@ -6643,6 +7068,65 @@ mod tests {
         .into_iter()
         .map(Option::unwrap)
         .collect()
+    }
+
+    #[test]
+    fn a_directory_is_named_by_its_path_not_by_a_longer_name() {
+        let directory = "/home/a/gate";
+        for text in [
+            "sh /home/a/gate/check.sh",
+            "sh '/home/a/gate/check.sh'",
+            "cd /home/a/gate && sh check.sh",
+            "PATH=/home/a/gate:$PATH check",
+            "/home/a/gate",
+        ] {
+            assert!(names_directory(text, directory), "{text}");
+        }
+        for text in [
+            "sh /home/a/gate-old/check.sh",
+            "sh /home/a/gate.d/check.sh",
+            "sh /x/home/a/gate/check.sh",
+            "sh home/a/gate/check.sh",
+            "sh \"$SYKLI_CONTRACT_DIR/check.sh\"",
+        ] {
+            assert!(!names_directory(text, directory), "{text}");
+        }
+    }
+
+    /// A task that declares no contract inputs keeps the key it had before
+    /// they existed: the same bytes, hashed the same way.
+    #[test]
+    fn a_task_without_contract_inputs_keeps_its_key() {
+        #[derive(Serialize)]
+        struct Before<'a> {
+            task: &'a Task,
+            inputs: BTreeMap<&'a str, String>,
+            runtime: &'a str,
+            after: &'a BTreeMap<&'a str, &'a str>,
+            inherited: BTreeMap<&'a str, String>,
+        }
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "name": "t", "run": "true", "inputs": [manifest], "env": {"A": "b"},
+        }))
+        .unwrap();
+        let runtime = ShellRuntime {
+            path: PathBuf::from("sh"),
+            fingerprint: "shell".into(),
+            environment: Vec::new(),
+        };
+        let after = BTreeMap::from([("u", "k")]);
+        let before = Before {
+            task: &task,
+            inputs: BTreeMap::from([(manifest, input_digest(Path::new(manifest)).unwrap())]),
+            runtime: "shell",
+            after: &after,
+            inherited: BTreeMap::new(),
+        };
+        assert_eq!(
+            cache_key(&task, &runtime, &after, &InputRecords::new()).unwrap(),
+            sha256(&serde_json::to_vec(&before).unwrap())
+        );
     }
 
     #[test]
@@ -7078,6 +7562,7 @@ mod tests {
                 outputs: vec!["result".into()],
                 runtime: None,
                 inherit: vec![],
+                contract_inputs: vec![],
             }],
         };
         let runtime = shell_runtime().unwrap();
@@ -7097,6 +7582,8 @@ mod tests {
                 submodules_modified: false,
                 inputs: BTreeMap::new(),
                 head_commit: None,
+                contract_directory: PathBuf::new(),
+                contract_inputs: BTreeMap::new(),
             },
             tasks: first,
             outcome: Outcome::Passed,
