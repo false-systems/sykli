@@ -132,7 +132,8 @@ enum Command {
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
         the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
-        an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
+        an unclosed one, a $${, $worktree_cache without braces in an env value, or\n\
+        ${worktree_cache} anywhere but an env value is invalid.\n\
         These rules apply where a contract is written or run, not where `verify` or\n\
         `status --commit` judge a contract that an earlier version ran.")]
     Validate {
@@ -178,7 +179,8 @@ enum Command {
         keys cover the value as declared, never the directory. On Linux and macOS a run\n\
         holds the directory, and a later run removes it once its worktree is gone\n\
         (removed, moved or pruned, and not locked). Any other ${...} in an env value, an\n\
-        unclosed one, a $${, or ${worktree_cache} anywhere but an env value exits 2.")]
+        unclosed one, a $${, $worktree_cache without braces in an env value, or\n\
+        ${worktree_cache} anywhere but an env value exits 2.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]

@@ -542,8 +542,10 @@ write into it, just as it can write receipts.
 the others exit 2.
 
 - In an `env` value, any `${…}` other than `${worktree_cache}`, or an unclosed
-  one. Such a value is never passed on literally. A `$` that opens no `${`
-  is kept as written (`$ORIGIN`, `$LINENO`).
+  one. Such a value is never passed on literally. Nor is `$worktree_cache`
+  without braces, which sykli does not expand: write `${worktree_cache}`. Any
+  other `$` that opens no `${` is kept as written (`$ORIGIN`, `$LINENO`,
+  `$worktree_cache_dir`).
 - In an `env` value, `$${`. It is reserved for an escape of `${`, so that
   adding one later never changes what a valid contract means. There is no
   escape for a literal `${` yet.
