@@ -8,63 +8,6 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
-- **Delivery (Linux and macOS):** `sykli deliver`, `sykli status --delivery`,
-  `sykli observe --delivery` and `sykli resume --delivery`. A produced artifact
-  is put on a target through commands the caller declares in a
-  `sykli-delivery-contract.v1` (`identity`, `apply`, `observe`, optional
-  `smoke`, `freshness_seconds`, `settle_seconds`), and the operation is
-  journaled in `<git-common-dir>/sykli/deliveries/<id>/`
-  (`sykli-delivery-record.v1`). Sykli knows no kind of target.
-  - **Order:** the delivery is durable before anything runs, and the apply is
-    durable as `dispatched` before its shell starts; then exactly one end:
-    `acknowledged` (exit 0), `failed`, `interrupted` or `lost`. An
-    acknowledgement is not a deployment: what is deployed is only what an
-    observation (`sykli-observation.v1`, printed by the caller's `observe`)
-    shows, recorded with the time taken before its observer was spawned and
-    the digest of the observer's output. Observations count in the order
-    their observers began: one that began before an observation already
-    recorded is unordered (`out_of_order`) and cannot establish current health.
-  - **The verdict** (`sykli-delivery-status.v1`) has six dimensions: A the
-    operation (an exit 0's effect is `acknowledged`), B intended against
-    running artifact, C the desired state (this delivery's only when the
-    target names it as the operation; `unattributed` otherwise), D the
-    observed state (done only when the controller reports `complete`), E
-    health (readiness, checks, smoke) and F freshness (age against the
-    contract's bound; an observation dated more than 5 s ahead of now is never
-    fresh). The label is `VERIFIED HEALTHY` only when all hold, on the object
-    this delivery's apply changed (a new `uid` is "target recreated");
-    otherwise `NOT VERIFIED HEALTHY`, `DEGRADED`, `UNKNOWN` or `STALE`, with
-    reasons, and the text output ends with what it rests on (`trust:`). A
-    status is judged when it is asked, so it ages.
-  - **Superseded** follows the target's own sequence in the clone, taken
-    under the target's lock, never the clock; a delivery from another clone is
-    seen when an observation shows the target naming it.
-  - **A lost acknowledgement is never answered by applying again.**
-    `resume --delivery` observes the target first and records
-    `reconciled`: "acknowledgement lost, effect observed" when the target's
-    desired state shows this delivery's artifact and names this delivery,
-    unknown otherwise. Only `--reapply` applies again, as a new attempt that
-    supersedes the old one, and only after a reconciliation that reached the
-    target; the journal refuses a second apply that was not asked for or came
-    before such a reconciliation.
-  - **Nothing is applied over an unknown effect:** `deliver`, and a `resume`
-    that would dispatch, are refused (`target-unreconciled`, exit 2) while
-    another delivery to the target has an apply whose effect is unknown and not
-    reconciled from an observation that reached the target.
-    `deliver --reapply-over DELIVERY` passes one whose reconciliation could not
-    reach the target, and the new request records it.
-  - Also: `deliver --detach` (`sykli-delivery.v1`), `--production ID`,
-    `--rollback-to DELIVERY`, `observe` (never applies, runs beside a live
-    coordinator), a busy target refused (`target-busy`), and inherited
-    variables reaching only the command that declares them; a delivery's
-    records name them (`set` or `absent`), never their values or digests.
-    Retention: `SYKLI_DELIVERY_BUDGET` (100) deliveries per clone, the oldest
-    settled ones first: never the newest to a target, nor one whose apply is
-    alive or whose effect is still unknown; at most 2000 records per delivery.
-  - `deliver` and `status --delivery` start one `git rev-parse`, none with
-    `--repo-root` and `--git-common-dir` (pinned in `tests/git_calls.rs`).
-- `resume --assume-ended` applies to `--delivery` as well as `--run` (with
-  neither, it is still refused, exit 2).
 - `${worktree_cache}` in a task's declared `env` values: a directory that
   belongs to the worktree the run is in,
   `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is 16 hex digits of
@@ -216,8 +159,7 @@ contract consumer can observe; internal refactors are not listed.
 - `sykli init --contract PATH` writes the contract it infers from the
   repository, and its lock, to PATH (its directory is created) and touches
   nothing in the repository: no `.sykli/`, no `.gitignore` entry. It
-  conflicts with the positional path and with `--production`; outside any git
-  repository it exits 1.
+  conflicts with the positional path; outside any git repository it exits 1.
 - `sykli hook pre-commit --contract PATH` runs that contract on the staged
   tree, and `sykli hook pre-push --contract PATH REMOTE URL` gates pushes
   with it, whatever the pushed commits carry. A named contract that does not
@@ -366,6 +308,12 @@ contract consumer can observe; internal refactors are not listed.
   now fails verify with exit 3 on pull requests**, and the annotation says the
   merge commit was checked out. Check out `github.event.pull_request.head.sha`
   instead; this repository's CI does.
+- Commands shipped in 0.6.0 are removed (see Removed): `targets`, `produce`,
+  `verify-production`, `diagnostics`, `inspect` and `assess`, and the
+  production modes of `status` (a production ID), `resume` (a production ID),
+  `plan` (`--target`) and `init` (`--production`). Each now fails as an
+  unknown command or argument (exit 2). `status --run`, `status --commit` and
+  `resume --run` are unchanged.
 
 ### Changed
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
@@ -421,14 +369,8 @@ contract consumer can observe; internal refactors are not listed.
 - Existing v2 lock files must pin the named contract; empty maps and missing
   entries no longer silently run unpinned, including `verify --commit`.
   `sykli lock` can add the missing entry without discarding sibling pins.
-- Delivery observations with equal or decreasing start times cannot revive
-  older healthy evidence after a clock step. Freshness reports `unordered`
-  until a subsequently recorded, strictly newer observation resolves the gap.
 - Journal lock acquisition fails with `journal-busy` after 2 seconds rather
-  than hanging on a stopped writer. Cross-delivery supersession and target
-  sequence recovery propagate unreadable journals instead of skipping them.
-  `--reapply-over` cannot override an unreadable journal: it requires a
-  recorded reconciliation that could not reach the target.
+  than hanging on a stopped writer.
 - `verify --commit` and the pre-push hook: two forgeries the first fix for
   sykli#78 still let through are refused.
   - A symbolic link whose target has a `..` after a name (`sub/../x`, with
@@ -496,6 +438,22 @@ contract consumer can observe; internal refactors are not listed.
   repository, spelled through a symbolic link (macOS's `/var` for
   `/private/var`), refused it as outside the repository (exit 2); it is now
   read from the commit.
+
+### Removed
+- Typed production, shipped in 0.6.0: `targets`, `produce`,
+  `verify-production`, `diagnostics`, `plan --target`, `init --production`
+  (with `--package`, `--bin` and `--smoke`), and the production forms of
+  `status` and `resume` (a production ID, `--store`, `--summary`, `--retry`,
+  `--abandon`, `--stop-after`, `--operation`, `--jobs`). `status` now takes
+  `--run ID` or `--commit REV`, and `resume` takes `--run ID`; those modes,
+  their output and their exit codes are unchanged.
+- Pull-request evidence, shipped in 0.6.0: `inspect` and `assess`, with
+  `sykli-requirements.v1`, `sykli-inspect.v1`, `sykli-assessment.v1`,
+  `sykli-error.v1` and the evidence bundles under `.sykli/evidence`. sykli no
+  longer runs `gh` or makes any network request.
+- The CI shadow experiment: `examples/ci_shadow.rs`, its CI steps and
+  `docs/ci-shadow.md`.
+- The removed code is kept on the `archive/delivery-production` branch.
 
 ## [0.6.0] - 2026-09-09
 

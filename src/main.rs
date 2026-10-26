@@ -15,17 +15,11 @@ use std::thread;
 use std::time::Instant;
 use sykli::{Contract, Task};
 
-mod assessment;
 mod canonical;
-mod evidence;
-mod github;
 mod hook;
 mod init;
-mod inspect;
 #[cfg(unix)]
 mod journal;
-#[cfg(unix)]
-mod production;
 mod repo;
 #[cfg(unix)]
 mod runs;
@@ -198,7 +192,7 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// Explain selection and current cache evidence without running tasks (JSON contracts only)
-        #[arg(long, conflicts_with = "target")]
+        #[arg(long)]
         explain: bool,
         /// Coverage comparison base (default HEAD); does not filter task selection
         #[arg(long, requires = "explain")]
@@ -206,58 +200,12 @@ enum Command {
         /// Preview an edited JSON contract despite lock drift; never write or accept the lock
         #[arg(long, requires = "explain")]
         preview: bool,
-        /// Select a typed production target from the positional contract
-        #[arg(long)]
-        target: Option<String>,
     },
-    /// Discover typed artifact targets without running builds
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  0  targets listed\n  2  invalid or unreadable contract")]
-    Targets {
-        /// sykli-production-contract.v1 file
-        #[arg(long, default_value = "sykli.production.json")]
-        contract: PathBuf,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
-        #[arg(long)]
-        json: bool,
-    },
-    /// Produce a typed artifact from captured source (Linux and macOS)
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  the artifact is available and every required check passed\n  \
-        1  unfinished or failed work (also after --stop-after or --prepare)\n  \
-        2  invalid contract, unavailable tool, or store failure\n\n\
-        The production ID printed is what `status` and `resume` take.")]
-    Produce {
-        /// Target name from the contract (see `sykli targets`)
-        target: String,
-        /// sykli-production-contract.v1 file
-        #[arg(long, default_value = "sykli.production.json")]
-        contract: PathBuf,
-        /// Where captured inputs, artifacts and records are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Stop at a durable operation boundary (incomplete delivery exits 1)
-        #[arg(long)]
-        stop_after: Option<String>,
-        /// Capture the request without executing operations
-        #[arg(long, conflicts_with = "stop_after")]
-        prepare: bool,
-        /// Maximum independent operations per execution wave
-        #[arg(long, default_value_t = 1)]
-        jobs: usize,
-        /// Omit execution records and expose ready work
-        #[arg(long)]
-        summary: bool,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
-        #[arg(long)]
-        json: bool,
-    },
-    /// Inspect a pinned production, a graph run (--run), or what applies to a commit (--commit)
+    /// Inspect a graph run (--run), or what applies to a commit (--commit)
     #[cfg(unix)]
     #[command(after_help = "Exit codes:\n  \
         0  records inspected (work may be unfinished)\n  \
-        2  unknown production or run, unreadable store or journal, or no such commit\n\n\
+        2  unknown run, unreadable journal, or no such commit\n\n\
         --run ID reads a run's journal (sykli-run-status.v1): its state (requested, running,\n\
         completed, interrupted, or lost when its coordinator ended without concluding it),\n\
         its subject and contract, each task's state (pending, running, passed, failed,\n\
@@ -274,53 +222,30 @@ enum Command {
         but never current evidence. Runs of that tree are listed with their states and each\n\
         task's attempts. The verdict never lets a pass hide a failure: the newest result its\n\
         run recorded decides, and a pass no run recorded never outranks a recorded failure\n\
-        (`conflict`, with why). Like `verify`, it does not establish that tasks ran.\n\n\
-        --delivery ID reads a delivery's journal (sykli-delivery-status.v1) and judges it now,\n\
-        one dimension at a time: A the operation (requested, dispatched, applying,\n\
-        acknowledged, apply-failed, lost, unknown, acknowledgement-lost), B the intended\n\
-        artifact against what runs, C the target's desired state (this delivery's only when\n\
-        the target names it as the operation), D its observed state (done only when the\n\
-        controller reports `complete`), E health (readiness, checks, smoke), F freshness (the\n\
-        last observation's age against the contract's bound; one dated ahead of now is never\n\
-        fresh). Observations count in the order their observers began. The label is VERIFIED\n\
-        HEALTHY only when every dimension holds; otherwise NOT VERIFIED HEALTHY, DEGRADED,\n\
-        UNKNOWN or STALE, with why. Nothing runs and nothing is written: a status ages as its\n\
-        last observation does.")]
+        (`conflict`, with why). Like `verify`, it does not establish that tasks ran.")]
     Status {
-        /// Production ID printed by `produce`
-        #[arg(required_unless_present_any = ["run", "commit", "delivery"], conflicts_with_all = ["run", "commit", "delivery"])]
-        production: Option<String>,
         /// A graph run's id, as `run` printed it or its receipt's `run` names it
-        #[arg(long, conflicts_with_all = ["commit", "delivery"])]
+        #[arg(long, required_unless_present = "commit", conflicts_with = "commit")]
         run: Option<String>,
-        /// A delivery's id, as `deliver` printed it
-        #[arg(long, conflicts_with = "commit")]
-        delivery: Option<String>,
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
         /// With --commit: the contract to judge by, as for `verify`
         #[arg(long, default_value = "sykli.rs", requires = "commit")]
         contract: PathBuf,
-        /// Where captured inputs, artifacts and records are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Omit execution records and expose ready work
-        #[arg(long)]
-        summary: bool,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
+        /// Print one versioned JSON document on stdout (sykli-run-status.v1 with --run,
+        /// sykli-commit-status.v1 with --commit); an error goes to stderr and exits 2
         #[arg(long)]
         json: bool,
     },
-    /// Continue a pinned production, or a graph run (--run); failed work requires an explicit retry
+    /// Continue a graph run whose coordinator ended (--run)
     #[cfg(unix)]
     #[command(after_help = "Exit codes:\n  \
-        0  the artifact is available and every required check passed\n     \
-           (--run: the run concluded and passed)\n  \
-        1  unfinished or failed work (--run: the run concluded and a task failed)\n  \
-        2  unknown production or run, busy, or store failure (--run: also a run whose\n     \
-           source, contract or runtime changed since it was requested)\n  \
-        128+N  --run: stopped again by signal N\n\n\
+        0  the run concluded and passed\n  \
+        1  the run concluded and a task failed\n  \
+        2  unknown run, busy, or a run whose source, contract or runtime changed since it\n     \
+           was requested\n  \
+        128+N  stopped again by signal N\n\n\
         --run ID continues a graph run whose coordinator ended (crashed, killed, or stopped\n\
         on a signal) from its journal. Tasks with an accepted outcome are kept, failed ones\n\
         included. Every attempt left unfinished is recorded as lost, and every lost or\n\
@@ -333,203 +258,24 @@ enum Command {
         A resumed task runs at least once, and possibly more than once: an attempt that was\n\
         lost or interrupted may have run to completion, and done whatever it does, before its\n\
         end went unrecorded. A resume warns, naming each task it runs again whose last\n\
-        attempt had started.\n\n\
-        --delivery ID takes over a delivery whose coordinator ended, and never runs an apply\n\
-        again on its own. An apply whose end was not recorded (lost, interrupted, killed) is\n\
-        reconciled first, by observing the target: when the target's desired state shows\n\
-        this delivery's artifact and names this delivery as its operation, the attempt is\n\
-        recorded `acknowledgement lost, effect observed`; otherwise its effect is recorded\n\
-        unknown, the delivery is UNKNOWN, and only --reapply applies again, as a new attempt\n\
-        that supersedes the old one, which stays in the history; --reapply is refused (exit\n\
-        2) when that observation did not reach the target. A delivery never dispatched is\n\
-        dispatched; an acknowledged one is observed again. Nothing is dispatched while\n\
-        another delivery to the target has an unknown, unreconciled effect\n\
-        (`target-unreconciled`, exit 2). Exits 0 when the delivery is then VERIFIED HEALTHY,\n\
-        1 otherwise.")]
+        attempt had started.")]
     Resume {
-        /// Production ID printed by `produce`
-        #[arg(required_unless_present_any = ["run", "delivery"], conflicts_with_all = ["run", "delivery"])]
-        production: Option<String>,
         /// A graph run's id
-        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary", "delivery"])]
-        run: Option<String>,
-        /// A delivery's id, as `deliver` printed it
-        #[arg(long, conflicts_with_all = ["retry", "abandon", "stop_after", "operation", "summary"])]
-        delivery: Option<String>,
-        /// With --delivery: apply again, as a new attempt, once the last apply's unknown
-        /// effect has been reconciled from an observation that reached the target (or the
-        /// last apply failed)
-        #[arg(long, requires = "delivery")]
-        reapply: bool,
-        /// With --run or --delivery: take an attempt whose process group still exists as
-        /// ended (lost), for when that group id now belongs to an unrelated process
+        #[arg(long)]
+        run: String,
+        /// Take an attempt whose process group still exists as ended (lost), for when
+        /// that group id now belongs to an unrelated process
         #[arg(long)]
         assume_ended: bool,
-        /// Where captured inputs, artifacts and records are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Run this failed operation again (requires --jobs 1)
-        #[arg(long)]
-        retry: Option<String>,
-        /// Record a contact-lost attempt as abandoned so its operation can be retried
-        #[arg(long)]
-        abandon: Option<String>,
-        /// Stop after this operation completes (requires --jobs 1)
-        #[arg(long)]
-        stop_after: Option<String>,
-        /// Execute only this operation; dependencies must already be satisfied
-        #[arg(long, conflicts_with = "stop_after")]
-        operation: Option<String>,
-        /// Maximum independent operations per execution wave
-        #[arg(long, default_value_t = 1)]
-        jobs: usize,
-        /// Omit execution records and expose ready work
-        #[arg(long)]
-        summary: bool,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
+        /// Print the run receipt as JSON on stdout; progress and task output go to stderr
         #[arg(long)]
         json: bool,
-    },
-    /// Check production record integrity, bindings, assessment and delivery
-    #[cfg(unix)]
-    #[command(
-        after_help = "Exit codes:\n  0  verified and delivered\n  1  records are consistent but delivery is incomplete\n  2  inconsistent records or unreadable store"
-    )]
-    VerifyProduction {
-        /// Production ID printed by `produce`
-        production: String,
-        /// Where captured inputs, artifacts and records are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
-        #[arg(long)]
-        json: bool,
-    },
-    /// Retrieve recorded diagnostics for one attempt, including historical attempts
-    #[cfg(unix)]
-    #[command(
-        after_help = "Exit codes:\n  0  diagnostics printed\n  2  unknown production or attempt"
-    )]
-    Diagnostics {
-        /// Production ID printed by `produce`
-        production: String,
-        /// Attempt ID from `status` or `resume` output
-        attempt: String,
-        /// Where captured inputs, artifacts and records are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Print one versioned JSON document on stdout; errors become sykli-production-error.v1 on stdout, exit code unchanged
-        #[arg(long)]
-        json: bool,
-    },
-    #[cfg(unix)]
-    #[command(name = "__production_attempt", hide = true)]
-    ProductionAttempt {
-        #[arg(long)]
-        store: PathBuf,
-        #[arg(long)]
-        production: String,
-        #[arg(long)]
-        attempt: String,
-        #[arg(long)]
-        lease_fd: i32,
     },
     #[cfg(unix)]
     #[command(name = "__run_coordinator", hide = true)]
     RunCoordinator {
         #[arg(long)]
         run: String,
-        #[arg(long)]
-        lease_fd: i32,
-    },
-    /// Apply a produced artifact to a declared target, and judge it from observations (Linux and macOS)
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  the delivery is VERIFIED HEALTHY (--detach: it is recorded and handed off)\n  \
-        1  it is recorded but not verified healthy: NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN\n     \
-           or STALE (see the reasons, and `sykli status --delivery ID`)\n  \
-        2  nothing was delivered: invalid contract, no complete production of the current\n     \
-           sources (run `sykli produce` first), its artifact unavailable, the identity\n     \
-           command failed, another delivery to the target still running (`target-busy`),\n     \
-           or one whose apply's effect is unknown and not reconciled with the target\n     \
-           (`target-unreconciled`: `sykli resume --delivery ID` it first), or the journal\n     \
-           could not be written\n  \
-        128+N  stopped by signal N; `sykli resume --delivery ID` reconciles and continues\n\n\
-        A sykli-delivery-contract.v1 names, per target, the product it receives (a target and\n\
-        product of the production contract it names) and four commands the caller owns:\n\
-        `identity` (`{\"kind\":\"content\"}` for the artifact's own SHA-256, or a command that\n\
-        prints what the target will report for it), `apply`, `observe` (prints a\n\
-        sykli-observation.v1) and an optional `smoke`, with `freshness_seconds` (how old an\n\
-        observation may be and still say anything about now) and `settle_seconds` (how long to\n\
-        keep observing after the apply). The commands run as a run's tasks do: `sh -c` in the\n\
-        contract's directory, a cleared environment plus PATH, HOME and TMPDIR, the declared\n\
-        `env`, and the `inherit`ed variables, whose values reach only that command; the\n\
-        journal names them (set or absent), never their values or digests. Each also gets\n\
-        SYKLI_DELIVERY (the id; write it to the target so an observer can name it),\n\
-        SYKLI_INTENDED,\n\
-        SYKLI_DELIVERY_TARGET, and for apply SYKLI_ARTIFACT (the artifact, materialized from\n\
-        the store) and SYKLI_DELIVERY_ATTEMPT.\n\n\
-        The delivery is recorded in $(git rev-parse --git-common-dir)/sykli/deliveries/<id>/\n\
-        before anything is applied, and the apply is recorded as dispatched before its shell\n\
-        starts. An apply that exits 0 is `acknowledged`: the target accepted the change, which\n\
-        is not a deployment. What is deployed is only ever what an observation shows, judged\n\
-        dimension by dimension (see `sykli status --help`). The delivery id is printed first\n\
-        (`delivery: ID`, on stderr with --json); --json prints sykli-delivery-status.v1.")]
-    Deliver {
-        /// Path to a sykli-delivery-contract.v1 file
-        #[arg(default_value = "sykli.delivery.json")]
-        contract: PathBuf,
-        /// The delivery target, as the contract names it
-        #[arg(long)]
-        target: String,
-        /// Where the production's artifacts are kept
-        #[arg(long, default_value = ".sykli/production")]
-        store: PathBuf,
-        /// Deliver this production's product instead of the current sources'
-        #[arg(long, conflicts_with = "rollback_to")]
-        production: Option<String>,
-        /// Deliver again the artifact an earlier delivery to this target delivered
-        #[arg(long, value_name = "DELIVERY")]
-        rollback_to: Option<String>,
-        /// Apply even though DELIVERY, an earlier delivery to this target, has an apply whose
-        /// effect is unknown and whose reconciliation (`resume --delivery`) could not reach
-        /// the target. Overrides only that; the new delivery records what it applied over
-        #[arg(long, value_name = "DELIVERY")]
-        reapply_over: Vec<String>,
-        /// Record the delivery, hand it to a coordinator that outlives this command, and print
-        /// its id once the record is durable (`{"schema":"sykli-delivery.v1","delivery":ID}`
-        /// with --json)
-        #[arg(long)]
-        detach: bool,
-        /// Print sykli-delivery-status.v1 on stdout; progress and the apply's output go to stderr
-        #[arg(long)]
-        json: bool,
-    },
-    /// Observe a delivery's target now and record it; never applies anything (Linux and macOS)
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  recorded, and the delivery is VERIFIED HEALTHY\n  \
-        1  recorded, and it is not (NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN or STALE)\n  \
-        2  unknown delivery, its record bound reached, or the journal could not be written\n  \
-        128+N  stopped by signal N; nothing was recorded\n\n\
-        Runs the target's observe command (and its smoke command, when it declares one) as the\n\
-        delivery recorded them, records what it reported with its time and the digest of its\n\
-        output, and prints the delivery's status. It runs beside a live coordinator, and on a\n\
-        delivery whose apply's end is unknown it observes without deciding anything: only\n\
-        `sykli resume --delivery ID` reconciles.")]
-    Observe {
-        /// A delivery's id, as `deliver` printed it
-        #[arg(long)]
-        delivery: String,
-        /// Print sykli-delivery-status.v1 on stdout
-        #[arg(long)]
-        json: bool,
-    },
-    #[cfg(unix)]
-    #[command(name = "__delivery_coordinator", hide = true)]
-    DeliveryCoordinator {
-        #[arg(long)]
-        delivery: String,
         #[arg(long)]
         lease_fd: i32,
     },
@@ -548,7 +294,7 @@ enum Command {
         #[arg(default_value = "sykli.json")]
         path: PathBuf,
         /// Write the contract (and its lock) to this path, which may be outside the repository
-        #[arg(long, value_name = "PATH", conflicts_with_all = ["path", "production"])]
+        #[arg(long, value_name = "PATH", conflicts_with = "path")]
         contract: Option<PathBuf>,
         /// Overwrite an existing contract
         #[arg(long)]
@@ -556,18 +302,6 @@ enum Command {
         /// Do not pin the written contract in sykli.lock
         #[arg(long = "no-lock")]
         no_lock: bool,
-        /// Write a typed executable target for Cargo, Go, or a standalone main.rs
-        #[arg(long)]
-        production: bool,
-        /// Cargo package or Go main package (./cmd/NAME) to select
-        #[arg(long, requires = "production")]
-        package: Option<String>,
-        /// Cargo binary to select for typed production
-        #[arg(long, requires = "production")]
-        bin: Option<String>,
-        /// Shell check of $SYKLI_INPUT_executable (required for Cargo and Go discovery)
-        #[arg(long, requires = "production")]
-        smoke: Option<String>,
     },
     /// Pin the contract's hash in sykli.lock beside it (one entry per contract file)
     #[command(after_help = "Exit codes:\n  0  locked\n  2  could not read or hash the contract")]
@@ -575,55 +309,6 @@ enum Command {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
         contract: PathBuf,
-    },
-    /// Read a pull request's runs and reviews through `gh`, save an evidence bundle, and show what is established
-    #[command(after_help = "Exit codes:\n  \
-        0  observations saved; with --requirements, every requirement established\n  \
-        1  a requirement is refuted\n  \
-        2  invalid input, unreadable candidate, or tool failure\n  \
-        3  a requirement is unproven\n  \
-        4  admitted evidence about one subject conflicts\n\n\
-        Read-only and advisory: nothing is merged, triggered, or certified. See docs/agents.md.")]
-    Inspect {
-        /// Repository as OWNER/NAME on github.com
-        #[arg(long)]
-        repo: String,
-        /// Pull request number
-        #[arg(long)]
-        pr: u64,
-        /// sykli-requirements.v1 file; without it only observations are shown
-        #[arg(long)]
-        requirements: Option<PathBuf>,
-        /// Where evidence bundles are appended
-        #[arg(long, default_value = ".sykli/evidence")]
-        store: PathBuf,
-        /// Print one sykli-inspect.v1 document; errors become sykli-error.v1 on stdout
-        #[arg(long)]
-        json: bool,
-    },
-    /// Assess a saved evidence bundle against requirements, offline and deterministically
-    #[command(after_help = "Exit codes:\n  \
-        0  established   1  refuted   2  invalid input or tool failure\n  \
-        3  unproven      4  conflict\n\n\
-        Evaluates at the collection's end unless --at names another UTC time.")]
-    Assess {
-        /// Evidence bundle directory written by `sykli inspect`
-        bundle: PathBuf,
-        /// sykli-requirements.v1 file
-        #[arg(long)]
-        requirements: PathBuf,
-        /// Evaluation time, YYYY-MM-DDTHH:MM:SSZ; later times can make evidence stale
-        #[arg(long)]
-        at: Option<String>,
-        /// Print the sykli-assessment.v1 document
-        #[arg(long)]
-        json: bool,
-        /// Print a Mermaid graph of the assessment instead of rows
-        #[arg(long, conflicts_with = "json", value_parser = ["mermaid"])]
-        graph: Option<String>,
-        /// Explain one obligation: support, counterevidence, exclusions, missing evidence
-        #[arg(long, conflicts_with = "graph")]
-        why: Option<String>,
     },
     /// Check that a receipt is consistent with the current tree and contract
     #[command(after_help = "Exit codes (first failing stage decides):\n  \
@@ -1499,7 +1184,6 @@ fn main() -> ExitCode {
         Command::Plan {
             contract: Some(contract),
             changed,
-            target: None,
             ..
         } => enter_for_contract(contract, &mut changed.iter_mut().collect::<Vec<_>>()),
         // A hook enters the repository root itself; the contract it was
@@ -1525,43 +1209,16 @@ fn main() -> ExitCode {
     }
     match cli.command {
         #[cfg(unix)]
-        Command::Targets { contract, json } => {
-            production::report(production::targets(&contract), json, false)
-        }
-        #[cfg(unix)]
-        Command::Produce {
-            target,
-            contract,
-            store,
-            stop_after,
-            prepare,
-            jobs,
-            summary,
-            json,
-        } => production::report(
-            production::produce(
-                &store,
-                &contract,
-                &target,
-                stop_after.as_deref(),
-                prepare,
-                jobs,
-            )
-            .map(|v| if summary { production::compact(v) } else { v }),
-            json,
-            !prepare,
-        ),
-        #[cfg(unix)]
         Command::Status {
-            delivery: Some(delivery),
+            run: Some(run),
             json,
             ..
-        } => match production::delivery::status(&delivery) {
+        } => match runs::status(&run) {
             Ok(status) => {
                 if json {
                     println!("{status}");
                 } else {
-                    println!("{}", production::delivery::describe(&status));
+                    println!("{}", describe_run(&status));
                 }
                 ExitCode::SUCCESS
             }
@@ -1571,111 +1228,17 @@ fn main() -> ExitCode {
             }
         },
         #[cfg(unix)]
-        Command::Deliver {
-            contract,
-            target,
-            store,
-            production: from,
-            rollback_to,
-            reapply_over,
-            detach,
-            json,
-        } => match production::delivery::deliver(
-            &contract,
-            &target,
-            &store,
-            from.as_deref(),
-            rollback_to.as_deref(),
-            &reapply_over,
-            detach,
-            json,
-        ) {
-            Ok(production::delivery::Started::Detached(delivery)) => {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({"schema": "sykli-delivery.v1", "delivery": delivery})
-                    );
-                } else {
-                    println!("delivery: {delivery}");
-                }
-                ExitCode::SUCCESS
-            }
-            Ok(production::delivery::Started::Ran(delivery, done)) => {
-                delivery_exit(&delivery, Ok(done), json)
-            }
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(2)
-            }
-        },
-        #[cfg(unix)]
-        Command::Observe { delivery, json } => match production::delivery::observe(&delivery) {
-            Ok(Ok(status)) => delivery_report(&status, json),
-            Ok(Err(signal)) => {
-                eprintln!("interrupted: stopped by signal {signal}; nothing was recorded");
-                ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
-            }
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(2)
-            }
-        },
-        #[cfg(unix)]
-        Command::DeliveryCoordinator { delivery, lease_fd } => {
-            match production::delivery::coordinator_main(&delivery, lease_fd) {
-                Ok(production::delivery::Done::Interrupted(signal)) => {
-                    ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
-                }
-                Ok(production::delivery::Done::Judged) => ExitCode::SUCCESS,
-                Err(error) => {
-                    eprintln!("coordinator: {error}");
-                    ExitCode::from(2)
-                }
-            }
-        }
-        #[cfg(unix)]
-        Command::Resume {
-            delivery: Some(delivery),
-            reapply,
-            assume_ended,
-            json,
-            ..
-        } => delivery_exit(
-            &delivery,
-            production::delivery::resume(&delivery, reapply, assume_ended, json),
-            json,
-        ),
-        #[cfg(unix)]
         Command::Status {
-            production: id,
-            run: Some(run),
-            json,
-            ..
-        } => {
-            let _ = id;
-            match runs::status(&run) {
-                Ok(status) => {
-                    if json {
-                        println!("{status}");
-                    } else {
-                        println!("{}", describe_run(&status));
-                    }
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    ExitCode::from(2)
-                }
-            }
-        }
-        #[cfg(unix)]
-        Command::Status {
-            commit: Some(rev),
+            commit,
             contract,
             json,
             ..
         } => {
+            // clap requires --run or --commit, so a status without --run has --commit.
+            let Some(rev) = commit else {
+                eprintln!("error: status takes --run ID or --commit REV");
+                return ExitCode::from(2);
+            };
             let mut contract = resolve_contract(contract);
             match enter_for_contract(&mut contract, &mut [])
                 .and_then(|()| commit_status(&rev, &contract))
@@ -1695,37 +1258,10 @@ fn main() -> ExitCode {
             }
         }
         #[cfg(unix)]
-        Command::Status {
-            production: id,
-            store,
-            summary,
-            json,
-            ..
-        } => production::report(
-            production::inspect(&store, id.as_deref().unwrap_or_default())
-                .map(|v| if summary { production::compact(v) } else { v }),
-            json,
-            false,
-        ),
-        #[cfg(unix)]
-        Command::Diagnostics {
-            production: id,
-            attempt,
-            store,
-            json,
-        } => production::report(production::diagnostics(&store, &id, &attempt), json, false),
-        #[cfg(unix)]
-        Command::VerifyProduction {
-            production: id,
-            store,
-            json,
-        } => production::report(production::inspect(&store, &id), json, true),
-        #[cfg(unix)]
         Command::Resume {
-            run: Some(run),
+            run,
             assume_ended,
             json,
-            ..
         } => match resume_run(&run, assume_ended, json) {
             Ok(ran) => exit_for(ran, json),
             Err(error) => {
@@ -1734,39 +1270,6 @@ fn main() -> ExitCode {
             }
         },
         #[cfg(unix)]
-        Command::Resume {
-            assume_ended: true, ..
-        } => {
-            eprintln!("error: --assume-ended applies to --run or --delivery");
-            ExitCode::from(2)
-        }
-        #[cfg(unix)]
-        Command::Resume {
-            production: id,
-            store,
-            retry,
-            abandon,
-            stop_after,
-            operation,
-            jobs,
-            summary,
-            json,
-            ..
-        } => production::report(
-            production::resume(
-                &store,
-                id.as_deref().unwrap_or_default(),
-                abandon.as_deref(),
-                retry.as_deref(),
-                stop_after.as_deref(),
-                operation.as_deref(),
-                jobs,
-            )
-            .map(|v| if summary { production::compact(v) } else { v }),
-            json,
-            true,
-        ),
-        #[cfg(unix)]
         Command::RunCoordinator { run, lease_fd } => match coordinator_main(&run, lease_fd) {
             Ok(ran) => exit_for(ran, false),
             Err(error) => {
@@ -1774,35 +1277,6 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        #[cfg(unix)]
-        Command::ProductionAttempt {
-            store,
-            production: id,
-            attempt,
-            lease_fd,
-        } => match production::executor(&store, &id, &attempt, lease_fd) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("executor: {error}");
-                ExitCode::from(2)
-            }
-        },
-        #[cfg(unix)]
-        Command::Plan {
-            contract,
-            target: Some(target),
-            changed,
-            json,
-            ..
-        } => production::report(
-            if changed.is_empty() {
-                production::plan(contract.as_ref().unwrap(), &target)
-            } else {
-                Err("typed planning pins all selected inputs; --changed applies to declared graphs (sykli-contract.v1)".into())
-            },
-            json,
-            false,
-        ),
         Command::Validate { contract, json } => {
             match load(&contract).and_then(|loaded| authored(&loaded.0).map(|()| loaded)) {
                 Ok((_, _, contract_hash)) => {
@@ -1872,16 +1346,11 @@ fn main() -> ExitCode {
             contract,
             changed,
             json,
-            target,
             explain,
             base,
             preview,
         } => {
             let contract = contract.unwrap();
-            if target.is_some() {
-                eprintln!("typed production requires Linux or macOS");
-                return ExitCode::from(2);
-            }
             if explain
                 && !contract
                     .extension()
@@ -2036,36 +1505,7 @@ fn main() -> ExitCode {
             contract,
             force,
             no_lock,
-            production: typed,
-            package,
-            bin,
-            smoke,
         } => {
-            #[cfg(unix)]
-            if typed {
-                let path = if path == Path::new("sykli.json") {
-                    PathBuf::from("sykli.production.json")
-                } else {
-                    path
-                };
-                return production::report(
-                    production::init(
-                        &path,
-                        force,
-                        package.as_deref(),
-                        bin.as_deref(),
-                        smoke.as_deref(),
-                    ),
-                    false,
-                    false,
-                );
-            }
-            #[cfg(not(unix))]
-            let _ = (&package, &bin, &smoke);
-            if typed {
-                eprintln!("typed production requires Linux or macOS");
-                return ExitCode::from(2);
-            }
             let Some(mut contract) = contract else {
                 return init::run(&path, force, !no_lock, &write_lock);
             };
@@ -2095,28 +1535,6 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Command::Inspect {
-            repo,
-            pr,
-            requirements,
-            store,
-            json,
-        } => inspect::inspect(&repo, pr, requirements.as_deref(), &store, json),
-        Command::Assess {
-            bundle,
-            requirements,
-            at,
-            json,
-            graph,
-            why,
-        } => inspect::assess(
-            &bundle,
-            &requirements,
-            at.as_deref(),
-            graph.as_deref(),
-            why.as_deref(),
-            json,
-        ),
         Command::Verify {
             receipt,
             contract,
@@ -2167,52 +1585,6 @@ fn exit_for(ran: Ran, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-    }
-}
-
-/// What `deliver`, `resume --delivery` exit with once the coordinator's work
-/// is done: the delivery's status, printed, then 0 when it is VERIFIED
-/// HEALTHY and 1 when it is anything else; 128+N when signal N stopped it.
-#[cfg(unix)]
-fn delivery_exit(
-    delivery: &str,
-    done: Result<production::delivery::Done, String>,
-    json: bool,
-) -> ExitCode {
-    match done {
-        Ok(production::delivery::Done::Judged) => match production::delivery::status(delivery) {
-            Ok(status) => delivery_report(&status, json),
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(2)
-            }
-        },
-        Ok(production::delivery::Done::Interrupted(signal)) => {
-            eprintln!(
-                "interrupted: delivery {delivery} was stopped by signal {signal}; `sykli resume \
-                 --delivery {delivery}` reconciles it with the target and continues it"
-            );
-            ExitCode::from(u8::try_from(128 + signal).unwrap_or(255))
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// Print a delivery's status; 0 only when it is VERIFIED HEALTHY.
-#[cfg(unix)]
-fn delivery_report(status: &serde_json::Value, json: bool) -> ExitCode {
-    if json {
-        println!("{status}");
-    } else {
-        println!("{}", production::delivery::describe(status));
-    }
-    if status["label"] == production::delivery::VERIFIED_HEALTHY {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
     }
 }
 
@@ -3967,13 +3339,7 @@ fn attempt_task(
         .map(|coordinator| coordinator.dispatch(&task.name, &key))
         .transpose()?;
     checkpoint("after-dispatch")?;
-    let launched = launch(
-        task,
-        runtime,
-        progress,
-        MAX_CAPTURE_BYTES,
-        attempt.as_ref().map(|attempt| attempt as &dyn Journaled),
-    )?;
+    let launched = launch(task, runtime, progress, MAX_CAPTURE_BYTES, attempt.as_ref())?;
     let (mut record, ended) = match launched {
         Launched::Ran { record, ended } => (*record, ended),
         Launched::Stopped { exit_code, signal } => {
@@ -4111,50 +3477,6 @@ enum Launched {
     },
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
-fn run_task(
-    task: &Task,
-    runtime: &ShellRuntime,
-    progress: Progress,
-    capture_limit: usize,
-) -> TaskReceipt {
-    launch(task, runtime, progress, capture_limit, None)
-        .and_then(|launched| match launched {
-            Launched::Ran { record, .. } => Ok(*record),
-            Launched::Stopped { .. } => Err("stopped on a signal".to_string()),
-        })
-        .unwrap_or_else(|error| {
-            empty_task_receipt(
-                task,
-                runtime,
-                Outcome::Errored,
-                &error,
-                "runtime_error",
-                false,
-            )
-        })
-}
-
-/// What `launch` asks of the journal that records an attempt: a run's task
-/// attempt, or a delivery's apply (`production::delivery`).
-trait Journaled {
-    /// Let the shell, and everything it starts, hold the attempt's lease.
-    #[cfg(unix)]
-    fn inherit(&self, command: &mut ProcessCommand);
-    /// The shell is running, in process group `group`.
-    fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String>;
-}
-
-impl Journaled for runs::Attempt<'_> {
-    #[cfg(unix)]
-    fn inherit(&self, command: &mut ProcessCommand) {
-        runs::Attempt::inherit(self, command)
-    }
-    fn started(&self, group: i32, started_at_ms: u64) -> Result<(), String> {
-        runs::Attempt::started(self, group, started_at_ms)
-    }
-}
-
 /// Run one task's shell and record what it did. With an attempt, the shell
 /// inherits the attempt's lease and its start is journaled; a start that
 /// cannot be journaled kills it and is an error. On Unix the shell runs in
@@ -4168,7 +3490,7 @@ fn launch(
     runtime: &ShellRuntime,
     progress: Progress,
     capture_limit: usize,
-    attempt: Option<&dyn Journaled>,
+    attempt: Option<&runs::Attempt<'_>>,
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
     let declared = worktree_cache::environment(task)?;
@@ -7261,6 +6583,31 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task launched with no journal, as its receipt: a launch error or a stop
+    /// becomes an errored one.
+    fn run_task(
+        task: &Task,
+        runtime: &ShellRuntime,
+        progress: Progress,
+        capture_limit: usize,
+    ) -> TaskReceipt {
+        launch(task, runtime, progress, capture_limit, None)
+            .and_then(|launched| match launched {
+                Launched::Ran { record, .. } => Ok(*record),
+                Launched::Stopped { .. } => Err("stopped on a signal".to_string()),
+            })
+            .unwrap_or_else(|error| {
+                empty_task_receipt(
+                    task,
+                    runtime,
+                    Outcome::Errored,
+                    &error,
+                    "runtime_error",
+                    false,
+                )
+            })
+    }
 
     /// Every task decided without a journal, as a run on Windows does.
     fn execute_all(

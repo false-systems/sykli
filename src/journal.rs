@@ -1,8 +1,7 @@
-//! The append-only journal and the leases that typed production and durable
-//! graph runs share (Unix only).
+//! The append-only journal and the leases of durable graph runs (Unix only).
 //!
 //! A journal is a directory of immutable records, `records/<sequence>.json`,
-//! each published durably and exclusively (`canonical::publish`: a synced
+//! each published durably and exclusively (`canonical::publish_with`: a synced
 //! temporary, an exclusive hard link, a synced directory), each an envelope
 //! whose id is the domain-separated identity of its record, and each naming
 //! the id of the one before it. Loading validates the whole chain, so a torn,
@@ -26,13 +25,13 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// One kind of journal record: its schema (also the identity domain of its
-/// envelope), the name of the thing it records (a production, a run), and
-/// its facts. Each kind keeps its own record type, so the bytes of existing
-/// records never change.
+/// envelope), the name of the thing it records (a run), and its facts. Each
+/// kind keeps its own record type, so the bytes of existing records never
+/// change.
 pub(crate) trait Record: Serialize + DeserializeOwned {
     type Fact;
     const SCHEMA: &'static str;
-    /// What the owner is called in errors ("production", "run").
+    /// What the owner is called in errors ("run").
     const OWNER: &'static str;
     fn new(
         owner: String,
@@ -150,7 +149,7 @@ unsafe extern "C" {
     fn fcntl(fd: i32, command: i32, ...) -> i32;
 }
 
-// Process control for runs, production and tasks, declared once here.
+// Process control for runs and their tasks, declared once here.
 unsafe extern "C" {
     pub(crate) fn setsid() -> i32;
     pub(crate) fn setpgid(pid: i32, pgid: i32) -> i32;
@@ -210,7 +209,7 @@ impl Lease {
             // Only a held lock means another controller; ENOLCK/EOPNOTSUPP
             // (network file systems) are a store problem, not a busy peer.
             return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                format!("production-busy: {error}")
+                format!("lease-busy: {error}")
             } else {
                 format!("lease unavailable on this file system: {error}")
             });
@@ -233,10 +232,7 @@ impl Lease {
         };
         // SAFETY: the descriptor is owned by file; LOCK_EX | LOCK_NB on Unix.
         if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
-            return Err(format!(
-                "production-busy: {}",
-                std::io::Error::last_os_error()
-            ));
+            return Err(format!("lease-busy: {}", std::io::Error::last_os_error()));
         }
         Ok(Some(Self(file)))
     }

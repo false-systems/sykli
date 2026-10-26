@@ -600,9 +600,6 @@ fn ci_checks_out_the_pull_request_head_not_the_merge_ref() {
         checkouts,
         "every checkout names the pull request head"
     );
-    // On the head, the shadow experiment diffs from the merge base, not the
-    // base branch's tip, which may have moved.
-    assert!(ci.contains("git merge-base \"$SHADOW_BASE\" HEAD"), "{ci}");
 }
 
 /// The Action's verify step, run as the Action runs it, with this build.

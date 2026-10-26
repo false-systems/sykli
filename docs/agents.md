@@ -89,9 +89,9 @@ to find the repository; the root's `.git` must lead to the common directory
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
 exists; an explicit JSON path selects a different contract. Missing JSON
-contracts require `sykli init`. Explain rejects Rust emitters and
-`--target`, runs no task or emitter commands, and creates no cache entries,
-receipts or restored outputs. Git and shell discovery still invoke those
+contracts require `sykli init`. Explain rejects Rust emitters, runs no task
+or emitter commands, and creates no cache entries, receipts or restored
+outputs. Git and shell discovery still invoke those
 tools, so explain requires Git and the task shell.
 
 Add `--json` for the existing `sykli-plan.v1` document with an optional
@@ -215,10 +215,6 @@ files, environment or cache contents can change, and task side effects are
 not simulated. Given the same task key and cache contents, planning and
 execution share the same evidence validation.
 
-The repository's [CI shadow experiment](ci-shadow.md) compares changed-path
-selection and baseline cache evidence with an independent full run. Its
-observations never enable skipping or decide the required CI result.
-
 A run outlives the session that asked for it (Linux and macOS). Keep its id:
 `sykli run sykli.json --detach --json` answers `{"schema":"sykli-run.v1",
 "run":ID}` once the run is recorded and returns; `sykli run --json` names it
@@ -233,43 +229,3 @@ that verify for that commit now, `historical` those of the same tree that do
 not, and `verdict` is `passed`, `failed`, `pending` or `none`. `sykli verify
 RECEIPT --commit REV --json` gives one receipt's verdict (`sykli-verify.v1`)
 with its trust tiers. Never infer a result from a receipt you parsed yourself.
-
-For typed artifact production, start with `sykli targets --json` and
-`sykli plan sykli.production.json --target TARGET --json`. Use the discovered
-target name (`sykli` in this repository), not an assumed `app` alias.
-`sykli produce TARGET --prepare --summary --json` captures the request without
-executing it. Keep its production ID. A fresh worker can inspect
-`sykli status ID --summary --json`, then select ready work with
-`sykli resume ID --operation NAME --summary --json` or finish all remaining work
-with `sykli resume ID --jobs 2 --summary --json`.
-The same local store is sufficient; no chat handover is required. Compact state
-omits command captures; retrieve them with `sykli diagnostics ID ATTEMPT --json`.
-Read `assessment` and `delivery` separately: an available artifact can still
-have unfinished checks, and a failed operation needs an explicit `--retry`.
-That `delivery` means the artifact is in the local store, not that it is
-deployed anywhere.
-
-To put a produced artifact on a target, use `sykli deliver
-sykli.delivery.json --target NAME --json` (or `--detach --json`, which returns
-`{"schema":"sykli-delivery.v1","delivery":ID}` once the request is durable).
-Keep the delivery ID. Ask about it with `sykli status --delivery ID --json`
-(`sykli-delivery-status.v1`), and read `label` and every entry of
-`dimensions` (A `operation`, B `artifact`, C `desired`, D `observed`, E
-`health`, F `freshness`) rather than one of them. Only `VERIFIED HEALTHY` says
-the intended artifact runs, converged and healthy, by an observation fresher
-than the contract's bound; `acknowledged` alone is not a deployment. A status
-ages: re-observe with `sykli observe --delivery ID --json`, which never
-applies anything. After a crash, `sykli resume --delivery ID --json`
-reconciles an apply whose end is unknown by observing the target; if that
-leaves it `UNKNOWN`, apply again only deliberately, with `--reapply`, which
-is refused until an observation has reached the target. A `deliver` refused
-with `target-unreconciled` names an earlier delivery whose effect is unknown:
-resume that one first; never work around it. `--reapply-over ID` is for a
-person who has decided to apply over an effect nobody could observe.
-
-To learn what a pull request has established before acting on it, run
-`sykli inspect --repo OWNER/NAME --pr N --requirements FILE --json` and read the
-embedded `sykli-assessment.v1`: each unresolved obligation carries a reason code,
-the evidence it would need (`missing`), and source references into the saved
-bundle. Replay or explain it offline with `sykli assess BUNDLE --requirements FILE
---why ID`. The result is advisory and never a merge authorization.

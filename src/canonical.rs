@@ -1,6 +1,6 @@
 //! Strict JSON decoding, canonical serialization, domain-separated identities
-//! and immutable file publication. Shared by typed production and candidate
-//! assessment; existing identity domains never change.
+//! and immutable file publication. Shared by durable runs, their journal and
+//! the worktree cache; existing identity domains never change.
 use serde::Serialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
@@ -28,6 +28,7 @@ pub fn now() -> u64 {
 
 // serde_json::Value normally keeps the last duplicate key. Reject duplicates
 // before deserializing any identity-bearing document, including nested maps.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct Unique(Value);
 impl<'de> serde::Deserialize<'de> for Unique {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -74,6 +75,7 @@ impl<'de> serde::Deserialize<'de> for Unique {
 }
 
 /// Decode JSON, rejecting duplicate keys and floating-point numbers.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     let value: Unique = serde_json::from_slice(bytes).map_err(err)?;
     serde_json::from_value(value.0).map_err(err)
@@ -92,6 +94,7 @@ pub fn identity(domain: &str, value: &impl Serialize) -> Result<String, String> 
     Ok(crate::sha256(&bytes))
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn digest(value: &str) -> Result<(), String> {
     if value.len() != 64
         || !value
@@ -106,9 +109,6 @@ pub fn digest(value: &str) -> Result<(), String> {
 /// How hard a write is pushed to stable storage before it is acknowledged.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Durability {
-    /// `File::sync_all`: on macOS `F_FULLFSYNC`, which also empties the
-    /// drive's own write cache. Typed production's records use it.
-    Full,
     /// `fsync(2)`: the bytes and the directory entry are handed to the
     /// device before the write is acknowledged. On macOS the drive's own
     /// cache is not emptied (SQLite's default there); a process crash or a
@@ -140,14 +140,9 @@ pub fn sync(file: &fs::File, durability: Durability) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// Write an immutable file: a durable temporary followed by a hard link, so a
-/// torn write never becomes a record. An existing identical file is accepted;
-/// a differing one is a conflict.
-pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    publish_with(path, bytes, Durability::Full)
-}
-
-/// `publish`, synced as `durability` says.
+/// Write an immutable file, synced as `durability` says: a durable temporary
+/// followed by a hard link, so a torn write never becomes a record. An
+/// existing identical file is accepted; a differing one is a conflict.
 pub fn publish_with(path: &Path, bytes: &[u8], durability: Durability) -> Result<(), String> {
     let parent = path.parent().ok_or("missing parent")?;
     fs::create_dir_all(parent).map_err(err)?;

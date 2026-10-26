@@ -1326,6 +1326,43 @@ fn a_detached_run_outlives_its_client() {
     assert_eq!(f.commit_status("HEAD")["verdict"], "passed");
 }
 
+/// A resume never takes over a run whose coordinator is alive: it exits 2
+/// with `run-busy`, records nothing, and the run goes on. The words are the
+/// lease's busy error (`journal::Lease::acquire`) as `Coordinator::reopen`
+/// maps it, so a rename on either side alone shows here.
+#[test]
+fn resume_refuses_a_run_whose_coordinator_is_alive() {
+    let f = Fixture::new("busy", "one\n", one_task);
+    let out = f.output(&["run", "sykli.json", "--detach", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let run = answer["run"].as_str().unwrap().to_owned();
+    f.wait_ready("t");
+    let records = || {
+        fs::read_dir(f.runs_dir().join(&run).join("records"))
+            .unwrap()
+            .count()
+    };
+    let before = records();
+
+    let out = f.resume(&run);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stderr),
+        format!("error: run-busy: run {run}'s coordinator is still running\n")
+    );
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    assert_eq!(records(), before, "a refused resume records nothing");
+    let status = f.status(&run);
+    assert_eq!(status["state"], "running");
+    assert_eq!(status["generation"], 1);
+    assert_eq!(status["coordinator_live"], true);
+
+    f.release("t.latch");
+    wait_until(|| f.status(&run)["state"] == "completed");
+    assert_eq!(state(&f.status(&run), "t"), "passed");
+}
+
 /// A resume refuses a run whose source changed since it was requested:
 /// its receipt would claim a tree that did not produce it.
 #[test]
