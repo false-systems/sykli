@@ -38,7 +38,7 @@ cargo run --quiet -- lock sykli.json          # re-pin after editing sykli.json
 The CLI binary lands in Cargo's target directory, which `CARGO_TARGET_DIR` or a
 Cargo config may move outside the checkout; prefer `cargo run --quiet --`.
 macOS has no `timeout`; use `perl -e 'alarm 300; exec @ARGV' -- <cmd>` to bound
-a run. `tests/runs.rs` is Unix-only and takes about 10 s; a hang there
+a run. `tests/runs.rs` is Unix-only and takes 10 to 15 s; a hang there
 usually means a test waits on a FIFO-latched task it never released
 (`release`, `unlatch`).
 
@@ -203,6 +203,8 @@ coordinator, a replayed completion, inputs changed mid-run, concurrent cache
 stores; each ends on `nothing_unknown_passed`. Its tasks wait at FIFO
 latches to hold a run mid-flight; any new test that runs a latched task again
 must release the latch again. Its hook tests skip under `--release`.
+`resume_refuses_a_run_whose_coordinator_is_alive` pins the `run-busy` words
+that the lease's `lease-busy` tag becomes.
 `tests/cli.rs` pins the help flags other tools detect
 (`help_lists_the_flags_other_tools_detect`).
 

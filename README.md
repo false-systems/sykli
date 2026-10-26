@@ -883,17 +883,17 @@ entry costs a re-run, never a result.
 
 ## Command map
 
-| | Command | What it does |
-|---|---|---|
-| **Graph** | `init` | Detect Cargo, npm and Go; write `sykli.json` and pin it (`--contract` writes it outside the repository) |
-| | `validate` | Check a contract without executing it |
-| | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
-| | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
-| | `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
-| | `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
-| | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
-| | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
-| | `hook` | Git hook entrypoints that gate what is committed and pushed |
+| Command | What it does |
+|---|---|
+| `init` | Detect Cargo, npm and Go; write `sykli.json` and pin it (`--contract` writes it outside the repository) |
+| `validate` | Check a contract without executing it |
+| `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
+| `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
+| `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
+| `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
+| `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
+| `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
+| `hook` | Git hook entrypoints that gate what is committed and pushed |
 
 Every command documents its flags and exit codes in `sykli <command> --help`.
 
