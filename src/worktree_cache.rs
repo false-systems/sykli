@@ -357,11 +357,8 @@ fn incarnation(gitdir: &Path) -> Result<String, String> {
         )
         .as_bytes(),
     );
-    let published = crate::canonical::publish_with(
-        &gitdir.join(INCARNATION),
-        format!("{token}\n").as_bytes(),
-        crate::canonical::Durability::Fsync,
-    );
+    let published =
+        crate::canonical::publish(&gitdir.join(INCARNATION), format!("{token}\n").as_bytes());
     match (published, current_incarnation(gitdir)) {
         // Ours, or another first run's that won.
         (_, Some(token)) => Ok(token),
@@ -474,7 +471,7 @@ fn there(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resu
 }
 
 fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Result<(), String> {
-    use crate::canonical::{Durability, sync, sync_directory};
+    use crate::canonical::{sync, sync_directory};
     use std::io::Write;
     let error = |path: &Path, error: std::io::Error| format!("{}: {error}", path.display());
     let staging = parent.join(format!(
@@ -498,14 +495,14 @@ fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resul
         {
             let mut file = fs::File::create(&path).map_err(|e| error(&path, e))?;
             file.write_all(&marker)
-                .and_then(|()| sync(&file, Durability::Fsync))
+                .and_then(|()| sync(&file))
                 .map_err(|e| error(&path, e))?;
         }
         fs::write(staging.join("lease"), b"").map_err(|e| error(&staging, e))?;
         fs::create_dir(staging.join(HANDED_OUT)).map_err(|e| error(&staging, e))?;
-        sync_directory(&staging, Durability::Fsync)?;
+        sync_directory(&staging)?;
         match fs::rename(&staging, directory) {
-            Ok(()) => sync_directory(parent, Durability::Fsync),
+            Ok(()) => sync_directory(parent),
             // Another run of this worktree made it first.
             Err(_) if directory.is_dir() => Ok(()),
             Err(e) => Err(error(directory, e)),

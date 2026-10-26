@@ -1,7 +1,7 @@
 //! The append-only journal and the leases of durable graph runs (Unix only).
 //!
 //! A journal is a directory of immutable records, `records/<sequence>.json`,
-//! each published durably and exclusively (`canonical::publish_with`: a synced
+//! each published durably and exclusively (`canonical::publish`: a synced
 //! temporary, an exclusive hard link, a synced directory), each an envelope
 //! whose id is the domain-separated identity of its record, and each naming
 //! the id of the one before it. Loading validates the whole chain, so a torn,
@@ -13,7 +13,7 @@
 //! releases it itself when it is done (`Lease`'s `Drop`), since a close alone
 //! waits for every copy of the descriptor, and a child process that another
 //! thread is spawning has a copy of each one until it execs.
-use crate::canonical::{Durability, canonical, decode, digest, identity, publish_with};
+use crate::canonical::{canonical, decode, digest, identity, publish};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -31,7 +31,9 @@ fn err(e: impl std::fmt::Display) -> String {
 /// One kind of journal record: its schema (also the identity domain of its
 /// envelope), the name of the thing it records (a run), and its facts. Each
 /// kind keeps its own record type, so the bytes of existing records never
-/// change.
+/// change. A run's (`runs::Record`) is the only kind left; the trait stays
+/// so that this module knows a record only by these methods and never
+/// imports what a run is, while `runs` already depends on it.
 pub(crate) trait Record: Serialize + DeserializeOwned {
     type Fact;
     const SCHEMA: &'static str;
@@ -136,14 +138,9 @@ pub(crate) fn seal<R: Record>(
 
 /// Publish a sealed record. An identical record already there is accepted;
 /// a different one at the same sequence is a conflict, never an overwrite.
-pub(crate) fn write<R: Record>(
-    records: &Path,
-    envelope: &Envelope<R>,
-    durability: Durability,
-) -> Result<(), String> {
+pub(crate) fn write<R: Record>(records: &Path, envelope: &Envelope<R>) -> Result<(), String> {
     let path = record_path(records, envelope.record.sequence());
-    publish_with(&path, &canonical(envelope)?, durability)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    publish(&path, &canonical(envelope)?).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // Native advisory locks: the open file description survives controller exit

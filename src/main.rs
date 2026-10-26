@@ -5249,7 +5249,7 @@ fn random_key() -> io::Result<[u8; 32]> {
 /// runs that race there may each digest one run under their own key, and
 /// the later one is kept, which costs a cache miss. On Linux and macOS a
 /// run never gets here, as its journal already needs hard links in the same
-/// directory (`publish_with`); it is kept for Windows, where a run is not
+/// directory (`publish`); it is kept for Windows, where a run is not
 /// journaled and nothing else there needs them.
 fn read_or_make_key(path: &Path) -> Result<[u8; 32], String> {
     if let Some(key) = read_key(path)? {
@@ -5275,7 +5275,7 @@ fn read_or_make_key(path: &Path) -> Result<[u8; 32], String> {
         .open(&temporary)
         .and_then(|mut file| {
             file.write_all(text.as_bytes())?;
-            canonical::sync(&file, canonical::Durability::Fsync)
+            canonical::sync(&file)
         })
         .and_then(|()| match fs::hard_link(&temporary, path) {
             Ok(()) => Ok(()),
@@ -5285,7 +5285,7 @@ fn read_or_make_key(path: &Path) -> Result<[u8; 32], String> {
     // The temporary never outlives this call, whatever happened.
     let _ = fs::remove_file(&temporary);
     written.map_err(shown)?;
-    let _ = canonical::sync_directory(directory, canonical::Durability::Fsync);
+    let _ = canonical::sync_directory(directory);
     read_key(path)?.ok_or_else(|| format!("{}: made, then gone", path.display()))
 }
 
@@ -5713,7 +5713,7 @@ impl Cache for LocalCache {
                     .write(true)
                     .open(&copy)
                     .map_err(error)?;
-                canonical::sync(&copied, canonical::Durability::Fsync).map_err(error)?;
+                canonical::sync(&copied).map_err(error)?;
                 outputs.push(CacheOutput {
                     path: output.clone(),
                     artifact,
@@ -5728,9 +5728,9 @@ impl Cache for LocalCache {
             .map_err(|error| error.to_string())?;
             let mut file = fs::File::create(temporary.join("entry.json")).map_err(error)?;
             file.write_all(&entry).map_err(error)?;
-            canonical::sync(&file, canonical::Durability::Fsync).map_err(error)?;
-            canonical::sync_directory(&temporary.join("outputs"), canonical::Durability::Fsync)?;
-            canonical::sync_directory(&temporary, canonical::Durability::Fsync)?;
+            canonical::sync(&file).map_err(error)?;
+            canonical::sync_directory(&temporary.join("outputs"))?;
+            canonical::sync_directory(&temporary)?;
             checkpoint("cache-store")
         })();
         if let Err(failed) = built {
@@ -5741,7 +5741,7 @@ impl Cache for LocalCache {
         for _ in 0..3 {
             match fs::rename(&temporary, &target) {
                 Ok(()) => {
-                    canonical::sync_directory(&self.cache, canonical::Durability::Fsync)?;
+                    canonical::sync_directory(&self.cache)?;
                     self.evict(&target);
                     return Ok(());
                 }
@@ -8115,10 +8115,7 @@ fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String, Vec<u8>), String
     if !path.exists() {
         let temporary = directory.join(format!(".{hash}.tmp-{}", std::process::id()));
         let written = fs::File::create(&temporary)
-            .and_then(|mut file| {
-                file.write_all(&bytes)
-                    .and_then(|()| canonical::sync(&file, canonical::Durability::Fsync))
-            })
+            .and_then(|mut file| file.write_all(&bytes).and_then(|()| canonical::sync(&file)))
             .map_err(|error| error.to_string());
         if let Err(error) = written.and_then(|()| checkpoint("during-receipt")) {
             let _ = fs::remove_file(&temporary);
@@ -8131,7 +8128,7 @@ fn write_receipt(receipt: &Receipt) -> Result<(PathBuf, String, Vec<u8>), String
                 return Err(error.to_string());
             }
         }
-        canonical::sync_directory(&directory, canonical::Durability::Fsync)?;
+        canonical::sync_directory(&directory)?;
     }
     Ok((spelled(&path), hash, bytes))
 }

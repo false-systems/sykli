@@ -190,8 +190,8 @@ directory.
 **Durable graph runs (`src/runs.rs`, `src/journal.rs`, Unix only).** Every
 `run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
 machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
-`publish_with`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
-(`canonical::Durability`). A dropped `Lease` is unlocked (`LOCK_UN`), not
+`publish`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
+(`canonical::sync`). A dropped `Lease` is unlocked (`LOCK_UN`), not
 just closed: a child process another thread is spawning (a task or `git`,
 through `fork` or `posix_spawn` alike) has a copy of its descriptor until it
 execs, and the lock with it. One handed to a child (`inherit`) is
@@ -222,7 +222,7 @@ sykli's own handler ran is `withdrawn`, with every pass decided after it
 waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
 receipt.
 `conclude` keeps the receipt as `rcpt_<digest>.json` in the run's directory
-(`publish_with`, named by digest so a fenced coordinator cannot replace it)
+(`publish`, named by digest so a fenced coordinator cannot replace it)
 before it records `concluded`; `status --run` reports it as `receipt.kept`.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
