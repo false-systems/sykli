@@ -16,9 +16,10 @@ cargo run --quiet --locked -- run sykli.json --json
 
 That is what CI runs.
 
-The QA graph for behaviour changes lives in `tests/qa/sykli.json`; add a
-task there when you add behaviour, and make sure it fails before your change
-and passes after.
+A behaviour change comes with a test that fails before the change and passes
+after: an integration test in `tests/` or a unit test beside the code. A new
+test file goes into the `inputs` of the `fmt`, `clippy` and `test` tasks in
+`sykli.json`, followed by `cargo run --quiet -- lock sykli.json`.
 
 ## Pull requests
 

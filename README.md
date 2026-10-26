@@ -30,36 +30,41 @@ decides which of them need to run and keeps a verifiable record of what did.
 
 ## See it in 30 seconds
 
-Two tasks, `lint` then `test`, each reading one script. Real output, hashes shortened:
+Two tasks, `lint` then `test`, each reading one script, in a Git repository
+with one commit (the [graph below](#a-graph-you-can-try)). Real output, hashes
+shortened:
 
 ```console
 $ sykli run
+run: b8ca5240…
 running: lint
 lint passed
 passed: lint
 running: test
 tests passed
 passed: test
-receipt: …/.sykli/receipts/rcpt_4a80a5dc….json
+receipt: …/.sykli/receipts/rcpt_18b86d1f….json
 
 $ sykli run                                   # nothing changed: nothing runs
+run: 425a4e49…
 cached: lint
 cached: test
-receipt: …/.sykli/receipts/rcpt_efdf9834….json
+receipt: …/.sykli/receipts/rcpt_70470655….json
 
 $ echo 'echo tests passed, again' > test.sh
 $ sykli plan --explain                        # what would a run cost now?
 lint
   selected: all tasks requested
-  cache: available; receipt rcpt_4a80a5dc….json (restoration not attempted)
+  cache: available; receipt rcpt_18b86d1f….json (restoration not attempted)
 test
   selected: all tasks requested
   cache: no entry for the current key
-Input coverage against 435c318a… (plus --changed hints):
+Input coverage against 4af540f7… (plus --changed hints):
   declared input: "test.sh" -> test
 Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse.
 
 $ sykli run --json > .sykli/receipt.json      # only the changed task runs
+run: ceea1618…
 cached: lint
 running: test
 tests passed, again
@@ -73,6 +78,8 @@ ok: inputs e533f926…
 ok: records consistent
 ok: outcome passed with 2 task records
 verified: receipt matches this tree and contract
+established: a valid receipt schema; records consistent with each other and the contract; the contract's identity; the tree, and every declared input's bytes and execute bit, read from the checkout, or with --commit from the commit (save an input the run itself generates), never from the receipt (an input a checkout converts, as a checkout of the commit converts it); every contract input's, read from beside a contract outside the repository, with or without --commit
+not established: where the receipt came from, who produced it, that its tasks ran, or anything they read that is not a declared input. Receipts are unsigned: an outcome rewritten to passed, or a receipt recomputed in full for a commit with consistent digests, verifies; with --commit, the bytes of an input a task outputs are the receipt's claim (only that task's own inputs are established); and a converted input is bound only as the commit's attributes and this repository's configuration convert it
 
 $ echo 'echo sneaky' > lint.sh                # change the code after the fact…
 $ sykli verify .sykli/receipt.json --contract sykli.json
@@ -80,6 +87,7 @@ ok: schema sykli-receipt.v1
 ok: contract 8d0e65a0…
 mismatch: tree expected a07b2a09… but got 777d2ada…
 mismatch: inputs expected 834ffc9b… but got e533f926…
+refused: tree expected a07b2a09… but got 777d2ada…
 $ echo $?
 3
 ```
@@ -95,7 +103,8 @@ Install from source with Rust 1.85 or newer:
 cargo install --git https://github.com/false-systems/sykli --branch main --locked sykli
 ```
 
-Then, in an existing Cargo, npm or Go repository:
+Then, in an existing Cargo, npm or Go repository with at least one commit
+(in one with none, `run` exits 2):
 
 ```sh
 sykli init                                        # detect ecosystems, write sykli.json, pin it in sykli.lock
@@ -112,7 +121,10 @@ and symbolic links included, since a build or a test can read a vendored crate,
 an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
 sykli's own contract and lock, and a symbolic link that leads out of the repository,
 which cannot be bound. Review the inputs it declares, and declare files you add
-later. Task execution
+later. A Cargo repository without a `Cargo.lock` needs one before `sykli init`
+(`cargo generate-lockfile`): otherwise the first run's build creates it, which
+changes the tree that run's receipt names (`verify` exits 3), and the next run
+refuses (exit 2) until a task declares it. Task execution
 needs Git, a POSIX `sh` and your project's own toolchain. On Windows, Git for
 Windows supplies `sh`.
 
@@ -182,6 +194,8 @@ printf 'echo lint passed\n' > lint.sh
 printf 'echo tests passed\n' > test.sh
 ```
 
+Save this as `sykli.json`:
+
 ```json
 {
   "schema": "sykli-contract.v1",
@@ -191,6 +205,16 @@ printf 'echo tests passed\n' > test.sh
   ]
 }
 ```
+
+Then commit once. In a repository with no commits, `sykli run` exits 2
+(`repository has no commits; commit once before running sykli`).
+
+```sh
+git add . && git commit -m 'a graph to try'
+```
+
+The [demo](#see-it-in-30-seconds) starts here; its run ids, receipt names
+and commit differ on every machine.
 
 `inputs` names the files a task reads. `after` makes `test` wait for `lint` and
 binds its cache key to that dependency. Independent tasks run in parallel.
@@ -205,8 +229,10 @@ declared path that a symbolic link on its way leads out of the repository:
 an input `ext/file.txt`, an output `ext/bundle.js` or a workdir `ext` when
 `ext` links to a directory elsewhere, or an output `out` when `out` links to
 a file elsewhere that the run has yet to make, or `hop` when it links to `out`
-(every link on the way is followed by its text, chained or not, and a path
-through more than 40 links is refused). This is judged against the work tree
+(every link on the way is followed by its text, chained or not, and judged
+by where its chain ends, so a chain that passes through a link outside and
+comes back in is not refused; a path through more than 40 links is). This is
+judged against the work tree
 before any task runs, so a link a task makes while it runs is not seen.
 `sykli validate` checks a contract without running it.
 

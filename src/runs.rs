@@ -47,7 +47,7 @@
 //! created aside and renamed into place with its lease held, and a remover
 //! takes only an existing lease and moves the run aside before deleting it,
 //! so concurrent runs never prune a run being created or leave half of one.
-use crate::canonical::{Durability, NONCE, canonical, decode, digest, identity, now, publish_with};
+use crate::canonical::{NONCE, canonical, decode, digest, identity, now, publish};
 use crate::journal::{self, Envelope, Lease};
 use crate::{InputRecords, Outcome, Subject, TaskReceipt};
 use serde::{Deserialize, Serialize};
@@ -894,7 +894,7 @@ impl Coordinator {
         // The directories' own entries, so the first record cannot be
         // orphaned by a power cut.
         for synced in [&directory, &parent, &common.join("sykli"), &common] {
-            crate::canonical::sync_directory(synced, Durability::Fsync)?;
+            crate::canonical::sync_directory(synced)?;
         }
         let coordinator = Coordinator {
             directory,
@@ -1101,7 +1101,7 @@ impl Coordinator {
         }
         let envelope = journal::seal(self.id.clone(), &history.records, fact)?;
         history.apply(&envelope.record)?;
-        if let Err(error) = journal::write(&records, &envelope, Durability::Fsync) {
+        if let Err(error) = journal::write(&records, &envelope) {
             // What was not written is not known: the history goes back to
             // the journal, and a coordinator that cannot read it back writes
             // nothing more.
@@ -1119,13 +1119,12 @@ impl Coordinator {
     fn persist(&self, record: &TaskReceipt) -> Result<String, String> {
         let bytes = serde_json::to_vec(record).map_err(err)?;
         let digest = crate::sha256(&bytes);
-        publish_with(
+        publish(
             &self
                 .directory
                 .join("outputs")
                 .join(format!("{digest}.json")),
             &bytes,
-            Durability::Fsync,
         )?;
         Ok(digest)
     }
@@ -1339,11 +1338,7 @@ impl Coordinator {
         if crate::sha256(bytes) != digest {
             return Err("the receipt to keep is not the one written".into());
         }
-        publish_with(
-            &kept_receipt(&self.directory, digest),
-            bytes,
-            Durability::Fsync,
-        )?;
+        publish(&kept_receipt(&self.directory, digest), bytes)?;
         self.append(Fact::Concluded {
             generation: self.generation(),
             receipt: receipt.to_string_lossy().into(),
@@ -2087,10 +2082,9 @@ fn note_pruned(common: &Path, path: &Path, run: &str) -> Result<(), String> {
     let directory = tombstones(common);
     // Never through a symbolic link, as the journal is not.
     crate::hook::ensure_directory(&directory, |path| fs::create_dir(path))?;
-    publish_with(
+    publish(
         &directory.join(format!("{run}.json")),
         &serde_json::to_vec(&note).map_err(err)?,
-        Durability::Fsync,
     )
 }
 

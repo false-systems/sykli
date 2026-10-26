@@ -1,7 +1,7 @@
 //! The append-only journal and the leases of durable graph runs (Unix only).
 //!
 //! A journal is a directory of immutable records, `records/<sequence>.json`,
-//! each published durably and exclusively (`canonical::publish_with`: a synced
+//! each published durably and exclusively (`canonical::publish`: a synced
 //! temporary, an exclusive hard link, a synced directory), each an envelope
 //! whose id is the domain-separated identity of its record, and each naming
 //! the id of the one before it. Loading validates the whole chain, so a torn,
@@ -11,8 +11,9 @@
 //! kernel releases when the last descriptor of its holder closes, so a dead
 //! holder never leaves a stale lock and a PID is never trusted. A live holder
 //! releases it itself when it is done (`Lease`'s `Drop`), since a close alone
-//! waits for every copy of the descriptor, and a fork makes copies.
-use crate::canonical::{Durability, canonical, decode, digest, identity, publish_with};
+//! waits for every copy of the descriptor, and a child process that another
+//! thread is spawning has a copy of each one until it execs.
+use crate::canonical::{canonical, decode, digest, identity, publish};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -30,7 +31,9 @@ fn err(e: impl std::fmt::Display) -> String {
 /// One kind of journal record: its schema (also the identity domain of its
 /// envelope), the name of the thing it records (a run), and its facts. Each
 /// kind keeps its own record type, so the bytes of existing records never
-/// change.
+/// change. A run's (`runs::Record`) is the only kind left; the trait stays
+/// so that this module knows a record only by these methods and never
+/// imports what a run is, while `runs` already depends on it.
 pub(crate) trait Record: Serialize + DeserializeOwned {
     type Fact;
     const SCHEMA: &'static str;
@@ -135,14 +138,9 @@ pub(crate) fn seal<R: Record>(
 
 /// Publish a sealed record. An identical record already there is accepted;
 /// a different one at the same sequence is a conflict, never an overwrite.
-pub(crate) fn write<R: Record>(
-    records: &Path,
-    envelope: &Envelope<R>,
-    durability: Durability,
-) -> Result<(), String> {
+pub(crate) fn write<R: Record>(records: &Path, envelope: &Envelope<R>) -> Result<(), String> {
     let path = record_path(records, envelope.record.sequence());
-    publish_with(&path, &canonical(envelope)?, durability)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    publish(&path, &canonical(envelope)?).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // Native advisory locks: the open file description survives controller exit
@@ -197,11 +195,12 @@ pub(crate) fn close_inherited_on_exec() {
 }
 
 /// A held `flock`. The lock belongs to the open file description, which every
-/// copy of the descriptor shares, and a process that another thread forks
-/// has a copy of each one until it execs (close-on-exec closes them only
-/// then). So dropping a lease releases it explicitly (`LOCK_UN`), at once,
-/// rather than by a close the kernel honours only once the last copy is
-/// closed. A lease handed to a child (`inherit`) is the child's too: then
+/// copy of the descriptor shares, and a child process that another thread is
+/// spawning (a task or `git`, through `fork` or `posix_spawn` alike) has a
+/// copy of each one until it execs (close-on-exec closes them only then).
+/// So dropping a lease releases it explicitly (`LOCK_UN`), at once, rather
+/// than by a close the kernel honours only once the last copy is closed. A
+/// lease handed to a child (`inherit`) is the child's too: then
 /// dropping it only closes this process's descriptor, and the child keeps
 /// holding it.
 pub struct Lease {
@@ -371,6 +370,12 @@ impl Lease {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(err(error)),
         };
+        Self::probe(file)
+    }
+
+    /// Whether another holds the lock on `file`, an open lease: asked by
+    /// taking it shared, and given up at once.
+    fn probe(file: File) -> Result<bool, String> {
         loop {
             // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
             if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
@@ -488,8 +493,8 @@ mod tests {
         assert!(!path.exists(), "observation must not create a lease");
         File::create(&path).unwrap();
         let observed = Lease::observe(&path).unwrap();
-        // At once, though other tests fork meanwhile: the probe is released,
-        // not left to a close that waits for a forked child's copy.
+        // At once, though other tests spawn processes meanwhile: the probe is
+        // released, not left to a close that waits for a starting child's copy.
         let next_controller = Lease::acquire(&directory).unwrap();
         assert!(!observed);
         assert!(Lease::observe(&path).unwrap());
@@ -509,38 +514,78 @@ mod tests {
         directory
     }
 
-    /// A process that another thread forks has a copy of every descriptor
-    /// until it execs, and a lock belongs to the open file description that
-    /// copy shares. Dropping a lease in that window still releases it: the
-    /// next holder is never refused for a child that only had not exec'd yet.
+    /// A child process that another thread is spawning has a copy of every
+    /// descriptor until it execs, and a lock belongs to the open file
+    /// description that copy shares. Dropping a lease in that window still
+    /// releases it: the next holder is never refused for a child that only
+    /// had not exec'd yet. The test holds a child in the window, forked
+    /// (`pre_exec` makes `Command` fork) and not yet exec'd.
     #[test]
     fn a_dropped_lease_is_free_while_a_forked_child_still_has_its_descriptor() {
-        use std::io::{Read, Write};
-        use std::os::unix::net::UnixStream;
         let directory = scratch("forked");
         let lease = Lease::acquire(&directory).unwrap();
-        // The child says it has forked, then waits to be told to exec.
-        let (forked, mut has_forked) = UnixStream::pair().unwrap();
-        let (go_on, mut tell) = UnixStream::pair().unwrap();
-        let forker = std::thread::spawn(move || {
-            let mut command = ProcessCommand::new("true");
-            // SAFETY: one write and one read on sockets; nothing allocates.
-            unsafe {
-                command.pre_exec(move || {
-                    (&forked).write_all(&[1])?;
-                    (&go_on).read_exact(&mut [0])
-                });
-            }
-            command.status()
-        });
-        has_forked.read_exact(&mut [0]).unwrap();
+        let child = Unexecuted::start();
         drop(lease);
         let next = Lease::acquire_existing(&directory);
-        tell.write_all(&[1]).unwrap();
-        assert!(forker.join().unwrap().unwrap().success());
+        child.exec();
         assert!(matches!(next, Ok(Some(_))), "{:?}", next.err());
         drop(next);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The same for the probe `observe` takes: a child process another thread
+    /// starts while the probe's descriptor is open has a copy of it, and
+    /// the lease is still free once the probe has answered.
+    #[test]
+    fn an_observed_lease_is_free_while_a_forked_child_still_has_the_probe() {
+        let directory = scratch("probed");
+        File::create(directory.join("lease")).unwrap();
+        // Opened as `observe` opens it, before the child forks.
+        let probe = File::open(directory.join("lease")).unwrap();
+        let child = Unexecuted::start();
+        let observed = Lease::probe(probe);
+        let next = Lease::acquire_existing(&directory);
+        child.exec();
+        assert_eq!(observed, Ok(false));
+        assert!(matches!(next, Ok(Some(_))), "{:?}", next.err());
+        drop(next);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A child another thread has forked, with a copy of every descriptor
+    /// this process had open then, held before it execs until `exec`.
+    struct Unexecuted {
+        forker: std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>>,
+        tell: std::os::unix::net::UnixStream,
+    }
+
+    impl Unexecuted {
+        fn start() -> Self {
+            use std::io::{Read, Write};
+            use std::os::unix::net::UnixStream;
+            // The child says it has forked, then waits to be told to exec.
+            let (forked, mut has_forked) = UnixStream::pair().unwrap();
+            let (go_on, tell) = UnixStream::pair().unwrap();
+            let forker = std::thread::spawn(move || {
+                let mut command = ProcessCommand::new("true");
+                // SAFETY: one write and one read on sockets; nothing allocates.
+                unsafe {
+                    command.pre_exec(move || {
+                        (&forked).write_all(&[1])?;
+                        (&go_on).read_exact(&mut [0])
+                    });
+                }
+                command.status()
+            });
+            has_forked.read_exact(&mut [0]).unwrap();
+            Self { forker, tell }
+        }
+
+        fn exec(mut self) {
+            use std::io::Write;
+            self.tell.write_all(&[1]).unwrap();
+            assert!(self.forker.join().unwrap().unwrap().success());
+        }
     }
 
     /// A lease handed to a child stays held by it once this process drops

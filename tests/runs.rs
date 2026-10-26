@@ -1907,6 +1907,67 @@ fn a_task_that_drops_its_lease_is_running_while_its_group_lives() {
     nothing_unknown_passed(&f, &f.status(&run));
 }
 
+/// The attempt's lease is handed to its shell, and the coordinator never
+/// releases it for them: dropping the attempt only closes its own copy. A
+/// coordinator that cannot record a task's end drops the attempt while a
+/// process the task started, which left the task's group (`setsid`), still
+/// holds the lease. The attempt reads as running, not lost, and a resume
+/// does not run it again while that process runs; once it has ended, the
+/// attempt is lost, and a resume runs it.
+#[test]
+fn an_attempt_whose_end_was_not_recorded_is_running_while_its_lease_is_held() {
+    if hooks_missing() {
+        return;
+    }
+    let f = Fixture::new("handed", "one\n", |base| {
+        let b = base.display();
+        vec![(
+            "t".into(),
+            format!(
+                "echo run >> '{b}/t.count'; if [ ! -e '{b}/go' ]; then \
+                 perl -MPOSIX -e 'POSIX::setsid(); open F, \">\", shift; print F $$; close F; sleep 30' \
+                 '{b}/t.pid' >/dev/null 2>&1 & \
+                 while [ ! -s '{b}/t.pid' ]; do sleep 0.01; done; fi"
+            ),
+            vec![],
+        )]
+    });
+    let out = f
+        .sykli(&["run", "sykli.json", "--json"])
+        .env("SYKLI_TEST_FAIL_AT", "after-exit")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let holder: u32 = fs::read_to_string(f.base.join("t.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(holder));
+    let run = f.run_id();
+    let status = f.status(&run);
+    assert_eq!(state(&status, "t"), "running", "{status}");
+    let refused = f.resume(&run);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    // Refused for the lease, not for a process group.
+    assert!(
+        text(&refused.stderr).contains("is still running without a coordinator"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(f.count("t"), 1);
+
+    let _ = Command::new("kill")
+        .args(["-KILL", &holder.to_string()])
+        .status();
+    wait_until(|| state(&f.status(&run), "t") == "lost");
+    f.unlatch();
+    let resumed = f.resume(&run);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert_eq!(f.count("t"), 2);
+    nothing_unknown_passed(&f, &f.status(&run));
+}
+
 /// A run removed by the run budget is reported as pruned, not as an
 /// unknown id; and a receipt it wrote before it concluded stays historical
 /// once its journal is gone: nothing shows the run concluded with it.

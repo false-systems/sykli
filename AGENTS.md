@@ -176,7 +176,8 @@ one to a directory in the repository or to nothing is recorded by its text
 required of the same task, and one that leads out of the repository is
 refused (`link_missing_inputs`), as is a workdir, input or output that a
 link on its way leads out of it (`through_links_out`, `leads`: every link
-followed by its text, chained or dangling, at most `LINK_HOPS`; sykli#54;
+followed by its text, chained or dangling, at most `LINK_HOPS`, and judged
+where its chain ends, `Part::LinkEnd`; sykli#54;
 judged before any task, so a link a task makes while it runs is not seen). A text record is judged by the commit's link
 text (`judge_link`), after a third round of the same `cat-file` asks where it
 leads (`link_target_names`, `PathFacts::around`).
@@ -189,10 +190,11 @@ directory.
 **Durable graph runs (`src/runs.rs`, `src/journal.rs`, Unix only).** Every
 `run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
 machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
-`publish_with`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
-(`canonical::Durability`). A dropped `Lease` is unlocked (`LOCK_UN`), not
-just closed: a child another thread forked has a copy of its descriptor
-until it execs, and the lock with it. One handed to a child (`inherit`) is
+`publish`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
+(`canonical::sync`). A dropped `Lease` is unlocked (`LOCK_UN`), not
+just closed: a child process another thread is spawning (a task or `git`,
+through `fork` or `posix_spawn` alike) has a copy of its descriptor until it
+execs, and the lock with it. One handed to a child (`inherit`) is
 only closed, so the child keeps it. The first record, `requested`, holds
 the contract as run (canonical JSON), the subject with its input records,
 the runtime fingerprint and the task list, and is durable before any task is
@@ -220,7 +222,7 @@ sykli's own handler ran is `withdrawn`, with every pass decided after it
 waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
 receipt.
 `conclude` keeps the receipt as `rcpt_<digest>.json` in the run's directory
-(`publish_with`, named by digest so a fenced coordinator cannot replace it)
+(`publish`, named by digest so a fenced coordinator cannot replace it)
 before it records `concluded`; `status --run` reports it as `receipt.kept`.
 `status --run` is a pure view of the journal and leases; `resume --run`
 re-checks worktree, contract, lock, runtime and subject before taking over;
