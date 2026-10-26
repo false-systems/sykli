@@ -901,6 +901,45 @@ fn verify_judges_the_files_beside_an_outside_contract_as_they_are_now() {
     }
 }
 
+/// Both refusals hold together for an outside contract with contract
+/// inputs. `validate` exits 1 for one whose task names the contract's
+/// directory, which is a contract problem, checked first. It exits 2, as
+/// `run` refuses before any task, for undeclared repository files beside a
+/// declared input. `run` exits 2 for either.
+#[test]
+fn contract_inputs_keep_the_undeclared_file_rules_and_their_exit_codes() {
+    let scratch = Scratch::new("bothrules");
+    let repo = &scratch.repo;
+    fs::create_dir(repo.join("fixtures")).unwrap();
+    fs::write(repo.join("fixtures/a.txt"), "a\n").unwrap();
+    fs::write(repo.join("fixtures/b.txt"), "b\n").unwrap();
+    commit(repo, "fixtures");
+    fs::write(scratch.config.join("check.sh"), "exit 0\n").unwrap();
+    let contract = scratch.config.join("sykli.json");
+    let path = contract.to_str().unwrap();
+    let task = |run: &str| {
+        serde_json::json!({"schema": "sykli-contract.v1", "tasks": [{
+            "name": "check", "run": run, "inputs": ["fixtures/a.txt"],
+            "contract_inputs": ["check.sh"],
+        }]})
+        .to_string()
+    };
+    fs::write(&contract, task(RUNS_HELPER)).unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("fixtures/b.txt (task check)"));
+    assert_eq!(sykli(repo, &["run", path]).status.code(), Some(2));
+
+    let by_path = format!("{RUNS_HELPER}; sh '{}/check.sh'", scratch.config.display());
+    fs::write(&contract, task(&by_path)).unwrap();
+    let out = sykli(repo, &["validate", path]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("names the directory"));
+    let out = sykli(repo, &["run", path]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("names the directory"));
+}
+
 /// Files beside a contract inside the repository are in the repository:
 /// they are declared as `inputs`, and a contract input there is refused. A
 /// contract input must stay inside the contract's directory.
@@ -1263,9 +1302,10 @@ fn init_with_a_contract_path_writes_outside_the_repository_and_nothing_in_it() {
         tasks.iter().map(|task| &task["name"]).collect::<Vec<_>>(),
         ["fmt", "clippy", "test"]
     );
+    // Every tracked file, the fixture's `file.txt` too: a test may read it.
     assert_eq!(
         tasks[2]["inputs"],
-        serde_json::json!(["Cargo.toml", "src/main.rs", "tests/it.rs"])
+        serde_json::json!(["Cargo.toml", "file.txt", "src/main.rs", "tests/it.rs"])
     );
     // Nothing in the repository was touched: no .sykli/, no .gitignore.
     assert_eq!(scratch.status(), "");

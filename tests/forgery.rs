@@ -201,7 +201,11 @@ fn redigest(receipt: &mut serde_json::Value) {
             let digest = (!record.is_null()).then(|| {
                 let mode = record["mode"].as_u64().unwrap_or(0);
                 let sha = record["sha256"].as_str().unwrap();
-                sha256_hex(&serde_json::to_vec(&("sykli-input.v2", sha, mode)).unwrap())
+                if record["link"] == true {
+                    sha256_hex(&serde_json::to_vec(&("sykli-input-link.v1", sha)).unwrap())
+                } else {
+                    sha256_hex(&serde_json::to_vec(&("sykli-input.v2", sha, mode)).unwrap())
+                }
             });
             inputs.insert(input.clone(), digest);
         }
@@ -835,6 +839,63 @@ fn a_symbolic_link_is_judged_by_its_entry_and_its_declared_target() {
     let out = scratch.verify(&forged, &c3);
     exits(&out, 3, "the link's bytes are not its target's");
     assert!(refusal(&out).contains("link.txt"), "{}", refusal(&out));
+}
+
+/// A symbolic link that leads to no file in the repository (here, to a
+/// directory) is judged by its own text, as git stores it: a genuine receipt
+/// verifies, and one rebound to a commit where the link points elsewhere
+/// does not, even where both directories hold the same bytes. A link's text
+/// never stands in for a file a link leads to: a record claiming the run
+/// read the text of a link to a file is refused, since the run reads the
+/// file.
+#[cfg(unix)]
+#[test]
+fn a_link_to_no_file_is_judged_by_its_text_which_never_stands_for_a_file() {
+    let scratch = Scratch::new(
+        "link-text-judged",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"grep -q one current/x.txt && grep -q a link.txt","inputs":["current","v1/x.txt","v2/x.txt","link.txt","a.txt"]}]}"#,
+    );
+    for dir in ["v1", "v2"] {
+        fs::create_dir_all(scratch.repo.join(dir)).unwrap();
+        fs::write(scratch.repo.join(dir).join("x.txt"), "one\n").unwrap();
+    }
+    fs::write(scratch.repo.join("a.txt"), "a\n").unwrap();
+    std::os::unix::fs::symlink("a.txt", scratch.repo.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink("v1", scratch.repo.join("current")).unwrap();
+    let c1 = scratch.commit("current is v1");
+    let genuine = scratch.receipt();
+    assert_eq!(genuine["outcome"], "passed");
+    let inputs = &genuine["tasks"][0]["inputs"];
+    assert_eq!(inputs["current"]["link"], true, "{inputs}");
+    assert_eq!(inputs["current"]["sha256"], sha256_hex(b"v1"), "{inputs}");
+    assert!(inputs["link.txt"]["link"].is_null(), "{inputs}");
+    exits(
+        &scratch.verify(&genuine, &c1),
+        0,
+        "genuine, a link to a directory",
+    );
+
+    fs::remove_file(scratch.repo.join("current")).unwrap();
+    std::os::unix::fs::symlink("v2", scratch.repo.join("current")).unwrap();
+    let c2 = scratch.commit("current is v2");
+    let mut forged = genuine.clone();
+    rebind(&mut forged, &scratch.tree(&c2));
+    exits(&scratch.verify(&forged, &c2), 3, "link retargeted");
+    exits(&scratch.push(&forged, &c2), 1, "hook, link retargeted");
+
+    // The record of `link.txt`, a link to a file, swapped for its text.
+    let mut forged = genuine.clone();
+    let object = forged["tasks"][0]["inputs"]["link.txt"]["object"].clone();
+    forged["tasks"][0]["inputs"]["link.txt"] =
+        serde_json::json!({"sha256": sha256_hex(b"a.txt"), "link": true, "object": object});
+    redigest(&mut forged);
+    let out = scratch.verify(&forged, &c1);
+    exits(&out, 3, "a link's text for a link to a file");
+    assert!(
+        refusal(&out).contains("link.txt leads to a.txt, a file"),
+        "{}",
+        refusal(&out)
+    );
 }
 
 /// A link target is followed by its names only where the names alone

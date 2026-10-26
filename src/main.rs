@@ -16,6 +16,7 @@ use std::time::Instant;
 use sykli::{Contract, Task};
 
 mod canonical;
+mod cargo_inputs;
 mod hook;
 mod init;
 #[cfg(unix)]
@@ -118,7 +119,18 @@ enum Command {
     /// Validate a declared contract without executing it
     #[command(after_help = "Exit codes:\n  \
         0  valid\n  \
-        1  invalid, unreadable, or drifted from sykli.lock\n\n\
+        1  invalid, unreadable, or drifted from sykli.lock\n  \
+        2  refused for undeclared files, as `run` refuses it (also exit 2), or that check failed\n\n\
+        Inside a git repository, validate also makes the check `run` makes before any task, so\n\
+        its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
+        graph, every Rust source, Cargo file and file under tests/, and every file a source\n\
+        includes must be declared, and an include must name its path as a literal; a\n\
+        document a string literal names but no task declares only warns (exit 0). In every\n\
+        graph, each tracked file beside a task's declared\n\
+        inputs must be declared, except documents, licences and CI configuration; and a\n\
+        declared link to a directory needs every file under it declared. It does not check\n\
+        that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
+        the contract it emits).\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
         an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
         These rules apply where a contract is written or run, not where `verify` or\n\
@@ -511,6 +523,13 @@ struct InputCoverage {
     /// Absent when empty, so complete graphs report what they always did.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     folder_missing_inputs: Vec<FolderInput>,
+    /// Absent when empty: files under a directory a declared link leads to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_missing_inputs: Vec<LinkInput>,
+    /// Absent when empty: documents a string literal in a Rust source names
+    /// that no task declares. They warn; they never make `refusal` refuse.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    named_inputs: Vec<NamedInput>,
 }
 
 impl InputCoverage {
@@ -520,6 +539,8 @@ impl InputCoverage {
             Some(cargo_coverage_error(&self.cargo_missing_inputs))
         } else if !self.folder_missing_inputs.is_empty() {
             Some(folder_coverage_error(&self.folder_missing_inputs))
+        } else if !self.link_missing_inputs.is_empty() {
+            Some(link_coverage_error(&self.link_missing_inputs))
         } else {
             None
         }
@@ -569,44 +590,17 @@ impl Inventory {
         self.listed
             .get_or_init(|| {
                 let root = coverage_root()?;
-                let mut args = vec!["ls-files", "--stage", "-z"];
-                if self.cargo {
-                    args.extend(["--others", "--exclude-standard"]);
-                }
-                let output = repo::git_command()
-                    .arg("-C")
-                    .arg(&root)
-                    .args(&args)
-                    .output()
-                    .map_err(|error| error.to_string())?;
-                if !output.status.success() {
-                    return Err(String::from_utf8_lossy(&output.stderr).into());
-                }
-                let (mut cached, mut others) = (Vec::new(), Vec::new());
-                for entry in output.stdout.split(|byte| *byte == 0) {
-                    if entry.is_empty() {
-                        continue;
-                    }
-                    let entry = std::str::from_utf8(entry)
-                        .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
-                    // `<mode> <object> <stage>\t<path>` for the index.
-                    let staged = entry.split_once('\t').filter(|(stage, _)| {
-                        let fields = stage.split(' ').collect::<Vec<_>>();
-                        fields.len() == 3
-                            && fields[0].len() == 6
-                            && fields[0].bytes().all(|byte| matches!(byte, b'0'..=b'7'))
-                            && fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
-                            && matches!(fields[2], "0" | "1" | "2" | "3")
-                    });
-                    match staged {
-                        Some((_, path)) => cached.push(absolute(&root.join(path))?),
-                        None => others.push(absolute(&root.join(entry))?),
-                    }
-                }
+                let files = repo::files(&root, self.cargo)?;
+                let spelled = |paths: Vec<String>| {
+                    paths
+                        .into_iter()
+                        .map(|path| absolute(&root.join(path)))
+                        .collect::<Result<Vec<_>, _>>()
+                };
                 Ok(Listed {
+                    cached: spelled(files.cached)?,
+                    others: spelled(files.others)?,
                     root,
-                    cached,
-                    others,
                 })
             })
             .as_ref()
@@ -614,54 +608,127 @@ impl Inventory {
     }
 }
 
-fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Vec<String>, String> {
+/// A document a string literal in a Rust source names, which no task
+/// declares. It warns, never refuses: a help or message text names files a
+/// task never reads, so the name alone does not make it an input.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct NamedInput {
+    path: String,
+    named_at: String,
+}
+
+fn named_warning(named: &NamedInput) -> String {
+    format!(
+        "{} is named in {} but not declared; declare it if a task reads it",
+        named.path, named.named_at
+    )
+}
+
+/// The Cargo inputs no task declares, which refuse, and the documents a
+/// source names that no task declares, which warn.
+fn cargo_missing_inputs(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<(Vec<String>, Vec<NamedInput>), String> {
     // This is checked on every invocation, before execution can reuse cached passes. Its
     // input is the current file inventory, not the contract's existing list.
     if !inventory.cargo {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let listed = inventory.listed()?;
     let root = &listed.root;
+    let state = root.join(".sykli");
     let declared = declared_inputs(contract)?;
-    let mut missing = BTreeSet::new();
-    for path in listed.cached.iter().chain(&listed.others) {
-        let path = path.clone();
-        if path.starts_with(root.join(".sykli")) {
-            continue;
+    let files = listed
+        .cached
+        .iter()
+        .chain(&listed.others)
+        .filter(|path| !path.starts_with(&state))
+        .collect::<BTreeSet<_>>();
+    // Cargo's files by name and every listed file a listed Rust source
+    // includes refuse (`cargo_inputs`, which `init` declares by), and so does
+    // an include that names no knowable file; a document a string names warns.
+    let shown = |path: &Path| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let mut sources = cargo_inputs::Sources::default();
+    for path in &files {
+        if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
+            let text = fs::read(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            sources.read(path, &String::from_utf8_lossy(&text), &shown(path));
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let cargo_input = path.extension().is_some_and(|ext| ext == "rs")
-            || matches!(
-                name,
-                "Cargo.toml"
-                    | "Cargo.lock"
-                    | "rust-toolchain"
-                    | "rust-toolchain.toml"
-                    | "rustfmt.toml"
-                    | ".rustfmt.toml"
-                    | "clippy.toml"
-                    | ".clippy.toml"
-            )
-            || (path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == ".cargo")
-                && matches!(name, "config" | "config.toml"))
-            || relative
-                .components()
-                .any(|part| part.as_os_str() == "tests");
-        if cargo_input && !declared.contains_key(&path) {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => {
-                    missing.insert(relative.to_string_lossy().into_owned());
+    }
+    if let Some(refusal) = sources.refusal() {
+        return Err(refusal);
+    }
+    let mut wanted = BTreeSet::new();
+    let mut named = BTreeSet::new();
+    let declarable = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir())
+            && !leads_out_of_the_repository(path)
+    };
+    for path in &files {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        if cargo_inputs::by_name(relative) || sources.included().contains(*path) {
+            wanted.insert((*path).clone());
+        } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
+            if let Some(at) = sources.named_at(&shown(path)) {
+                if declarable(path) {
+                    named.insert(NamedInput {
+                        path: shown(path),
+                        named_at: at.to_string(),
+                    });
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
             }
         }
     }
-    Ok(missing.into_iter().collect())
+    let mut missing = BTreeSet::new();
+    for path in wanted {
+        // A link to a directory outside the repository is never declarable.
+        if declared.contains_key(&path) || leads_out_of_the_repository(&path) {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            // A submodule: a directory in the index, never a declarable file.
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                missing.insert(relative.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+        }
+    }
+    Ok((missing.into_iter().collect(), named.into_iter().collect()))
+}
+
+/// Why `run` refuses this contract before any task, for files it leaves
+/// undeclared (`cargo_missing_inputs`, `folder_missing_inputs`, then
+/// `link_missing_inputs`), if it does, after warning of each document a
+/// source names that no task declares. `validate` asks the same inside a git
+/// repository, so a contract it accepts is one `run` starts.
+fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
+    let inventory = Inventory::new(contract)?;
+    let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
+    for named in &named {
+        eprintln!("warning: {}", named_warning(named));
+    }
+    if !missing.is_empty() {
+        return Ok(Some(cargo_coverage_error(&missing)));
+    }
+    let folders = folder_missing_inputs(contract, &inventory)?;
+    if !folders.is_empty() {
+        return Ok(Some(folder_coverage_error(&folders)));
+    }
+    let linked = link_missing_inputs(contract, &inventory)?;
+    if !linked.is_empty() {
+        return Ok(Some(link_coverage_error(&linked)));
+    }
+    Ok(None)
 }
 
 fn cargo_coverage_error(missing: &[String]) -> String {
@@ -685,7 +752,9 @@ struct FolderInput {
 /// file counts once it is `git add`ed) directly inside a folder holding one
 /// of a task's declared inputs must be one of that task's inputs too, for
 /// Cargo and other graphs alike. Only the repository root is exempt; a task's
-/// working directory is a folder like any other.
+/// working directory is a folder like any other. Documents, licences and CI
+/// configuration (`cargo_inputs::docs`) are never asked for, so a task that
+/// reads a folder of Markdown fixtures declares them itself.
 ///
 /// It does not catch files in new subfolders or in parent folders of an input
 /// folder, anything in the repository root, untracked, ignored or generated
@@ -726,17 +795,29 @@ fn folder_missing_inputs(
     }
     let mut missing = BTreeSet::new();
     for file in &listed.cached {
-        if file.starts_with(root.join(".sykli")) {
+        // Documents, licences and CI configuration are never asked for
+        // (`cargo_inputs::docs`), so a commit that adds documents never
+        // refuses a run.
+        if file.starts_with(root.join(".sykli"))
+            || cargo_inputs::docs(file.strip_prefix(root).unwrap_or(file))
+        {
             continue;
         }
         let Some(folder) = file.parent() else {
             continue;
         };
         for (name, declared, folders) in &tasks {
-            if !folders.contains(folder) || declared.contains(file) {
+            // A link to a directory outside the repository is never
+            // declarable.
+            if !folders.contains(folder)
+                || declared.contains(file)
+                || leads_out_of_the_repository(file)
+            {
                 continue;
             }
             match fs::symlink_metadata(file) {
+                // A submodule: a directory in the index, never a declarable file.
+                Ok(meta) if meta.is_dir() => {}
                 Ok(_) => {
                     let relative = file.strip_prefix(root).unwrap_or(file);
                     missing.insert(FolderInput {
@@ -764,6 +845,169 @@ fn folder_coverage_error(missing: &[FolderInput]) -> String {
     }
     format!(
         "tracked files next to a task's declared inputs that the task does not declare: {}; add each to its task's inputs (or move it out of that folder) and re-lock before running (no cached results used)",
+        listed.join(", ")
+    )
+}
+
+/// Where a symbolic link leads, for the rules about declared links.
+enum Behind {
+    /// A directory in the repository, as a path from its top level.
+    Directory(PathBuf),
+    /// Out of the repository: a file, a directory, or nothing there.
+    Outside(PathBuf),
+    /// Not a symbolic link, or one to a file in the repository, or to
+    /// nothing in it.
+    Other,
+}
+
+fn link_behind(path: &Path) -> Behind {
+    let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    let root = repo::repository()
+        .ok()
+        .and_then(|repository| repository.resolved());
+    let Some(root) = root.filter(|_| linked) else {
+        return Behind::Other;
+    };
+    let target = match fs::canonicalize(path) {
+        Ok(target) => target,
+        // Nothing there (or a loop): where its names lead, from the link's
+        // own directory as resolved.
+        Err(_) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let named = fs::read_link(path)
+                .ok()
+                .zip(fs::canonicalize(parent).ok())
+                .and_then(|(text, directory)| absolute(&directory.join(text)).ok());
+            let Some(named) = named else {
+                return Behind::Other;
+            };
+            named
+        }
+    };
+    match target.strip_prefix(root) {
+        Ok(inside) if target.is_dir() => Behind::Directory(inside.to_path_buf()),
+        Ok(_) => Behind::Other,
+        Err(_) => Behind::Outside(target),
+    }
+}
+
+/// Whether `path` is a symbolic link that leads out of the repository, to a
+/// file, a directory or nothing there: no commit holds what it leads to, so
+/// it is never a declarable input, and the rules that ask for files beside
+/// declared ones, or for Cargo's, never ask for it.
+fn leads_out_of_the_repository(path: &Path) -> bool {
+    matches!(link_behind(path), Behind::Outside(_))
+}
+
+/// A file under the directory a task's declared symbolic link leads to,
+/// which the task does not declare.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct LinkInput {
+    path: String,
+    task: String,
+    link: String,
+}
+
+/// A declared symbolic link to a directory is recorded by its text
+/// (`link_text`), so the files a task reads through it are in no key unless
+/// the task declares them: every tracked file under that directory must be
+/// one of the task's inputs too (`init` declares them). A link that leads out
+/// of the repository, to a file, a directory or nothing there, leads where no
+/// commit can show, which sykli cannot bind, so a contract that declares one
+/// is refused.
+fn link_missing_inputs(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<Vec<LinkInput>, String> {
+    let mut links = Vec::new();
+    for task in &contract.tasks {
+        let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+        let mut directories = Vec::new();
+        for input in &task.inputs {
+            match link_behind(&workdir.join(input)) {
+                Behind::Directory(directory) => directories.push((input, directory)),
+                Behind::Outside(target) => {
+                    return Err(format!(
+                        "task {:?} declares {input}, a symbolic link to {}, outside the \
+                         repository: no commit holds what it leads to, so sykli cannot bind it \
+                         and no receipt of it could verify; declare the files the task reads \
+                         inside the repository instead, and re-lock",
+                        task.name,
+                        target.display()
+                    ));
+                }
+                Behind::Other => {}
+            }
+        }
+        if !directories.is_empty() {
+            let declared = task
+                .inputs
+                .iter()
+                .map(|input| absolute(&workdir.join(input)))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            links.push((&task.name, declared, directories));
+        }
+    }
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listed = inventory.listed()?;
+    let root = &listed.root;
+    let mut missing = BTreeSet::new();
+    for file in &listed.cached {
+        if file.starts_with(root.join(".sykli")) {
+            continue;
+        }
+        let relative = file.strip_prefix(root).unwrap_or(file);
+        for (task, declared, directories) in &links {
+            if declared.contains(file) {
+                continue;
+            }
+            for (link, directory) in directories {
+                if !relative.starts_with(directory) {
+                    continue;
+                }
+                match fs::symlink_metadata(file) {
+                    // A submodule: a directory in the index, never a file.
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => {
+                        missing.insert(LinkInput {
+                            path: relative.to_string_lossy().replace('\\', "/"),
+                            task: (*task).clone(),
+                            link: (*link).clone(),
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("cannot inspect {}: {error}", file.display()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+fn link_coverage_error(missing: &[LinkInput]) -> String {
+    const SHOWN: usize = 10;
+    let mut listed = missing
+        .iter()
+        .take(SHOWN)
+        .map(|input| {
+            format!(
+                "{} (task {}, through {})",
+                input.path, input.task, input.link
+            )
+        })
+        .collect::<Vec<_>>();
+    if missing.len() > SHOWN {
+        listed.push(format!("and {} more", missing.len() - SHOWN));
+    }
+    format!(
+        "tracked files under a directory that a task's declared symbolic link leads to, which the task does not declare: {}; a link to a directory is declared by its text, so declare each file under it in that task's inputs and re-lock before running (no cached results used)",
         listed.join(", ")
     )
 }
@@ -891,11 +1135,14 @@ fn input_coverage(
             })
         })
         .collect::<Result<_, String>>()?;
+    let (cargo_missing_inputs, named_inputs) = cargo_missing_inputs(contract, &inventory)?;
     Ok(InputCoverage {
         base_commit,
         paths,
-        cargo_missing_inputs: cargo_missing_inputs(contract, &inventory)?,
+        cargo_missing_inputs,
+        named_inputs,
         folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
+        link_missing_inputs: link_missing_inputs(contract, &inventory)?,
     })
 }
 
@@ -1285,10 +1532,26 @@ fn main() -> ExitCode {
             }
         },
         Command::Validate { contract, json } => {
-            match load(&contract).and_then(|loaded| {
-                authored(&loaded.0)?;
-                placed(&loaded.0, &contract).map(|()| loaded)
-            }) {
+            match load(&contract)
+                .and_then(|loaded| {
+                    authored(&loaded.0)?;
+                    placed(&loaded.0, &contract).map(|()| loaded)
+                })
+                .map_err(|error| (1, error))
+                .and_then(|loaded| {
+                    // What `run` refuses before any task for undeclared
+                    // files, with `run`'s exit code (2), so a caller can
+                    // tell it from an invalid or unpinned contract (1);
+                    // outside a git repository there is no inventory to
+                    // judge, and `run` cannot start at all.
+                    if repo::repository().is_ok() {
+                        match undeclared_refusal(&loaded.0) {
+                            Ok(None) => {}
+                            Ok(Some(refusal)) | Err(refusal) => return Err((2, refusal)),
+                        }
+                    }
+                    Ok(loaded)
+                }) {
                 Ok((_, _, contract_hash)) => {
                     if json {
                         println!(
@@ -1306,7 +1569,7 @@ fn main() -> ExitCode {
                     }
                     ExitCode::SUCCESS
                 }
-                Err(error) => {
+                Err((code, error)) => {
                     if json {
                         println!(
                             "{}",
@@ -1321,7 +1584,7 @@ fn main() -> ExitCode {
                     } else {
                         eprintln!("invalid {}: {error}", contract.display());
                     }
-                    ExitCode::FAILURE
+                    ExitCode::from(code)
                 }
             }
         }
@@ -1493,6 +1756,9 @@ fn main() -> ExitCode {
                                         path.tasks.join(", ")
                                     ),
                                 }
+                            }
+                            for named in &coverage.named_inputs {
+                                println!("  warning: {}", named_warning(named));
                             }
                             println!(
                                 "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."
@@ -3206,14 +3472,8 @@ fn run(
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());
     }
-    let inventory = Inventory::new(contract)?;
-    let missing = cargo_missing_inputs(contract, &inventory)?;
-    if !missing.is_empty() {
-        return Err(cargo_coverage_error(&missing));
-    }
-    let folders = folder_missing_inputs(contract, &inventory)?;
-    if !folders.is_empty() {
-        return Err(folder_coverage_error(&folders));
+    if let Some(refusal) = undeclared_refusal(contract)? {
+        return Err(refusal);
     }
     let subject = subject(contract, contract_path)?;
     // Before the run is recorded: a directory that cannot be made or held
@@ -3685,7 +3945,8 @@ impl<'a> Baseline<'a> {
                 if self.generated.contains(&full) {
                     return false;
                 }
-                let bytes = sha256_file(&path).ok();
+                // Read as the record was: a link to no file by its text.
+                let bytes = input_record(&path).ok().map(|record| record.sha256);
                 let then = recorded
                     .get(*input)
                     .cloned()
@@ -4165,17 +4426,62 @@ struct InputRecord {
     /// (an ignored or generated file). Not part of the digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     object: Option<String>,
+    /// The input is a symbolic link to a directory in the repository, or to
+    /// nothing, so the run recorded the link itself: `sha256` is that of its
+    /// text, as git stores it, and `mode` is absent. Its digest is
+    /// `sykli-input-link.v1`. A link to a file, inside the repository or
+    /// out of it, is recorded by that file's bytes, as every input always
+    /// was, and this is absent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    link: bool,
 }
 
 impl InputRecord {
     fn digest(&self) -> Result<String, String> {
-        let bytes = serde_json::to_vec(&("sykli-input.v2", &self.sha256, self.mode.unwrap_or(0)))
-            .map_err(|error| error.to_string())?;
+        let bytes = if self.link {
+            serde_json::to_vec(&("sykli-input-link.v1", &self.sha256))
+        } else {
+            serde_json::to_vec(&("sykli-input.v2", &self.sha256, self.mode.unwrap_or(0)))
+        }
+        .map_err(|error| error.to_string())?;
         Ok(sha256(&bytes))
     }
 }
 
+/// The text of the symbolic link at `path`, as git stores it, when the run
+/// records the link itself: it leads to a directory, or to nothing. None
+/// for anything else, a link to a file included: that is read through, as
+/// every input always was. A declared link is declared by its text only
+/// where what it leads to cannot be read as a file; the files under a
+/// directory it leads to must be declared beside it, and one that leads out
+/// of the repository is refused (`link_missing_inputs`), both before any
+/// task.
+fn link_text(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !linked || path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_link(path)
+        .map_err(|error| format!("cannot read the symbolic link {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        text.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = text.to_string_lossy().replace('\\', "/").into_bytes();
+    Ok(Some(bytes))
+}
+
 fn input_record(path: &Path) -> Result<InputRecord, String> {
+    if let Some(text) = link_text(path)? {
+        return Ok(InputRecord {
+            sha256: sha256(&text),
+            mode: None,
+            object: None,
+            link: true,
+        });
+    }
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
@@ -4193,6 +4499,7 @@ fn input_record(path: &Path) -> Result<InputRecord, String> {
         sha256: sha256_file(path)?,
         mode,
         object: None,
+        link: false,
     })
 }
 
@@ -4447,8 +4754,10 @@ fn cache_key(
     let mut inputs = BTreeMap::new();
     for input in &task.inputs {
         let path = root.join(input);
-        // ponytail: declared inputs are files; add glob/tree hashing when a contract needs it.
-        if !path.is_file() {
+        // ponytail: declared inputs are files, or symbolic links to anything
+        // (`link_text`); add glob/tree hashing when a contract needs it.
+        let linked = fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
+        if !path.is_file() && !linked {
             return Err(format!("declared input {input:?} is missing or not a file"));
         }
         inputs.insert(input.as_str(), input_digest(&path)?);
@@ -4529,7 +4838,10 @@ fn declared_input_records(
                             if let Some(Found::Entry(entry)) = facts.found.get(*path) {
                                 record.object = Some(entry.clone());
                             }
-                            if let Ok((_, file)) = facts.file_behind(path) {
+                            // A link recorded by its text has no execute bits.
+                            if let Some((_, file)) =
+                                facts.file_behind(path).ok().filter(|_| !record.link)
+                            {
                                 record.mode = Some(git_execute_bits(record.mode, &file));
                             }
                         }
@@ -5971,6 +6283,10 @@ fn link_target(link: &str, target: &str) -> Result<String, String> {
 struct PathFacts {
     found: HashMap<String, Found>,
     links: HashMap<String, String>,
+    /// What the tree has where a declared symbolic link leads, for each
+    /// target no task declares (`link_target_names`): whether a link judged
+    /// by its own text leads to a file.
+    around: HashMap<String, Found>,
 }
 
 impl PathFacts {
@@ -6113,6 +6429,42 @@ pub(crate) fn input_names(rev: &str, contract: &Contract) -> Result<Vec<String>,
     Ok(names)
 }
 
+/// The names to ask once the answers to `input_names(rev, contract)` are
+/// in: for each declared symbolic link whose target no task declares, the
+/// trees on the way to where it leads, so a link judged by its own text can
+/// be seen to lead to no file (`InputsAt::judge_link`). Empty, and no round
+/// asked, when no declared input is such a link.
+pub(crate) fn link_target_names(
+    rev: &str,
+    contract: &Contract,
+    answers: &Answers,
+) -> Result<Vec<String>, String> {
+    let declared = input_paths(contract)?
+        .into_iter()
+        .map(|(_, _, path)| path)
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    for path in &declared {
+        let Found::Entry(entry) = found_at(rev, path, answers) else {
+            continue;
+        };
+        let id = entry.split(' ').nth(1).unwrap_or_default();
+        let text = answer(answers, &format!("{rev}:{path}")).filter(|object| {
+            entry.starts_with("120000 ")
+                && object.kind == "blob"
+                && object.id == id
+                && object.sha256.as_deref() == Some(sha256(&object.bytes).as_str())
+        });
+        let target = text
+            .and_then(|object| link_target(path, &String::from_utf8_lossy(&object.bytes)).ok())
+            .filter(|target| !declared.contains(target));
+        if let Some(target) = target {
+            names.extend(tree_names(rev, &target));
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
 /// The inputs `input_names(rev, contract)` asked about, from git's answers.
 pub(crate) fn inputs_from(
     rev: &str,
@@ -6149,6 +6501,23 @@ pub(crate) fn inputs_from(
         }
         tasks.entry(task).or_default().insert(input, path);
     }
+    // Where each declared link leads, when no task declares that path, and
+    // only when `link_target_names` asked for it: one not asked is never
+    // taken to lead to nothing.
+    let mut around = HashMap::new();
+    for (path, text) in &facts.links {
+        let Ok(target) = link_target(path, text) else {
+            continue;
+        };
+        let asked = tree_names(rev, &target)
+            .iter()
+            .all(|name| answers.contains_key(name));
+        if !facts.found.contains_key(&target) && asked {
+            let found = found_at(rev, &target, answers);
+            around.insert(target, found);
+        }
+    }
+    facts.around = around;
     let mut outputs = Vec::new();
     for task in &contract.tasks {
         let root = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -6264,6 +6633,75 @@ impl InputsAt {
         Ok(digest)
     }
 
+    /// Judge a record of a symbolic link's own text (`InputRecord::link`),
+    /// already found to name the commit's entry at `path`: the commit must
+    /// have a link there with that text, leading, by its names, inside the
+    /// repository to no regular file (a directory, a submodule, nothing, or
+    /// a link a task declares, judged on its own), as the run found it. A
+    /// link to a file is judged by the file, never by its text: a run reads
+    /// the file. A link out of the repository is refused.
+    fn judge_link(&self, path: &str, entry: &str, record: &InputRecord, short: &str) -> Judgment {
+        let read = format!(
+            "the text of a symbolic link (sha256 {}) recorded by the run",
+            record.sha256
+        );
+        if !entry.starts_with("120000 ") {
+            return Judgment::Refused(format!("{path} as commit {short} has it: {entry}"), read);
+        }
+        if self.stored.get(path) != Some(&record.sha256) {
+            return Judgment::Refused(
+                format!(
+                    "the text of the symbolic link {path} in commit {short} (sha256 {})",
+                    self.stored.get(path).map_or("unread", String::as_str)
+                ),
+                read,
+            );
+        }
+        let Some(text) = self.facts.links.get(path) else {
+            return Judgment::Refused(
+                format!("the target of the symbolic link {path} in commit {short}, unread"),
+                read,
+            );
+        };
+        // A link out of the repository leads where no commit can show, so
+        // its text vouches for nothing a run read: refused, as a link to a
+        // file outside the repository always was.
+        let target = match link_target(path, text) {
+            Ok(target) => target,
+            Err(why) => {
+                return Judgment::Refused(
+                    format!("where {path} leads in commit {short}: to {text}, {why}"),
+                    read,
+                );
+            }
+        };
+        let found = match self.facts.found.get(&target) {
+            Some(found) => Some((found, true)),
+            None => self.facts.around.get(&target).map(|found| (found, false)),
+        };
+        match found {
+            None => Judgment::Refused(
+                format!("where {path} leads in commit {short}: {target}, which was not looked up"),
+                read,
+            ),
+            Some((Found::Entry(at), _)) if is_file(at) => Judgment::Refused(
+                format!(
+                    "{path} leads to {target}, a file in commit {short}, which a run reads \
+                     rather than the link's text"
+                ),
+                read,
+            ),
+            Some((Found::Entry(at), false)) if at.starts_with("120000 ") => Judgment::Refused(
+                format!(
+                    "{path} leads to the symbolic link {target} in commit {short}, which no task \
+                     declares; declare it too, so where {path} leads can be judged"
+                ),
+                read,
+            ),
+            Some(_) => Judgment::Judged,
+        }
+    }
+
     /// Judge the declared input at `path` by the record a run wrote for it
     /// (None: the run found nothing it could read there).
     fn judge(
@@ -6315,6 +6753,9 @@ impl InputsAt {
                     record.object.as_deref().unwrap_or("nothing")
                 ),
             ));
+        }
+        if record.link {
+            return Ok(self.judge_link(path, entry, record, short));
         }
         // A symbolic link is judged only by the file it leads to. A checkout
         // without symbolic links (`core.symlinks=false`) holds a file with
@@ -6605,6 +7046,7 @@ fn older_inputs_check(
                     sha256,
                     mode,
                     object: None,
+                    link: false,
                 }),
             );
         }
@@ -6784,7 +7226,7 @@ fn commit_facts(
         names.extend(inside.names());
     }
     // One process, two rounds: the commit and its contract, then the inputs
-    // that contract declares.
+    // that contract declares (and a third where a declared link leads).
     let mut session = repository.session(Vec::new());
     let mut answers = ask_in(&mut session, names)?;
     let mut at = commit_from(rev, &answers)?;
@@ -6797,6 +7239,11 @@ fn commit_facts(
         input_names(rev, &judged.contract)?,
         INPUT_BLOB_KEPT,
     )?);
+    // A third round, only for declared symbolic links: where they lead.
+    let around = link_target_names(rev, &judged.contract, &answers)?;
+    if !around.is_empty() {
+        answers.extend(ask_in(&mut session, around)?);
+    }
     session.finish()?;
     at.inputs = Some(inputs_from(rev, &judged.contract, &answers)?);
     Ok((judged, at))

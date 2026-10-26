@@ -70,7 +70,7 @@ domain-separated SHA-256 over canonical JSON (`canonical::identity`), computed
 after `canonical::decode` has rejected duplicate keys and floats. Existing
 domains and schema meanings never change; incompatible changes are a new `.vN`.
 
-**Graph runs (`src/main.rs`, `src/lib.rs`, `src/init.rs`).** A
+**Graph runs (`src/main.rs`, `src/lib.rs`, `src/init.rs`, `src/cargo_inputs.rs`).** A
 `sykli-contract.v1` names tasks, commands, declared input files and `after`
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
@@ -157,7 +157,20 @@ repository once per process (one `git rev-parse`, or `--repo-root` and
 one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
 (`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
 `.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
-undeclared-file checks (`Inventory`). `verify --commit` and `hook pre-push`
+undeclared-file checks (`Inventory`, through `repo::files`), which
+`validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
+same listing. What Cargo reads (by name, the files sources include, the
+documents their string literals name, which only warn: `Sources`, a small Rust
+lexer) and what is a document
+(`docs`, which the sibling check never asks for; `init` declares them) are
+`cargo_inputs` for both. A declared symbolic link to a file in the repository is read through;
+one to a directory in the repository or to nothing is recorded by its text
+(`link_text`, `InputRecord::link`), with every file under such a directory
+required of the same task, and one that leads out of the repository is
+refused (`link_missing_inputs`). A text record is judged by the commit's link
+text (`judge_link`), after a third round of the same `cat-file` asks where it
+leads (`link_target_names`, `PathFacts::around`).
+`verify --commit` and `hook pre-push`
 read every commit fact in one batch (`commit_names`, `ContractNames`) and
 judge receipts against them (`judge`); the pre-push hook validates branch
 names in-process and reads `refs/remotes/REMOTE/HEAD` from the common
@@ -167,7 +180,10 @@ directory.
 `run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
 machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
 `publish_with`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
-(`canonical::Durability`). The first record, `requested`, holds
+(`canonical::Durability`). A dropped `Lease` is unlocked (`LOCK_UN`), not
+just closed: a child another thread forked has a copy of its descriptor
+until it execs, and the lock with it. One handed to a child (`inherit`) is
+only closed, so the child keeps it. The first record, `requested`, holds
 the contract as run (canonical JSON), the subject with its input records,
 the runtime fingerprint and the task list, and is durable before any task is
 dispatched; the run id is its identity. Each task is then `reused`,
