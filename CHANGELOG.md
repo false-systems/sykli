@@ -450,10 +450,12 @@ contract consumer can observe; internal refactors are not listed.
   link on its way leads out of the repository: an input `ext/file.txt` with
   `ext` a link to a directory elsewhere validated, was hashed into the key
   and the receipt from outside, and passed, and an output or a workdir there
-  was written outside (sykli#54). A path that does not exist yet is judged
-  by its nearest existing ancestor. It is judged against the work tree
-  before any task runs, so a link a task makes while it runs is not seen. A
-  link that stays inside the repository is not refused.
+  was written outside (sykli#54). Each link on the way is judged as a
+  declared link is: by where it resolves, or, when nothing is there yet (an
+  output's link before the run that makes it), by where its text leads. It
+  is judged against the work tree before any task runs, so a link a task
+  makes while it runs is not seen. A link that stays inside the repository
+  is not refused.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,

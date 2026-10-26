@@ -932,14 +932,28 @@ fn leads_out_of_the_repository(path: &Path) -> bool {
     matches!(link_behind(path), Behind::Outside(_))
 }
 
-/// Where `path` leads once every symbolic link on its way is followed, when
-/// that is out of the repository (sykli#54): `ext/file.txt` with `ext` a
-/// link to a directory elsewhere. A path that does not exist yet is judged
-/// by its nearest existing ancestor (`located`). None inside the repository,
-/// or without one.
+/// Where `path` leads when a symbolic link on its way leads out of the
+/// repository (sykli#54): `ext/file.txt` with `ext` a link to a directory
+/// elsewhere, or an output `out` whose link leads to a file elsewhere that
+/// the run has yet to make. Each link below the top level is judged as a
+/// declared link is (`link_behind`): by where it resolves, or, when nothing
+/// is there yet, by where its text leads. None inside the repository, or
+/// without one.
 fn led_out_of_the_repository(path: &Path) -> Option<PathBuf> {
-    let root = repo::repository().ok()?.resolved()?;
-    located(path).filter(|resolved| !resolved.starts_with(root))
+    let repository = repo::repository().ok()?;
+    let top = repository.root_here().ok()?;
+    let path = absolute(path).ok()?;
+    if let Ok(below) = path.strip_prefix(&top) {
+        let mut prefix = top;
+        for part in below.components() {
+            prefix.push(part);
+            if let Behind::Outside(target) = link_behind(&prefix) {
+                return Some(target);
+            }
+        }
+    }
+    let root = repository.resolved()?;
+    located(&path).filter(|resolved| !resolved.starts_with(root))
 }
 
 /// Refuse a task whose working directory, declared input or declared output
