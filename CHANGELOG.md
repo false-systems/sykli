@@ -258,9 +258,11 @@ contract consumer can observe; internal refactors are not listed.
     changed. Sources are read as Rust: an invocation in a string or a plain
     comment is none, a doc comment's literal ones count;
   - a document (`*.md`, `LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`,
-    anything under `docs/` or `.github/`, at any depth) that a Rust source
-    names: a top-level one by its file name, a deeper one by its path,
-    anywhere in the text (a test that reads `README.md`).
+    anything under `docs/` or `.github/`, at any depth) that a string
+    literal in a Rust source names, as a test that reads it does
+    (`fs::read("README.md")`): a top-level one by its file name alone, a
+    deeper one by its path. A comment or a doc comment that mentions a
+    document names nothing.
 - In a Cargo graph, an include whose path is not a string literal in one of
   those forms (a macro's variable, an expression) refuses `init` (exit 1),
   `validate`, `run` and `plan --explain` (exit 2), naming its file and line,
@@ -283,11 +285,17 @@ contract consumer can observe; internal refactors are not listed.
   cache and the receipt. For a link to a directory, `validate`, `run` and
   `plan --explain` (`link_missing_inputs: [{path, task, link}]`) refuse,
   exit 2, until the same task declares every tracked file under the
-  directory. A declared link to a directory outside the repository is
-  refused: no commit holds its files. `verify --commit` and the pre-push
-  hook judge a text record by the commit's link text, and refuse it where
-  the link leads to a file or out of the repository. A link to a file,
-  inside the repository or out of it, is read through and judged as before.
+  directory. `verify --commit` and the pre-push hook judge a text record by
+  the commit's link text, and refuse it where the link leads to a file or
+  out of the repository. A link to a file in the repository is read through
+  and judged as before.
+- A declared symbolic link that leads out of the repository, to a file, a
+  directory or nothing there, is refused by `validate`, `run` and
+  `plan --explain` before any task (exit 2): no commit holds what it leads
+  to, so no receipt of it could verify. A link to a file outside used to
+  run, with every receipt then refused by `verify --commit`. `init` leaves
+  such a link out with a note, and the Cargo rule and the sibling check do
+  not ask for it.
 - Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
   `resume`, the pre-commit hook), a declared `env` value that contains `${`
   must name `${worktree_cache}` and close it, and must not contain `$${`
@@ -360,7 +368,7 @@ contract consumer can observe; internal refactors are not listed.
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
   `test`) declares every file git tracks under the directory sykli runs in,
   documents included (a test may read a folder of Markdown cases), every
-  tracked symbolic link but one to a directory outside the repository (and
+  tracked symbolic link but one that leads out of the repository (and
   the file a link to a file leads to), and the untracked files the Cargo
   completeness rule counts. `init` used to declare Rust sources and Cargo's
   files under `src/`, `tests/` and workspace members only, so it left out a
@@ -438,7 +446,7 @@ contract consumer can observe; internal refactors are not listed.
   required one under a `tests` directory, and the undeclared-sibling check
   one beside a declared input. A tracked symbolic link to a directory in the
   repository, or to nothing, both rules required too, and now it can be
-  declared (above); one to a directory outside the repository, which cannot
+  declared (above); one that leads out of the repository, which cannot
   be, they no longer ask for.
 - Existing v2 lock files must pin the named contract; empty maps and missing
   entries no longer silently run unpinned, including `verify --commit`.

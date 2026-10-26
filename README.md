@@ -108,7 +108,7 @@ sykli verify .sykli/receipt.json --contract sykli.json
 repository each task declares every file git tracks, [documents](#documents)
 and symbolic links included, since a build or a test can read a vendored crate,
 an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
-sykli's own contract and lock, and a link to a directory outside the repository,
+sykli's own contract and lock, and a symbolic link that leads out of the repository,
 which cannot be bound. Review the inputs it declares, and declare files you add
 later. Task execution
 needs Git, a POSIX `sh` and your project's own toolchain. On Windows, Git for
@@ -255,8 +255,10 @@ from every task's inputs:
   anything else (a macro's variable, an expression) is refused with its file
   and line, since its file cannot be known; a path built from `OUT_DIR` names
   a file made at build time and is not asked for;
-- a [document](#documents) a Rust source names: a top-level one by its file
-  name (a test that reads `README.md`), a deeper one by its path.
+- a [document](#documents) a string literal in a Rust source names, as a test
+  that reads it does (`fs::read("README.md")`): a top-level one by its file
+  name, a deeper one by its path. A comment or a doc comment that mentions a
+  document names nothing.
 
 In every graph, it also refuses an undeclared sibling of a declared input: a
 tracked file directly inside a folder that holds one of a task's inputs, which
@@ -865,9 +867,11 @@ What the commit cannot show is never passed unjudged:
   leading inside the repository to no file. A link a run recorded by its text
   that leads to a file, or out of the repository, is refused. Before any task,
   `run` and `validate` require every tracked file under a directory a declared
-  link leads to to be declared by the same task, and refuse a declared link to
-  a directory outside the repository, whose files no commit holds.
-- A symbolic link to a file is judged by its entry, the target's name, and by the
+  link leads to to be declared by the same task, and refuse a declared link
+  that leads out of the repository, to a file, a directory or nothing there:
+  no commit holds what it leads to, so no receipt of it could verify. `init`
+  leaves such a link out, with a note.
+- A symbolic link to a file in the repository is judged by its entry, the target's name, and by the
   bytes read through it, which must be those of the declared input it names.
   A link whose target no task declares is refused: declare both. A `..` in a
   target may only leave the link's own directories: after a name the target
