@@ -1100,10 +1100,27 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
     let root = linked_repository(
         "through-links",
         &[("file.txt", "one\n"), ("inside/real/file.txt", "inside\n")],
-        &[("ext", outside.to_str().unwrap()), ("alias", "inside/real")],
+        &[
+            ("ext", outside.to_str().unwrap()),
+            ("alias", "inside/real"),
+            // Dangling, as an output's link is before the run that makes it.
+            ("out", outside.join("new.txt").to_str().unwrap()),
+            ("gone", outside.join("missing-dir").to_str().unwrap()),
+        ],
         None,
     );
     let refusals = [
+        ("outputs", serde_json::json!(["out"]), "\"out\""),
+        (
+            "outputs",
+            serde_json::json!(["gone/new.txt"]),
+            "gone/new.txt",
+        ),
+        (
+            "inputs",
+            serde_json::json!(["file.txt", "gone/new.txt"]),
+            "gone/new.txt",
+        ),
         (
             "inputs",
             serde_json::json!(["file.txt", "ext/file.txt"]),
@@ -1124,7 +1141,7 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
     for (field, value, named) in refusals {
         let mut task = serde_json::json!({
             "name": "t",
-            "run": "echo built > bundle.js; touch ran",
+            "run": "echo built > bundle.js; echo pwned > out; touch ran",
             "inputs": ["file.txt"],
         });
         task[field] = value;
@@ -1146,7 +1163,12 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
         assert_eq!(code, Some(2), "run, {field} {named}: {stderr}");
         assert!(refused(&stderr), "{stderr}");
         assert!(!root.join(".sykli/receipts").exists(), "no task ran");
-        assert!(!outside.join("ran").exists() && !outside.join("bundle.js").exists());
+        for written in ["ran", "bundle.js", "new.txt", "out"] {
+            assert!(
+                !outside.join(written).exists(),
+                "{field} {named}: {written}"
+            );
+        }
     }
 
     // A link on the way that stays in the repository is not refused.
