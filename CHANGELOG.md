@@ -7,6 +7,194 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-27
+
+Set in `Cargo.toml` only: no tag, release or crates.io publish has been made
+for it, so `install.sh` and the GitHub Action, which install release tags,
+cannot install it yet. It breaks 0.6.0, so read Breaking first: it removes the
+commands 0.6.0 shipped for typed production and pull-request evidence (see
+Removed), refuses contracts that 0.6.0 ran, and changes what a receipt
+records.
+
+### Breaking
+- In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
+  exit 2) also refuse a contract that leaves out a file git lists (tracked,
+  or untracked and not ignored) that a Rust source includes
+  (`include_str!`, `include_bytes!`, `include!`) by a string literal,
+  resolved from that source's directory as rustc resolves it, or by
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`, from the nearest
+  `Cargo.toml`. A file built into the binary, or a README a crate's
+  documentation includes, kept a cached pass when it changed. Sources are
+  read as Rust: an invocation in a string or a plain comment is none, a doc
+  comment's literal ones count.
+- In a Cargo graph, an include whose path is not a string literal in one of
+  those forms (a macro's variable, an expression) refuses `init` (exit 1),
+  `validate`, `run` and `plan --explain` (exit 2), naming its file and line,
+  since the file it reads cannot be known; it used to be passed over. A path
+  built from `OUT_DIR` names a file made at build time and is not refused.
+- Inside a git repository, `validate` refuses what `run` refuses before any
+  task for undeclared files: the Cargo completeness rule, then the
+  undeclared-sibling check. It exits 2, as `run` does, with `run`'s message
+  (in `errors` with `--json`; `sykli-validate.v1` is unchanged), where it
+  used to exit 0 on a contract `run` would not start; exit 1 stays an
+  invalid, unreadable or unpinned contract. Its verdict now depends on the
+  work tree too. Outside a git repository nothing changes. A caller that
+  reads exit 1 as "re-lock" is still right; exit 2 means "declare the files
+  named", which re-locking alone does not fix.
+- A declared symbolic link to a directory in the repository, or to nothing,
+  is recorded by its own text, as git stores it: its input record carries
+  `"link": true` and the text's SHA-256, and its digest is
+  `sykli-input-link.v1`. Such a declared input used to error the task
+  (`missing or not a file`). Pointing such a link elsewhere now misses the
+  cache and the receipt. For a link to a directory, `validate`, `run` and
+  `plan --explain` (`link_missing_inputs: [{path, task, link}]`) refuse,
+  exit 2, until the same task declares every tracked file under the
+  directory. `verify --commit` and the pre-push hook judge a text record by
+  the commit's link text, and refuse it where the link leads to a file or
+  out of the repository. A link to a file in the repository is read through
+  and judged as before.
+- A declared symbolic link that leads out of the repository, to a file, a
+  directory or nothing there, is refused by `validate`, `run` and
+  `plan --explain` before any task (exit 2): no commit holds what it leads
+  to, so no receipt of it could verify. A link to a file outside used to
+  run, with every receipt then refused by `verify --commit`. `init` leaves
+  such a link out with a note, and the Cargo rule and the sibling check do
+  not ask for it.
+- Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
+  `resume`, the pre-commit hook), a declared `env` value that contains `${`
+  must name `${worktree_cache}` and close it, and must not contain `$${`
+  (reserved for an escape of `${`); and `${worktree_cache}` or
+  `$worktree_cache` anywhere but an `env` value (in `run`, `workdir`,
+  `inputs`, `outputs` or an env name, where a shell would make it empty) is
+  refused. `validate` exits 1, and the others exit 2. Such a value used to
+  reach the task literally (sykli never expanded it). A `$` that opens no
+  `${` is kept as written (`$ORIGIN`, `$LINENO`). Where a contract is judged
+  (`verify`, `status --commit`, the pre-push hook), nothing changes: a
+  contract an earlier sykli ran keeps its verdict.
+- On Linux and macOS `run` needs a writable common git directory: every run
+  is recorded in `<git-common-dir>/sykli/runs/` before any task starts, and
+  `run` exits 2 when it cannot write there (with `chmod a-w .git`, an earlier
+  sykli exited 0).
+- On Linux and macOS a signal no longer kills `run`: it stops the run's tasks
+  (TERM, then KILL after 3 s or on a second signal), records the run stopped,
+  and exits 128+N. A caller reading the wait status sees an exit code, not a
+  death by signal, and the exit takes as long as the tasks take to stop.
+- Every receipt written on Linux and macOS carries `run`, so its bytes, and
+  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
+  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
+  fields (including older `verify`) are unaffected.
+- `verify --commit` and `sykli hook pre-push` refuse (exit 3, and the push)
+  a receipt whose run read a declared input that the commit cannot show at
+  its declared path (sykli#78): an ignored or untracked file, a name spelled
+  differently from git's (case, Unicode normalization), a file inside a
+  submodule or reached through a symbolic link to a directory, a symbolic
+  link to an undeclared file or with a `..` after a name in its target, or
+  `.git` declared as an input and read in a linked worktree, where `.git` is
+  a file. Such inputs used to pass unjudged. To migrate, drop such paths
+  from a contract you verify against commits, declare inputs as git spells
+  them, declare a symbolic link's target as well, and declare files a task
+  generates as that task's `outputs` (reported as not judged, never
+  refused). Plain `verify`, against the checkout, is unaffected.
+- `verify --commit` and `sykli hook pre-push` need git 2.40 or later to
+  check an input that a checkout converts (line endings, a smudge filter):
+  they ask `git --attr-source=COMMIT cat-file --filters`. With an older git
+  such a receipt cannot be checked and exits 2; inputs a checkout leaves as
+  they are need no newer git.
+- `run` refuses (exit 2) an undeclared sibling of a declared input: a tracked
+  file (in the index) directly inside a folder holding one of a task's declared
+  inputs, which that task does not declare. Such a file could change the
+  task's result without changing its key; a test reading a whole fixture
+  folder kept a cached pass after a fixture was added. This applies to every
+  graph, not only Cargo graphs. Only the repository root is exempt; a task's
+  working directory is checked like any other folder. The message names each
+  file and its task; `plan --explain` reports them as
+  `input_coverage.folder_missing_inputs` (absent when empty), marks the cache
+  states as input errors and exits 2. It is a tripwire, not a dependency scan:
+  new subfolders, parent folders, the repository root, untracked (so editor
+  and OS scratch files never refuse a run), ignored and generated files are
+  not checked. Contracts with such gaps must declare the files, or move them,
+  and re-lock.
+- The GitHub Action verifies twice: the live check against the checkout, as
+  before, and then `--commit`, by default against the pull request's head on
+  `pull_request` events and against HEAD otherwise (new `commit` input; `none`
+  skips the second check). **A workflow that checks out GitHub's merge commit
+  now fails verify with exit 3 on pull requests**, and the annotation says the
+  merge commit was checked out. Check out `github.event.pull_request.head.sha`
+  instead; this repository's CI does.
+- Commands shipped in 0.6.0 are removed (see Removed): `targets`, `produce`,
+  `verify-production`, `diagnostics`, `inspect` and `assess`, and the
+  production modes of `status` (a production ID), `resume` (a production ID),
+  `plan` (`--target`) and `init` (`--production`). Each now fails as an
+  unknown command or argument (exit 2). `status --run`, `status --commit` and
+  `resume --run` are unchanged.
+- Where a contract outside the repository is written or run (`validate`,
+  `lock`, `plan`, `run`, the pre-commit hook), a task whose `run` or `env`
+  value names the contract's own directory, as the contract's path spells it
+  or resolved, is refused (`validate` exits 1, the others 2), since sykli
+  cannot hash what the task reads there by that name (sykli#75). Declare the
+  files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
+  The text is read as the task's shell would read it: its `$HOME`, `${HOME}`
+  and a leading `~` expanded (its declared `HOME`, else sykli's), quotes and
+  `\` escapes removed, and `//` and `/./` read as `/`. A variable just before
+  the path does not hide it. When the directory holds the repository, a path
+  inside the repository is not refused unless it has a `..` in it. With no
+  git repository around the current directory, nothing is refused. Where a
+  contract is judged, nothing changes.
+- A receipt records each inherited value as `inherited_keyed_digests`, and
+  no longer writes `inherited_digests`. The old field held the plain
+  SHA-256 of the value, and CI uploads receipts: a short token could be
+  found by trying every candidate against it. Nothing in sykli read it
+  (`verify` never did), and an older receipt that has it still verifies.
+  The new field (64 hex digits, or `absent`), and the cache key of a task
+  that inherits, is HMAC-SHA256 of `sykli-inherited.v1`, the name and the
+  value, under a key of the clone's own: 32 bytes from the operating system
+  (`/dev/urandom`; `BCryptGenRandom` on Windows), kept as hex in
+  `<git-common-dir>/sykli/inherit-key` (0600 where files have modes), made
+  by the first run that needs it and never rewritten. A salt recorded in
+  the receipt would be as public as the digest, so the key is kept where no
+  receipt goes. What it costs:
+  - Digests are comparable only between runs of one clone, and nobody can
+    check one against a value they know.
+  - The key is only as secret as the clone. Any task the clone runs can
+    read it, on a runner that keeps `.git` between jobs a pull request's
+    code too, and whoever has read it can try guesses against every digest
+    the clone publishes.
+  - Each task that inherits misses the cache once in a clone that lasts. A
+    fresh clone makes a new key, so a CI job that restores `.sykli/` into a
+    fresh clone misses the cache for every task that inherits, on every run.
+  - A contract that inherits nothing makes no key, and its keys are
+    unchanged. `plan --explain` never makes the key: before a run has, it
+    reports a task that inherits as `missing`. Where the file system has no
+    hard links, the key is renamed into place instead, and two first runs
+    racing there may each use their own key once.
+  - A task's own output is not covered: a value it prints is in its
+    captured output and `stdout_digest`.
+- Where a contract is written or run (`validate` exit 1; `lock`, `plan`,
+  `run` exit 2), `$worktree_cache` without braces in an `env` value is
+  refused, and the refusal names `${worktree_cache}`. sykli never expanded
+  it: the task got it as written, and a build tool made a directory named
+  `$worktree_cache/` inside the work tree while the run passed. A name that
+  goes on (`$worktree_cache_dir`) is not the placeholder and is kept.
+- `status --run ID --contract PATH` is refused (exit 2, naming both flags).
+  `--contract` names the contract `--commit` judges by; with `--run` it was
+  accepted and ignored. `status --commit` and `verify --contract` are
+  unchanged.
+- Inside a git repository, `validate`, `plan --explain` and `run` (exit 2)
+  refuse a task whose workdir, declared input or declared output a symbolic
+  link on its way leads out of the repository: an input `ext/file.txt` with
+  `ext` a link to a directory elsewhere validated, was hashed into the key
+  and the receipt from outside, and passed, and an output or a workdir there
+  was written outside (sykli#54). Every link on the way is followed by its
+  text, chained or not, also one that leads to nothing yet (an output's link
+  before the run that makes it). A link is judged where it finally
+  resolves, after the links its text leads through, so where its chain
+  ends, and that must be inside the repository, as must the end of the
+  path. A path through more than 40 links (a loop) is refused too. It is
+  judged against the work tree before any task runs, so a link a task makes
+  while it runs is not seen. A link, or a chain, that stays inside the
+  repository is not refused, and neither is a chain that passes through a
+  link outside it and ends inside: what is read or written there is inside.
+
 ### Added
 - In a Cargo graph, a warning for a document (`*.md`, `LICENSE*`,
   `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or `.github/`,
@@ -295,185 +483,6 @@ contract consumer can observe; internal refactors are not listed.
   - A contract inside the repository may not declare them: its neighbours
     are repository files, declared as `inputs`. `plan --changed` still
     selects by repository inputs only.
-
-### Breaking
-- In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
-  exit 2) also refuse a contract that leaves out a file git lists (tracked,
-  or untracked and not ignored) that a Rust source includes
-  (`include_str!`, `include_bytes!`, `include!`) by a string literal,
-  resolved from that source's directory as rustc resolves it, or by
-  `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`, from the nearest
-  `Cargo.toml`. A file built into the binary, or a README a crate's
-  documentation includes, kept a cached pass when it changed. Sources are
-  read as Rust: an invocation in a string or a plain comment is none, a doc
-  comment's literal ones count.
-- In a Cargo graph, an include whose path is not a string literal in one of
-  those forms (a macro's variable, an expression) refuses `init` (exit 1),
-  `validate`, `run` and `plan --explain` (exit 2), naming its file and line,
-  since the file it reads cannot be known; it used to be passed over. A path
-  built from `OUT_DIR` names a file made at build time and is not refused.
-- Inside a git repository, `validate` refuses what `run` refuses before any
-  task for undeclared files: the Cargo completeness rule, then the
-  undeclared-sibling check. It exits 2, as `run` does, with `run`'s message
-  (in `errors` with `--json`; `sykli-validate.v1` is unchanged), where it
-  used to exit 0 on a contract `run` would not start; exit 1 stays an
-  invalid, unreadable or unpinned contract. Its verdict now depends on the
-  work tree too. Outside a git repository nothing changes. A caller that
-  reads exit 1 as "re-lock" is still right; exit 2 means "declare the files
-  named", which re-locking alone does not fix.
-- A declared symbolic link to a directory in the repository, or to nothing,
-  is recorded by its own text, as git stores it: its input record carries
-  `"link": true` and the text's SHA-256, and its digest is
-  `sykli-input-link.v1`. Such a declared input used to error the task
-  (`missing or not a file`). Pointing such a link elsewhere now misses the
-  cache and the receipt. For a link to a directory, `validate`, `run` and
-  `plan --explain` (`link_missing_inputs: [{path, task, link}]`) refuse,
-  exit 2, until the same task declares every tracked file under the
-  directory. `verify --commit` and the pre-push hook judge a text record by
-  the commit's link text, and refuse it where the link leads to a file or
-  out of the repository. A link to a file in the repository is read through
-  and judged as before.
-- A declared symbolic link that leads out of the repository, to a file, a
-  directory or nothing there, is refused by `validate`, `run` and
-  `plan --explain` before any task (exit 2): no commit holds what it leads
-  to, so no receipt of it could verify. A link to a file outside used to
-  run, with every receipt then refused by `verify --commit`. `init` leaves
-  such a link out with a note, and the Cargo rule and the sibling check do
-  not ask for it.
-- Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
-  `resume`, the pre-commit hook), a declared `env` value that contains `${`
-  must name `${worktree_cache}` and close it, and must not contain `$${`
-  (reserved for an escape of `${`); and `${worktree_cache}` or
-  `$worktree_cache` anywhere but an `env` value (in `run`, `workdir`,
-  `inputs`, `outputs` or an env name, where a shell would make it empty) is
-  refused. `validate` exits 1, and the others exit 2. Such a value used to
-  reach the task literally (sykli never expanded it). A `$` that opens no
-  `${` is kept as written (`$ORIGIN`, `$LINENO`). Where a contract is judged
-  (`verify`, `status --commit`, the pre-push hook), nothing changes: a
-  contract an earlier sykli ran keeps its verdict.
-- On Linux and macOS `run` needs a writable common git directory: every run
-  is recorded in `<git-common-dir>/sykli/runs/` before any task starts, and
-  `run` exits 2 when it cannot write there (with `chmod a-w .git`, an earlier
-  sykli exited 0).
-- On Linux and macOS a signal no longer kills `run`: it stops the run's tasks
-  (TERM, then KILL after 3 s or on a second signal), records the run stopped,
-  and exits 128+N. A caller reading the wait status sees an exit code, not a
-  death by signal, and the exit takes as long as the tasks take to stop.
-- Every receipt written on Linux and macOS carries `run`, so its bytes, and
-  therefore its `rcpt_<sha256>.json` name, differ from a receipt of the same
-  run before. The schema stays `sykli-receipt.v1`; readers that ignore unknown
-  fields (including older `verify`) are unaffected.
-- `verify --commit` and `sykli hook pre-push` refuse (exit 3, and the push)
-  a receipt whose run read a declared input that the commit cannot show at
-  its declared path (sykli#78): an ignored or untracked file, a name spelled
-  differently from git's (case, Unicode normalization), a file inside a
-  submodule or reached through a symbolic link to a directory, a symbolic
-  link to an undeclared file or with a `..` after a name in its target, or
-  `.git` declared as an input and read in a linked worktree, where `.git` is
-  a file. Such inputs used to pass unjudged. To migrate, drop such paths
-  from a contract you verify against commits, declare inputs as git spells
-  them, declare a symbolic link's target as well, and declare files a task
-  generates as that task's `outputs` (reported as not judged, never
-  refused). Plain `verify`, against the checkout, is unaffected.
-- `verify --commit` and `sykli hook pre-push` need git 2.40 or later to
-  check an input that a checkout converts (line endings, a smudge filter):
-  they ask `git --attr-source=COMMIT cat-file --filters`. With an older git
-  such a receipt cannot be checked and exits 2; inputs a checkout leaves as
-  they are need no newer git.
-- `run` refuses (exit 2) an undeclared sibling of a declared input: a tracked
-  file (in the index) directly inside a folder holding one of a task's declared
-  inputs, which that task does not declare. Such a file could change the
-  task's result without changing its key; a test reading a whole fixture
-  folder kept a cached pass after a fixture was added. This applies to every
-  graph, not only Cargo graphs. Only the repository root is exempt; a task's
-  working directory is checked like any other folder. The message names each
-  file and its task; `plan --explain` reports them as
-  `input_coverage.folder_missing_inputs` (absent when empty), marks the cache
-  states as input errors and exits 2. It is a tripwire, not a dependency scan:
-  new subfolders, parent folders, the repository root, untracked (so editor
-  and OS scratch files never refuse a run), ignored and generated files are
-  not checked. Contracts with such gaps must declare the files, or move them,
-  and re-lock.
-- The GitHub Action verifies twice: the live check against the checkout, as
-  before, and then `--commit`, by default against the pull request's head on
-  `pull_request` events and against HEAD otherwise (new `commit` input; `none`
-  skips the second check). **A workflow that checks out GitHub's merge commit
-  now fails verify with exit 3 on pull requests**, and the annotation says the
-  merge commit was checked out. Check out `github.event.pull_request.head.sha`
-  instead; this repository's CI does.
-- Commands shipped in 0.6.0 are removed (see Removed): `targets`, `produce`,
-  `verify-production`, `diagnostics`, `inspect` and `assess`, and the
-  production modes of `status` (a production ID), `resume` (a production ID),
-  `plan` (`--target`) and `init` (`--production`). Each now fails as an
-  unknown command or argument (exit 2). `status --run`, `status --commit` and
-  `resume --run` are unchanged.
-- Where a contract outside the repository is written or run (`validate`,
-  `lock`, `plan`, `run`, the pre-commit hook), a task whose `run` or `env`
-  value names the contract's own directory, as the contract's path spells it
-  or resolved, is refused (`validate` exits 1, the others 2), since sykli
-  cannot hash what the task reads there by that name (sykli#75). Declare the
-  files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
-  The text is read as the task's shell would read it: its `$HOME`, `${HOME}`
-  and a leading `~` expanded (its declared `HOME`, else sykli's), quotes and
-  `\` escapes removed, and `//` and `/./` read as `/`. A variable just before
-  the path does not hide it. When the directory holds the repository, a path
-  inside the repository is not refused unless it has a `..` in it. With no
-  git repository around the current directory, nothing is refused. Where a
-  contract is judged, nothing changes.
-- A receipt records each inherited value as `inherited_keyed_digests`, and
-  no longer writes `inherited_digests`. The old field held the plain
-  SHA-256 of the value, and CI uploads receipts: a short token could be
-  found by trying every candidate against it. Nothing in sykli read it
-  (`verify` never did), and an older receipt that has it still verifies.
-  The new field (64 hex digits, or `absent`), and the cache key of a task
-  that inherits, is HMAC-SHA256 of `sykli-inherited.v1`, the name and the
-  value, under a key of the clone's own: 32 bytes from the operating system
-  (`/dev/urandom`; `BCryptGenRandom` on Windows), kept as hex in
-  `<git-common-dir>/sykli/inherit-key` (0600 where files have modes), made
-  by the first run that needs it and never rewritten. A salt recorded in
-  the receipt would be as public as the digest, so the key is kept where no
-  receipt goes. What it costs:
-  - Digests are comparable only between runs of one clone, and nobody can
-    check one against a value they know.
-  - The key is only as secret as the clone. Any task the clone runs can
-    read it, on a runner that keeps `.git` between jobs a pull request's
-    code too, and whoever has read it can try guesses against every digest
-    the clone publishes.
-  - Each task that inherits misses the cache once in a clone that lasts. A
-    fresh clone makes a new key, so a CI job that restores `.sykli/` into a
-    fresh clone misses the cache for every task that inherits, on every run.
-  - A contract that inherits nothing makes no key, and its keys are
-    unchanged. `plan --explain` never makes the key: before a run has, it
-    reports a task that inherits as `missing`. Where the file system has no
-    hard links, the key is renamed into place instead, and two first runs
-    racing there may each use their own key once.
-  - A task's own output is not covered: a value it prints is in its
-    captured output and `stdout_digest`.
-- Where a contract is written or run (`validate` exit 1; `lock`, `plan`,
-  `run` exit 2), `$worktree_cache` without braces in an `env` value is
-  refused, and the refusal names `${worktree_cache}`. sykli never expanded
-  it: the task got it as written, and a build tool made a directory named
-  `$worktree_cache/` inside the work tree while the run passed. A name that
-  goes on (`$worktree_cache_dir`) is not the placeholder and is kept.
-- `status --run ID --contract PATH` is refused (exit 2, naming both flags).
-  `--contract` names the contract `--commit` judges by; with `--run` it was
-  accepted and ignored. `status --commit` and `verify --contract` are
-  unchanged.
-- Inside a git repository, `validate`, `plan --explain` and `run` (exit 2)
-  refuse a task whose workdir, declared input or declared output a symbolic
-  link on its way leads out of the repository: an input `ext/file.txt` with
-  `ext` a link to a directory elsewhere validated, was hashed into the key
-  and the receipt from outside, and passed, and an output or a workdir there
-  was written outside (sykli#54). Every link on the way is followed by its
-  text, chained or not, also one that leads to nothing yet (an output's link
-  before the run that makes it). A link is judged where it finally
-  resolves, after the links its text leads through, so where its chain
-  ends, and that must be inside the repository, as must the end of the
-  path. A path through more than 40 links (a loop) is refused too. It is
-  judged against the work tree before any task runs, so a link a task makes
-  while it runs is not seen. A link, or a chain, that stays inside the
-  repository is not refused, and neither is a chain that passes through a
-  link outside it and ends inside: what is read or written there is inside.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
@@ -858,7 +867,7 @@ commit `f536224`, the bootstrap of the Rust rewrite.
 - A self-hosted repository gate and `install.sh`, which fetches a tagged
   tarball and checks it against the release's `SHA256SUMS`.
 
-[Unreleased]: https://github.com/false-systems/sykli/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/false-systems/sykli/releases/tag/v0.6.0
+[Unreleased]: https://github.com/false-systems/sykli/commits/main
+[0.6.0]: https://github.com/false-systems/sykli/commit/bacc69f
 [0.2.0]: https://github.com/false-systems/sykli/commit/1c4e247
 [0.1.0]: https://github.com/false-systems/sykli/commit/f536224
