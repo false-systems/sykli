@@ -28,6 +28,7 @@ pub fn now() -> u64 {
 
 // serde_json::Value normally keeps the last duplicate key. Reject duplicates
 // before deserializing any identity-bearing document, including nested maps.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct Unique(Value);
 impl<'de> serde::Deserialize<'de> for Unique {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -74,6 +75,7 @@ impl<'de> serde::Deserialize<'de> for Unique {
 }
 
 /// Decode JSON, rejecting duplicate keys and floating-point numbers.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     let value: Unique = serde_json::from_slice(bytes).map_err(err)?;
     serde_json::from_value(value.0).map_err(err)
@@ -92,6 +94,7 @@ pub fn identity(domain: &str, value: &impl Serialize) -> Result<String, String> 
     Ok(crate::sha256(&bytes))
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn digest(value: &str) -> Result<(), String> {
     if value.len() != 64
         || !value
@@ -108,6 +111,7 @@ pub fn digest(value: &str) -> Result<(), String> {
 pub enum Durability {
     /// `File::sync_all`: on macOS `F_FULLFSYNC`, which also empties the
     /// drive's own write cache. Typed production's records use it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Full,
     /// `fsync(2)`: the bytes and the directory entry are handed to the
     /// device before the write is acknowledged. On macOS the drive's own
@@ -143,6 +147,7 @@ pub fn sync(file: &fs::File, durability: Durability) -> std::io::Result<()> {
 /// Write an immutable file: a durable temporary followed by a hard link, so a
 /// torn write never becomes a record. An existing identical file is accepted;
 /// a differing one is a conflict.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
     publish_with(path, bytes, Durability::Full)
 }
