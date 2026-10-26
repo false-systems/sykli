@@ -104,7 +104,9 @@ sykli run --json > .sykli/receipt.json            # run the graph, keep the rece
 sykli verify .sykli/receipt.json --contract sykli.json
 ```
 
-`init` creates `.sykli/` for local state and adds it to `.gitignore`. In a Cargo
+`init` creates `.sykli/` for local state and adds it to `.gitignore`.
+(`.sykli/production` and `.sykli/evidence`, left by 0.6.0's removed
+features, are read by nothing and safe to delete.) In a Cargo
 repository each task declares every file git tracks, [documents](#documents)
 and symbolic links included, since a build or a test can read a vendored crate,
 an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
