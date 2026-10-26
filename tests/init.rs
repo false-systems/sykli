@@ -1106,11 +1106,33 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
             // Dangling, as an output's link is before the run that makes it.
             ("out", outside.join("new.txt").to_str().unwrap()),
             ("gone", outside.join("missing-dir").to_str().unwrap()),
+            // Chains: each hop inside, the last one out; a loop; and chains
+            // that stay inside.
+            ("hop", "out"),
+            ("h2", "hop"),
+            ("h3", "h2"),
+            ("hopgone", "gone"),
+            ("loop-a", "loop-b"),
+            ("loop-b", "loop-a"),
+            ("in1", "inside/real"),
+            ("in2", "in1"),
+            ("din1", "inside/real/nothing.txt"),
+            ("din2", "din1"),
         ],
         None,
     );
     let refusals = [
         ("outputs", serde_json::json!(["out"]), "\"out\""),
+        ("outputs", serde_json::json!(["hop"]), "\"hop\""),
+        ("outputs", serde_json::json!(["h3"]), "\"h3\""),
+        ("inputs", serde_json::json!(["file.txt", "hop"]), "\"hop\""),
+        ("workdir", serde_json::json!("hopgone"), "\"hopgone\""),
+        ("outputs", serde_json::json!(["loop-a"]), "\"loop-a\""),
+        (
+            "inputs",
+            serde_json::json!(["file.txt", "loop-b/x.txt"]),
+            "loop-b/x.txt",
+        ),
         (
             "outputs",
             serde_json::json!(["gone/new.txt"]),
@@ -1141,7 +1163,7 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
     for (field, value, named) in refusals {
         let mut task = serde_json::json!({
             "name": "t",
-            "run": "echo built > bundle.js; echo pwned > out; touch ran",
+            "run": "echo built > bundle.js; echo pwned > out; echo pwned > hop; touch ran",
             "inputs": ["file.txt"],
         });
         task[field] = value;
@@ -1171,16 +1193,18 @@ fn a_declared_path_through_a_link_out_of_the_repository_is_refused() {
         }
     }
 
-    // A link on the way that stays in the repository is not refused.
-    fs::write(
-        root.join("sykli.json"),
+    // A link on the way that stays in the repository is not refused, nor a
+    // chain that stays in it, to a directory or to nothing yet.
+    for contract in [
         r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"cat alias/file.txt","inputs":["alias/file.txt"]}]}"#,
-    )
-    .unwrap();
-    let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
-    assert_eq!(code, Some(0), "{stderr}");
-    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
-    assert_eq!(code, Some(0), "{stderr}");
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"t","run":"cat in2/file.txt > din2","inputs":["in2/file.txt"],"outputs":["din2"]}]}"#,
+    ] {
+        fs::write(root.join("sykli.json"), contract).unwrap();
+        let (code, _, stderr) = sykli(&root, &["lock", "sykli.json"]);
+        assert_eq!(code, Some(0), "{stderr}");
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(0), "{contract}: {stderr}");
+    }
     fs::remove_dir_all(outside).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
