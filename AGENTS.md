@@ -163,7 +163,10 @@ directory.
 `run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
 machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
 `publish_with`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
-(`canonical::Durability`). The first record, `requested`, holds
+(`canonical::Durability`). A dropped `Lease` is unlocked (`LOCK_UN`), not
+just closed: a child another thread forked has a copy of its descriptor
+until it execs, and the lock with it. One handed to a child (`inherit`) is
+only closed, so the child keeps it. The first record, `requested`, holds
 the contract as run (canonical JSON), the subject with its input records,
 the runtime fingerprint and the task list, and is durable before any task is
 dispatched; the run id is its identity. Each task is then `reused`,
