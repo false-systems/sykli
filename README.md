@@ -229,8 +229,10 @@ declared path that a symbolic link on its way leads out of the repository:
 an input `ext/file.txt`, an output `ext/bundle.js` or a workdir `ext` when
 `ext` links to a directory elsewhere, or an output `out` when `out` links to
 a file elsewhere that the run has yet to make, or `hop` when it links to `out`
-(every link on the way is followed by its text, chained or not, and a path
-through more than 40 links is refused). This is judged against the work tree
+(every link on the way is followed by its text, chained or not, and judged
+by where its chain ends, so a chain that passes through a link outside and
+comes back in is not refused; a path through more than 40 links is). This is
+judged against the work tree
 before any task runs, so a link a task makes while it runs is not seen.
 `sykli validate` checks a contract without running it.
 

@@ -466,11 +466,14 @@ contract consumer can observe; internal refactors are not listed.
   and the receipt from outside, and passed, and an output or a workdir there
   was written outside (sykli#54). Every link on the way is followed by its
   text, chained or not, also one that leads to nothing yet (an output's link
-  before the run that makes it): where each one leads, and the end, must be
-  inside the repository, and a path through more than 40 links (a loop) is
-  refused too. It is judged against the work tree before any task runs, so
-  a link a task makes while it runs is not seen. A link, or a chain, that
-  stays inside the repository is not refused.
+  before the run that makes it). A link is judged where it finally
+  resolves, after the links its text leads through, so where its chain
+  ends, and that must be inside the repository, as must the end of the
+  path. A path through more than 40 links (a loop) is refused too. It is
+  judged against the work tree before any task runs, so a link a task makes
+  while it runs is not seen. A link, or a chain, that stays inside the
+  repository is not refused, and neither is a chain that passes through a
+  link outside it and ends inside: what is read or written there is inside.
 
 ### Changed
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,

@@ -976,7 +976,7 @@ fn leads_out_of_the_repository(path: &Path) -> bool {
 enum Leads {
     /// Inside the repository, or there is no repository to judge.
     Inside,
-    /// Out of it: where a link on the way, or the path's end, leads.
+    /// Out of it: where a chain of links on the way ends, or the path does.
     Outside(PathBuf),
     /// Through more than `LINK_HOPS` links: a loop, or as good as one.
     Endless,
@@ -991,15 +991,19 @@ const LINK_HOPS: usize = 40;
 /// elsewhere that the run has yet to make, or `hop` linked to `out`. It is
 /// resolved as the kernel resolves it, part by part from the resolved top
 /// level, following every link, chained or not, also one that leads to
-/// nothing yet, by its text. Wherever a link's text leads, once resolved,
-/// must be inside the repository, and so must the end; a chain of more than
-/// `LINK_HOPS` links is `Endless`.
+/// nothing yet, by its text. A link is judged where its text finally
+/// resolves, after the links it leads through: where its chain ends, which
+/// must be inside the repository, as must the end of the path. A chain that
+/// passes through a link outside and ends inside is not refused (what is
+/// read or written is inside). A chain of more than `LINK_HOPS` links is
+/// `Endless`.
 fn leads(path: &Path) -> Leads {
     enum Part {
         Root(OsString),
         Up,
         Name(OsString),
-        /// A link's text is resolved: where it led is judged here.
+        /// A link's text is resolved, with the links it leads through:
+        /// where its chain ends is judged here.
         LinkEnd,
     }
     let parts = |path: &Path| {
