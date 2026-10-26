@@ -83,8 +83,9 @@ Every command that looks for the repository accepts `--repo-root` and
 --show-toplevel --git-common-dir` prints them); with them sykli runs no git
 to find the repository; the root's `.git` must lead to the common directory
 (checked from files, or exit 2). `hook pre-push` then starts one git process, one
-`git cat-file --batch` for all pushed commits, `verify --commit` one, and
-`run` five; without them each starts one more.
+`git cat-file --batch` for all pushed commits, `verify --commit` one,
+`validate` one (`git ls-files`, inside a repository), and `run` five; without
+them each starts one more.
 
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
