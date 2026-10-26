@@ -26,8 +26,8 @@ stewardship:
   runs_retention_days: 14
   history_max_records: 500
 boundaries:
-- "Own only graph parsing, validation, planning, execution, caching, and receipts."
-- "Receipts claim what ran; verifying them, deciding closure, storing them and running workers belong to other tools."
-- "Stay a local, offline, single-run CLI: no server, network service, daemon, coordination, or agent execution."
+- "Own graph parsing, validation, planning, execution, caching, and receipts; verify checks a receipt against a tree and a contract, and judges nothing else."
+- "Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. A detached run's coordinator ends with its run."
 - "A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily."
-- "Contract growth requires a named user and the re-entry conditions in docs/adr/0005-deletions.md."
+- "Contract growth requires a named user and a written condition for it; removed capabilities stay on the archive/delivery-production branch."
+- "Anything written under .sykli/ is bounded, and the bound is stated where it is written."
