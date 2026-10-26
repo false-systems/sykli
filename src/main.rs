@@ -124,7 +124,7 @@ enum Command {
         Inside a git repository, validate also makes the check `run` makes before any task, so\n\
         its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
         graph, every Rust source, Cargo file and file under tests/, every file a source\n\
-        includes, and every document a source names must be declared, and an include must\n\
+        includes, and every document a string literal names must be declared, and an include must\n\
         name its path as a literal. In every graph, each tracked file beside a task's declared\n\
         inputs must be declared, except documents, licences and CI configuration; and a\n\
         declared link to a directory needs every file under it declared. It does not check\n\
@@ -803,38 +803,57 @@ fn folder_coverage_error(missing: &[FolderInput]) -> String {
     )
 }
 
-/// Where a symbolic link leads, when it leads to a directory.
+/// Where a symbolic link leads, for the rules about declared links.
 enum Behind {
     /// A directory in the repository, as a path from its top level.
-    Inside(PathBuf),
-    /// A directory outside the repository, resolved.
+    Directory(PathBuf),
+    /// Out of the repository: a file, a directory, or nothing there.
     Outside(PathBuf),
-    /// Not a symbolic link to a directory.
+    /// Not a symbolic link, or one to a file in the repository, or to
+    /// nothing in it.
     Other,
 }
 
-fn directory_behind(path: &Path) -> Behind {
+fn link_behind(path: &Path) -> Behind {
     let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
-    if !linked || !path.is_dir() {
-        return Behind::Other;
-    }
-    let Ok(target) = fs::canonicalize(path) else {
-        return Behind::Other;
-    };
     let root = repo::repository()
         .ok()
         .and_then(|repository| repository.resolved());
-    match root.and_then(|root| target.strip_prefix(root).ok()) {
-        Some(inside) => Behind::Inside(inside.to_path_buf()),
-        None => Behind::Outside(target),
+    let Some(root) = root.filter(|_| linked) else {
+        return Behind::Other;
+    };
+    let target = match fs::canonicalize(path) {
+        Ok(target) => target,
+        // Nothing there (or a loop): where its names lead, from the link's
+        // own directory as resolved.
+        Err(_) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let named = fs::read_link(path)
+                .ok()
+                .zip(fs::canonicalize(parent).ok())
+                .and_then(|(text, directory)| absolute(&directory.join(text)).ok());
+            let Some(named) = named else {
+                return Behind::Other;
+            };
+            named
+        }
+    };
+    match target.strip_prefix(root) {
+        Ok(inside) if target.is_dir() => Behind::Directory(inside.to_path_buf()),
+        Ok(_) => Behind::Other,
+        Err(_) => Behind::Outside(target),
     }
 }
 
-/// Whether `path` is a symbolic link to a directory outside the repository,
-/// whose files no commit holds: never a declarable input, so the rules that
-/// ask for files beside declared ones, or for Cargo's, never ask for it.
+/// Whether `path` is a symbolic link that leads out of the repository, to a
+/// file, a directory or nothing there: no commit holds what it leads to, so
+/// it is never a declarable input, and the rules that ask for files beside
+/// declared ones, or for Cargo's, never ask for it.
 fn leads_out_of_the_repository(path: &Path) -> bool {
-    matches!(directory_behind(path), Behind::Outside(_))
+    matches!(link_behind(path), Behind::Outside(_))
 }
 
 /// A file under the directory a task's declared symbolic link leads to,
@@ -849,9 +868,10 @@ struct LinkInput {
 /// A declared symbolic link to a directory is recorded by its text
 /// (`link_text`), so the files a task reads through it are in no key unless
 /// the task declares them: every tracked file under that directory must be
-/// one of the task's inputs too (`init` declares them). A link to a directory
-/// outside the repository leads to files no commit holds, which sykli cannot
-/// bind, so a contract that declares one is refused.
+/// one of the task's inputs too (`init` declares them). A link that leads out
+/// of the repository, to a file, a directory or nothing there, leads where no
+/// commit can show, which sykli cannot bind, so a contract that declares one
+/// is refused.
 fn link_missing_inputs(
     contract: &Contract,
     inventory: &Inventory,
@@ -861,14 +881,14 @@ fn link_missing_inputs(
         let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
         let mut directories = Vec::new();
         for input in &task.inputs {
-            match directory_behind(&workdir.join(input)) {
-                Behind::Inside(directory) => directories.push((input, directory)),
+            match link_behind(&workdir.join(input)) {
+                Behind::Directory(directory) => directories.push((input, directory)),
                 Behind::Outside(target) => {
                     return Err(format!(
-                        "task {:?} declares {input}, a symbolic link to {}, a directory outside \
-                         the repository: no commit holds its files, so sykli cannot bind them; \
-                         declare the files the task reads inside the repository instead, and \
-                         re-lock",
+                        "task {:?} declares {input}, a symbolic link to {}, outside the \
+                         repository: no commit holds what it leads to, so sykli cannot bind it \
+                         and no receipt of it could verify; declare the files the task reads \
+                         inside the repository instead, and re-lock",
                         task.name,
                         target.display()
                     ));
@@ -4090,12 +4110,12 @@ impl InputRecord {
 
 /// The text of the symbolic link at `path`, as git stores it, when the run
 /// records the link itself: it leads to a directory, or to nothing. None
-/// for anything else, a link to a file included, wherever the file is: that
-/// is read through, as every input always was. A declared link is declared
-/// by its text only where what it leads to cannot be read as a file; the
-/// files under a directory it leads to must be declared beside it, and one
-/// that leads to a directory outside the repository is refused
-/// (`link_missing_inputs`), both before any task.
+/// for anything else, a link to a file included: that is read through, as
+/// every input always was. A declared link is declared by its text only
+/// where what it leads to cannot be read as a file; the files under a
+/// directory it leads to must be declared beside it, and one that leads out
+/// of the repository is refused (`link_missing_inputs`), both before any
+/// task.
 fn link_text(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let linked = fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
     if !linked || path.is_file() {

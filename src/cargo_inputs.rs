@@ -72,12 +72,15 @@ pub(crate) fn docs(relative: &Path) -> bool {
 }
 
 /// What a set of Rust sources read beyond Cargo's own files: the files they
-/// include, and every path they name.
+/// include, and every path their string literals name.
 #[derive(Default)]
 pub(crate) struct Sources {
     included: BTreeSet<PathBuf>,
     opaque: Vec<String>,
-    tokens: HashSet<String>,
+    /// File names a string literal names alone (`"README.md"`).
+    bare: HashSet<String>,
+    /// Paths a string literal names, and their endings of two names or more.
+    paths: HashSet<String>,
 }
 
 impl Sources {
@@ -86,7 +89,11 @@ impl Sources {
     /// refusal names it.
     pub(crate) fn read(&mut self, source: &Path, text: &str, shown: &str) {
         let base = source.parent().unwrap_or_else(|| Path::new(""));
-        for (line, include) in scan(text) {
+        let (includes, literals) = scan(text);
+        for literal in literals {
+            index(literal, &mut self.bare, &mut self.paths);
+        }
+        for (line, include) in includes {
             let resolved = match include {
                 Include::Source(path) => {
                     let named = Path::new(&path);
@@ -125,7 +132,6 @@ impl Sources {
                 self.included.insert(resolved);
             }
         }
-        index(text, &mut self.tokens);
     }
 
     /// The files the sources include, resolved as rustc resolves them: from
@@ -135,15 +141,20 @@ impl Sources {
         &self.included
     }
 
-    /// Whether any source names `relative` (a path with `/` separators):
-    /// some run of path characters in its text, in code, a string or a
-    /// comment, is `relative` or ends in `/` and `relative`. A file at the
-    /// top level is so named by its file name alone (`README.md`, or any path
-    /// that ends in it), a deeper one only by its path (`docs/guide.md`). A
-    /// test that reads a document names it this way, unless it builds the
-    /// path from pieces.
+    /// Whether a string literal in a source names `relative` (a path with `/`
+    /// separators), as a test that reads a document does
+    /// (`fs::read("README.md")`). A comment or a doc comment that mentions a
+    /// document names nothing. A file at the top level is named by its file
+    /// name alone (`"README.md"`, `"./README.md"`, `"/README.md"` after
+    /// `CARGO_MANIFEST_DIR`), never by a deeper path that ends in it; a
+    /// deeper one by its path (`"docs/guide.md"`), or a path that ends in
+    /// it. A path built from pieces is not seen.
     pub(crate) fn names(&self, relative: &str) -> bool {
-        self.tokens.contains(relative)
+        if relative.contains('/') {
+            self.paths.contains(relative)
+        } else {
+            self.bare.contains(relative)
+        }
     }
 
     /// Why the files the sources read cannot be known, if they cannot: an
@@ -182,11 +193,12 @@ enum Include {
 /// compiles, but only their literal invocations count: a doc comment that
 /// describes an include in prose names no file. An argument built from
 /// `OUT_DIR` names a file made at build time, which is not in git and is not
-/// returned.
-fn scan(text: &str) -> Vec<(usize, Include)> {
+/// returned. Also every string literal in code, as written, for `index`.
+fn scan(text: &str) -> (Vec<(usize, Include)>, Vec<&str>) {
     let bytes = text.as_bytes();
     let line = |at: usize| 1 + text[..at].bytes().filter(|byte| *byte == b'\n').count();
     let mut found = Vec::new();
+    let mut literals = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
         let rest = &text[at..];
@@ -212,6 +224,7 @@ fn scan(text: &str) -> Vec<(usize, Include)> {
             continue;
         }
         if let Some(end) = literal_end(text, at) {
+            literals.push(&text[at..end]);
             at = end;
             continue;
         }
@@ -236,7 +249,7 @@ fn scan(text: &str) -> Vec<(usize, Include)> {
         }
         at += rest.chars().next().map_or(1, char::len_utf8);
     }
-    found
+    (found, literals)
 }
 
 /// The literal invocations in a doc comment. Their line is not kept: only
@@ -463,23 +476,43 @@ fn identifier(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-/// Every run of path characters in `text` (letters, digits, `.`, `_`, `-`,
-/// `+`, `@`, `~`, and `/` or `\`, either one a separator), and each of its
-/// endings after a separator, into `tokens`, `/`-separated.
-fn index(text: &str, tokens: &mut HashSet<String>) {
+/// Every run of path characters in the string literal `literal` (letters,
+/// digits, `.`, `_`, `-`, `+`, `@`, `~`, and `/` or `\`, either one a
+/// separator), `/`-separated, without the `/`, `./` and `../` it starts
+/// with: a single name into `bare`; a path, with each of its endings of two
+/// names or more, into `paths`. So `"home/.claude/CLAUDE.md"` names
+/// `.claude/CLAUDE.md` but never a top-level `CLAUDE.md`.
+fn index(literal: &str, bare: &mut HashSet<String>, paths: &mut HashSet<String>) {
     let path = |c: char| {
         c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~' | '/' | '\\')
     };
-    for run in text.split(|c: char| !path(c)).filter(|run| !run.is_empty()) {
+    for run in literal
+        .split(|c: char| !path(c))
+        .filter(|run| !run.is_empty())
+    {
         let run = run.replace("\\\\", "/").replace('\\', "/");
         let mut rest = run.as_str();
         loop {
-            let trimmed = rest.trim_start_matches('/');
-            if !trimmed.is_empty() {
-                tokens.insert(trimmed.to_string());
+            let before = rest;
+            rest = rest.trim_start_matches('/');
+            rest = rest.strip_prefix("./").unwrap_or(rest);
+            rest = rest.strip_prefix("../").unwrap_or(rest);
+            if rest == before {
+                break;
             }
-            match trimmed.find('/') {
-                Some(separator) => rest = &trimmed[separator..],
+        }
+        if rest.is_empty() || rest == "." || rest == ".." {
+            continue;
+        }
+        if !rest.contains('/') {
+            bare.insert(rest.to_string());
+            continue;
+        }
+        let mut ending = rest;
+        while ending.contains('/') {
+            paths.insert(ending.trim_end_matches('/').to_string());
+            match ending.find('/') {
+                Some(separator) => ending = &ending[separator + 1..],
                 None => break,
             }
         }
@@ -712,15 +745,22 @@ mod tests {
     }
 
     #[test]
-    fn a_source_names_a_top_level_file_by_its_name_and_a_deeper_one_by_its_path() {
+    fn a_string_literal_names_a_top_level_file_by_its_name_and_a_deeper_one_by_its_path() {
         let mut sources = Sources::default();
         sources.read(
             Path::new("tests/docs.rs"),
             concat!(
-                "fs::read(\"README.md\"); fs::read(\"docs/guide.md\");\n",
-                "let ci = root.join(\".github/workflows/ci.yml\");\n",
-                "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/NOTICE\"));\n",
-                "// see docs\\\\windows.md\n",
+                "//! The setup is in AGENTS.md and docs/setup.md.\n",
+                "/// Reads README.md, as STYLE.md says.\n",
+                "fn f() {\n",
+                "    // CHANGELOG.md and docs/history.md are only mentioned here.\n",
+                "    /* LICENSE, in a block comment */\n",
+                "    fs::read(\"README.md\"); fs::read(\"docs/guide.md\");\n",
+                "    let ci = root.join(\".github/workflows/ci.yml\");\n",
+                "    include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/NOTICE\"));\n",
+                "    fs::read(\"./COPYING\"); fs::read(\"docs\\\\windows.md\");\n",
+                "    let elsewhere = \"home/.claude/CLAUDE.md\";\n",
+                "}\n",
             ),
             "tests/docs.rs",
         );
@@ -730,18 +770,26 @@ mod tests {
             ".github/workflows/ci.yml",
             "workflows/ci.yml",
             "NOTICE",
+            "COPYING",
             "docs/windows.md",
-            // Any path's ending counts, the safe direction: a top-level
-            // `guide.md` is named by `docs/guide.md` too.
-            "guide.md",
+            ".claude/CLAUDE.md",
         ] {
             assert!(sources.names(named), "{named}");
         }
         for unnamed in [
+            // Mentioned in a comment or a doc comment only.
+            "AGENTS.md",
+            "docs/setup.md",
+            "STYLE.md",
             "CHANGELOG.md",
+            "docs/history.md",
+            "LICENSE",
+            // A bare name is a top-level file's, never a deeper path's ending.
+            "CLAUDE.md",
+            "guide.md",
+            "ci.yml",
             "other/docs/guide.md",
             "s/guide.md",
-            "release.yml",
         ] {
             assert!(!sources.names(unnamed), "{unnamed}");
         }

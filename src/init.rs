@@ -81,8 +81,8 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
 /// a top-level `fixtures/`, beside a pin), and nothing can tell all of them
 /// apart from the files nothing reads. So every cargo task declares every
 /// file git tracks here (`listing`), documents included (a test may read a
-/// folder of Markdown cases), and every symbolic link but one to a directory
-/// outside the repository, which cannot be bound; all it leaves out is
+/// folder of Markdown cases), and every symbolic link but one that leads
+/// out of the repository, which cannot be bound; all it leaves out is
 /// `.sykli/`, `target/`, and sykli's own contract and lock at the top
 /// level. An untracked file is declared only when the completeness rule
 /// counts it (Cargo's files by name, every file a source includes, every
@@ -138,7 +138,7 @@ fn cargo(
             || included.contains(path)
             || (cargo_inputs::docs(relative) && sources.names(path));
         let wanted = required || (tracked && !metadata(path, contract));
-        if wanted && declarable(root, path) {
+        if wanted && declarable(root, path, notes) {
             inputs.insert(path.clone());
         }
     }
@@ -201,11 +201,12 @@ fn metadata(path: &str, contract: Option<&str>) -> bool {
 }
 
 /// Whether `path` can be declared: a regular file, or a symbolic link (read
-/// through to a file, wherever it is; recorded by its text when it leads to
-/// a directory in the repository or to nothing). A link to a directory
-/// outside the repository cannot be, since no commit holds its files; nor
-/// can a file gone from the work tree, a directory or a submodule.
-fn declarable(root: &Path, path: &str) -> bool {
+/// through to a file in the repository; recorded by its text when it leads
+/// to a directory in the repository or to nothing there). A link that leads
+/// out of the repository, to a file, a directory or nothing, cannot be,
+/// since no commit holds what it leads to (with a note); nor can a file gone
+/// from the work tree, a directory or a submodule.
+fn declarable(root: &Path, path: &str, notes: &mut Vec<String>) -> bool {
     let file = root.join(path);
     let Ok(meta) = fs::symlink_metadata(&file) else {
         return false;
@@ -216,12 +217,14 @@ fn declarable(root: &Path, path: &str) -> bool {
     if !meta.file_type().is_symlink() {
         return false;
     }
-    let outside = file.is_dir()
-        && fs::canonicalize(&file)
-            .ok()
-            .zip(fs::canonicalize(root).ok())
-            .is_some_and(|(target, root)| !target.starts_with(root));
-    !outside
+    if crate::leads_out_of_the_repository(&file) {
+        notes.push(format!(
+            "{path} is a symbolic link out of the repository; not declared, since no commit \
+             holds what it leads to"
+        ));
+        return false;
+    }
+    true
 }
 
 /// The regular file inside `root` that the symbolic link at `path` leads
