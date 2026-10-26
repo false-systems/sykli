@@ -9,7 +9,9 @@
 //! Appends are serialized by an exclusive `journal-lock`; readers take it
 //! shared. Who may append at all is a lease: an advisory `flock` that the
 //! kernel releases when the last descriptor of its holder closes, so a dead
-//! holder never leaves a stale lock and a PID is never trusted.
+//! holder never leaves a stale lock and a PID is never trusted. A live holder
+//! releases it itself when it is done (`Lease`'s `Drop`), since a close alone
+//! waits for every copy of the descriptor, and a fork makes copies.
 use crate::canonical::{Durability, canonical, decode, digest, identity, publish_with};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::AtomicBool;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -193,8 +196,40 @@ pub(crate) fn close_inherited_on_exec() {
     }
 }
 
-pub struct Lease(File);
+/// A held `flock`. The lock belongs to the open file description, which every
+/// copy of the descriptor shares, and a process that another thread forks
+/// has a copy of each one until it execs (close-on-exec closes them only
+/// then). So dropping a lease releases it explicitly (`LOCK_UN`), at once,
+/// rather than by a close the kernel honours only once the last copy is
+/// closed. A lease handed to a child (`inherit`) is the child's too: then
+/// dropping it only closes this process's descriptor, and the child keeps
+/// holding it.
+pub struct Lease {
+    file: File,
+    handed_on: AtomicBool,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if !*self.handed_on.get_mut() {
+            // SAFETY: the descriptor is owned by file; LOCK_UN (8) releases
+            // the lock of its open file description, whoever has a copy.
+            unsafe {
+                flock(self.file.as_raw_fd(), 8);
+            }
+        }
+    }
+}
+
 impl Lease {
+    /// A lock already taken on `file`.
+    fn held(file: File) -> Self {
+        Self {
+            file,
+            handed_on: AtomicBool::new(false),
+        }
+    }
+
     pub fn acquire(directory: &Path) -> Result<Self, String> {
         let file = OpenOptions::new()
             .read(true)
@@ -214,7 +249,7 @@ impl Lease {
                 format!("lease unavailable on this file system: {error}")
             });
         }
-        Ok(Self(file))
+        Ok(Self::held(file))
     }
     /// Take an existing lease, never creating one: None when there is no
     /// `lease` in `directory` (it is still being set up, or already gone),
@@ -234,7 +269,7 @@ impl Lease {
         if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
             return Err(format!("lease-busy: {}", std::io::Error::last_os_error()));
         }
-        Ok(Some(Self(file)))
+        Ok(Some(Self::held(file)))
     }
 
     /// Hold the lease at `path` shared, beside any other shared holder,
@@ -255,7 +290,7 @@ impl Lease {
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
         let lease = Self::lock(file, 1)?; // LOCK_SH
-        let held = lease.0.metadata().map_err(err)?;
+        let held = lease.file.metadata().map_err(err)?;
         Ok(fs::metadata(path)
             .ok()
             .filter(|now| (now.dev(), now.ino()) == (held.dev(), held.ino()))
@@ -266,7 +301,7 @@ impl Lease {
         // SAFETY: the descriptor is owned by file. Retry interrupted flock calls.
         loop {
             if unsafe { flock(file.as_raw_fd(), mode) } == 0 {
-                return Ok(Self(file));
+                return Ok(Self::held(file));
             }
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::Interrupted {
@@ -283,7 +318,7 @@ impl Lease {
         loop {
             // SAFETY: owned descriptor; LOCK_NB never waits in the kernel.
             if unsafe { flock(file.as_raw_fd(), mode | 4) } == 0 {
-                return Ok(Self(file));
+                return Ok(Self::held(file));
             }
             let error = std::io::Error::last_os_error();
             if !matches!(
@@ -339,6 +374,8 @@ impl Lease {
         loop {
             // SAFETY: owned descriptor; LOCK_SH | LOCK_NB does not modify bytes.
             if unsafe { flock(file.as_raw_fd(), 1 | 4) } == 0 {
+                // Released as a lease is dropped, not left to the close.
+                drop(Self::held(file));
                 return Ok(false);
             }
             let error = std::io::Error::last_os_error();
@@ -365,8 +402,13 @@ impl Lease {
         // A duplicate executor checks the recorded terminal outcome after locking.
         Self::lock(file, 2)
     }
+    /// Let the process `command` starts hold this lease too: its descriptor
+    /// is not closed on exec. From then on, dropping this lease leaves the
+    /// lock to the child (and to whatever the child starts).
     pub fn inherit(&self, command: &mut ProcessCommand) -> RawFd {
-        let fd = self.0.as_raw_fd();
+        self.handed_on
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let fd = self.file.as_raw_fd();
         // SAFETY: fcntl is async-signal-safe; no allocation in pre_exec.
         unsafe {
             command.pre_exec(move || {
@@ -394,7 +436,7 @@ impl Lease {
         if unsafe { fcntl(fd, 2, 1) } == -1 {
             return Err(err(std::io::Error::last_os_error()));
         }
-        Ok(Self(file))
+        Ok(Self::held(file))
     }
 }
 
@@ -446,22 +488,85 @@ mod tests {
         assert!(!path.exists(), "observation must not create a lease");
         File::create(&path).unwrap();
         let observed = Lease::observe(&path).unwrap();
-        // Other unit tests fork commands concurrently. A child can briefly
-        // inherit the probe's descriptor until exec closes it (CLOEXEC).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let next_controller = loop {
-            match Lease::acquire(&directory) {
-                Ok(lease) => break lease,
-                Err(error) => {
-                    assert!(std::time::Instant::now() < deadline, "{error}");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        };
+        // At once, though other tests fork meanwhile: the probe is released,
+        // not left to a close that waits for a forked child's copy.
+        let next_controller = Lease::acquire(&directory).unwrap();
         assert!(!observed);
         assert!(Lease::observe(&path).unwrap());
         assert!(Lease::acquire(&directory).is_err());
         drop(next_controller);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "sykli-{name}-{}-{}-{}",
+            std::process::id(),
+            now(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        directory
+    }
+
+    /// A process that another thread forks has a copy of every descriptor
+    /// until it execs, and a lock belongs to the open file description that
+    /// copy shares. Dropping a lease in that window still releases it: the
+    /// next holder is never refused for a child that only had not exec'd yet.
+    #[test]
+    fn a_dropped_lease_is_free_while_a_forked_child_still_has_its_descriptor() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let directory = scratch("forked");
+        let lease = Lease::acquire(&directory).unwrap();
+        // The child says it has forked, then waits to be told to exec.
+        let (forked, mut has_forked) = UnixStream::pair().unwrap();
+        let (go_on, mut tell) = UnixStream::pair().unwrap();
+        let forker = std::thread::spawn(move || {
+            let mut command = ProcessCommand::new("true");
+            // SAFETY: one write and one read on sockets; nothing allocates.
+            unsafe {
+                command.pre_exec(move || {
+                    (&forked).write_all(&[1])?;
+                    (&go_on).read_exact(&mut [0])
+                });
+            }
+            command.status()
+        });
+        has_forked.read_exact(&mut [0]).unwrap();
+        drop(lease);
+        let next = Lease::acquire_existing(&directory);
+        tell.write_all(&[1]).unwrap();
+        assert!(forker.join().unwrap().unwrap().success());
+        assert!(matches!(next, Ok(Some(_))), "{:?}", next.err());
+        drop(next);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A lease handed to a child stays held by it once this process drops
+    /// its own copy: a task that outlives its coordinator reads as running.
+    #[test]
+    fn a_lease_handed_to_a_child_stays_held_once_this_copy_is_dropped() {
+        let directory = scratch("handed");
+        let lease = Lease::acquire(&directory).unwrap();
+        let mut command = ProcessCommand::new("sh");
+        lease.inherit(&mut command);
+        // The child holds it until its stdin closes.
+        let mut child = command
+            .args(["-c", "read line || true"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(lease);
+        let refused = Lease::acquire_existing(&directory).map(|lease| lease.is_some());
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.starts_with("lease-busy")),
+            "{refused:?}"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
