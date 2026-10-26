@@ -78,15 +78,20 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
 
 /// A Cargo build reads more than its Rust sources: a vendored or path
 /// dependency, a file a source includes, data its tests read (in `tests/`,
-/// a top-level `fixtures/`, beside a pin, in a workflow file), and nothing
-/// can tell all of them apart from the files nothing reads. So every cargo
-/// task declares every file git lists here (`listing`), except what
-/// `left_out` names at the top level, and except untracked files that the
-/// completeness rule does not count. A file that is declared and read by
-/// nothing costs cache hits when it changes; one that is read and not
-/// declared keeps a cached pass it does not deserve. Every file the
-/// completeness rule requires (`cargo_inputs`) is declared, so `run`
-/// accepts the contract `init` writes.
+/// a top-level `fixtures/`, beside a pin), and nothing can tell all of them
+/// apart from the files nothing reads. So every cargo task declares every
+/// file git lists here (`listing`), symbolic links whatever they lead to,
+/// except documents, licences and CI configuration (`cargo_inputs::docs`,
+/// which the undeclared-sibling check never asks for either) and sykli's own
+/// contract and lock at the top level. What the completeness rule requires
+/// is declared all the same: Cargo's files by name, every file a source
+/// includes, and every document a source names (a test that reads
+/// `README.md`). So `run` accepts the contract `init` writes, and a commit
+/// of documents keeps it accepted. An untracked file is declared only when
+/// the rule counts it, and an include whose path cannot be known refuses
+/// here as it does in `run`. A file that is declared and read by nothing
+/// costs cache hits when it changes; one that is read and not declared
+/// keeps a cached pass it does not deserve.
 fn cargo(
     root: &Path,
     contract: Option<&str>,
@@ -97,18 +102,22 @@ fn cargo(
     }
     let (tracked, untracked) = listing(root)?;
     let source = |path: &str| Path::new(path).extension().is_some_and(|ext| ext == "rs");
-    let mut included = BTreeSet::new();
+    let mut sources = cargo_inputs::Sources::default();
     for path in tracked.iter().chain(&untracked) {
         let file = root.join(path);
         if source(path) && file.is_file() {
             let text = fs::read(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
-            included.extend(
-                cargo_inputs::included(Path::new(path), &String::from_utf8_lossy(&text))
-                    .into_iter()
-                    .map(|named| named.to_string_lossy().replace('\\', "/")),
-            );
+            sources.read(Path::new(path), &String::from_utf8_lossy(&text), path);
         }
     }
+    if let Some(refusal) = sources.refusal() {
+        return Err(refusal);
+    }
+    let included = sources
+        .included()
+        .iter()
+        .map(|named| named.to_string_lossy().replace('\\', "/"))
+        .collect::<BTreeSet<_>>();
     let mut inputs = BTreeSet::new();
     let mut build = 0;
     let listed = tracked
@@ -125,16 +134,25 @@ fn cargo(
             build += 1;
             continue;
         }
-        let wanted = included.contains(path)
-            || if tracked {
-                !left_out(path, contract)
-            } else {
-                cargo_inputs::by_name(Path::new(path))
-            };
-        if wanted && declarable(root, path, notes) {
+        let relative = Path::new(path);
+        let docs = cargo_inputs::docs(relative);
+        let required = cargo_inputs::by_name(relative)
+            || included.contains(path)
+            || (docs && sources.names(path));
+        let wanted = required || (tracked && !docs && !metadata(path, contract));
+        if wanted && declarable(root, path) {
             inputs.insert(path.clone());
         }
     }
+    // The file a declared link to a file in the repository leads to, which
+    // `verify --commit` judges the link by.
+    let all = tracked.iter().chain(&untracked).collect::<BTreeSet<_>>();
+    let behind = inputs
+        .iter()
+        .filter_map(|path| file_behind(root, path))
+        .filter(|file| all.contains(file))
+        .collect::<Vec<_>>();
+    inputs.extend(behind);
     if build > 0 {
         notes.push(format!(
             "{build} files under target/, Cargo's build directory, are not declared; ignore it in .gitignore"
@@ -178,49 +196,32 @@ fn listing(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     Ok((files.cached, files.others))
 }
 
-/// The files at the top level that no build or test is expected to read,
-/// left out so that editing them keeps cached passes: prose (`*.md`),
-/// licences and notices, and sykli's own contracts and lock. Only the top
-/// level, which the undeclared-sibling check exempts, so leaving them out
-/// never refuses a run; a file a source includes (a crate documented by its
-/// README) is declared all the same. Nothing else is left out: a test that
-/// checks a workflow file or a document reads it.
-fn left_out(path: &str, contract: Option<&str>) -> bool {
-    if path.contains('/') {
-        return false;
-    }
-    let upper = path.to_ascii_uppercase();
-    upper.ends_with(".MD")
-        || ["LICENSE", "LICENCE", "COPYING", "NOTICE"]
-            .iter()
-            .any(|prefix| upper.starts_with(prefix))
-        || matches!(path, "sykli.json" | "sykli.lock")
-        || contract == Some(path)
+/// sykli's own contract and lock at the top level, and the contract being
+/// written: evaluation metadata, never a task's input.
+fn metadata(path: &str, contract: Option<&str>) -> bool {
+    matches!(path, "sykli.json" | "sykli.lock") || contract == Some(path)
 }
 
-/// Whether `path` can be declared: a regular file, or a symbolic link to
-/// one inside `root`, since a run hashes what the link leads to. A link out
-/// of `root` or to no file is not (with a note); a file gone from the work
-/// tree, a directory or a submodule is not either.
-fn declarable(root: &Path, path: &str, notes: &mut Vec<String>) -> bool {
-    let file = root.join(path);
-    match fs::symlink_metadata(&file) {
-        Ok(meta) if meta.is_file() => true,
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let inside = file.is_file()
-                && fs::canonicalize(&file)
-                    .ok()
-                    .zip(fs::canonicalize(root).ok())
-                    .is_some_and(|(target, root)| target.starts_with(root));
-            if !inside {
-                notes.push(format!(
-                    "{path} is a symbolic link to no file in the repository; not declared"
-                ));
-            }
-            inside
-        }
-        _ => false,
+/// Whether `path` can be declared: a regular file, or a symbolic link,
+/// whatever it leads to (a run records a link that leads to no file in the
+/// repository by its own text). A file gone from the work tree, a directory
+/// or a submodule cannot.
+fn declarable(root: &Path, path: &str) -> bool {
+    fs::symlink_metadata(root.join(path))
+        .is_ok_and(|meta| meta.is_file() || meta.file_type().is_symlink())
+}
+
+/// The regular file inside `root` that the symbolic link at `path` leads
+/// to, as a path from `root`; None for anything else.
+fn file_behind(root: &Path, path: &str) -> Option<String> {
+    let link = root.join(path);
+    if !fs::symlink_metadata(&link).ok()?.file_type().is_symlink() {
+        return None;
     }
+    let file = fs::canonicalize(&link).ok().filter(|file| file.is_file())?;
+    let root = fs::canonicalize(root).ok()?;
+    let relative = file.strip_prefix(root).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn npm(root: &Path, notes: &mut Vec<String>) -> Option<Ecosystem> {

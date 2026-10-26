@@ -676,6 +676,31 @@ pub(crate) fn pre_push(
     let read =
         crate::ask_in_bounded(&mut session, input_names, crate::INPUT_BLOB_KEPT).and_then(|more| {
             answers.extend(more);
+            // A third round, only for declared symbolic links: where they lead.
+            let mut around = Vec::new();
+            for step in &steps {
+                let Step::Judge {
+                    update, at, owned, ..
+                } = step
+                else {
+                    continue;
+                };
+                let judged = match (&outside_judged, owned.as_ref()) {
+                    (Some(judged), _) => judged.as_ref().ok(),
+                    (None, Some(owned)) => owned.as_ref().ok(),
+                    (None, None) => None,
+                };
+                if let (Some(judged), Ok(_)) = (judged, at.as_ref()) {
+                    around.extend(crate::link_target_names(
+                        &update.local_sha,
+                        &judged.contract,
+                        &answers,
+                    )?);
+                }
+            }
+            if !around.is_empty() {
+                answers.extend(crate::ask_in(&mut session, around)?);
+            }
             session.finish()
         });
     if let Err(error) = read {
