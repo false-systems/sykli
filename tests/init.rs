@@ -639,3 +639,42 @@ fn a_change_to_any_file_init_declares_misses_the_cache() {
     fs::remove_dir_all(&bin).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A submodule is a directory in git's index, never a file a task can
+/// declare. Beside a file init declares, neither the undeclared-sibling
+/// check nor the Cargo rule may require it, or init's contract is refused.
+#[test]
+fn a_submodule_beside_declared_files_is_not_required() {
+    let root = temp_root("submodule");
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, "vendor/notes.txt", "vendored by hand\n");
+    write(&root, "tests/data/case.txt", "case\n");
+    for sub in ["vendor/sub", "tests/data/sub"] {
+        write(&root, &format!("{sub}/file.txt"), "inside\n");
+        git(&root.join(sub), &["init", "--quiet"]);
+        git(&root.join(sub), &["add", "."]);
+        git(&root.join(sub), &["commit", "--quiet", "-m", "sub"]);
+    }
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "with submodules"]);
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let declared = inputs(task(&contract(&root), "test"));
+    assert!(
+        declared.contains(&"vendor/notes.txt".to_string()),
+        "{declared:?}"
+    );
+    assert!(
+        !declared.iter().any(|input| input.ends_with("sub")),
+        "{declared:?}"
+    );
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    fs::remove_dir_all(root).unwrap();
+}

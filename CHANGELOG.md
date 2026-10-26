@@ -397,6 +397,10 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- A submodule, which is a directory in git's index and cannot be declared,
+  no longer makes `run` refuse a contract: the Cargo completeness rule
+  required one under a `tests` directory, and the undeclared-sibling check
+  one beside a declared input.
 - Existing v2 lock files must pin the named contract; empty maps and missing
   entries no longer silently run unpinned, including `verify --commit`.
   `sykli lock` can add the missing entry without discarding sibling pins.

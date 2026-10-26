@@ -627,6 +627,8 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
             continue;
         }
         match fs::symlink_metadata(&path) {
+            // A submodule: a directory in the index, never a declarable file.
+            Ok(meta) if meta.is_dir() => {}
             Ok(_) => {
                 let relative = path.strip_prefix(root).unwrap_or(&path);
                 missing.insert(relative.to_string_lossy().into_owned());
@@ -728,6 +730,8 @@ fn folder_missing_inputs(
                 continue;
             }
             match fs::symlink_metadata(file) {
+                // A submodule: a directory in the index, never a declarable file.
+                Ok(meta) if meta.is_dir() => {}
                 Ok(_) => {
                     let relative = file.strip_prefix(root).unwrap_or(file);
                     missing.insert(FolderInput {
