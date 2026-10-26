@@ -497,6 +497,24 @@ contract consumer can observe; internal refactors are not listed.
   `/private/var`), refused it as outside the repository (exit 2); it is now
   read from the commit.
 
+### Removed
+- Typed production, shipped in 0.6.0: `targets`, `produce`,
+  `verify-production`, `diagnostics`, `plan --target`, `init --production`
+  (with `--package`, `--bin` and `--smoke`), and the production forms of
+  `status` and `resume` (a production ID, `--store`, `--summary`, `--retry`,
+  `--abandon`, `--stop-after`, `--operation`, `--jobs`). `status` now takes
+  `--run ID` or `--commit REV`, and `resume` takes `--run ID`; those modes,
+  their output and their exit codes are unchanged.
+- Delivery, added above and never released: `deliver`, `observe`, and
+  `status --delivery` and `resume --delivery` (with `--reapply`).
+- Pull-request evidence, shipped in 0.6.0: `inspect` and `assess`, with
+  `sykli-requirements.v1`, `sykli-inspect.v1`, `sykli-assessment.v1`,
+  `sykli-error.v1` and the evidence bundles under `.sykli/evidence`. sykli no
+  longer runs `gh` or makes any network request.
+- The CI shadow experiment: `examples/ci_shadow.rs`, its CI steps and
+  `docs/ci-shadow.md`.
+- The removed code is kept on the `archive/delivery-production` branch.
+
 ## [0.6.0] - 2026-09-09
 
 The first published release of this implementation. Version 0.2.0 was bumped

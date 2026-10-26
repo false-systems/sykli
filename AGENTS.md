@@ -1,12 +1,9 @@
 Product boundaries:
 
-- Own graph parsing, validation, planning, execution, caching, receipts, and local typed production.
-- Production assessment establishes declared products and checks, not task closure or publication authority. External tools and workers remain optional consumers.
-- Stay a local CLI: no server, network service, daemon, coordination, or agent execution. The one network use is on-demand, read-only acquisition of pull-request evidence through the operator's `gh` (`sykli inspect`); it never mutates a provider, triggers work, or runs candidate code. A bounded executor (a production attempt, or the coordinator of a run started with `run --detach` or of a delivery started with `deliver --detach`) may finish its work after its initiating client exits; it is never a daemon: it ends with the attempt, run or delivery it was started for.
-- Delivery (`sykli deliver`) is a journaled operation, not a deployment tool or controller. Sykli knows no kind of target: the caller's declared commands apply, observe and smoke-test it, and sykli records what happened and judges only what an observer reported, dimension by dimension. It never re-applies on its own (no reconcile loop), never repeats an unacknowledged apply, nor applies another delivery over it, before an observation that reached the target, and never calls an acknowledgement a deployment. The named user and condition for this growth: a caller putting a produced artifact on a disposable target needed the operation's state to survive a crash without fake success.
-- Candidate assessment (`sykli inspect` / `sykli assess`) establishes only the declared review-readiness predicates under a printed trust designation. It is advisory: no merge or deployment authority, no claim that GitHub's full merge policy is met.
+- Own graph parsing, validation, planning, execution, caching, and receipts.
+- Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
-- Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode) do not return without one.
+- Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
 - Treat `sykli plan --json` as the agent-facing query surface; before handoff run sykli's own graph, `cargo run --quiet --locked -- run sykli.json --json` (the same run CI does).
 
@@ -31,9 +28,9 @@ checks, caching by content. Pieces on their own:
 ```sh
 cargo build                                   # binary lands in the shared target dir, not ./target
 cargo test --workspace --locked               # everything
-cargo test --test cli                         # one integration suite: cli, init, assess, assess_portable, production
-cargo test --test production -- executor_loss # one test by substring
-cargo test --bin sykli assessment             # unit tests in one module
+cargo test --test cli                         # one integration suite: cli, init, runs, boundary, worktree_cache
+cargo test --test runs -- detached            # tests by substring
+cargo test --bin sykli journal                # unit tests in one module
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc   # Windows type-check (target is installed)
 cargo run --quiet -- lock sykli.json          # re-pin after editing sykli.json
 ```
@@ -41,13 +38,14 @@ cargo run --quiet -- lock sykli.json          # re-pin after editing sykli.json
 The CLI binary lands in Cargo's target directory, which `CARGO_TARGET_DIR` or a
 Cargo config may move outside the checkout; prefer `cargo run --quiet --`.
 macOS has no `timeout`; use `perl -e 'alarm 300; exec @ARGV' -- <cmd>` to bound
-a run. `tests/production.rs` is Unix-only and takes about 25 s; a hang there
-usually means a test re-ran a FIFO-latched recipe without feeding the latch.
+a run. `tests/runs.rs` is Unix-only and takes about 10 s; a hang there
+usually means a test waits on a FIFO-latched task it never released
+(`release`, `unlatch`).
 
 When adding a source, test or fixture file, add it to the `inputs` of the
-`fmt`, `clippy` and `test` tasks in `sykli.json` (fixtures to `test` only), to
-the `paths` list in `sykli.production.json`, then run `sykli lock sykli.json`.
-Both contracts list files explicitly; nothing is globbed.
+`fmt`, `clippy` and `test` tasks in `sykli.json` (fixtures to `test` only),
+then run `sykli lock sykli.json`. The contract lists files explicitly;
+nothing is globbed.
 
 ## Toolchain constraints
 
@@ -61,12 +59,13 @@ Both contracts list files explicitly; nothing is globbed.
   (`flock`, `fcntl`, `setsid`, `setpgid`, `kill`, `killpg`, `signal`) are
   declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via
   libc.
-- `src/production` is `#[cfg(unix)]`; on Windows those commands do not exist and
-  anything only they construct must be `cfg_attr(not(unix), allow(dead_code))`.
+- `src/journal.rs` and `src/runs.rs` are `#[cfg(unix)]` (on Windows `runs` is a
+  stub of uninhabited types), and so are `status` and `resume`; anything only
+  Unix code uses must be `cfg_attr(not(unix), allow(dead_code))`.
 
 ## Architecture
 
-One binary, three surfaces, one identity model. Every identity is a
+One binary, one identity model. Every identity is a
 domain-separated SHA-256 over canonical JSON (`canonical::identity`), computed
 after `canonical::decode` has rejected duplicate keys and floats. Existing
 domains and schema meanings never change; incompatible changes are a new `.vN`.
@@ -149,10 +148,9 @@ directory.
 
 **Durable graph runs (`src/runs.rs`, `src/journal.rs`, Unix only).** Every
 `run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
-production journal's machinery, lifted unchanged into `src/journal.rs`
-(hash-chained envelopes, exclusive synced `publish`, `journal-lock`, flock
-`Lease`); production keeps its own record type and `F_FULLFSYNC`, runs use
-`fsync(2)` (`canonical::Durability`). The first record, `requested`, holds
+machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
+`publish_with`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
+(`canonical::Durability`). The first record, `requested`, holds
 the contract as run (canonical JSON), the subject with its input records,
 the runtime fingerprint and the task list, and is durable before any task is
 dispatched; the run id is its identity. Each task is then `reused`,
@@ -199,122 +197,14 @@ test hook
 crash window; release builds have none. On Windows `runs` is a stub of
 uninhabited types and a run is in memory, as before.
 
-**Typed production (`src/production/`, Unix only).** Opt-in local artifact
-production from a `sykli-production-contract.v1`. `contract.rs` is the schema
-and validation; `discovery.rs` generates contracts from Cargo, Go or a bare
-`main.rs`; `store.rs` is the content-addressed blob store, atomic `publish`,
-and `flock`-based leases; `mod.rs` is the journal and executor. State is an
-append-only journal of facts (`Started`, `Finished`, `ContactLost`,
-`Abandoned`), each envelope hashed and chained; `status` is a pure function of
-the journal. A controller acquires the production lease, appends `Started`,
-and spawns a detached executor (`__production_attempt`, its own session via
-`setsid`) that inherits the lease fd and takes a per-attempt liveness lease;
-recipe shells run in their own process group, which the executor kills after
-the shell exits, so a signalled shell is a recorded `interrupted` failure and
-only a failed `wait` is `ContactLost`. `--retry` reopens failed operations;
-`--abandon ATTEMPT` records a lost attempt as abandoned (refused while its
-executor is alive). Never turn an unknown into a success: an unresolved attempt
-blocks the production until it is resolved or abandoned.
-
-**Delivery (`src/production/delivery.rs`, Unix only).** A
-`sykli-delivery-contract.v1` (its own file, so changing how an artifact is
-delivered never changes the production that built it) names, per target, a
-production target's product and the caller's commands: `identity`
-(`content`, or a command printing what the target will report),
-`apply`, `observe` (prints `sykli-observation.v1`), optional `smoke`,
-`freshness_seconds`, `settle_seconds`. Commands are `sykli::Task`s run through
-`launch` (env and `inherit` rules of runs; `SYKLI_DELIVERY`, `SYKLI_INTENDED`,
-`SYKLI_DELIVERY_TARGET`, and for apply `SYKLI_ARTIFACT` and
-`SYKLI_DELIVERY_ATTEMPT`); `launch` takes a `Journaled` attempt, implemented by
-a run's attempt and a delivery's apply. A delivery lives in
-`<git-common-dir>/sykli/deliveries/<id>/` (`sykli-delivery-record.v1`, the
-shared `journal`, `Durability::Fsync`, created aside and renamed with its lease
-held); its id is the identity (`sykli-delivery.v1`) of its `Request`, which
-holds the contract as read, the delivered product (production, store,
-artifact) and the intended identity. Facts: `requested`; `dispatched` (attempt
-lease first, durable before the shell); `started`; one end: `acknowledged`
-(exit 0), `failed` (an exit code: refused; a foreign signal: unknown; neither:
-never started), `interrupted` (sykli's stop) or `lost` (a later coordinator
-found it unfinished); `observed` (the observer's execution with its stdout
-digest, the validated observation or why none, the smoke run; any time,
-generation `None` for `sykli observe`); `reconciled` (an unknown end, judged
-from a cited observation, which `reached` the target when its observer exited
-0 with a reachable report). `History::apply` refuses a stale generation, a
-second end, an exit-0 failure, an `observed` effect its observation does not
-show (`Observation::shows`: desired artifact intended, operation this
-delivery; the artifact alone attributes nothing), and any second `dispatched`
-unless it is `--reapply` after a refused apply or an unknown one reconciled
-from an observation that reached the target (invariant H). `resume --delivery`
-takes over (generation + 1, unfinished attempts `lost`), observes and records
-`reconciled` before anything else, and dispatches again only on `--reapply`.
-Across deliveries, `clear_to_apply` (under the target lock, in `deliver` and
-in any `resume` that would dispatch) refuses while another delivery to the
-target `hold`s it: busy (`target-busy`), or an unknown effect never
-reconciled from an observation that reached the target
-(`target-unreconciled`); `deliver --reapply-over ID` passes the latter only
-when its reconciliation could not reach the target, recorded in
-`Request.reapply_over`. `status --delivery` is a pure function of the journal,
-the leases, the clock and the clone's other deliveries to the target
-(`superseded_by`, by the target's sequence): `judge` computes dimensions A to
-F and one label (VERIFIED HEALTHY, NOT VERIFIED HEALTHY, DEGRADED, UNKNOWN,
-STALE). It takes observations in the order their observers began (`by_start`;
-`Execution::of` dates one before its spawn), never journal order; C is this
-delivery's only when attributed; D is done only on the controller's
-`complete`; a `uid` other than the first after the apply is "target
-recreated"; an observation naming an operation the clone does not know marks
-the delivery superseded (`superseded_seen`); an observation dated more than
-`CLOCK_SKEW_MS` ahead is never fresh. `deliver --detach` hands the lease to
-`__delivery_coordinator`. Checkpoints: `after-request`, `after-dispatch`,
-`before-apply-start-record`, `after-apply-start`, `after-apply-exit`, `after-ack`, `before-observed`,
-`after-lost`, `after-reconcile`, `coordinator-start`. Retention:
-`SYKLI_DELIVERY_BUDGET` (100) per clone, oldest settled first (`prunable`: no
-live coordinator or apply, no unknown effect, not the newest per target);
-`MAX_RECORDS` (2000) per delivery. The per-target directory
-(`deliveries/.targets/<digest>`) holds the lock `deliver` takes from its
-check until its delivery is recorded (a dispatching `resume` takes it for its
-check), and `sequence/` (`next_in_sequence`, under its own short lock): every
-request and dispatch to the target gets the next number, so the order of
-applies never depends on the clock. An observation counts for an apply only when it began after the
-apply's recorded end (`observable_from`), and a started apply without an exit
-or signal gets no end (it becomes lost, never refused). Records name inherited
-variables (`set`/`absent`), never their digests.
-
-**Pull-request evidence (`src/assessment.rs`, `src/github.rs`,
-`src/evidence.rs`, `src/inspect.rs`).** `github.rs` makes bounded, read-only
-`gh api` GETs (fixed endpoints from validated components, page/byte/time caps,
-token redaction), records why each listing stopped, reads the pull request and
-lists runs/reviews twice, and stores raw bodies as content-addressed objects.
-`evidence.rs` publishes a bundle (manifest + objects + private diagnostics)
-into `.sykli/evidence/<collection-id>` by writing a private temp dir and
-renaming it; loading re-verifies every digest. `github::normalize` is the only
-path from raw objects to `Observations` (with `sha256:<object>#/json/pointer`
-references), used identically live and on replay. `assessment.rs` is pure:
-`Requirements` (two predicates: `workflow-reported-success`,
-`candidate-approval`) plus a `Request` (stable candidate coordinates) plus
-`Observations` give an `Assessment` with per-obligation verdicts, exclusions
-with reasons, gaps, and the fixed trust designation
-(`trusted-local-collector-and-store`, `not-established`, `advisory`). Gaps and
-incompleteness are always unproven, never a convenient selection; a race or an
-incomplete listing blocks the affected obligation. `inspect.rs` maps results to
-exit codes 0 established, 1 refuted, 2 tool error, 3 unproven, 4 conflict, and
-persists records beside the bundle best-effort after printing the verdict.
-
-**Tests.** `tests/delivery.rs` (Unix) delivers to a scripted FAKE target, a
-test adapter whose commands print what each test writes; it kills the
-coordinator at each delivery checkpoint, during the apply and during the
-observer, and covers every reconcile case; its last test is `#[ignore]`d
-and opt-in (`cargo test --test delivery -- --ignored real_target`, with
-`SYKLI_TEST_REAL_TARGET`, `SYKLI_TEST_REAL_TARGET_NAME`): it runs the lost
-acknowledgement against a real target the caller's own commands drive.
-`tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the coordinator at each
-checkpoint and of a task, SIGTERM/SIGINT, a stale coordinator, a replayed
-completion, inputs changed mid-run, concurrent cache stores; each ends on
-`nothing_unknown_passed`. Its hook tests skip under `--release`. `tests/assess.rs` drives `inspect` through a fake `gh` shell script
-on `PATH` serving `tests/fixtures/github/pr25` (real responses from this
-repository's PR #25); it is Unix-only. `tests/assess_portable.rs` replays the
-committed bundle in `tests/fixtures/bundle` on every platform. Production tests
-use FIFO latches to hold a build mid-flight; any new test that retries a
-latched operation must feed the latch again.
+**Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the
+coordinator at each checkpoint and of a task, SIGTERM/SIGINT, a stale
+coordinator, a replayed completion, inputs changed mid-run, concurrent cache
+stores; each ends on `nothing_unknown_passed`. Its tasks wait at FIFO
+latches to hold a run mid-flight; any new test that runs a latched task again
+must release the latch again. Its hook tests skip under `--release`.
+`tests/cli.rs` pins the help flags other tools detect
+(`help_lists_the_flags_other_tools_detect`).
 
 ## Working rules in this repository
 
@@ -328,8 +218,7 @@ latched operation must feed the latch again.
   keep to `ubuntu-latest` and `windows-latest` (macOS is the development host
   and is covered locally). Do not push a release tag (`release.yml` builds
   five targets) unless told to.
-- `.sykli/` and other tools' local state directories are ignored; the
-  production store lives under `.sykli/`.
+- `.sykli/` and other tools' local state directories are ignored.
 
 ## Languages
 
