@@ -58,7 +58,8 @@ nothing is globbed.
 - No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls
   (`flock`, `fcntl`, `setsid`, `setpgid`, `kill`, `killpg`, `signal`) are
   declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via
-  libc.
+  libc. On Windows, `BCryptGenRandom` (bcrypt.dll, for the inherit key) is
+  declared once, in `windows_random` in `src/main.rs`.
 - `src/journal.rs` and `src/runs.rs` are `#[cfg(unix)]` (on Windows `runs` is a
   stub of uninhabited types), and so are `status` and `resume`; anything only
   Unix code uses must be `cfg_attr(not(unix), allow(dead_code))`.
@@ -75,9 +76,10 @@ domains and schema meanings never change; incompatible changes are a new `.vN`.
 ordering. `run` executes level by level under `sh -c --` with a null stdin and
 an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
 `inherit` variables (inherited values reach the task; only their digests reach
-the receipt, keyed: HMAC-SHA256 under the clone's own `sykli/inherit-key` in
-the common git directory, `inherited_digests`, so no receipt holds a digest a
-guess can be checked against). A declared `env` value may name `${worktree_cache}`
+the receipt, keyed: HMAC-SHA256 under 32 random bytes of the clone's own,
+`sykli/inherit-key` in the common git directory, made only by a run,
+`inherited_keyed_digests`; the plain `inherited_digests` is no longer written,
+so no receipt holds a digest a guess can be checked against). A declared `env` value may name `${worktree_cache}`
 (`src/worktree_cache.rs`): `<git-common-dir>/sykli/worktrees/<id>/cache`, the
 16-hex id from the worktree's incarnation: its resolved top level and git
 directory (read from its `.git`, no git process) and the token in that git

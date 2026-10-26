@@ -420,21 +420,35 @@ contract consumer can observe; internal refactors are not listed.
   inside the repository is not refused unless it has a `..` in it. With no
   git repository around the current directory, nothing is refused. Where a
   contract is judged, nothing changes.
-- A receipt's `inherited_digests` (and the cache key of a task that
-  inherits) is now HMAC-SHA256 of `sykli-inherited.v1`, the name and the
-  value, keyed by a secret of the clone's own: 64 hex digits in
-  `<git-common-dir>/sykli/inherit-key` (0600 where files have modes), made by
-  the first run that needs it and never rewritten. It was the plain SHA-256
-  of the value, and CI uploads receipts: a short token could be found by
-  trying every candidate against it. A salt recorded in the receipt would be
-  as public as the digest, so the key is kept where no receipt goes. The
-  field keeps its name and shape (64 hex digits, or `absent`) and changes
-  meaning: digests are comparable only between runs of one clone (a fresh
-  CI checkout has its own key), and nobody can check one against a value
-  they know. `verify` never read the field. Each task that inherits misses
-  the cache once; a contract that inherits nothing makes no key, and its
-  keys are unchanged. A task's own output is not covered: a value it prints
-  is in its captured output and `stdout_digest`.
+- A receipt records each inherited value as `inherited_keyed_digests`, and
+  no longer writes `inherited_digests`. The old field held the plain
+  SHA-256 of the value, and CI uploads receipts: a short token could be
+  found by trying every candidate against it. Nothing in sykli read it
+  (`verify` never did), and an older receipt that has it still verifies.
+  The new field (64 hex digits, or `absent`), and the cache key of a task
+  that inherits, is HMAC-SHA256 of `sykli-inherited.v1`, the name and the
+  value, under a key of the clone's own: 32 bytes from the operating system
+  (`/dev/urandom`; `BCryptGenRandom` on Windows), kept as hex in
+  `<git-common-dir>/sykli/inherit-key` (0600 where files have modes), made
+  by the first run that needs it and never rewritten. A salt recorded in
+  the receipt would be as public as the digest, so the key is kept where no
+  receipt goes. What it costs:
+  - Digests are comparable only between runs of one clone, and nobody can
+    check one against a value they know.
+  - The key is only as secret as the clone. Any task the clone runs can
+    read it, on a runner that keeps `.git` between jobs a pull request's
+    code too, and whoever has read it can try guesses against every digest
+    the clone publishes.
+  - Each task that inherits misses the cache once in a clone that lasts. A
+    fresh clone makes a new key, so a CI job that restores `.sykli/` into a
+    fresh clone misses the cache for every task that inherits, on every run.
+  - A contract that inherits nothing makes no key, and its keys are
+    unchanged. `plan --explain` never makes the key: before a run has, it
+    reports a task that inherits as `missing`. Where the file system has no
+    hard links, the key is renamed into place instead, and two first runs
+    racing there may each use their own key once.
+  - A task's own output is not covered: a value it prints is in its
+    captured output and `stdout_digest`.
 - Where a contract is written or run (`validate` exit 1; `lock`, `plan`,
   `run` exit 2), `$worktree_cache` without braces in an `env` value is
   refused, and the refusal names `${worktree_cache}`. sykli never expanded
