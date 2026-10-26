@@ -37,6 +37,10 @@ const VERIFY_COMMIT_GIVEN: &[&str] = &["cat-file"];
 /// Discovery and one `cat-file --batch` for every pushed commit.
 const PRE_PUSH: &[&str] = &["rev-parse", "cat-file"];
 const PRE_PUSH_GIVEN: &[&str] = &["cat-file"];
+/// `validate` refuses what `run` refuses before any task, so it lists the
+/// inventory once, after discovery (none with the repository given).
+const VALIDATE: &[&str] = &["rev-parse", "ls-files"];
+const VALIDATE_GIVEN: &[&str] = &["ls-files"];
 
 const ZEROS: &str = "0000000000000000000000000000000000000000";
 
@@ -232,6 +236,31 @@ fn with<'a>(args: &[&'a str], facts: &'a [String]) -> Vec<&'a str> {
     let mut all = args.to_vec();
     all.extend(facts.iter().map(String::as_str));
     all
+}
+
+#[test]
+fn validate_stays_within_its_git_budget() {
+    let scratch = Scratch::new("validate");
+    let contract = scratch.config.join("sykli.json");
+    fs::write(&contract, CONTRACT).unwrap();
+    let contract = contract.to_str().unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", contract])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    within(
+        "validate",
+        scratch.counted(&["validate", contract], None),
+        0,
+        VALIDATE,
+    );
+    within(
+        "validate (given)",
+        scratch.counted(&with(&["validate", contract], &scratch.facts()), None),
+        0,
+        VALIDATE_GIVEN,
+    );
 }
 
 #[test]

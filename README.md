@@ -104,10 +104,15 @@ sykli run --json > .sykli/receipt.json            # run the graph, keep the rece
 sykli verify .sykli/receipt.json --contract sykli.json
 ```
 
-`init` creates `.sykli/` for local state and adds it to `.gitignore`. Review the
-inputs it declares, especially configuration and fixtures, and declare files you
-add later. Task execution needs Git, a POSIX `sh` and your project's own
-toolchain. On Windows, Git for Windows supplies `sh`.
+`init` creates `.sykli/` for local state and adds it to `.gitignore`. In a Cargo
+repository each task declares every file git tracks, [documents](#documents)
+and symbolic links included, since a build or a test can read a vendored crate,
+an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
+sykli's own contract and lock, and a symbolic link that leads out of the repository,
+which cannot be bound. Review the inputs it declares, and declare files you add
+later. Task execution
+needs Git, a POSIX `sh` and your project's own toolchain. On Windows, Git for
+Windows supplies `sh`.
 
 > [!NOTE]
 > This README describes `main`. For a reproducible install, replace
@@ -240,14 +245,51 @@ lists as an input, even when every task is already selected. It checks staged,
 unstaged and untracked non-ignored files, and `--base origin/main` adds
 committed changes relative to that ref. Contract and lock changes are labeled as
 evaluation metadata. In Cargo-root repositories, `run` refuses to execute or
-reuse passes when known source, configuration or test files in the current Git
-inventory are missing from every task's inputs. In every graph, it also refuses
-an undeclared sibling of a declared input: a tracked file directly inside a
-folder that holds one of a task's inputs, which that task does not declare.
-That catches a fixture added next to declared fixtures, once it is `git add`ed.
-It is a tripwire, not a dependency scan. It does not catch files in new
-subfolders or in parent folders, anything in the repository root, or
-untracked, ignored and generated files. Other unmapped paths are advisory.
+reuse passes when any of these files in the current Git inventory is missing
+from every task's inputs:
+
+- known source, configuration or test files;
+- a file a Rust source includes (`include_str!`, `include_bytes!`, `include!`)
+  by a string literal, or by `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`,
+  which is resolved from the nearest `Cargo.toml`. An include whose path is
+  anything else (a macro's variable, an expression) is refused with its file
+  and line, since its file cannot be known; a path built from `OUT_DIR` names
+  a file made at build time and is not asked for.
+
+A [document](#documents) that a string literal in a Rust source names, as a test
+that reads it does (`fs::read("README.md")`), but no task declares, only warns:
+`validate`, `plan --explain` and `run` print `README.md is named in
+tests/x.rs:LINE but not declared; declare it if a task reads it` and go on,
+since a help or message text names files too. A top-level document is named by
+its file name, a deeper one by its path; a comment or a doc comment that
+mentions a document names nothing.
+
+In every graph, it also refuses an undeclared sibling of a declared input: a
+tracked file directly inside a folder that holds one of a task's inputs, which
+that task does not declare, unless it is a document. That catches a fixture
+added next to declared fixtures, once it is `git add`ed. It is a tripwire, not a
+dependency scan. It does not catch files in new subfolders or in parent folders,
+anything in the repository root, documents, or untracked, ignored and generated
+files. Other unmapped paths are advisory.
+
+Inside a git repository, `validate` refuses (exit 2, as `run` does) a contract
+for these undeclared files, so its verdict depends on the work tree as well as
+on the contract and its lock (exit 1). That is all it adds: it does not check
+that declared inputs exist, and it runs no task. (Given a `sykli.rs` emitter,
+`validate` runs the emitter, to read the contract it emits.)
+
+<a id="documents"></a>**Documents** are a file named `*.md`, a file whose name
+starts with `LICENSE`, `LICENCE`, `COPYING` or `NOTICE` (in any case), and
+anything under a directory named `docs` or `.github`, at any depth. The
+undeclared-sibling check never asks for them, so a commit that adds documents
+never makes a contract refuse. `init` declares them like any other file, since
+a test may read a folder of Markdown cases, so editing one misses the cache. A
+document a Rust source includes is required in Cargo graphs; one a string in a
+source names warns until it is declared. What
+stays open: a new document beside declared ones, or one a hand-written
+contract leaves out, is in no key, so a test that reads its folder (with
+`read_dir`, or a path built at run time) keeps its cached pass until the
+contract declares it (`init --force` does).
 
 > [!IMPORTANT]
 > Sykli does not observe every file or tool your commands read. An undeclared
@@ -824,7 +866,17 @@ What the commit cannot show is never passed unjudged:
   declares) is generated by the run, so the commit is not expected to have
   it. It is reported as not judged: its bytes are the receipt's claim, and
   only the inputs of the task that produces it are judged.
-- A symbolic link is judged by its entry, the target's name, and by the
+- A symbolic link to a directory in the repository, or to nothing, is
+  declared by its own text: the run records the target's name (`"link": true`
+  in its input record), and the commit must have that link, with that text,
+  leading inside the repository to no file. A link a run recorded by its text
+  that leads to a file, or out of the repository, is refused. Before any task,
+  `run` and `validate` require every tracked file under a directory a declared
+  link leads to to be declared by the same task, and refuse a declared link
+  that leads out of the repository, to a file, a directory or nothing there:
+  no commit holds what it leads to, so no receipt of it could verify. `init`
+  leaves such a link out, with a note.
+- A symbolic link to a file in the repository is judged by its entry, the target's name, and by the
   bytes read through it, which must be those of the declared input it names.
   A link whose target no task declares is refused: declare both. A `..` in a
   target may only leave the link's own directories: after a name the target

@@ -8,6 +8,17 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- In a Cargo graph, a warning for a document (`*.md`, `LICENSE*`,
+  `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or `.github/`,
+  at any depth) that a string literal in a Rust source names but no task
+  declares: `validate` and `run` print `PATH is named in FILE:LINE but not
+  declared; declare it if a task reads it` on stderr, `plan --explain` in
+  its text and as `named_inputs: [{path, named_at}]` under
+  `input_coverage`, and all of them go on. A test that reads `README.md`
+  names it so, and so does a help text that says "see AGENTS.md", which
+  reads nothing; hence a warning, never a refusal. A top-level document is
+  named by its file name alone, a deeper one by its path; a comment or a doc
+  comment names nothing.
 - `${worktree_cache}` in a task's declared `env` values: a directory that
   belongs to the worktree the run is in,
   `<git-common-dir>/sykli/worktrees/<id>/cache`. `<id>` is 16 hex digits of
@@ -247,6 +258,49 @@ contract consumer can observe; internal refactors are not listed.
   and a `core.hooksPath` that sends git elsewhere is refused.
 
 ### Breaking
+- In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
+  exit 2) also refuse a contract that leaves out a file git lists (tracked,
+  or untracked and not ignored) that a Rust source includes
+  (`include_str!`, `include_bytes!`, `include!`) by a string literal,
+  resolved from that source's directory as rustc resolves it, or by
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`, from the nearest
+  `Cargo.toml`. A file built into the binary, or a README a crate's
+  documentation includes, kept a cached pass when it changed. Sources are
+  read as Rust: an invocation in a string or a plain comment is none, a doc
+  comment's literal ones count.
+- In a Cargo graph, an include whose path is not a string literal in one of
+  those forms (a macro's variable, an expression) refuses `init` (exit 1),
+  `validate`, `run` and `plan --explain` (exit 2), naming its file and line,
+  since the file it reads cannot be known; it used to be passed over. A path
+  built from `OUT_DIR` names a file made at build time and is not refused.
+- Inside a git repository, `validate` refuses what `run` refuses before any
+  task for undeclared files: the Cargo completeness rule, then the
+  undeclared-sibling check. It exits 2, as `run` does, with `run`'s message
+  (in `errors` with `--json`; `sykli-validate.v1` is unchanged), where it
+  used to exit 0 on a contract `run` would not start; exit 1 stays an
+  invalid, unreadable or unpinned contract. Its verdict now depends on the
+  work tree too. Outside a git repository nothing changes. A caller that
+  reads exit 1 as "re-lock" is still right; exit 2 means "declare the files
+  named", which re-locking alone does not fix.
+- A declared symbolic link to a directory in the repository, or to nothing,
+  is recorded by its own text, as git stores it: its input record carries
+  `"link": true` and the text's SHA-256, and its digest is
+  `sykli-input-link.v1`. Such a declared input used to error the task
+  (`missing or not a file`). Pointing such a link elsewhere now misses the
+  cache and the receipt. For a link to a directory, `validate`, `run` and
+  `plan --explain` (`link_missing_inputs: [{path, task, link}]`) refuse,
+  exit 2, until the same task declares every tracked file under the
+  directory. `verify --commit` and the pre-push hook judge a text record by
+  the commit's link text, and refuse it where the link leads to a file or
+  out of the repository. A link to a file in the repository is read through
+  and judged as before.
+- A declared symbolic link that leads out of the repository, to a file, a
+  directory or nothing there, is refused by `validate`, `run` and
+  `plan --explain` before any task (exit 2): no commit holds what it leads
+  to, so no receipt of it could verify. A link to a file outside used to
+  run, with every receipt then refused by `verify --commit`. `init` leaves
+  such a link out with a note, and the Cargo rule and the sibling check do
+  not ask for it.
 - Where a contract is written or run (`validate`, `lock`, `plan`, `run`,
   `resume`, the pre-commit hook), a declared `env` value that contains `${`
   must name `${worktree_cache}` and close it, and must not contain `$${`
@@ -316,6 +370,32 @@ contract consumer can observe; internal refactors are not listed.
   `resume --run` are unchanged.
 
 ### Changed
+- `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
+  `test`) declares every file git tracks under the directory sykli runs in,
+  documents included (a test may read a folder of Markdown cases), every
+  tracked symbolic link but one that leads out of the repository (and
+  the file a link to a file leads to), and the untracked files the Cargo
+  completeness rule counts. `init` used to declare Rust sources and Cargo's
+  files under `src/`, `tests/` and workspace members only, so it left out a
+  vendored path dependency (and `run` refused the contract `init` had just
+  written), a file the binary includes, a pin a test reads, and test data
+  in a top-level `fixtures/`: a change to any of them kept a cached pass.
+  Left out: `.sykli/`, Cargo's top-level `target/` (with a note when git
+  lists files there), and sykli's own contract and lock and the contract
+  being written. Editing a declared file that nothing reads, a document
+  included, now costs a cache miss. Outside a git repository `init` walks the
+  files, as before, without hidden entries, symbolic links, `node_modules`
+  or `target/`. npm and Go detection are unchanged, and existing contracts
+  are not rewritten: run `sykli init --force` (or `init --contract PATH
+  --force`) to adopt this.
+- The undeclared-sibling check no longer asks for documents (`*.md`,
+  `LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or
+  `.github/`, at any depth), in every graph, so a commit that adds
+  documents never makes a contract refuse; with `init` declaring a file in
+  nearly every folder, any new file there would have. What stays open: a
+  new document beside declared ones, or one a hand-written contract leaves
+  out, is in no key, so a test that reads its folder with `read_dir` keeps
+  its cached pass until the contract declares it (`init --force`).
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
   and SIGHUP reach tasks through sykli, which stops them, records them as
   interrupted whatever they exit with (a task that traps the signal and exits
@@ -366,6 +446,13 @@ contract consumer can observe; internal refactors are not listed.
   `plan --explain`.
 
 ### Fixed
+- A submodule, which is a directory in git's index and cannot be declared,
+  no longer makes `run` refuse a contract: the Cargo completeness rule
+  required one under a `tests` directory, and the undeclared-sibling check
+  one beside a declared input. A tracked symbolic link to a directory in the
+  repository, or to nothing, both rules required too, and now it can be
+  declared (above); one that leads out of the repository, which cannot
+  be, they no longer ask for.
 - Durable runs (Linux and macOS): a lease or journal lock sykli lets go of
   is free at once. A `flock` lock belongs to the open file description, and
   a process another of sykli's threads had just forked kept a copy of the
