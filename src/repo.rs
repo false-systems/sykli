@@ -447,6 +447,57 @@ pub(crate) fn tree_entries(tree: &[u8], id_bytes: usize) -> Vec<(String, String)
     entries
 }
 
+/// What one `git ls-files` lists under `directory`, as paths from it: the
+/// files in the index and, with `others`, the untracked files git does not
+/// ignore. `--stage` tells the two apart: it prints an index entry with its
+/// mode, object id and stage, and an untracked file bare.
+pub(crate) fn files(directory: &Path, others: bool) -> Result<Files, String> {
+    let mut args = vec!["ls-files", "--stage", "-z"];
+    if others {
+        args.extend(["--others", "--exclude-standard"]);
+    }
+    let output = git_command()
+        .arg("-C")
+        .arg(directory)
+        .args(&args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into());
+    }
+    let mut files = Files::default();
+    for entry in output.stdout.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let entry = std::str::from_utf8(entry)
+            .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
+        // `<mode> <object> <stage>\t<path>` for the index.
+        let staged = entry.split_once('\t').filter(|(stage, _)| {
+            let fields = stage.split(' ').collect::<Vec<_>>();
+            fields.len() == 3
+                && fields[0].len() == 6
+                && fields[0].bytes().all(|byte| matches!(byte, b'0'..=b'7'))
+                && fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
+                && matches!(fields[2], "0" | "1" | "2" | "3")
+        });
+        match staged {
+            Some((_, path)) => files.cached.push(path.to_string()),
+            None => files.others.push(entry.to_string()),
+        }
+    }
+    Ok(files)
+}
+
+/// `files`' answer: paths as git spells them, from the directory it listed.
+#[derive(Default)]
+pub(crate) struct Files {
+    /// In the index (once per stage while a merge is unresolved).
+    pub(crate) cached: Vec<String>,
+    /// Untracked and not ignored.
+    pub(crate) others: Vec<String>,
+}
+
 /// Whether `name` is a branch name a push can update, by git's documented
 /// rules for ref names applied to `refs/heads/NAME`, plus what `git branch`
 /// refuses: `HEAD`, `@` and a leading `-`. No git runs.

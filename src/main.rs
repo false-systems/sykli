@@ -16,6 +16,7 @@ use std::time::Instant;
 use sykli::{Contract, Task};
 
 mod canonical;
+mod cargo_inputs;
 mod hook;
 mod init;
 #[cfg(unix)]
@@ -118,7 +119,11 @@ enum Command {
     /// Validate a declared contract without executing it
     #[command(after_help = "Exit codes:\n  \
         0  valid\n  \
-        1  invalid, unreadable, or drifted from sykli.lock\n\n\
+        1  invalid, unreadable, drifted from sykli.lock, or refused by `run` for undeclared inputs\n\n\
+        Inside a git repository, the contract must also declare what `run` requires before\n\
+        any task: in a Cargo graph every Rust source, Cargo file and file under tests/, and\n\
+        every file a source names in an include_str!, include_bytes! or include! literal;\n\
+        in every graph, each tracked file beside a task's declared inputs.\n\n\
         An env value may name ${worktree_cache} (see `sykli run --help`); any other ${...},\n\
         an unclosed one, a $${, or ${worktree_cache} anywhere but an env value is invalid.\n\
         These rules apply where a contract is written or run, not where `verify` or\n\
@@ -564,44 +569,17 @@ impl Inventory {
         self.listed
             .get_or_init(|| {
                 let root = coverage_root()?;
-                let mut args = vec!["ls-files", "--stage", "-z"];
-                if self.cargo {
-                    args.extend(["--others", "--exclude-standard"]);
-                }
-                let output = repo::git_command()
-                    .arg("-C")
-                    .arg(&root)
-                    .args(&args)
-                    .output()
-                    .map_err(|error| error.to_string())?;
-                if !output.status.success() {
-                    return Err(String::from_utf8_lossy(&output.stderr).into());
-                }
-                let (mut cached, mut others) = (Vec::new(), Vec::new());
-                for entry in output.stdout.split(|byte| *byte == 0) {
-                    if entry.is_empty() {
-                        continue;
-                    }
-                    let entry = std::str::from_utf8(entry)
-                        .map_err(|_| "input coverage requires UTF-8 Git paths".to_string())?;
-                    // `<mode> <object> <stage>\t<path>` for the index.
-                    let staged = entry.split_once('\t').filter(|(stage, _)| {
-                        let fields = stage.split(' ').collect::<Vec<_>>();
-                        fields.len() == 3
-                            && fields[0].len() == 6
-                            && fields[0].bytes().all(|byte| matches!(byte, b'0'..=b'7'))
-                            && fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
-                            && matches!(fields[2], "0" | "1" | "2" | "3")
-                    });
-                    match staged {
-                        Some((_, path)) => cached.push(absolute(&root.join(path))?),
-                        None => others.push(absolute(&root.join(entry))?),
-                    }
-                }
+                let files = repo::files(&root, self.cargo)?;
+                let spelled = |paths: Vec<String>| {
+                    paths
+                        .into_iter()
+                        .map(|path| absolute(&root.join(path)))
+                        .collect::<Result<Vec<_>, _>>()
+                };
                 Ok(Listed {
+                    cached: spelled(files.cached)?,
+                    others: spelled(files.others)?,
                     root,
-                    cached,
-                    others,
                 })
             })
             .as_ref()
@@ -617,46 +595,64 @@ fn cargo_missing_inputs(contract: &Contract, inventory: &Inventory) -> Result<Ve
     }
     let listed = inventory.listed()?;
     let root = &listed.root;
+    let state = root.join(".sykli");
     let declared = declared_inputs(contract)?;
+    let files = listed
+        .cached
+        .iter()
+        .chain(&listed.others)
+        .filter(|path| !path.starts_with(&state))
+        .collect::<BTreeSet<_>>();
+    // Cargo's files by name, and every listed file a listed Rust source
+    // names in an include literal (`cargo_inputs`, which `init` declares by).
+    let mut wanted = BTreeSet::new();
+    for path in &files {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        if cargo_inputs::by_name(relative) {
+            wanted.insert((*path).clone());
+        }
+        if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
+            let text = fs::read(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            wanted.extend(
+                cargo_inputs::included(path, &String::from_utf8_lossy(&text))
+                    .into_iter()
+                    .filter(|named| files.contains(named)),
+            );
+        }
+    }
     let mut missing = BTreeSet::new();
-    for path in listed.cached.iter().chain(&listed.others) {
-        let path = path.clone();
-        if path.starts_with(root.join(".sykli")) {
+    for path in wanted {
+        if declared.contains_key(&path) {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let cargo_input = path.extension().is_some_and(|ext| ext == "rs")
-            || matches!(
-                name,
-                "Cargo.toml"
-                    | "Cargo.lock"
-                    | "rust-toolchain"
-                    | "rust-toolchain.toml"
-                    | "rustfmt.toml"
-                    | ".rustfmt.toml"
-                    | "clippy.toml"
-                    | ".clippy.toml"
-            )
-            || (path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == ".cargo")
-                && matches!(name, "config" | "config.toml"))
-            || relative
-                .components()
-                .any(|part| part.as_os_str() == "tests");
-        if cargo_input && !declared.contains_key(&path) {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => {
-                    missing.insert(relative.to_string_lossy().into_owned());
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                missing.insert(relative.to_string_lossy().into_owned());
             }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
         }
     }
     Ok(missing.into_iter().collect())
+}
+
+/// Why `run` refuses this contract before any task, for files it leaves
+/// undeclared (`cargo_missing_inputs`, then `folder_missing_inputs`), if it
+/// does. `validate` asks the same inside a git repository, so a contract it
+/// accepts is one `run` starts.
+fn undeclared_refusal(contract: &Contract) -> Result<Option<String>, String> {
+    let inventory = Inventory::new(contract)?;
+    let missing = cargo_missing_inputs(contract, &inventory)?;
+    if !missing.is_empty() {
+        return Ok(Some(cargo_coverage_error(&missing)));
+    }
+    let folders = folder_missing_inputs(contract, &inventory)?;
+    if !folders.is_empty() {
+        return Ok(Some(folder_coverage_error(&folders)));
+    }
+    Ok(None)
 }
 
 fn cargo_coverage_error(missing: &[String]) -> String {
@@ -1278,7 +1274,19 @@ fn main() -> ExitCode {
             }
         },
         Command::Validate { contract, json } => {
-            match load(&contract).and_then(|loaded| authored(&loaded.0).map(|()| loaded)) {
+            match load(&contract)
+                .and_then(|loaded| authored(&loaded.0).map(|()| loaded))
+                .and_then(|loaded| {
+                    // What `run` refuses before any task for undeclared
+                    // files; outside a git repository there is no inventory
+                    // to judge, and `run` cannot start at all.
+                    if repo::repository().is_ok() {
+                        if let Some(refusal) = undeclared_refusal(&loaded.0)? {
+                            return Err(refusal);
+                        }
+                    }
+                    Ok(loaded)
+                }) {
                 Ok((_, _, contract_hash)) => {
                     if json {
                         println!(
@@ -2953,14 +2961,8 @@ fn run(
     if detach {
         return Err(DURABLE_RUNS_UNSUPPORTED.into());
     }
-    let inventory = Inventory::new(contract)?;
-    let missing = cargo_missing_inputs(contract, &inventory)?;
-    if !missing.is_empty() {
-        return Err(cargo_coverage_error(&missing));
-    }
-    let folders = folder_missing_inputs(contract, &inventory)?;
-    if !folders.is_empty() {
-        return Err(folder_coverage_error(&folders));
+    if let Some(refusal) = undeclared_refusal(contract)? {
+        return Err(refusal);
     }
     let subject = subject(contract)?;
     // Before the run is recorded: a directory that cannot be made or held
