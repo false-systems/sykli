@@ -552,10 +552,25 @@ fn the_contract_directory_is_refused_through_home_and_extra_slashes() {
         "HELPERS=~/config sh -c 'sh \"$HELPERS/check.sh\"'".to_string(),
         format!("sh {base}//config/check.sh"),
         format!("sh {base}/./config/check.sh"),
+        // Quotes that split the path are removed, as the shell removes them.
+        "sh \"$HOME\"/config/check.sh".to_string(),
+        "sh \"${HOME}\"/config/check.sh".to_string(),
+        "sh $HOME\"/config/check.sh\"".to_string(),
+        "sh ~/\"config\"/check.sh".to_string(),
+        format!("sh '{base}'/config/check.sh"),
+        format!("sh \"{base}/con\"fig/check.sh"),
+        // A variable before the path may be empty, quoted or not.
+        format!("sh \"$PREFIX\"{base}/config/check.sh"),
     ] {
         let out = validate_with_home(&scratch, &contract, task(&run), &scratch.base);
         assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
         assert!(text(&out.stderr).contains("names the directory"), "{run}");
+    }
+    // A backslash escape is removed too, where it is not a separator.
+    if cfg!(unix) {
+        let run = format!("sh {base}/con\\fig/check.sh");
+        let out = validate_with_home(&scratch, &contract, task(&run), &scratch.base);
+        assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
     }
     // The task's own HOME is the one its shell expands.
     let declared = serde_json::json!({
@@ -570,6 +585,12 @@ fn the_contract_directory_is_refused_through_home_and_extra_slashes() {
         ("sh $HOME/config-old/check.sh", &scratch.base),
         ("sh ~user/config/check.sh", &scratch.base),
         ("sh $HOME/config/check.sh", &scratch.repo),
+        // A quote inside an ordinary argument is only a quote.
+        (
+            "printf '%s\\n' \"don't\" \"$HOME\"/config-old/check.sh",
+            &scratch.base,
+        ),
+        ("echo \"it's $HOME/configs\"", &scratch.base),
     ] {
         let out = validate_with_home(&scratch, &contract, task(run), home);
         assert_eq!(out.status.code(), Some(0), "{run}: {}", text(&out.stderr));
@@ -627,6 +648,10 @@ fn a_repository_inside_the_contract_directory_is_named_freely() {
             "true".to_string(),
             serde_json::json!({"CARGO_TARGET_DIR": format!("{repo_path}/target")}),
         ),
+        (
+            format!("test -f \"{repo_path}\"/file.txt"),
+            serde_json::json!({}),
+        ),
         (format!("cd '{repo_path}' && true"), serde_json::json!({})),
     ] {
         let out = validate_with_home(&scratch, &contract, task(run.clone(), env), repo);
@@ -637,9 +662,14 @@ fn a_repository_inside_the_contract_directory_is_named_freely() {
     let (_, value) = receipt(&scratch, repo, &contract);
     assert_eq!(value["outcome"], "passed", "{value}");
 
+    // Unpinned, so each edit below is judged for what it names.
+    fs::remove_file(scratch.base.join("sykli.lock")).unwrap();
     for run in [
         format!("sh {}/check.sh", scratch.base.display()),
         format!("sh {repo_path}/../check.sh"),
+        // A quote that ends before the `..` does not end the path.
+        format!("sh \"{repo_path}\"/../check.sh"),
+        format!("sh '{repo_path}'/../check.sh"),
     ] {
         let out = validate_with_home(
             &scratch,
@@ -648,6 +678,7 @@ fn a_repository_inside_the_contract_directory_is_named_freely() {
             repo,
         );
         assert_eq!(out.status.code(), Some(1), "{run}: {}", text(&out.stdout));
+        assert!(text(&out.stderr).contains("names the directory"), "{run}");
     }
 }
 
