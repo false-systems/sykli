@@ -213,7 +213,11 @@ before any task runs, so a link a task makes while it runs is not seen.
 Tasks run under `sh -c` with no stdin. They receive `PATH`, `HOME` and `TMPDIR`,
 plus declared `env` values and named `inherit` variables. Inherited values reach
 the task, but only their digests reach the receipt, where they count toward the
-task's identity. A declared value may name `${worktree_cache}`, a directory of
+task's identity. A digest is keyed by a secret of the clone's own
+(`$(git rev-parse --git-common-dir)/sykli/inherit-key`, made by the first run
+that needs it), so a receipt you publish holds nothing a guess at a short token
+can be checked against. Digests are therefore comparable only between runs of
+one clone. A declared value may name `${worktree_cache}`, a directory of
 the worktree's own
 ([one build directory per worktree](#one-build-directory-per-worktree)). A task
 that declares `contract_inputs` also gets `SYKLI_CONTRACT_DIR`, where those

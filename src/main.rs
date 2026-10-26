@@ -4121,6 +4121,8 @@ fn launch(
 ) -> Result<Launched, String> {
     progress.line("running", &task.name);
     let declared = worktree_cache::environment(task)?;
+    // Before the task starts: its key needed them already (`cache_key`).
+    let inherited_digests = inherited_digests(task)?;
     let errored = |error: &str, class: &'static str| {
         Ok(Launched::Ran {
             record: Box::new(empty_task_receipt(
@@ -4365,7 +4367,7 @@ fn launch(
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             output_digests,
-            inherited_digests: inherited_digests(task),
+            inherited_digests,
             outcome,
             importable,
             class,
@@ -4472,7 +4474,8 @@ fn empty_task_receipt(
         stdout_digest: sha256(&[]),
         stderr_digest: sha256(&[]),
         output_digests: BTreeMap::new(),
-        inherited_digests: inherited_digests(task),
+        // A task that errored because the key cannot be read records none.
+        inherited_digests: inherited_digests(task).unwrap_or_default(),
         outcome,
         importable: outcome != Outcome::Errored,
         class: Some(class.into()),
@@ -4869,7 +4872,7 @@ fn cache_key(
         inputs,
         runtime: &runtime.fingerprint,
         after,
-        inherited: inherited_digests(task)
+        inherited: inherited_digests(task)?
             .iter()
             .map(|(name, digest)| (name.as_str(), digest.clone()))
             .collect(),
@@ -4879,19 +4882,141 @@ fn cache_key(
     Ok(sha256(&bytes))
 }
 
-/// Digests of the inherited variables' current values, never the values.
-/// An unset variable digests as `absent`, which is not any value's digest.
-fn inherited_digests(task: &Task) -> BTreeMap<String, String> {
-    task.inherit
+/// Digests of the inherited variables' current values, never the values:
+/// each is HMAC-SHA256 of `sykli-inherited.v1`, the name and the value
+/// (NUL-separated) under the clone's own key (`inherit_key`). An unset
+/// variable digests as `absent`, which is not any value's digest.
+///
+/// A plain SHA-256 of a value is a check anyone holding a receipt can run
+/// a guess against, and CI uploads receipts: a short token falls to trying
+/// every candidate. A salt written into the receipt would not stop that, as
+/// the salt is then as public as the digest. Keyed by a secret no receipt
+/// holds, the digest still tells two runs of one clone apart, so the cache
+/// misses when a value changes, and tells nobody else anything. The price:
+/// digests are comparable only within one clone (another clone, a fresh
+/// CI checkout, has its own key), and nobody can check a receipt's digest
+/// against a value they know.
+///
+/// A task that inherits nothing asks for no key; one that does errors when
+/// the key cannot be read or made.
+fn inherited_digests(task: &Task) -> Result<BTreeMap<String, String>, String> {
+    if task.inherit.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let key = inherit_key()?;
+    Ok(task
+        .inherit
         .iter()
         .map(|name| {
             let digest = match std::env::var_os(name) {
-                Some(value) => sha256(value.as_encoded_bytes()),
+                Some(value) => {
+                    let mut message = b"sykli-inherited.v1\0".to_vec();
+                    message.extend_from_slice(name.as_bytes());
+                    message.push(0);
+                    message.extend_from_slice(value.as_encoded_bytes());
+                    hmac_sha256(key.as_bytes(), &message)
+                }
                 None => "absent".to_string(),
             };
             (name.clone(), digest)
         })
-        .collect()
+        .collect())
+}
+
+/// HMAC-SHA256 (RFC 2104) of `message` under `key`, as lowercase hex.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let padded = |pad: u8| block.map(|byte| byte ^ pad);
+    let inner = Sha256::new()
+        .chain_update(padded(0x36))
+        .chain_update(message)
+        .finalize();
+    let outer = Sha256::new()
+        .chain_update(padded(0x5c))
+        .chain_update(inner)
+        .finalize();
+    format!("{outer:x}")
+}
+
+/// Where the key that inherited values are digested under is kept: in the
+/// common git directory, beside the runs, so every worktree of a clone
+/// shares it, and never in a worktree's `.sykli/`, which a person may copy
+/// or upload with its receipts and cache.
+const INHERIT_KEY: &str = "sykli/inherit-key";
+
+/// The clone's key for `inherited_digests`, read once per process, and
+/// made by the first process that needs it.
+///
+/// Bound: one file of 64 hex digits per clone, made once and never
+/// rewritten; it goes when the clone does. Deleting it costs only a cache
+/// miss for each task that inherits, and makes earlier digests
+/// incomparable with later ones.
+fn inherit_key() -> Result<&'static str, String> {
+    static KEY: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let repository = repo::repository().map_err(|_| {
+            "a task inherits a variable, whose value is digested under a key kept in the git \
+             common directory, and there is no git repository here"
+                .to_string()
+        })?;
+        read_or_make_key(&repository.common_dir.join(INHERIT_KEY))
+    })
+    .as_deref()
+    .map_err(Clone::clone)
+}
+
+/// The key at `path`, made there first when there is none: written whole
+/// to a private temporary, synced, and linked into place, so a reader never
+/// sees part of one and two processes that race agree on the first.
+fn read_or_make_key(path: &Path) -> Result<String, String> {
+    let shown = |error: io::Error| format!("{}: {error}", path.display());
+    let read = || -> Result<Option<String>, String> {
+        match fs::read_to_string(path) {
+            Ok(text) if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+                Ok(Some(text))
+            }
+            Ok(_) => Err(format!(
+                "{}: not a key sykli wrote; remove it, and the next run makes a new one",
+                path.display()
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(shown(error)),
+        }
+    };
+    if let Some(key) = read()? {
+        return Ok(key);
+    }
+    let directory = path.parent().ok_or("the key has no directory")?;
+    fs::create_dir_all(directory).map_err(shown)?;
+    let key = format!("{}{}", private_name(), private_name());
+    let temporary = directory.join(format!(".inherit-key-{}", private_name()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(key.as_bytes())?;
+            canonical::sync(&file, canonical::Durability::Fsync)
+        })
+        .and_then(|()| match fs::hard_link(&temporary, path) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            linked => linked,
+        });
+    // The temporary never outlives this call, whatever happened.
+    let _ = fs::remove_file(&temporary);
+    written.map_err(shown)?;
+    read()?.ok_or_else(|| format!("{}: made, then gone", path.display()))
 }
 
 /// Every task's declared inputs as the run reads them, each with the tree
@@ -5247,7 +5372,7 @@ impl Cache for LocalCache {
             stdout_digest: sha256(&[]),
             stderr_digest: sha256(&[]),
             output_digests,
-            inherited_digests: inherited_digests(task),
+            inherited_digests: inherited_digests(task).ok()?,
             outcome: Outcome::Cached,
             importable: true,
             class: None,
@@ -7967,6 +8092,56 @@ mod tests {
         assert_ne!(private_name(), private_name());
         assert_eq!(private_name().len(), 32);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// RFC 4231, test cases 1, 2 and 6 (a key longer than a block).
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        assert_eq!(
+            hmac_sha256(&[0x0b; 20], b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hmac_sha256(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    /// The key is made once, whole, and read back the same by every process
+    /// that asks; one that is not what sykli writes is refused, never
+    /// replaced, so a run never digests under a key it did not make.
+    #[test]
+    fn the_inherit_key_is_made_once_and_never_replaced() {
+        let base = std::env::temp_dir().join(format!("sykli-key-{}", private_name()));
+        let path = base.join("sykli/inherit-key");
+        let keys = std::thread::scope(|scope| {
+            (0..4)
+                .map(|_| scope.spawn(|| read_or_make_key(&path)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(keys[0].len(), 64);
+        assert!(keys.iter().all(|key| *key == keys[0]));
+        assert_eq!(fs::read_to_string(&path).unwrap(), keys[0]);
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "no temporary is left"
+        );
+        fs::write(&path, "short").unwrap();
+        let refused = read_or_make_key(&path).unwrap_err();
+        assert!(refused.contains("not a key sykli wrote"), "{refused}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "short");
+        fs::remove_dir_all(base).unwrap();
     }
 
     /// A task that declares no contract inputs keeps the key it had before
