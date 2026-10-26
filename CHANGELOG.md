@@ -10,13 +10,28 @@ contract consumer can observe; internal refactors are not listed.
 ## [0.7.0] - 2026-10-27
 
 Set in `Cargo.toml` only: no tag, release or crates.io publish has been made
-for it, so `install.sh` and the GitHub Action, which install release tags,
-cannot install it yet. It breaks 0.6.0, so read Breaking first: it removes the
-commands 0.6.0 shipped for typed production and pull-request evidence (see
-Removed), refuses contracts that 0.6.0 ran, and changes what a receipt
-records.
+for it, so `install.sh` and the GitHub Action cannot install it from a release
+yet (the Action's `version: source` builds a checkout instead). It breaks
+0.6.0, so read Breaking first: it removes the commands 0.6.0 had for typed
+production and pull-request evidence (see Removed), refuses contracts that
+0.6.0 ran, and changes what a receipt records.
 
 ### Breaking
+- In a Cargo graph (a `Cargo.toml` where sykli runs, and a task that runs
+  `cargo` or declares that `Cargo.toml`), `run` refuses (exit 2), before any
+  task runs or any pass is reused, a contract in which no task declares a
+  file git lists (tracked, or untracked and not ignored) that Cargo or its
+  tools read by name: a Rust source, a `Cargo.toml` or `Cargo.lock`, a
+  toolchain, rustfmt or clippy configuration, Cargo's configuration, or
+  anything under a `tests` directory. `plan --explain` names them as
+  `cargo_missing_inputs` and exits 2. 0.6.0 kept a cached pass when such a
+  file changed.
+- A task's `workdir`, `inputs` and `outputs` must stay inside the
+  repository: a path with a `..` component, an absolute path or a drive
+  prefix (`C:build`) is refused (`must stay inside the repository`;
+  `validate` exits 1, `lock`, `plan` and `run` exit 2). Such a path put a
+  file outside the repository into a task's key and receipt, and an output
+  could be written or restored outside it.
 - In a Cargo graph, `run` (exit 2) and `plan --explain` (`cargo_missing_inputs`,
   exit 2) also refuse a contract that leaves out a file git lists (tracked,
   or untracked and not ignored) that a Rust source includes
@@ -196,6 +211,18 @@ records.
   link outside it and ends inside: what is read or written there is inside.
 
 ### Added
+- `sykli plan --explain`: why each task is selected and what the cache holds
+  for it now (`available`, `missing`, `invalid`, `deferred`, `input_error`).
+  It runs no task, restores no output and writes no cache entry or receipt.
+  It reads `sykli.json` by default, and `--json` adds `explanations` and
+  `input_coverage` to `sykli-plan.v1`. `input_coverage` names the changed
+  files (staged, unstaged, untracked and not ignored; with `--base REF`, also
+  committed since REF) that no task declares, whatever is selected.
+  `--preview` explains an edited JSON contract despite lock drift, and never
+  writes the lock.
+- `started_at_ms` on a receipt, when the run began, and on each task, when
+  it was seen running. A cached task keeps its original moment. Neither is
+  part of a cache key.
 - In a Cargo graph, a warning for a document (`*.md`, `LICENSE*`,
   `LICENCE*`, `COPYING*`, `NOTICE*`, anything under `docs/` or `.github/`,
   at any depth) that a string literal in a Rust source names but no task
@@ -485,6 +512,18 @@ records.
     selects by repository inputs only.
 
 ### Changed
+- The task cache, `.sykli/cache`, is bounded: past 1 GiB its least recently
+  used entries are deleted, never the one just stored. Eviction never fails
+  a run. `SYKLI_CACHE_BUDGET_BYTES` sets the budget, and `0` keeps every
+  entry, as 0.6.0 did.
+- `.sykli/receipts` is bounded: past 200 receipts the oldest are deleted,
+  but never one a cache entry cites or one written in the last five
+  minutes, and stale temporary files go too. `SYKLI_RECEIPT_BUDGET` sets the
+  budget (it also bounds the copies `hook pre-push` keeps, under Added), and `0`
+  keeps every receipt, as 0.6.0 did.
+- Both budgets are applied when a run starts or is resumed, not only when
+  it stores, so a lowered budget, or a cache that no longer grows, is
+  brought inside its bound.
 - `sykli init` and `init --contract`: each cargo task (`fmt`, `clippy`,
   `test`) declares every file git tracks under the directory sykli runs in,
   documents included (a test may read a folder of Markdown cases), every
@@ -561,6 +600,14 @@ records.
   `plan --explain`.
 
 ### Fixed
+- `verify` accepts a receipt whose tasks were all cached. It failed with
+  exit 2 (`task NAME is cached but recorded exit code None`): a cached
+  record carries no exit code, and 0.6.0 required one.
+- `run` outside a git repository says `not inside a git repository; sykli
+  binds every receipt to a git tree`, not git's own `fatal:` line.
+- A cached task's receipt records the digests of its inherited values, as
+  a fresh one does; it left them out. They are `inherited_keyed_digests`
+  now (Breaking).
 - A submodule, which is a directory in git's index and cannot be declared,
   no longer makes `run` refuse a contract: the Cargo completeness rule
   required one under a `tests` directory, and the undeclared-sibling check
@@ -694,11 +741,14 @@ records.
 
 ## [0.6.0] - 2026-09-09
 
-The first published release of this implementation. Version 0.2.0 was bumped
-in the crate and described below but never tagged or published; everything
-listed under it first ships here, together with the additions below. The
-number continues the `sykli` crate on crates.io, whose 0.3.0 through 0.5.3
-belong to the retired reference implementation, so a future publish is possible.
+Prepared as the first release of this implementation, but never tagged or
+published. This section describes `main` at commit `7f0cf67`: everything it
+lists is there, and nothing merged after it is listed. Version 0.2.0 was
+bumped in the crate and described below but never tagged or published either;
+everything listed under it is part of 0.6.0 too, together with the additions
+below. The number continues the `sykli` crate on crates.io, whose 0.3.0
+through 0.5.3 belong to the retired reference implementation, so a future
+publish is possible.
 
 ### Added
 - Typed artifact production, opt-in beside the graph commands:
@@ -817,7 +867,8 @@ belong to the retired reference implementation, so a future publish is possible.
 
 ## [0.2.0] - 2026-09-05
 
-Bumped in `Cargo.toml` but never tagged or published; first shipped in 0.6.0.
+Bumped in `Cargo.toml` but never tagged or published; its changes are part
+of 0.6.0.
 
 ### Added
 - Container images published on release: `ghcr.io/false-systems/sykli:<tag>`
@@ -868,6 +919,6 @@ commit `f536224`, the bootstrap of the Rust rewrite.
   tarball and checks it against the release's `SHA256SUMS`.
 
 [Unreleased]: https://github.com/false-systems/sykli/commits/main
-[0.6.0]: https://github.com/false-systems/sykli/commit/bacc69f
+[0.6.0]: https://github.com/false-systems/sykli/commit/7f0cf67
 [0.2.0]: https://github.com/false-systems/sykli/commit/1c4e247
 [0.1.0]: https://github.com/false-systems/sykli/commit/f536224
