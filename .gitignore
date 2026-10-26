@@ -1,3 +1,6 @@
 /target
-/.sykli/
-/.claude/
+# A folder whose name starts with a dot, at the top level, is local tool
+# state (sykli's own .sykli/ among them); .github is the only one this
+# repository tracks.
+/.*/
+!/.github/
