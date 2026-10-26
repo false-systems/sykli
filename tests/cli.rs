@@ -1864,8 +1864,9 @@ fn a_contract_in_a_folder_is_not_asked_for_by_its_own_run() {
 
 /// What a Rust source includes is compiled into the build, so the Cargo
 /// rule asks for it whatever it is, the contract included: a task's key
-/// does not cover the contract, and with `include_str!("../sykli.json")`
-/// undeclared an edit of the contract kept the task's cached pass. Only the
+/// does not cover the contract, and with the contract included by the
+/// source and undeclared, an edit of the contract kept the task's cached
+/// pass. (A doc comment's include counts, so this one names none.) Only the
 /// rules that ask for files by their name or folder leave the contract out.
 #[test]
 fn a_contract_a_source_includes_is_still_asked_for() {
