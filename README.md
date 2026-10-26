@@ -652,16 +652,41 @@ directory:
   misses the cache, and the receipt records them in the task's
   `contract_inputs`. The task finds them in `$SYKLI_CONTRACT_DIR`, a
   directory of its own that holds a copy of exactly the files it declares,
-  as they were hashed, and is removed when the task ends; a task that
-  declares none has no such variable. A task that names the contract's
-  directory itself in its `run` or an `env` value, as the contract's path
-  spells it or resolved, is refused by `validate`, `lock`, `plan` and `run`,
-  since sykli cannot hash what it reads there by that name. What sykli
-  cannot see is not hashed, as nothing outside a task's declared files is:
-  the directory spelled another way (through `$HOME`), a value the task
-  inherits, a tool on `PATH`. A contract inside the repository declares the
+  as they were hashed, and is removed when the task ends. The directory is
+  yours alone (0700, made under an unguessable name in the temporary
+  directory), and so are the files (0600, or 0700 where yours to execute).
+  A task that declares none has no such variable.
+
+  A task that names the contract's directory itself in its `run` or an
+  `env` value is refused by `validate`, `lock`, `plan` and `run`, since
+  sykli cannot hash what it reads there by that name. The match is on the
+  contract's path as you name it and as it resolves, in the task's text
+  read with its `$HOME`, `${HOME}` and a leading `~` expanded and `//` and
+  `/./` read as `/`. When the contract's directory holds the repository, a
+  path inside the repository is the repository's, covered by its `inputs`.
+  With no git repository around the current directory, nothing here is
+  judged (`run` needs one). A contract inside the repository declares the
   files beside it as `inputs`, and `contract_inputs` there is refused.
   `plan --changed` selects by repository inputs only.
+
+  Sykli cannot see, and so does not hash, a file beside the contract that a
+  task reaches any other way. These still reuse a stale pass when the file
+  changes:
+  - a helper that names a neighbour by its path, such as
+    `. /path/to/gate/lib.sh` inside a declared `check.sh` (only the
+    contract's text is matched, never a helper's);
+  - a relative path, such as `../gate/check.sh` from the repository;
+  - another symbolic link to the directory, or a spelling through one
+    (`/tmp` for `/private/tmp` on macOS);
+  - the same name in another case, on a file system that ignores case
+    (macOS's default);
+  - a command found through `PATH`, inherited or set by the task;
+  - a value the task inherits.
+
+  Declare every helper in `contract_inputs`, and reach each one only through
+  `$SYKLI_CONTRACT_DIR`, from the task and from other helpers alike
+  (`. "$SYKLI_CONTRACT_DIR/lib.sh"`): a file reached there that is not
+  declared is not there, so the task fails instead of passing.
 - The lock is the `sykli.lock` beside the contract as you name it, as always,
   and `sykli lock "$gate"` writes it there. An existing v2 lock must contain
   the named contract, even when it already pins other contracts: run `sykli

@@ -256,10 +256,21 @@ contract consumer can observe; internal refactors are not listed.
     a missing input does.
   - The task reaches them as `$SYKLI_CONTRACT_DIR/PATH`: a directory of its
     own in the system's temporary directory, holding a copy of exactly the
-    declared files, each checked to be the recorded bytes and execute bits,
-    and removed when the task ends. A helper therefore runs what was hashed
-    and finds no undeclared neighbour there. A task that declares none has
-    no `SYKLI_CONTRACT_DIR`.
+    declared files, each hashed as it is copied and checked to be the
+    recorded bytes, and removed when the task ends. The task runs what was
+    hashed, and a helper that reaches a neighbour through
+    `$SYKLI_CONTRACT_DIR` finds only declared ones there. A task that
+    declares none has no `SYKLI_CONTRACT_DIR`.
+  - The copy is its owner's alone. The directory is made exclusively under
+    an unguessable name and is 0700. Its files are 0600, or 0700 where the
+    owner may execute the original. A name another process holds, such as
+    the copy a killed sykli left, is passed over, so a leftover never stops
+    a run.
+  - What sykli cannot see is not hashed. A helper that names a neighbour by
+    its path, a relative path, another link or case of the directory, a
+    `PATH` lookup and an inherited value still reuse a stale pass when the
+    file changes. The README lists them: declare every helper and reach it
+    only through `$SYKLI_CONTRACT_DIR`.
   - Receipts record them per task as `contract_inputs` (`sha256`, `mode`,
     no tree entry; absent on tasks without any). The subject and its digests
     are unchanged. A run's journal keeps them, so a detached or resumed
@@ -347,9 +358,11 @@ contract consumer can observe; internal refactors are not listed.
   or resolved, is refused (`validate` exits 1, the others 2), since sykli
   cannot hash what the task reads there by that name (sykli#75). Declare the
   files in `contract_inputs` and name them as `$SYKLI_CONTRACT_DIR/PATH`.
-  Only the contract's text is matched: the directory spelled another way, a
-  value a task inherits or a tool on `PATH` is not seen. Where a contract is
-  judged, nothing changes.
+  The text is read with the task's `$HOME`, `${HOME}` and a leading `~`
+  expanded (its declared `HOME`, else sykli's), and `//` and `/./` read as
+  `/`. When the directory holds the repository, a path inside the repository
+  is not refused. With no git repository around the current directory,
+  nothing is refused. Where a contract is judged, nothing changes.
 
 ### Changed
 - On Linux and macOS each task runs in its own process group. Ctrl-C, SIGTERM
