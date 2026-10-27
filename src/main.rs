@@ -123,12 +123,17 @@ enum Command {
         2  refused for undeclared files, as `run` refuses it (also exit 2), or that check failed\n\n\
         Inside a git repository, validate also makes the check `run` makes before any task, so\n\
         its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
-        graph, every Rust source, Cargo file and file under tests/, and every file a source\n\
-        includes must be declared, and an include must name its path as a literal; a\n\
-        document a string literal names but no task declares only warns (exit 0). In every\n\
-        graph, each tracked file beside a task's declared\n\
-        inputs must be declared, except documents, licences and CI configuration; and a\n\
-        declared link to a directory needs every file under it declared. Neither the Cargo\n\
+        graph, every Rust source, Cargo file and file under tests/, every file a source\n\
+        includes (in code, or in a doc comment's code block), every file of a package that\n\
+        `cargo vendor` wrote, and every path a build script's string literals name must be\n\
+        declared, and an include outside a vendored package must name its path as a\n\
+        literal. A document a string literal names but no task declares only warns (exit 0),\n\
+        and so do build scripts while a tracked file is declared by no task, since what they\n\
+        read by a path built at run time is not seen. In every graph, each tracked file\n\
+        beside a task's declared inputs must be declared, except documents, licences and CI\n\
+        configuration; and a declared link to a directory needs every file under it declared.\n\
+        A file outside the current directory cannot be declared from it: the refusal then\n\
+        names the repository's top level to run in. Neither the Cargo\n\
         files by name nor the sibling rule asks for the JSON contract being validated or\n\
         its sykli.lock (an include of either is still asked for). It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
@@ -309,8 +314,14 @@ enum Command {
     #[command(after_help = "Exit codes:\n  \
         0  wrote the contract\n  \
         1  nothing to declare — no Cargo.toml, package.json, or go.mod — or, with\n     \
-           --contract, no git repository around the current directory or no way to write\n  \
+           --contract, no git repository around the current directory or no way to write;\n     \
+           or validate and run would refuse the contract it would write (nothing is written)\n  \
         2  the contract exists; pass --force to overwrite it\n\n\
+        Inside a git repository, init lists the whole repository once and judges the\n\
+        contract it would write as validate and run do before any task. In a subdirectory,\n\
+        the Cargo rule still reads the whole repository, and a contract's paths cannot leave\n\
+        the directory sykli runs in, so a file it asks for outside it refuses: run init at\n\
+        the repository's top level.\n\n\
         With --contract PATH outside the repository, the tasks are still inferred from\n\
         the git repository around the current directory, with paths from its root; the\n\
         contract and its sykli.lock are written to PATH's directory (created if needed)\n\

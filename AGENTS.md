@@ -166,11 +166,16 @@ sibling check leave out the JSON contract being run and its lock, however
 spelled, `evaluated`, sykli#73, and an include of either is still asked
 for), which
 `validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
-same listing. What Cargo reads (by name, the files sources include, the
-documents their string literals name, which only warn: `Sources`, a small Rust
-lexer) and what is a document
-(`docs`, which the sibling check never asks for; `init` declares them) are
-`cargo_inputs` for both. A declared symbolic link to a file in the repository is read through;
+same listing, made once from the top level (`Listed::of_repository`), and
+judges the contract it would write with that refusal before writing it
+(`Inventory::given`, `undeclared_refusal_of`); a refusal for files outside the
+current directory names the top level (`outside_here`). What Cargo reads (by
+name; what sources include, in code or a doc comment's code block; every file
+of a package `cargo vendor` wrote; what build scripts' string literals name:
+`Reads`, over `Sources`, a small Rust lexer) and what is a document (`docs`,
+which the sibling check never asks for; `init` declares them) are
+`cargo_inputs` for both; the documents string literals name, and what build
+scripts may read unseen (`UnseenReads`), only warn. A declared symbolic link to a file in the repository is read through;
 one to a directory in the repository or to nothing is recorded by its text
 (`link_text`, `InputRecord::link`), with every file under such a directory
 required of the same task, and one that leads out of the repository is

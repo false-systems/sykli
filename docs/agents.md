@@ -143,25 +143,42 @@ appear in at least one task's inputs. So must every file of that inventory
 that one of its Rust sources includes (`include_str!`, `include_bytes!`,
 `include!`), resolved from the source's directory as rustc resolves it, or
 from the nearest `Cargo.toml` for `concat!(env!("CARGO_MANIFEST_DIR"),
-"/path")`. A document (below) that a string literal in a source names, as a
-test that reads it does, but no task declares, warns and never refuses
+"/path")`. So must every file of a package `cargo vendor` wrote (a
+`Cargo.toml` with the `.cargo-checksum.json` it writes beside it), since
+Cargo hashes every file that checksum lists on every build and refuses to
+build when one has changed; and every path a build script's string literals
+name from its package's directory, where it runs and where Cargo resolves
+its `cargo:rerun-if-changed` paths (a file, or every file under a
+directory), since it hands each path it names to something that reads it. A
+build script is `build.rs` beside a `Cargo.toml`, or the file its
+`package.build` names (`cargo_inputs::Reads`). A document (below) that a
+string literal in a source names, as a test that reads it does, but no task
+declares, warns and never refuses
 (`named_inputs: [{path, named_at}]` under explain's `input_coverage`, and
 `PATH is named in FILE:LINE but not declared; declare it if a task reads it` on
 `validate`'s and `run`'s stderr), since a help or message text names files too:
 a top-level one by its file name alone, a deeper one by its path (or a path
 that ends in it). A comment or a doc comment that mentions a document names
 nothing. Sources are read as
-Rust: an invocation inside a string or a plain comment is not one, a doc
-comment's literal invocations count (doctests compile), and a comment before
-the literal is skipped. An include whose path is not a literal in one of those
-forms (a macro's variable, an expression) is refused with its file and line,
-since its file cannot be known: write the path as a literal. A path built from
+Rust: an invocation inside a string or a plain comment is not one, and a
+comment before the literal is skipped. A doc comment's invocations count only
+in its code blocks, which rustdoc compiles as doctests: a fenced block, unless
+its info string names another language (`text`, `sh`, …), or an indented one;
+prose and inline code name nothing. Where a doc comment's structure is unclear
+(a fence left open before the next item's doc comment), every reading is kept,
+and a line any reading takes for code counts. An include whose path is not a
+literal in one of those forms (a macro's variable, an expression) is refused
+with its file and line, since its file cannot be known: write the path as a
+literal. In a vendored package it is not refused, since every file of the
+package is required. A path built from
 `OUT_DIR` names a file made at build time and is not asked for. `sykli init`
 declares all of these, and every other file git tracks, documents included,
-but sykli's own contract and lock, so `run` accepts the contract it writes. This
-inventory is discovered afresh on
-every invocation, including committed files absent from the changed-path view;
-it is never itself cached against the existing input list. `.sykli/` is excluded.
+but sykli's own contract and lock, so `run` accepts the contract it writes;
+inside a git repository it also judges that contract with the same refusal,
+from the same listing (no git process more), and writes none it would refuse.
+This inventory is discovered afresh on every invocation, including committed
+files absent from the changed-path view; it is never itself cached against the
+existing input list. `.sykli/` is excluded.
 `run` exits 2 before executing tasks or reusing/writing cached passes when inputs
 are missing. Explain retains its JSON with `cargo_missing_inputs` under
 `input_coverage`, marks task cache states as input errors and exits 2, even if
@@ -173,6 +190,28 @@ therefore depends on the work tree (an untracked `.rs` file changes it), not
 only on the contract and its lock. It does not check that declared inputs
 exist, and it runs no task (given a `sykli.rs` emitter, it runs the emitter to
 read the contract).
+
+**What the rule cannot see.** A build script's read by a path built at run time
+(from the environment, from a directory it lists, or by a tool that finds its
+own files) is not seen. While a build script exists and any tracked file is
+declared by no task, `validate`, `run` and explain warn and never refuse
+(`unseen_reads: {build_scripts, undeclared, such_as}` under explain's
+`input_coverage`, and `build.rs is a build script, … may be read by it (…):
+declare any a build script reads` on stderr). A vendored package's build script
+is not counted: it runs in its package's directory, which is required whole.
+A contract `init` writes declares every tracked file, so it never warns. A
+build script's modules are read as sources, not as the script, so their string
+literals name nothing. A macro a dependency exports that includes a file reads
+it from the file that invokes the macro (rustc resolves an include from the
+outermost call site), which the scan does not follow, vendored or not.
+
+**A subdirectory.** Declared paths start in the directory sykli runs in and
+cannot leave it (`..` is refused), while the Cargo rule lists the whole
+repository from its top level. A file outside the current directory that the
+rule asks for can never be declared there, so `validate`, `run` and `init` say
+so after their refusal and name the top level to run in. `init` judges what it
+would write, so in a subdirectory it writes only a contract that `validate`
+and `run` accept.
 
 **Documents** are a file named `*.md`, one whose name starts with `LICENSE`,
 `LICENCE`, `COPYING` or `NOTICE` (any case), and anything under a directory
