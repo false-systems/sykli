@@ -93,7 +93,8 @@ pub(crate) fn docs(relative: &Path) -> bool {
 ///   (`build_scripts`, which `validate` and `run` warn of).
 pub(crate) struct Reads {
     sources: Sources,
-    vendored: Vec<PathBuf>,
+    /// The directories of vendored packages.
+    vendored: BTreeSet<PathBuf>,
     /// The build scripts outside vendored packages, which are read whole.
     scripts: Vec<PathBuf>,
     /// The paths their string literals name: files, or directories.
@@ -116,8 +117,8 @@ impl Reads {
             .filter_map(|path| path.parent())
             .filter(|directory| listed.contains(directory.join("Cargo.toml").as_path()))
             .map(Path::to_path_buf)
-            .collect::<Vec<_>>();
-        let in_vendored = |path: &Path| vendored.iter().any(|package| path.starts_with(package));
+            .collect::<BTreeSet<_>>();
+        let in_vendored = |path: &Path| under(&vendored, path);
         // Each build script, with its package's directory.
         let mut scripts = BTreeMap::new();
         for manifest in files
@@ -170,11 +171,8 @@ impl Reads {
     /// above it.
     pub(crate) fn reads(&self, path: &Path) -> bool {
         self.sources.included.contains(path)
-            || self
-                .vendored
-                .iter()
-                .any(|package| path.starts_with(package))
-            || path.ancestors().any(|named| self.named.contains(named))
+            || under(&self.vendored, path)
+            || under(&self.named, path)
     }
 
     /// The build scripts outside vendored packages: what they read by a
@@ -186,6 +184,12 @@ impl Reads {
     pub(crate) fn sources(&self) -> &Sources {
         &self.sources
     }
+}
+
+/// Whether `path` is one of `paths` or under one of them, looked up by each
+/// of its ancestors.
+fn under(paths: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    !paths.is_empty() && path.ancestors().any(|ancestor| paths.contains(ancestor))
 }
 
 /// What a manifest says of its package's build script (`package.build`):
@@ -275,7 +279,7 @@ pub(crate) struct Sources {
     opaque: Vec<String>,
     /// The directories of vendored packages, read whole (`Reads`): an
     /// include in one whose path cannot be known is not refused.
-    vendored: Vec<PathBuf>,
+    vendored: BTreeSet<PathBuf>,
     /// File names a string literal names alone (`"README.md"`), with where
     /// the first such literal is (`src/x.rs:LINE`).
     bare: HashMap<String, String>,
@@ -292,10 +296,7 @@ impl Sources {
         let base = source.parent().unwrap_or_else(|| Path::new(""));
         // A vendored package's files are all required, so what one of its
         // includes reads is, whatever its path.
-        let vendored = self
-            .vendored
-            .iter()
-            .any(|package| source.starts_with(package));
+        let vendored = under(&self.vendored, source);
         let Scanned { includes, literals } = scan(text);
         for (line, literal) in literals {
             index(
