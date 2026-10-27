@@ -1377,3 +1377,405 @@ fn a_submodule_beside_declared_files_is_not_required() {
     assert_eq!(code, Some(0), "{stderr}");
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A git repository of `files`, with `.sykli/` ignored, committed.
+fn committed(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+    let root = temp_root(tag);
+    for (path, contents) in files {
+        write(&root, path, contents);
+    }
+    if !files.iter().any(|(path, _)| *path == ".gitignore") {
+        write(&root, ".gitignore", ".sykli/\n");
+    }
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "fixture"]);
+    root
+}
+
+/// `written` without `left_out` in any task, written as `sykli.json` in
+/// `dir` and locked.
+fn leave_out(dir: &Path, written: &serde_json::Value, left_out: &[&str]) {
+    let mut edited = written.clone();
+    for task in edited["tasks"].as_array_mut().unwrap() {
+        task["inputs"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|input| !left_out.iter().any(|out| input == *out));
+    }
+    fs::write(
+        dir.join("sykli.json"),
+        serde_json::to_vec_pretty(&edited).unwrap(),
+    )
+    .unwrap();
+    let (code, _, stderr) = sykli(dir, &["lock", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+}
+
+/// Whether `text` (a refusal) names `path` among the undeclared inputs.
+fn refuses_for(text: &str, path: &str) -> bool {
+    let text = text.replace("\\\\", "/");
+    text.contains("Cargo inputs are undeclared") && text.contains(&format!("\"{path}\""))
+}
+
+/// A crate that `cargo vendor` wrote: a manifest and a `.cargo-checksum.json`
+/// beside it. Its test macro includes a file by a path built from the
+/// macro's argument, which no scanner can resolve and no one can edit.
+const VENDORED: &[(&str, &str)] = &[
+    (
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nthird-party = \"1\"\n",
+    ),
+    ("Cargo.lock", "# lock\n"),
+    (
+        ".cargo/config.toml",
+        "[source.crates-io]\nreplace-with = \"vendored\"\n\n[source.vendored]\ndirectory = \"vendor\"\n",
+    ),
+    ("src/lib.rs", "pub fn f() {}\n"),
+    ("README.md", "# x\n"),
+    (
+        "vendor/third-party/Cargo.toml",
+        "[package]\nname = \"third-party\"\nversion = \"1.0.0\"\nbuild = \"build.rs\"\n",
+    ),
+    (
+        "vendor/third-party/.cargo-checksum.json",
+        "{\"files\":{\"Cargo.toml\":\"00\",\"README.md\":\"01\",\"build.rs\":\"02\",\"data/case.blb\":\"03\",\"src/dev.rs\":\"04\",\"src/lib.rs\":\"05\"},\"package\":\"06\"}",
+    ),
+    (
+        "vendor/third-party/build.rs",
+        "fn main() {\n    let _ = std::env::var(\"TARGET\");\n}\n",
+    ),
+    ("vendor/third-party/src/lib.rs", "pub mod dev;\n"),
+    (
+        "vendor/third-party/src/dev.rs",
+        "#[macro_export]\nmacro_rules! blob { ($name:expr) => { include_bytes!(concat!(\"../data/\", $name, \".blb\")) }; }\n",
+    ),
+    ("vendor/third-party/data/case.blb", "blob\n"),
+    ("vendor/third-party/README.md", "# third-party\n"),
+];
+
+/// Found on the review of the include rule: a crate `cargo vendor` wrote
+/// was refused for an include no one can edit. Cargo hashes every file of
+/// a vendored package on every build, against its `.cargo-checksum.json`,
+/// so the whole package is what the build reads: every file of it is
+/// required, and an include in it whose path is not a literal reads one of
+/// them. A copy of the same code that `cargo vendor` did not write (no
+/// checksum file) is code someone can edit, and is still refused.
+#[test]
+fn a_vendored_package_is_required_whole_and_its_opaque_include_passes() {
+    let root = committed("vendored", VENDORED);
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let written = contract(&root);
+    let declared = inputs(task(&written, "test"));
+    for (path, _) in VENDORED {
+        assert!(declared.contains(&path.to_string()), "{path}: {declared:?}");
+    }
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("build script"), "{stderr}");
+
+    for left_out in [
+        "vendor/third-party/.cargo-checksum.json",
+        "vendor/third-party/data/case.blb",
+        "vendor/third-party/README.md",
+        "vendor/third-party/src/dev.rs",
+    ] {
+        leave_out(&root, &written, &[left_out]);
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(2), "validate without {left_out}: {stderr}");
+        assert!(refuses_for(&stderr, left_out), "{stderr}");
+        let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+        assert_eq!(code, Some(2), "run without {left_out}: {stderr}");
+        assert!(refuses_for(&stderr, left_out), "{stderr}");
+    }
+    // A vendored package's build script runs in its own directory, which is
+    // required whole: leaving out a file elsewhere warns of nothing.
+    leave_out(&root, &written, &["README.md"]);
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("build script"), "{stderr}");
+
+    // The same code, copied by hand: no checksum, so it is refused.
+    for (path, contents) in VENDORED
+        .iter()
+        .filter(|(path, _)| path.starts_with("vendor/third-party/src/"))
+    {
+        write(&root, &path.replace("third-party", "copied"), contents);
+    }
+    write(
+        &root,
+        "vendor/copied/Cargo.toml",
+        "[package]\nname = \"copied\"\nversion = \"1.0.0\"\n",
+    );
+    git(&root, &["add", "vendor/copied"]);
+    git(&root, &["commit", "--quiet", "-m", "copied"]);
+    let names = |text: &str| {
+        let text = text.replace('\\', "/");
+        text.contains("vendor/copied/src/dev.rs:2") && text.contains("not a string literal")
+    };
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(names(&stderr), "{stderr}");
+    assert!(!stderr.contains("third-party/src/dev.rs"), "{stderr}");
+    let (code, _, stderr) = sykli(&root, &["init", "--force"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(names(&stderr), "{stderr}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A change to any file of a vendored package misses the cache: each is a
+/// declared input, so its bytes are in every cargo task's key.
+#[cfg(unix)]
+#[test]
+fn a_change_to_a_vendored_file_misses_the_cache() {
+    let root = committed("vendored-key", VENDORED);
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let path = toolchain(&root);
+    let run = || statuses(&root, &path, &["run", "sykli.json", "--json"]);
+    let explain = || statuses(&root, &path, &["plan", "--explain", "--json"]);
+    assert_eq!(run(), ["passed", "passed", "passed"]);
+    assert_eq!(run(), ["cached", "cached", "cached"]);
+    for vendored in [
+        "vendor/third-party/data/case.blb",
+        "vendor/third-party/.cargo-checksum.json",
+        "vendor/third-party/README.md",
+    ] {
+        let file = root.join(vendored);
+        let original = fs::read(&file).unwrap();
+        fs::write(&file, b"changed\n").unwrap();
+        assert_eq!(
+            explain(),
+            ["missing", "deferred", "deferred"],
+            "a change to {vendored} kept a cached pass"
+        );
+        fs::write(&file, original).unwrap();
+    }
+    assert_eq!(explain(), ["available", "available", "available"]);
+    fs::remove_dir_all(root.with_extension("bin")).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// rustdoc compiles a doc comment's code blocks, never its prose: an
+/// include a doc comment shows in a sentence or in inline code reads
+/// nothing, and is not required, in a library or in a test. One in a code
+/// block (fenced, or indented) is a doctest's, and still is; so is one in
+/// code. A block marked as another language is not compiled.
+#[test]
+fn a_doc_comment_requires_what_its_code_blocks_include_not_what_its_prose_shows() {
+    let root = committed(
+        "doc-includes",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+            ),
+            ("Cargo.lock", "# lock\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "//! Reads its text as `include_str!(\"../notes/prose.txt\")` would, and\n",
+                    "//! unlike include_str!(\"../notes/sentence.txt\") in a sentence.\n",
+                    "//!\n",
+                    "//! ```\n",
+                    "//! let text = include_str!(\"doctest.txt\");\n",
+                    "//! ```\n",
+                    "//!\n",
+                    "//! ```text\n",
+                    "//! include_str!(\"../notes/shown.txt\")\n",
+                    "//! ```\n",
+                    "\n",
+                    "/// An indented example:\n",
+                    "///\n",
+                    "///     let bytes = include_bytes!(\"indented.bin\");\n",
+                    "pub fn f() {}\n",
+                    "\n",
+                    "pub const CODE: &str = include_str!(\"code.txt\");\n",
+                ),
+            ),
+            ("notes/prose.txt", "prose\n"),
+            ("notes/sentence.txt", "sentence\n"),
+            ("src/doctest.txt", "doctest\n"),
+            ("notes/shown.txt", "shown\n"),
+            ("src/indented.bin", "indented\n"),
+            ("src/code.txt", "code\n"),
+            (
+                "tests/notes.rs",
+                "/// The source does `include_str!(\"../NOTES.txt\")`; this test reads nothing.\n#[test]\nfn notes() {}\n",
+            ),
+            ("NOTES.txt", "notes\n"),
+        ],
+    );
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let written = contract(&root);
+    let mentioned = [
+        "notes/prose.txt",
+        "notes/sentence.txt",
+        "notes/shown.txt",
+        "NOTES.txt",
+    ];
+    leave_out(&root, &written, &mentioned);
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    for read in ["src/doctest.txt", "src/indented.bin", "src/code.txt"] {
+        let mut left_out = mentioned.to_vec();
+        left_out.push(read);
+        leave_out(&root, &written, &left_out);
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(2), "validate without {read}: {stderr}");
+        assert!(refuses_for(&stderr, read), "{stderr}");
+        for path in mentioned {
+            assert!(!stderr.contains(path), "{path} required: {stderr}");
+        }
+        let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+        assert_eq!(code, Some(2), "run without {read}: {stderr}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A contract's paths start where sykli runs and cannot leave it, and the
+/// Cargo rule reads the whole repository. In a subdirectory, `init` writes
+/// a contract only when `validate` and `run` would accept it; otherwise it
+/// refuses, writes nothing, and names the top level, as `validate` and
+/// `run` then do for the files they cannot ask for here.
+#[test]
+fn init_in_a_subdirectory_writes_only_a_contract_validate_and_run_accept() {
+    let root = committed(
+        "subdirectory",
+        &[
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            ),
+            ("app/Cargo.lock", "# lock\n"),
+            ("app/src/main.rs", "fn main() {}\n"),
+            ("other/x.rs", "pub fn x() {}\n"),
+            ("README.md", "# two projects\n"),
+        ],
+    );
+    let app = root.join("app");
+    let top = root.file_name().unwrap().to_str().unwrap().to_string();
+    let points_up = |text: &str| {
+        text.replace('\\', "/").contains("other/x.rs")
+            && text.contains("top level")
+            && text.contains(&top)
+    };
+    let (code, _, stderr) = sykli(&app, &["init"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(points_up(&stderr), "{stderr}");
+    assert!(!app.join("sykli.json").exists());
+    assert!(!app.join("sykli.lock").exists());
+
+    // A contract written here by hand is refused with the same pointer.
+    write(
+        &app,
+        "sykli.json",
+        r#"{"schema":"sykli-contract.v1","tasks":[{"name":"test","run":"cargo test","inputs":["Cargo.lock","Cargo.toml","src/main.rs"]}]}"#,
+    );
+    let (code, _, stderr) = sykli(&app, &["lock", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let (code, _, stderr) = sykli(&app, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(points_up(&stderr), "{stderr}");
+    let (code, _, stderr) = sykli(&app, &["run", "sykli.json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(points_up(&stderr), "{stderr}");
+    fs::remove_file(app.join("sykli.json")).unwrap();
+    fs::remove_file(app.join("sykli.lock")).unwrap();
+
+    // With nothing outside it that the rule asks for, init writes here,
+    // and validate accepts what it wrote.
+    git(&root, &["rm", "--quiet", "other/x.rs"]);
+    git(&root, &["commit", "--quiet", "-m", "one project"]);
+    let (code, _, stderr) = sykli(&app, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let (code, _, stderr) = sykli(&app, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A build script's string literals name what it reads, from its package's
+/// directory, where it runs and where Cargo resolves its
+/// `cargo:rerun-if-changed` paths: a file, or every file under a directory.
+/// Those are required. What it reads by a path built at run time cannot be
+/// seen, so `validate`, `run` and `plan --explain` warn while a tracked file
+/// is declared by no task, and name it.
+#[test]
+fn a_build_script_s_reads_are_required_and_what_it_hides_is_warned_of() {
+    let root = committed(
+        "build-script",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+            ),
+            ("Cargo.lock", "# lock\n"),
+            (
+                "build.rs",
+                concat!(
+                    "use std::{env, fs, path::Path};\n",
+                    "fn main() {\n",
+                    "    println!(\"cargo:rerun-if-changed=schema/a.json\");\n",
+                    "    println!(\"cargo::rerun-if-changed=proto\");\n",
+                    "    let template = fs::read_to_string(\"templates/b.txt\").unwrap();\n",
+                    "    let name = env::var(\"HIDDEN_NAME\").unwrap_or_default();\n",
+                    "    let dir = env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n",
+                    "    let _ = fs::read(Path::new(&dir).join(name));\n",
+                    "    let out = Path::new(&env::var(\"OUT_DIR\").unwrap()).join(\"gen.rs\");\n",
+                    "    fs::write(out, template).unwrap();\n",
+                    "}\n",
+                ),
+            ),
+            ("src/lib.rs", "pub fn f() {}\n"),
+            ("schema/a.json", "{}\n"),
+            ("proto/x.proto", "syntax = \"proto3\";\n"),
+            ("proto/y.proto", "syntax = \"proto3\";\n"),
+            ("templates/b.txt", "template\n"),
+            ("data/hidden.json", "{}\n"),
+            ("README.md", "# x\n"),
+        ],
+    );
+    let (code, _, stderr) = sykli(&root, &["init"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let written = contract(&root);
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("build script"), "{stderr}");
+
+    for read in ["schema/a.json", "proto/y.proto", "templates/b.txt"] {
+        leave_out(&root, &written, &[read]);
+        let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+        assert_eq!(code, Some(2), "validate without {read}: {stderr}");
+        assert!(refuses_for(&stderr, read), "{stderr}");
+        let (code, _, stderr) = sykli(&root, &["run", "sykli.json"]);
+        assert_eq!(code, Some(2), "run without {read}: {stderr}");
+        assert!(refuses_for(&stderr, read), "{stderr}");
+    }
+
+    // Read through a name from the environment: unseen, so it warns.
+    leave_out(&root, &written, &["data/hidden.json"]);
+    let warns = |text: &str| {
+        text.contains("warning: build.rs is a build script")
+            && text.replace('\\', "/").contains("data/hidden.json")
+    };
+    let (code, _, stderr) = sykli(&root, &["validate", "sykli.json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(warns(&stderr), "{stderr}");
+    let (code, stdout, stderr) = sykli(&root, &["plan", "--explain", "--json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        plan["input_coverage"]["unseen_reads"],
+        serde_json::json!({
+            "build_scripts": ["build.rs"],
+            "undeclared": 1,
+            "such_as": ["data/hidden.json"],
+        })
+    );
+    let (code, stdout, _) = sykli(&root, &["plan", "--explain"]);
+    assert_eq!(code, Some(0));
+    assert!(warns(&stdout), "{stdout}");
+    fs::remove_dir_all(root).unwrap();
+}

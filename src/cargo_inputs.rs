@@ -659,7 +659,13 @@ mod tests {
             const F: &str = include_str!(/* why */ "commented.txt" // and how
             );
             const G: &str = include_str!(concat!("pie", "ces.txt"));
-            /// A doctest: `include_str!("doctest.txt")`, and prose about include_str!(path).
+            /// A doctest:
+            ///
+            /// ```
+            /// include_str!("doctest.txt");
+            /// ```
+            ///
+            /// and prose about include_str!(path).
             fn documented() {}
         "##;
         let (named, refusal) = included("src/main.rs", text);
@@ -696,6 +702,75 @@ mod tests {
             included("src/lib.rs", text),
             (vec!["src/after.txt".into()], None)
         );
+    }
+
+    /// rustdoc compiles a doc comment's code blocks and nothing else: a
+    /// fenced block (unless its info string names another language) or an
+    /// indented one. Where a doc comment's structure is unclear (a fence
+    /// left open before the next item's doc), every reading counts, so what
+    /// a doctest includes is never missed.
+    #[test]
+    fn a_doc_comment_counts_the_includes_of_its_code_blocks_only() {
+        let text = concat!(
+            "/// Prose: `include_str!(\"inline.txt\")` and include_str!(\"sentence.txt\").\n",
+            "///\n",
+            "/// ```\n",
+            "/// let a = include_str!(\n",
+            "///     \"split.txt\",\n",
+            "/// );\n",
+            "/// // include_str!(\"commented.txt\")\n",
+            "/// ```\n",
+            "///\n",
+            "/// ```rust,no_run\n",
+            "/// include_str!(\"no-run.txt\");\n",
+            "/// ```\n",
+            "/// ~~~ignore\n",
+            "/// # include_str!(\"ignored.txt\");\n",
+            "/// ~~~\n",
+            "/// ```text\n",
+            "/// include_str!(\"text.txt\");\n",
+            "/// ```\n",
+            "/// ````sh\n",
+            "/// ```\n",
+            "/// include_str!(\"sh.txt\");\n",
+            "/// ````\n",
+            "///\n",
+            "///     include_str!(\"indented.txt\");\n",
+            "#[inline]\n",
+            "fn f() {}\n",
+            "/** Block prose, include_str!(\"block-prose.txt\").\n",
+            " *\n",
+            " * ```\n",
+            " * include_str!(\"block.txt\");\n",
+            " * ```\n",
+            " */\n",
+            "fn g() {}\n",
+            "//! Inner prose, `include_str!(\"inner-prose.txt\")`.\n",
+            "//! ```\n",
+            "//! include_str!(\"inner.txt\");\n",
+            "//! ```\n",
+            "/// ```\n",
+            "/// include_str!(\"unclosed.txt\");\n",
+            "fn h() {}\n",
+            "/// ```\n",
+            "/// include_str!(\"after.txt\");\n",
+            "/// ```\n",
+            "fn i() {}\n",
+        );
+        let (named, refusal) = included("src/lib.rs", text);
+        assert_eq!(refusal, None);
+        let mut expected = vec![
+            "src/split.txt",
+            "src/no-run.txt",
+            "src/ignored.txt",
+            "src/indented.txt",
+            "src/block.txt",
+            "src/inner.txt",
+            "src/unclosed.txt",
+            "src/after.txt",
+        ];
+        expected.sort();
+        assert_eq!(named, expected);
     }
 
     #[test]
