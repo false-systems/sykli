@@ -305,25 +305,37 @@ from every task's inputs:
   which is resolved from the nearest `Cargo.toml`. In a doc comment, only an
   include in a code block counts, since rustdoc compiles code blocks as
   doctests and nothing else: one shown in prose or inline code names nothing,
-  nor does one in a block marked as another language (`text`, `sh`, …). An
-  include whose path is anything else (a macro's variable, an expression) is
-  refused with its file and line, since its file cannot be known, unless it
-  is in a vendored package (below); a path built from `OUT_DIR` names a file
-  made at build time and is not asked for;
-- every file of a package `cargo vendor` wrote: a directory with a
-  `Cargo.toml` and the `.cargo-checksum.json` it writes beside it. Cargo
-  hashes every file that checksum lists on every build and refuses to build
-  when one has changed, so the build reads each of them. Each is then a
-  declared input, so a change to any of them changes every key that covers
-  it. An include there whose path is not a literal (a third-party test
-  macro's `include_bytes!($file)`) reads one of those files, so it is not
-  refused; the same code where no checksum sits beside the manifest is;
+  nor does one in a block marked as another language (`text`, `sh`, …). A
+  code block's includes are found by their text, each on its own, so a block
+  that is not Rust as written (a `.gitignore` sample's `/*`) hides none after
+  it. An include whose path is anything else (a macro's variable, an
+  expression) is refused with its file and line, since its file cannot be
+  known, unless it is in a vendored package (below); a path built from
+  `OUT_DIR` names a file made at build time and is not asked for;
+- every file of a package with the `.cargo-checksum.json` that `cargo vendor`
+  writes beside its `Cargo.toml`. Where Cargo verifies that checksum, it
+  hashes every file it lists on every build and refuses to build when one
+  has changed, so the build reads each of them. Each is then a declared
+  input, so a change to any of them changes every key that covers it;
 - every path a build script's string literals name, from its package's
   directory, where it runs and where Cargo resolves its
   `cargo:rerun-if-changed` paths: `"cargo:rerun-if-changed=schema/a.json"`,
   `fs::read("templates/b.txt")`, or a directory a tool takes (`"proto"`), and
   then every file under it. A build script is `build.rs` beside a
   `Cargo.toml`, or the file its `package.build` names.
+
+A package is **vendored** only where the tree shows that Cargo verifies its
+checksum: the package sits directly in a directory that a tracked
+`.cargo/config.toml` (or `.cargo/config`) names as a source's directory
+(`[source.NAME] directory = "vendor"`, as `cargo vendor` says to write), a
+tracked `Cargo.lock` pins its name and version from a registry or git, and
+the checksum the lock records is the one the file records. There an include
+whose path is not a literal (a third-party test macro's `include_bytes!($file)`)
+reads one of the package's own files, all required, so it is not refused,
+and its build script is not counted for the warning below. A checksum file
+anywhere else, planted or copied with a package out of that directory,
+proves nothing: Cargo never checks it, so the package is refused and warned
+of as any other.
 
 A [document](#documents) that a string literal in a Rust source names, as a test
 that reads it does (`fs::read("README.md")`), but no task declares, only warns:
@@ -335,15 +347,20 @@ mentions a document names nothing.
 
 What a build script reads by a path built at run time (from the environment,
 from a directory it lists, or by a tool that finds its own files) cannot be
-seen. So while a build script exists and any tracked file is declared by no
-task, `validate`, `plan --explain` and `run` warn and go on: `build.rs is a
-build script, and sykli requires only the files its includes and string
-literals name, never one read by a path built at run time; 1 tracked file no
-task declares may be read by it (data/hidden.json): declare any a build script
-reads`. Explain lists it as `input_coverage.unseen_reads: {build_scripts,
-undeclared, such_as}`. A vendored package's build script is not counted, since
-its package is required whole. A contract `init` writes declares every tracked
-file, so it never warns.
+seen. So while a build script exists and a file git lists under where sykli
+runs (tracked, or untracked and not ignored) is declared by no task that runs
+Cargo (one whose command names `cargo`, or which declares the `Cargo.toml`),
+`validate`, `plan --explain` and `run` warn and go on: `build.rs is a build
+script, and sykli requires only the files its includes and string literals
+name, never one read by a path built at run time; 1 file that no task running
+Cargo declares may be read by it (data/hidden.json): declare any a build
+script reads`. Explain lists it as `input_coverage.unseen_reads:
+{build_scripts, undeclared, such_as}`. A vendored package's build script is
+not counted, since its package is required whole. Nor is what `init` leaves
+out: `.sykli/`, `target/`, and sykli's own `sykli.json` and `sykli.lock`
+where sykli runs. A contract `init` writes declares every other tracked
+file, in the repository or kept outside it, so it warns only of untracked
+files: commit them, ignore them, or declare those a build script reads.
 
 A contract's paths start in the directory sykli runs in and cannot leave it,
 while the Cargo rule reads the whole repository. So in a subdirectory, a file

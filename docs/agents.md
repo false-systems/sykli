@@ -143,10 +143,10 @@ appear in at least one task's inputs. So must every file of that inventory
 that one of its Rust sources includes (`include_str!`, `include_bytes!`,
 `include!`), resolved from the source's directory as rustc resolves it, or
 from the nearest `Cargo.toml` for `concat!(env!("CARGO_MANIFEST_DIR"),
-"/path")`. So must every file of a package `cargo vendor` wrote (a
-`Cargo.toml` with the `.cargo-checksum.json` it writes beside it), since
-Cargo hashes every file that checksum lists on every build and refuses to
-build when one has changed; and every path a build script's string literals
+"/path")`. So must every file of a package with the `.cargo-checksum.json`
+that `cargo vendor` writes beside its `Cargo.toml`, since where Cargo
+verifies it, it hashes every file that checksum lists on every build and
+refuses to build when one has changed; and every path a build script's string literals
 name from its package's directory, where it runs and where Cargo resolves
 its `cargo:rerun-if-changed` paths (a file, or every file under a
 directory), since it hands each path it names to something that reads it. A
@@ -165,12 +165,28 @@ comment before the literal is skipped. A doc comment's invocations count only
 in its code blocks, which rustdoc compiles as doctests: a fenced block, unless
 its info string names another language (`text`, `sh`, …), or an indented one;
 prose and inline code name nothing. Where a doc comment's structure is unclear
-(a fence left open before the next item's doc comment), every reading is kept,
-and a line any reading takes for code counts. An include whose path is not a
-literal in one of those forms (a macro's variable, an expression) is refused
-with its file and line, since its file cannot be known: write the path as a
-literal. In a vendored package it is not refused, since every file of the
-package is required. A path built from
+(a fence left open before the next item's doc comment, a fence after a list
+marker or a `>`, or indented four columns), every reading is kept, and a line
+any reading takes for code counts; only a plain fence at the start of a line
+indented by fewer than four columns, a backtick fence's info string without a
+backtick, is read with certainty. A code block's includes are found by their
+text, each on its own, not by lexing the block, so a block that is not Rust as
+written (a `.gitignore` sample's `/*`, an `ignore` block's unterminated
+string) hides none after it, and one in a doctest's comment counts. An include
+whose path is not a literal in one of those forms (a macro's variable, an
+expression) is refused with its file and line, since its file cannot be known:
+write the path as a literal. In a vendored package it is not refused, since
+every file of the package is required and a published package reads none
+outside itself. A package is vendored only where the tree shows Cargo
+verifies its checksum (`cargo_inputs::vendored`): it sits directly in a
+directory a tracked `.cargo/config.toml` or `.cargo/config` names as a
+source's directory (`[source.NAME] directory = …`, resolved from the
+directory `.cargo` is in), a tracked `Cargo.lock` pins its name and version
+from a registry or git (`source = …`), and the lock's checksum, where it
+records one, is the checksum file's. A checksum file anywhere else, planted
+or copied with a package out of that directory, proves nothing, since Cargo
+checks it only for a replaced source: the package is still required whole,
+and its include is refused and its build script warned of as any other. A path built from
 `OUT_DIR` names a file made at build time and is not asked for. `sykli init`
 declares all of these, and every other file git tracks, documents included,
 but sykli's own contract and lock, so `run` accepts the contract it writes;
@@ -193,13 +209,18 @@ read the contract).
 
 **What the rule cannot see.** A build script's read by a path built at run time
 (from the environment, from a directory it lists, or by a tool that finds its
-own files) is not seen. While a build script exists and any tracked file is
-declared by no task, `validate`, `run` and explain warn and never refuse
+own files) is not seen. While a build script exists and a file git lists under
+where sykli runs (tracked, or untracked and not ignored) is declared by no task
+that runs Cargo (its command names `cargo`, or it declares the `Cargo.toml`),
+`validate`, `run` and explain warn and never refuse
 (`unseen_reads: {build_scripts, undeclared, such_as}` under explain's
 `input_coverage`, and `build.rs is a build script, … may be read by it (…):
 declare any a build script reads` on stderr). A vendored package's build script
 is not counted: it runs in its package's directory, which is required whole.
-A contract `init` writes declares every tracked file, so it never warns. A
+Nor is what `init` leaves out (`init::never_declared`: `.sykli/`, `target/`,
+and sykli's own `sykli.json` and `sykli.lock` where sykli runs), so a
+contract `init` writes, kept in the repository or outside it, warns only of
+untracked files. A
 build script's modules are read as sources, not as the script, so their string
 literals name nothing. A macro a dependency exports that includes a file reads
 it from the file that invokes the macro (rustc resolves an include from the

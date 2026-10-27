@@ -124,12 +124,14 @@ enum Command {
         Inside a git repository, validate also makes the check `run` makes before any task, so\n\
         its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
         graph, every Rust source, Cargo file and file under tests/, every file a source\n\
-        includes (in code, or in a doc comment's code block), every file of a package that\n\
-        `cargo vendor` wrote, and every path a build script's string literals name must be\n\
-        declared, and an include outside a vendored package must name its path as a\n\
-        literal. A document a string literal names but no task declares only warns (exit 0),\n\
-        and so do build scripts while a tracked file is declared by no task, since what they\n\
-        read by a path built at run time is not seen. In every graph, each tracked file\n\
+        includes (in code, or in a doc comment's code block), every file of a package with a\n\
+        .cargo-checksum.json beside its Cargo.toml, and every path a build script's string\n\
+        literals name must be declared, and an include must name its path as a literal\n\
+        unless its package is vendored: in a directory a tracked .cargo/config.toml names as a\n\
+        source's, and pinned by Cargo.lock with the checksum it records. A document a string\n\
+        literal names but no task declares only warns (exit 0), and so do build scripts while\n\
+        a file git lists is declared by no task that runs Cargo, since what they read by a\n\
+        path built at run time is not seen. In every graph, each tracked file\n\
         beside a task's declared inputs must be declared, except documents, licences and CI\n\
         configuration; and a declared link to a directory needs every file under it declared.\n\
         A file outside the current directory cannot be declared from it: the refusal then\n\
@@ -849,7 +851,7 @@ fn cargo_missing_inputs(
     let declared = declared_inputs(contract)?;
     let files = listed.files();
     // Cargo's files by name and every listed file the build reads otherwise
-    // (`cargo_inputs::Reads`: what a source includes, a vendored package,
+    // (`cargo_inputs::Reads`: what a source includes, a checksummed package,
     // what a build script names) refuse, which `init` declares by, and so
     // does an include that names no knowable file; a document a string names
     // warns.
