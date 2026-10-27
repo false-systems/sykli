@@ -1258,6 +1258,66 @@ mod tests {
         );
     }
 
+    /// Found on review: an earlier block that is not Rust as written (a
+    /// `.gitignore` sample's `/*`, an `ignore` or `compile_fail` block's
+    /// unterminated string, a regex's `"`) hid every later doctest's include,
+    /// and a line that only shows a fence in inline code opened one, so the
+    /// real fence after it read as a close. Each shape, before a doctest.
+    #[test]
+    fn a_block_that_is_not_rust_hides_no_later_doctest() {
+        let doctest =
+            "/// ```\n/// let data = include_str!(\"../fixtures/x.txt\");\n/// ```\nfn load() {}\n";
+        for (shape, before) in [
+            (
+                "gitignore",
+                "//! Add this to your `.gitignore`:\n//!\n//! ```gitignore\n//! /target/*\n//! ```\n\n",
+            ),
+            (
+                "ignore, the same item",
+                "/// ```ignore\n/// let s = \"unterminated;\n/// ```\n///\n",
+            ),
+            (
+                "compile_fail, an earlier item",
+                "/// ```compile_fail\n/// let s = 'x\n/// let t = \"unterminated;\n/// ```\nfn fails() {}\n",
+            ),
+            (
+                "regex",
+                "/// ```regex\n/// \"[a-z]+\n/// ```\nfn matches() {}\n",
+            ),
+            (
+                "a fence shown inline",
+                "/// A ```sh``` block is skipped.\n///\n",
+            ),
+            (
+                "a block comment left open",
+                "/// ```\n/// /* not closed\n/// ```\nfn open() {}\n",
+            ),
+        ] {
+            let text = format!("{before}{doctest}");
+            let (named, refusal) = included("src/lib.rs", &text);
+            assert_eq!(refusal, None, "{shape}");
+            assert_eq!(named, ["fixtures/x.txt"], "{shape}");
+        }
+    }
+
+    /// Within one block whose code does not lex to its end, its includes
+    /// are still found, by their text, as every literal include in a doc
+    /// comment once was.
+    #[test]
+    fn a_block_that_does_not_lex_keeps_its_own_includes() {
+        let text = concat!(
+            "/// ```ignore\n",
+            "/// let s = \"unterminated;\n",
+            "/// let t = include_str!(\"in-the-block.txt\");\n",
+            "/// ```\n",
+            "fn f() {}\n",
+        );
+        assert_eq!(
+            included("src/lib.rs", text),
+            (vec!["src/in-the-block.txt".into()], None)
+        );
+    }
+
     #[test]
     fn escapes_are_unescaped() {
         let text = concat!(
@@ -1512,51 +1572,150 @@ mod tests {
         found
     }
 
-    /// Every file of a package `cargo vendor` wrote is read, and an include
-    /// there whose path is no literal is not refused; the same code without
-    /// the checksum file beside its manifest is refused.
+    /// The package `cargo vendor` wrote, under the directory a tracked Cargo
+    /// configuration replaces a source with, and pinned by `Cargo.lock`.
+    const VENDORED: &[(&str, &str)] = &[
+        ("Cargo.toml", "[package]\nname = \"x\"\n"),
+        (
+            "Cargo.lock",
+            "version = 3\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0a\"\n\n[[package]]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+        ),
+        ("src/lib.rs", "pub fn f() {}\n"),
+        (
+            "vendor/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"1.0.0\"\n",
+        ),
+        (
+            "vendor/a/.cargo-checksum.json",
+            "{\"files\":{},\"package\":\"0a\"}",
+        ),
+        (
+            "vendor/a/src/lib.rs",
+            "macro_rules! t { ($p:expr) => { include_bytes!($p) }; }\n",
+        ),
+        ("vendor/a/data/x.bin", "x"),
+        ("vendor/b/Cargo.toml", "[package]\nname = \"b\"\n"),
+        ("vendor/b/src/lib.rs", "pub fn g() {}\n"),
+        ("vendor/b/data/y.bin", "y"),
+    ];
+
+    /// Every file of a package with a `.cargo-checksum.json` beside its
+    /// manifest is read; an include there whose path is no literal is not
+    /// refused only when Cargo verifies that checksum, which the tree
+    /// proves: the package is in a directory a tracked Cargo configuration
+    /// names as a replaced source, and `Cargo.lock` pins it from a registry
+    /// with the checksum the file records.
     #[test]
     fn a_vendored_package_is_read_whole() {
-        let files = [
-            ("Cargo.toml", "[package]\nname = \"x\"\n"),
-            ("src/lib.rs", "pub fn f() {}\n"),
-            ("vendor/a/Cargo.toml", "[package]\nname = \"a\"\n"),
-            ("vendor/a/.cargo-checksum.json", "{\"files\":{}}"),
-            (
-                "vendor/a/src/lib.rs",
-                "macro_rules! t { ($p:expr) => { include_bytes!($p) }; }\n",
-            ),
-            ("vendor/a/data/x.bin", "x"),
-            ("vendor/b/Cargo.toml", "[package]\nname = \"b\"\n"),
-            ("vendor/b/src/lib.rs", "pub fn g() {}\n"),
-            ("vendor/b/data/y.bin", "y"),
-        ];
-        let tree = Tree::new("vendored", &files);
-        let (reads, _) = tree.reads(&files);
+        let tree = Tree::new("vendored", VENDORED);
+        let (reads, _) = tree.reads(VENDORED);
         assert_eq!(reads.sources().refusal(), None);
-        assert_eq!(
-            tree.read(&reads),
-            [
+        let whole = [
+            "vendor/a/.cargo-checksum.json",
+            "vendor/a/Cargo.toml",
+            "vendor/a/data/x.bin",
+            "vendor/a/src/lib.rs",
+        ];
+        assert_eq!(tree.read(&reads), whole);
+        let refused = |reads: &Reads| {
+            reads
+                .sources()
+                .refusal()
+                .is_some_and(|refusal| refusal.contains("vendor/a/src/lib.rs:1"))
+        };
+        // Without the proof, the package is still read whole, and its
+        // include is refused: a checksum git does not list, a configuration
+        // git does not list, a lock that does not pin it from a registry, a
+        // checksum that is not the one pinned.
+        let without = |left_out: &str| {
+            VENDORED
+                .iter()
+                .filter(|(path, _)| *path != left_out)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let (reads, _) = tree.reads(&without("vendor/a/.cargo-checksum.json"));
+        assert!(refused(&reads), "{:?}", reads.sources().refusal());
+        let (reads, _) = tree.reads(&without(".cargo/config.toml"));
+        assert!(refused(&reads), "{:?}", reads.sources().refusal());
+        assert_eq!(tree.read(&reads), whole);
+        for (path, contents) in [
+            // Pinned as a path package, as a patch of a vendored one is.
+            (
+                "Cargo.lock",
+                "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n",
+            ),
+            // Another version.
+            (
+                "Cargo.lock",
+                "[[package]]\nname = \"a\"\nversion = \"1.0.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0a\"\n",
+            ),
+            // Another checksum.
+            (
                 "vendor/a/.cargo-checksum.json",
-                "vendor/a/Cargo.toml",
-                "vendor/a/data/x.bin",
-                "vendor/a/src/lib.rs",
-            ]
-        );
-        // A checksum git does not list makes no package vendored.
-        let unlisted = files
-            .iter()
-            .filter(|(path, _)| !path.ends_with(".cargo-checksum.json"))
-            .copied()
-            .collect::<Vec<_>>();
-        let (reads, _) = tree.reads(&unlisted);
+                "{\"files\":{},\"package\":\"0b\"}",
+            ),
+            // Another directory.
+            (
+                ".cargo/config.toml",
+                "[source.vendored-sources]\ndirectory = \"third_party\"\n",
+            ),
+        ] {
+            let mut changed = VENDORED.to_vec();
+            for file in &mut changed {
+                if file.0 == path {
+                    file.1 = contents;
+                }
+            }
+            let tree = Tree::new("unproven", &changed);
+            let (reads, _) = tree.reads(&changed);
+            assert!(refused(&reads), "{path}: {contents}");
+            assert_eq!(tree.read(&reads), whole, "{path}: {contents}");
+        }
+    }
+
+    /// Found on review: a `.cargo-checksum.json` beside a first-party
+    /// manifest, planted or copied with a package out of a vendored
+    /// directory, exempted that package's include. Cargo checks no such
+    /// file outside a replaced source, so it proves nothing.
+    #[test]
+    fn a_checksum_beside_a_first_party_manifest_exempts_nothing() {
+        let files = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("crates/a/.cargo-checksum.json", "{\"files\":{}}"),
+            (
+                "crates/a/src/lib.rs",
+                "macro_rules! data { ($p:expr) => { include_str!($p) } }\n",
+            ),
+            (
+                "crates/a/build.rs",
+                "fn main() { println!(\"cargo:rerun-if-changed=../../schema/x.json\"); }\n",
+            ),
+            ("schema/x.json", "{}"),
+        ];
+        let tree = Tree::new("planted", &files);
+        let (reads, _) = tree.reads(&files);
         assert!(
             reads
                 .sources()
                 .refusal()
-                .is_some_and(|refusal| refusal.contains("vendor/a/src/lib.rs:1")),
+                .is_some_and(|refusal| refusal.contains("crates/a/src/lib.rs:1")),
             "{:?}",
             reads.sources().refusal()
+        );
+        assert!(tree.read(&reads).contains(&"schema/x.json".to_string()));
+        assert_eq!(
+            reads
+                .build_scripts()
+                .iter()
+                .map(|script| script.strip_prefix(&tree.0).unwrap().to_path_buf())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("crates/a/build.rs")]
         );
     }
 
@@ -1574,6 +1733,12 @@ mod tests {
             ("package.build = \"top.rs\"\n[dependencies]\n", "top.rs"),
             ("[dependencies]\nbuild = \"1\"\n", "default"),
             ("[workspace]\nmembers = []\n", "default"),
+            // A comment after a table's header hides nothing.
+            (
+                "[package] # the crate\nbuild = \"codegen.rs\"\n",
+                "codegen.rs",
+            ),
+            ("[ package ]\nbuild = \"spaced.rs\"\n", "spaced.rs"),
         ] {
             let found = match build_setting(manifest) {
                 Build::Default => "default".to_string(),
