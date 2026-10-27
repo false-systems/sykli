@@ -1195,6 +1195,31 @@ mod tests {
         assert_eq!(named, expected);
     }
 
+    /// A code block in a list item or a block quote is a doctest too, its
+    /// fence after the item's marker or the quote's `>`.
+    #[test]
+    fn a_code_block_in_a_list_or_a_quote_is_a_doctest() {
+        let text = concat!(
+            "/// - ```\n",
+            "///   include_str!(\"listed.txt\");\n",
+            "///   ```\n",
+            "/// 1. ```\n",
+            "///    include_str!(\"numbered.txt\");\n",
+            "///    ```\n",
+            "///\n",
+            "/// > ```\n",
+            "/// > include_str!(\"quoted.txt\");\n",
+            "/// > ```\n",
+            "fn f() {}\n",
+        );
+        let (named, refusal) = included("src/lib.rs", text);
+        assert_eq!(refusal, None);
+        assert_eq!(
+            named,
+            ["src/listed.txt", "src/numbered.txt", "src/quoted.txt"]
+        );
+    }
+
     #[test]
     fn escapes_are_unescaped() {
         let text = concat!(
