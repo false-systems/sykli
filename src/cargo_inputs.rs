@@ -559,11 +559,13 @@ struct Readings {
 enum Reading {
     Prose,
     /// Inside a fenced block opened by `len` of `fence`; `rust` when
-    /// rustdoc compiles it.
+    /// rustdoc compiles it; `contained` when it opened after a list item's
+    /// marker or a block quote's `>`.
     Fence {
         fence: u8,
         len: usize,
         rust: bool,
+        contained: bool,
     },
 }
 
@@ -615,16 +617,20 @@ impl Readings {
             .map(|c| if c == '\t' { 4 } else { 1 })
             .sum::<usize>();
         let trimmed = line.trim_start();
-        let fence = fence_of(trimmed);
+        let plain = fence_of(trimmed);
+        // A fence may also follow a list item's marker or a block quote's
+        // `>`, as rustdoc reads Markdown.
+        let contained = fence_of(uncontained(trimmed)).filter(|_| plain.is_none());
         let mut code = false;
         let mut next = Vec::new();
         for reading in &self.readings {
             match *reading {
-                Reading::Prose => match fence {
+                Reading::Prose => match plain.or(contained) {
                     Some((fence, len, info)) => next.push(Reading::Fence {
                         fence,
                         len,
                         rust: compiled(info),
+                        contained: contained.is_some(),
                     }),
                     None => {
                         code |= indent >= 4 && !trimmed.is_empty();
@@ -635,16 +641,22 @@ impl Readings {
                     fence: open,
                     len: opened,
                     rust,
+                    contained: inside,
                 } => {
-                    let closes = fence.is_some_and(|(fence, len, info)| {
-                        fence == open && len >= opened && info.is_empty()
-                    });
+                    let matches = |found: Option<(u8, usize, &str)>| {
+                        found.is_some_and(|(fence, len, info)| {
+                            fence == open && len >= opened && info.is_empty()
+                        })
+                    };
+                    // A closing fence indented by four columns or more may
+                    // be the block's content instead, and so may one after
+                    // a marker when the block did not open after one.
+                    let closes = matches(plain) || matches(contained);
+                    let surely = (matches(plain) && indent < 4) || (matches(contained) && inside);
                     if closes {
                         next.push(Reading::Prose);
                     }
-                    // Indented by four columns or more, a closing fence may
-                    // be the block's content instead.
-                    if !closes || indent >= 4 {
+                    if !surely {
                         code |= rust;
                         next.push(*reading);
                     }
@@ -658,6 +670,32 @@ impl Readings {
             }
         }
         code
+    }
+}
+
+/// `trimmed` without the list item markers (`-`, `*`, `+`, `1.`, `1)`) and
+/// block quote markers (`>`) it starts with.
+fn uncontained(trimmed: &str) -> &str {
+    let mut rest = trimmed;
+    loop {
+        rest = rest.trim_start();
+        if let Some(quoted) = rest.strip_prefix('>') {
+            rest = quoted;
+            continue;
+        }
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+            digits + 1
+        } else if rest.starts_with(['-', '*', '+']) {
+            1
+        } else {
+            0
+        };
+        if marker > 0 && rest[marker..].starts_with([' ', '\t']) {
+            rest = &rest[marker..];
+            continue;
+        }
+        return rest;
     }
 }
 
