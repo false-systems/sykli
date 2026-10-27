@@ -170,7 +170,7 @@ fn cargo(
         // By name from the repository's top level, as the rule asks.
         let relative = full.strip_prefix(&top).unwrap_or(&full);
         let required = cargo_inputs::by_name(relative) || reads.reads(&full);
-        let wanted = required || (tracked && !metadata(path, contract));
+        let wanted = required || (tracked && !never_declared(path, contract));
         if wanted && declarable(root, path, notes) {
             inputs.insert(path.clone());
         }
@@ -233,6 +233,16 @@ fn walked(root: &Path) -> Vec<String> {
 /// written: evaluation metadata, never a task's input.
 fn metadata(path: &str, contract: Option<&str>) -> bool {
     matches!(path, "sykli.json" | "sykli.lock") || contract == Some(path)
+}
+
+/// What `init` leaves out, by its path from where it runs: sykli's state
+/// (`.sykli/`) and Cargo's build directory (`target/`) there, and, unless
+/// the Cargo rule requires them, sykli's own contract and lock there and the
+/// contract being written (`contract`). The warning of what build
+/// scripts may read unseen counts none of them either, so a contract `init`
+/// writes, in the repository or outside it, never warns of them.
+pub(crate) fn never_declared(path: &str, contract: Option<&str>) -> bool {
+    path.starts_with(".sykli/") || path.starts_with("target/") || metadata(path, contract)
 }
 
 /// Whether `path` can be declared: a regular file, or a symbolic link (read
@@ -521,8 +531,8 @@ fn write(
             Ok(None) => {}
             Ok(Some(refusal)) | Err(refusal) => {
                 eprintln!(
-                    "error: validate and run would refuse the contract init would write here, so \
-                     it writes none: {refusal}"
+                    "error: init wrote nothing, since validate and run would refuse the contract \
+                     it would write here: {refusal}"
                 );
                 return ExitCode::from(1);
             }

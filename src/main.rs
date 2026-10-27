@@ -587,6 +587,27 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
     Ok(names_cargo || declared_inputs(contract)?.contains_key(&absolute(Path::new("Cargo.toml"))?))
 }
 
+/// Whether `task` runs Cargo, so a build script runs in it: its command
+/// names `cargo`, or it declares the `Cargo.toml` where sykli runs (a
+/// wrapper that runs Cargo).
+fn runs_cargo(task: &sykli::Task) -> Result<bool, String> {
+    let names = task
+        .run
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+        .any(|word| word == "cargo");
+    if names {
+        return Ok(true);
+    }
+    let manifest = absolute(Path::new("Cargo.toml"))?;
+    let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+    for input in &task.inputs {
+        if absolute(&workdir.join(input))? == manifest {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What git lists for the undeclared-file checks, asked once for both. One
 /// `git ls-files --stage` lists the index; for a Cargo graph the same process
 /// also lists the untracked files that are not ignored (`--others`), which
@@ -759,17 +780,19 @@ fn named_warning(named: &NamedInput) -> String {
     )
 }
 
-/// What build scripts may read that sykli cannot see, while a tracked file is
-/// declared by no task. It warns, never refuses: the files a build script's
-/// includes and string literals name are required (`cargo_inputs::Reads`),
-/// but one it reads by a path built at run time (from the environment, a
-/// file it lists, a tool it runs) is not seen, and could be any file no
-/// task declares. A contract that declares every tracked file, as `init`
-/// writes it, leaves none.
+/// What build scripts may read that sykli cannot see, while a file git
+/// lists (tracked, or untracked and not ignored) is declared by no task that
+/// runs Cargo, where the build script runs. It warns, never refuses: the
+/// files a build script's includes and string literals name are required
+/// (`cargo_inputs::Reads`), but one it reads by a path built at run time
+/// (from the environment, a file it lists, a tool it runs) is not seen, and
+/// could be any such file. What `init` leaves out is not counted
+/// (`init::never_declared`), so a contract `init` writes, kept in the
+/// repository or outside it, counts only untracked files.
 #[derive(Serialize)]
 struct UnseenReads {
     build_scripts: Vec<String>,
-    /// How many tracked files no task declares.
+    /// How many files no task running Cargo declares.
     undeclared: usize,
     /// The first of them, those in a build script's package first.
     such_as: Vec<String>,
@@ -785,8 +808,8 @@ fn unseen_warning(unseen: &UnseenReads) -> String {
         ),
     };
     let files = match unseen.undeclared {
-        1 => "1 tracked file no task declares".to_string(),
-        count => format!("{count} tracked files no task declares"),
+        1 => "1 file that no task running Cargo declares".to_string(),
+        count => format!("{count} files that no task running Cargo declares"),
     };
     let mut such_as = unseen.such_as.join(", ");
     if unseen.undeclared > unseen.such_as.len() {
@@ -882,22 +905,33 @@ fn cargo_missing_inputs(
             Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
         }
     }
-    // What build scripts may read unseen: any tracked file no task declares,
-    // but the ones `init` never declares (sykli's state and Cargo's build
-    // directory where sykli runs, the contract and its lock, what cannot be
-    // declared).
+    // What build scripts may read unseen: any file listed under where sykli
+    // runs (a file outside it no contract run here can declare) that no
+    // task running Cargo declares, but what `init` leaves out
+    // (`init::never_declared`), the contract and its lock, and what cannot
+    // be declared.
     let mut unseen = None;
     if !reads.build_scripts().is_empty() {
-        let build = absolute(Path::new("target"))?;
-        let state = root.join(".sykli");
-        let undeclared = listed
-            .cached
+        let here = absolute(Path::new("."))?;
+        let mut covered = BTreeSet::new();
+        for task in &contract.tasks {
+            if runs_cargo(task)? {
+                let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+                for input in &task.inputs {
+                    covered.insert(absolute(&workdir.join(input))?);
+                }
+            }
+        }
+        let undeclared = files
             .iter()
             .filter(|path| {
-                !path.starts_with(&state)
-                    && !path.starts_with(&build)
+                let Ok(relative) = path.strip_prefix(&here) else {
+                    return false;
+                };
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                !crate::init::never_declared(&relative, None)
                     && !inventory.evaluated(path)
-                    && !declared.contains_key(*path)
+                    && !covered.contains(**path)
                     && declarable(path)
             })
             .collect::<BTreeSet<_>>();
@@ -908,10 +942,13 @@ fn cargo_missing_inputs(
                 .iter()
                 .filter_map(|script| script.parent())
                 .collect::<Vec<_>>();
-            let mut such_as = undeclared.iter().collect::<Vec<_>>();
+            let mut such_as = undeclared
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>();
             such_as.sort_by_key(|path| {
                 let elsewhere = !packages.iter().any(|package| path.starts_with(package));
-                (elsewhere, (**path).clone())
+                (elsewhere, *path)
             });
             unseen = Some(UnseenReads {
                 build_scripts: reads
@@ -920,11 +957,7 @@ fn cargo_missing_inputs(
                     .map(|script| shown(script))
                     .collect(),
                 undeclared: undeclared.len(),
-                such_as: such_as
-                    .into_iter()
-                    .take(SHOWN)
-                    .map(|path| shown(path))
-                    .collect(),
+                such_as: such_as.into_iter().take(SHOWN).map(shown).collect(),
             });
         }
     }
@@ -958,8 +991,8 @@ pub(crate) fn undeclared_refusal_of(
         eprintln!("warning: {}", unseen_warning(unseen));
     }
     if !cargo.missing.is_empty() {
-        let hint = outside_here(inventory, &cargo.missing)?;
-        return Ok(Some(cargo_coverage_error(&cargo.missing) + &hint));
+        let lead = outside_here(inventory, &cargo.missing)?;
+        return Ok(Some(lead + &cargo_coverage_error(&cargo.missing)));
     }
     let folders = folder_missing_inputs(contract, inventory)?;
     if !folders.is_empty() {
@@ -968,7 +1001,7 @@ pub(crate) fn undeclared_refusal_of(
             .map(|input| input.path.clone())
             .collect::<Vec<_>>();
         return Ok(Some(
-            folder_coverage_error(&folders) + &outside_here(inventory, &paths)?,
+            outside_here(inventory, &paths)? + &folder_coverage_error(&folders),
         ));
     }
     let linked = link_missing_inputs(contract, inventory)?;
@@ -978,16 +1011,16 @@ pub(crate) fn undeclared_refusal_of(
             .map(|input| input.path.clone())
             .collect::<Vec<_>>();
         return Ok(Some(
-            link_coverage_error(&linked) + &outside_here(inventory, &paths)?,
+            outside_here(inventory, &paths)? + &link_coverage_error(&linked),
         ));
     }
     Ok(None)
 }
 
-/// Where to run instead, when a refusal names files (`paths`, from the
-/// repository's top level) outside the current directory: a
-/// contract's paths start where sykli runs and cannot leave it, so a
-/// contract run here can never declare them. Empty otherwise.
+/// Where to run instead, to lead a refusal that names files (`paths`, from
+/// the repository's top level) outside the current directory: a contract's
+/// paths start where sykli runs and cannot leave it, so a contract run here
+/// can never declare them. Empty otherwise.
 fn outside_here(inventory: &Inventory, paths: &[String]) -> Result<String, String> {
     let root = &inventory.listed()?.root;
     let here = absolute(Path::new("."))?;
@@ -1012,11 +1045,11 @@ fn outside_here(inventory: &Inventory, paths: &[String]) -> Result<String, Strin
         ("are", "them")
     };
     Ok(format!(
-        "; {} {are} outside {below}/, where sykli runs, and a contract run here cannot declare \
-         {them}, since its paths cannot leave this directory: run sykli at the repository's top \
-         level, {}",
-        outside.join(", "),
-        root.display()
+        "run sykli at the repository's top level, {}: {} {are} outside {below}/, where it runs, \
+         and a contract run here cannot declare {them}, since its paths cannot leave this \
+         directory. ",
+        root.display(),
+        outside.join(", ")
     ))
 }
 
