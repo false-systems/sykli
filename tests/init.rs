@@ -1543,14 +1543,18 @@ fn a_change_to_a_vendored_file_misses_the_cache() {
     let explain = || statuses(&root, &path, &["plan", "--explain", "--json"]);
     assert_eq!(run(), ["passed", "passed", "passed"]);
     assert_eq!(run(), ["cached", "cached", "cached"]);
-    for vendored in [
-        "vendor/third-party/data/case.blb",
-        "vendor/third-party/.cargo-checksum.json",
-        "vendor/third-party/README.md",
+    for (vendored, changed) in [
+        ("vendor/third-party/data/case.blb", "changed\n"),
+        // A file's hash changed, the package's checksum as pinned.
+        (
+            "vendor/third-party/.cargo-checksum.json",
+            "{\"files\":{\"Cargo.toml\":\"ff\"},\"package\":\"06\"}",
+        ),
+        ("vendor/third-party/README.md", "changed\n"),
     ] {
         let file = root.join(vendored);
         let original = fs::read(&file).unwrap();
-        fs::write(&file, b"changed\n").unwrap();
+        fs::write(&file, changed).unwrap();
         assert_eq!(
             explain(),
             ["missing", "deferred", "deferred"],
@@ -1559,6 +1563,15 @@ fn a_change_to_a_vendored_file_misses_the_cache() {
         fs::write(&file, original).unwrap();
     }
     assert_eq!(explain(), ["available", "available", "available"]);
+    // A checksum file that no longer records the pinned package proves
+    // nothing: the include there is refused, and no pass is reused.
+    let checksum = root.join("vendor/third-party/.cargo-checksum.json");
+    let original = fs::read(&checksum).unwrap();
+    fs::write(&checksum, b"changed\n").unwrap();
+    let (code, _, stderr) = sykli_on(&root, &path, &["run", "sykli.json", "--json"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("not a string literal"), "{stderr}");
+    fs::write(&checksum, original).unwrap();
     fs::remove_dir_all(root.with_extension("bin")).unwrap();
     fs::remove_dir_all(root).unwrap();
 }

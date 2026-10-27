@@ -77,13 +77,11 @@ pub(crate) fn docs(relative: &Path) -> bool {
 /// by name (`by_name`), which `init` declares and the completeness rule
 /// requires alike:
 /// - what its Rust sources include (`Sources`);
-/// - every file of a package `cargo vendor` wrote: a directory with a
-///   `Cargo.toml` and the `.cargo-checksum.json` it writes beside it. Cargo
-///   hashes every file the checksum lists on every build, and refuses to
-///   build when one has changed, so the build reads each of them; and an
-///   include in such a package, whose path may be no literal (a third-party
-///   test macro's `include_bytes!($file)`), reads one of its own files, all
-///   required, so it is not refused, while the same code anywhere else is;
+/// - every file of a package with a `.cargo-checksum.json` beside its
+///   `Cargo.toml`, as `cargo vendor` writes one: where Cargo verifies that
+///   checksum, it hashes every file the checksum lists on every build and
+///   refuses to build when one has changed, so the build reads each of
+///   them, and anywhere else requiring them all costs only cache misses;
 /// - what a build script's string literals name, from its package's
 ///   directory (`build_named`): a build script runs during the build there,
 ///   and hands each path it names to something that reads it (`std::fs`, a
@@ -91,13 +89,22 @@ pub(crate) fn docs(relative: &Path) -> bool {
 ///   resolved from the same directory). A file, or every file under a
 ///   directory. What it reads by a path built at run time is not seen
 ///   (`build_scripts`, which `validate` and `run` warn of).
+///
+/// An include whose path is not a literal (a third-party test macro's
+/// `include_bytes!($file)`) is not refused only in a package the tree
+/// proves Cargo verifies, and so treats as a published package that cannot
+/// read outside itself (`vendored`); its build script is not warned of
+/// either. A checksum file alone proves nothing: Cargo checks it only for a
+/// package in a replaced source's directory, so one beside a first-party
+/// manifest, planted or copied with a package out of that directory, leaves
+/// the package refused and warned of as any other.
 pub(crate) struct Reads {
     sources: Sources,
-    /// The directories of vendored packages.
-    vendored: BTreeSet<PathBuf>,
-    /// The build scripts outside vendored packages, which are read whole.
+    /// The directories of the packages with a checksum file, read whole.
+    checksummed: BTreeSet<PathBuf>,
+    /// The build scripts outside vendored packages.
     scripts: Vec<PathBuf>,
-    /// The paths their string literals name: files, or directories.
+    /// The paths build scripts' string literals name: files, or directories.
     named: BTreeSet<PathBuf>,
 }
 
@@ -111,20 +118,17 @@ impl Reads {
         let listed = files.iter().map(PathBuf::as_path).collect::<BTreeSet<_>>();
         let named_file =
             |path: &Path, name: &str| path.file_name().is_some_and(|file| file == name);
-        let vendored = files
+        let checksummed = files
             .iter()
             .filter(|path| named_file(path, ".cargo-checksum.json"))
             .filter_map(|path| path.parent())
             .filter(|directory| listed.contains(directory.join("Cargo.toml").as_path()))
             .map(Path::to_path_buf)
             .collect::<BTreeSet<_>>();
-        let in_vendored = |path: &Path| under(&vendored, path);
+        let vendored = vendored(files, &checksummed);
         // Each build script, with its package's directory.
         let mut scripts = BTreeMap::new();
-        for manifest in files
-            .iter()
-            .filter(|path| named_file(path, "Cargo.toml") && !in_vendored(path))
-        {
+        for manifest in files.iter().filter(|path| named_file(path, "Cargo.toml")) {
             let directory = manifest.parent().unwrap_or_else(|| Path::new(""));
             let script = match build_setting(&fs::read_to_string(manifest).unwrap_or_default()) {
                 Build::Default => Some(directory.join("build.rs")),
@@ -157,21 +161,25 @@ impl Reads {
                 build_named(&text, package, &mut named);
             }
         }
+        let scripts = scripts
+            .into_keys()
+            .filter(|script| !under(&vendored, script))
+            .collect();
         Ok(Reads {
             sources,
-            vendored,
-            scripts: scripts.into_keys().collect(),
+            checksummed,
+            scripts,
             named,
         })
     }
 
     /// Whether the build reads `path`, one of the files `of` was given, by
     /// what it holds rather than by its name: a source includes it, it is
-    /// in a vendored package, or a build script names it or a directory
-    /// above it.
+    /// in a package with a checksum file, or a build script names it or a
+    /// directory above it.
     pub(crate) fn reads(&self, path: &Path) -> bool {
         self.sources.included.contains(path)
-            || under(&self.vendored, path)
+            || under(&self.checksummed, path)
             || under(&self.named, path)
     }
 
@@ -186,6 +194,170 @@ impl Reads {
     }
 }
 
+/// Of the packages with a checksum file (`checksummed`), those the tree
+/// proves Cargo verifies, as it does every package of a replaced source:
+/// - the package's directory is directly inside a directory that a tracked
+///   Cargo configuration (`.cargo/config.toml` or `.cargo/config`) names as
+///   a replaced source's (`[source.NAME] directory = "…"`), resolved from
+///   the directory its `.cargo` is in, as Cargo resolves it; `cargo vendor`
+///   says to write exactly that;
+/// - a tracked `Cargo.lock` pins a package of the manifest's name and
+///   version from a registry or git (`source = …`), so Cargo takes it from
+///   that source, replaced by the directory, and not as a path package (a
+///   `[patch]` of it, say, which Cargo never verifies);
+/// - where the lock records a checksum, the checksum file records the same
+///   one for the package, as Cargo itself requires.
+///
+/// Whether every file still matches its listed hash is left to Cargo, which
+/// refuses to build otherwise: it bears on no file outside the package.
+fn vendored(files: &[PathBuf], checksummed: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    if checksummed.is_empty() {
+        return BTreeSet::new();
+    }
+    let read = |path: &Path| fs::read_to_string(path).unwrap_or_default();
+    let mut directories = BTreeSet::new();
+    let mut pins = BTreeMap::new();
+    for path in files {
+        let name = path.file_name().and_then(|name| name.to_str());
+        let configuration = matches!(name, Some("config.toml" | "config"))
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|parent| parent == ".cargo");
+        if configuration {
+            let base = path
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(""));
+            for entry in entries(&read(path)) {
+                let directory = entry.quoted
+                    && ((entry.table.starts_with("source.") && entry.key == "directory")
+                        || (entry.table == "source" && entry.key.ends_with(".directory"))
+                        || (entry.table.is_empty()
+                            && entry.key.starts_with("source.")
+                            && entry.key.ends_with(".directory")));
+                if directory {
+                    directories.extend(lexical(&base.join(&entry.value)));
+                }
+            }
+        }
+        if name == Some("Cargo.lock") {
+            pins.extend(pinned(&read(path)));
+        }
+    }
+    checksummed
+        .iter()
+        .filter(|package| {
+            package
+                .parent()
+                .is_some_and(|parent| directories.contains(parent))
+        })
+        .filter(|package| {
+            let text = read(&package.join("Cargo.toml"));
+            let manifest = entries(&text);
+            let field = |key: &str| {
+                manifest
+                    .iter()
+                    .find(|entry| entry.table == "package" && entry.key == key && entry.quoted)
+                    .map(|entry| entry.value.clone())
+            };
+            let (Some(name), Some(version)) = (field("name"), field("version")) else {
+                return false;
+            };
+            let Some(pinned) = pins.get(&(name, version)) else {
+                return false;
+            };
+            let recorded = serde_json::from_str::<serde_json::Value>(&read(
+                &package.join(".cargo-checksum.json"),
+            ))
+            .ok()
+            .and_then(|checksum| checksum["package"].as_str().map(str::to_string));
+            pinned.is_none() || *pinned == recorded
+        })
+        .cloned()
+        .collect()
+}
+
+/// The packages a `Cargo.lock` pins from a registry or git (`source = …`),
+/// by name and version, with the checksum it records for each, if any.
+fn pinned(lock: &str) -> BTreeMap<(String, String), Option<String>> {
+    let mut packages: BTreeMap<usize, BTreeMap<&str, String>> = BTreeMap::new();
+    for entry in entries(lock) {
+        if entry.table == "package" && entry.quoted {
+            packages
+                .entry(entry.header)
+                .or_default()
+                .insert(entry.key, entry.value);
+        }
+    }
+    packages
+        .into_values()
+        .filter(|package| package.contains_key("source"))
+        .filter_map(|mut package| {
+            Some((
+                (package.remove("name")?, package.remove("version")?),
+                package.remove("checksum"),
+            ))
+        })
+        .collect()
+}
+
+/// One `key = value` line of a TOML file, read line by line without a TOML
+/// parser: the table it is in (its header's name, without brackets, spaces
+/// or a comment after it), which header that is (from 1, so two
+/// `[[package]]` entries differ), the key unquoted, and the value without a
+/// comment after it, a string unquoted (`quoted`).
+struct Entry<'a> {
+    table: String,
+    header: usize,
+    key: &'a str,
+    value: String,
+    quoted: bool,
+}
+
+fn entries(text: &str) -> Vec<Entry<'_>> {
+    let mut found = Vec::new();
+    let mut table = String::new();
+    let mut header = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let name = line.trim_start_matches('[');
+            let name = name.split(']').next().unwrap_or("").trim();
+            table = name.trim_matches(['"', '\'']).to_string();
+            header += 1;
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        let value = value.trim();
+        let quote = value.chars().next().filter(|c| matches!(c, '"' | '\''));
+        let (value, quoted) = match quote {
+            Some(quote) => match value[1..].find(quote) {
+                Some(end) => (value[1..1 + end].to_string(), true),
+                None => continue,
+            },
+            None => (
+                value.split('#').next().unwrap_or("").trim().to_string(),
+                false,
+            ),
+        };
+        found.push(Entry {
+            table: table.clone(),
+            header,
+            key,
+            value,
+            quoted,
+        });
+    }
+    found
+}
+
 /// Whether `path` is one of `paths` or under one of them, looked up by each
 /// of its ancestors.
 fn under(paths: &BTreeSet<PathBuf>, path: &Path) -> bool {
@@ -194,9 +366,8 @@ fn under(paths: &BTreeSet<PathBuf>, path: &Path) -> bool {
 
 /// What a manifest says of its package's build script (`package.build`):
 /// none said, so `build.rs` beside it if there is one; a path from it; or
-/// none at all (`false`). Read line by line, without a TOML parser: a
-/// `build` key in the `[package]` table, or `package.build` before any
-/// table.
+/// none at all (`false`). A `build` key in the `[package]` table, or
+/// `package.build` before any table (`entries`).
 enum Build {
     Default,
     Path(String),
@@ -204,37 +375,16 @@ enum Build {
 }
 
 fn build_setting(manifest: &str) -> Build {
-    let mut table = String::new();
-    for line in manifest.lines() {
-        let line = line.trim();
-        if let Some(header) = line.strip_prefix('[') {
-            table = header.trim_end_matches(']').trim().to_string();
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().trim_matches(['"', '\'']);
-        let build = (matches!(table.as_str(), "package" | "project") && key == "build")
-            || (table.is_empty() && key == "package.build");
+    for entry in entries(manifest) {
+        let build = (matches!(entry.table.as_str(), "package" | "project") && entry.key == "build")
+            || (entry.table.is_empty() && entry.key == "package.build");
         if !build {
             continue;
         }
-        let value = value.split('#').next().unwrap_or("").trim();
-        return match value {
-            "false" => Build::Off,
-            "true" => Build::Default,
-            _ => match value
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-                .or_else(|| {
-                    value
-                        .strip_prefix('\'')
-                        .and_then(|rest| rest.strip_suffix('\''))
-                }) {
-                Some(path) => Build::Path(path.to_string()),
-                None => Build::Default,
-            },
+        return match (entry.quoted, entry.value.as_str()) {
+            (true, path) => Build::Path(path.to_string()),
+            (false, "false") => Build::Off,
+            (false, _) => Build::Default,
         };
     }
     Build::Default
@@ -297,7 +447,9 @@ impl Sources {
         // A vendored package's files are all required, so what one of its
         // includes reads is, whatever its path.
         let vendored = under(&self.vendored, source);
-        let Scanned { includes, literals } = scan(text);
+        let Scanned {
+            includes, literals, ..
+        } = scan(text);
         for (line, literal) in literals {
             index(
                 literal,
@@ -489,18 +641,10 @@ fn scan(text: &str) -> Scanned<'_> {
         }
         at += rest.chars().next().map_or(1, char::len_utf8);
     }
-    // A doctest's includes, read from its code as any code is. Their line is
-    // not kept, and one whose path is not a literal is passed over: a doc
-    // comment is never refused.
-    if !docs.code.trim_matches(|c| c == ';' || c == '\n').is_empty() {
-        found.extend(
-            scan(&docs.code)
-                .includes
-                .into_iter()
-                .filter(|(_, include)| *include != Include::Opaque)
-                .map(|(_, include)| (0, include)),
-        );
-    }
+    // A doctest's includes. Their line is not kept, and one whose path is
+    // not a literal is passed over: a doc comment is never refused.
+    docs.flush();
+    found.extend(docs.found.into_iter().map(|include| (0, include)));
     Scanned {
         includes: found,
         literals,
@@ -526,17 +670,28 @@ fn undecorated(line: &str) -> &str {
     }
 }
 
-/// The code of a source's doc comments, as rustdoc reads Markdown: the
-/// lines of a fenced code block (unless its info string names another
-/// language) and indented lines, and nothing of their prose, inline code
-/// included. rustdoc compiles a doc comment's code blocks as doctests, and
-/// nothing else in it.
+/// The includes of a source's doc comments, as rustdoc reads Markdown: in
+/// the lines of a fenced code block (unless its info string names another
+/// language) and in indented lines, and in nothing of their prose, inline
+/// code included. rustdoc compiles a doc comment's code blocks as doctests,
+/// and nothing else in it.
+///
+/// A block's includes are found by their text, each on its own (`textual`),
+/// as every literal include in a doc comment once was, not by lexing the
+/// block: a block need not be Rust as written (a `.gitignore` sample's
+/// `/*`, an `ignore` block's unterminated string), and lexed, one such
+/// block hid the includes after it. So an include in a doctest's comment or
+/// string counts too.
 ///
 /// Where the structure is unclear, every reading is kept, and a line any
 /// reading takes for code is code, so a doctest's include is never missed
-/// (the cost is a file asked for that nothing reads): a line indented by
-/// four columns or more counts whatever the common indentation is; and a
-/// doc comment that does not follow the last one directly (code, an
+/// (the cost is a file asked for that nothing reads). Only the plainest
+/// fence is read with certainty: three or more backticks or tildes, at the
+/// start of a line indented by fewer than four columns, a backtick fence's
+/// info string without a backtick, as CommonMark has it. Every other fence,
+/// one after a list item's marker or a block quote's `>`, or indented by
+/// four columns or more, opens or closes in one reading and not in another;
+/// and a doc comment that does not follow the last one directly (code, an
 /// attribute or a plain comment between them) may document the same item,
 /// so a fence still open there stays open in one reading and is closed in
 /// another.
@@ -544,7 +699,9 @@ fn undecorated(line: &str) -> &str {
 struct Docs {
     outer: Readings,
     inner: Readings,
-    code: String,
+    /// The run of code lines read so far.
+    run: String,
+    found: Vec<Include>,
 }
 
 /// The readings of one kind of doc comment so far, and where the last one
@@ -559,13 +716,14 @@ struct Readings {
 enum Reading {
     Prose,
     /// Inside a fenced block opened by `len` of `fence`; `rust` when
-    /// rustdoc compiles it; `contained` when it opened after a list item's
-    /// marker or a block quote's `>`.
+    /// rustdoc compiles it; `plain` when it opened at the start of a line
+    /// indented by fewer than four columns, so a plain closing fence closes
+    /// it surely.
     Fence {
         fence: u8,
         len: usize,
         rust: bool,
-        contained: bool,
+        plain: bool,
     },
 }
 
@@ -579,31 +737,45 @@ impl Docs {
         kind: Kind,
         lines: impl IntoIterator<Item = &'a str>,
     ) {
-        let state = match kind {
-            Kind::Outer => &mut self.outer,
-            Kind::Inner => &mut self.inner,
+        let follows = {
+            let state = self.state(kind);
+            state
+                .last
+                .is_some_and(|last| text[last..at].trim().is_empty())
         };
-        let follows = state
-            .last
-            .is_some_and(|last| text[last..at].trim().is_empty());
         if !follows {
+            let state = self.state(kind);
             if !state.readings.contains(&Reading::Prose) {
                 state.readings.push(Reading::Prose);
             }
             // Nothing joins code across doc comments that do not follow
             // each other.
-            self.code.push_str(";\n");
+            self.flush();
         }
         for line in lines {
             let line = line.strip_suffix('\r').unwrap_or(line);
-            if state.read(line) {
-                self.code.push_str(line);
-                self.code.push('\n');
+            let code = self.state(kind).read(line);
+            if code {
+                self.run.push_str(line);
+                self.run.push('\n');
             } else {
-                self.code.push_str(";\n");
+                self.flush();
             }
         }
-        state.last = Some(end);
+        self.state(kind).last = Some(end);
+    }
+
+    fn state(&mut self, kind: Kind) -> &mut Readings {
+        match kind {
+            Kind::Outer => &mut self.outer,
+            Kind::Inner => &mut self.inner,
+        }
+    }
+
+    /// The includes of the run of code lines so far, found by their text.
+    fn flush(&mut self) {
+        textual(&self.run, &mut self.found);
+        self.run.clear();
     }
 }
 
@@ -617,46 +789,42 @@ impl Readings {
             .map(|c| if c == '\t' { 4 } else { 1 })
             .sum::<usize>();
         let trimmed = line.trim_start();
+        // A fence at the start of the line, and one after a list item's
+        // marker or a block quote's `>`, as rustdoc reads Markdown.
         let plain = fence_of(trimmed);
-        // A fence may also follow a list item's marker or a block quote's
-        // `>`, as rustdoc reads Markdown.
         let contained = fence_of(uncontained(trimmed)).filter(|_| plain.is_none());
+        let sure = plain.is_some() && indent < 4;
         let mut code = false;
         let mut next = Vec::new();
         for reading in &self.readings {
             match *reading {
-                Reading::Prose => match plain.or(contained) {
-                    Some((fence, len, info)) => next.push(Reading::Fence {
-                        fence,
-                        len,
-                        rust: compiled(info),
-                        contained: contained.is_some(),
-                    }),
-                    None => {
+                Reading::Prose => {
+                    if let Some((fence, len, info)) = plain.or(contained) {
+                        next.push(Reading::Fence {
+                            fence,
+                            len,
+                            rust: compiled(info),
+                            plain: sure,
+                        });
+                    }
+                    if !sure {
                         code |= indent >= 4 && !trimmed.is_empty();
                         next.push(Reading::Prose);
                     }
-                },
+                }
                 Reading::Fence {
                     fence: open,
                     len: opened,
                     rust,
-                    contained: inside,
+                    plain: opened_plainly,
                 } => {
-                    let matches = |found: Option<(u8, usize, &str)>| {
-                        found.is_some_and(|(fence, len, info)| {
-                            fence == open && len >= opened && info.is_empty()
-                        })
-                    };
-                    // A closing fence indented by four columns or more may
-                    // be the block's content instead, and so may one after
-                    // a marker when the block did not open after one.
-                    let closes = matches(plain) || matches(contained);
-                    let surely = (matches(plain) && indent < 4) || (matches(contained) && inside);
+                    let closes = plain.or(contained).is_some_and(|(fence, len, info)| {
+                        fence == open && len >= opened && info.is_empty()
+                    });
                     if closes {
                         next.push(Reading::Prose);
                     }
-                    if !surely {
+                    if !(closes && sure && opened_plainly) {
                         code |= rust;
                         next.push(*reading);
                     }
@@ -670,6 +838,33 @@ impl Readings {
             }
         }
         code
+    }
+}
+
+/// Every literal include invocation in `text` found by its text alone,
+/// whatever surrounds it: a fallback for code that does not lex.
+fn textual(text: &str, found: &mut Vec<Include>) {
+    let mut at = 0;
+    while let Some(offset) = text[at..].find("include") {
+        let start = at + offset;
+        at = start + "include".len();
+        if start > 0 && identifier(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let mut end = at;
+        while end < text.len() && identifier(text.as_bytes()[end]) {
+            end += 1;
+        }
+        if !matches!(
+            &text[start..end],
+            "include" | "include_str" | "include_bytes"
+        ) {
+            continue;
+        }
+        match invocation(text, end) {
+            Some(Include::Opaque) | None => {}
+            Some(include) => found.push(include),
+        }
     }
 }
 
@@ -701,14 +896,16 @@ fn uncontained(trimmed: &str) -> &str {
 
 /// The fence a line of a doc comment opens or closes, with leading
 /// whitespace removed: its character, its length (three or more) and its
-/// info string.
+/// info string. A run of backticks whose info string holds a backtick is
+/// no fence, as CommonMark has it: "```sh``` blocks" is inline code.
 fn fence_of(trimmed: &str) -> Option<(u8, usize, &str)> {
     let fence = *trimmed.as_bytes().first()?;
     if !matches!(fence, b'`' | b'~') {
         return None;
     }
     let len = trimmed.bytes().take_while(|byte| *byte == fence).count();
-    (len >= 3).then(|| (fence, len, trimmed[len..].trim()))
+    let info = trimmed[len..].trim();
+    (len >= 3 && !(fence == b'`' && info.contains('`'))).then_some((fence, len, info))
 }
 
 /// Whether rustdoc compiles a fenced block with this info string: unless it
@@ -1168,7 +1365,8 @@ mod tests {
     /// fenced block (unless its info string names another language) or an
     /// indented one. Where a doc comment's structure is unclear (a fence
     /// left open before the next item's doc), every reading counts, so what
-    /// a doctest includes is never missed.
+    /// a doctest includes is never missed. A block's includes are found by
+    /// their text, so one in a doctest's comment counts as well.
     #[test]
     fn a_doc_comment_counts_the_includes_of_its_code_blocks_only() {
         let text = concat!(
@@ -1221,6 +1419,8 @@ mod tests {
         assert_eq!(refusal, None);
         let mut expected = vec![
             "src/split.txt",
+            // Found by its text, in a doctest's comment too, as on main.
+            "src/commented.txt",
             "src/no-run.txt",
             "src/ignored.txt",
             "src/indented.txt",
