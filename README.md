@@ -120,7 +120,11 @@ repository each task declares every file git tracks, [documents](#documents)
 and symbolic links included, since a build or a test can read a vendored crate,
 an included file or a fixture anywhere. It leaves out only `.sykli/`, `target/`,
 sykli's own contract and lock, and a symbolic link that leads out of the repository,
-which cannot be bound. Review the inputs it declares, and declare files you add
+which cannot be bound. Inside a git repository it judges the contract it would
+write as `validate` and `run` do before any task, from the same listing, and
+writes none they would refuse: run it at the repository's top level (in a
+subdirectory, a Rust source outside it is a file no contract there can declare).
+Review the inputs it declares, and declare files you add
 later. A Cargo repository without a `Cargo.lock` needs one before `sykli init`
 (`cargo generate-lockfile`): otherwise the first run's build creates it, which
 changes the tree that run's receipt names (`verify` exits 3), and the next run
@@ -298,10 +302,40 @@ from every task's inputs:
 - known source, configuration or test files;
 - a file a Rust source includes (`include_str!`, `include_bytes!`, `include!`)
   by a string literal, or by `concat!(env!("CARGO_MANIFEST_DIR"), "/path")`,
-  which is resolved from the nearest `Cargo.toml`. An include whose path is
-  anything else (a macro's variable, an expression) is refused with its file
-  and line, since its file cannot be known; a path built from `OUT_DIR` names
-  a file made at build time and is not asked for.
+  which is resolved from the nearest `Cargo.toml`. In a doc comment, only an
+  include in a code block counts, since rustdoc compiles code blocks as
+  doctests and nothing else: one shown in prose or inline code names nothing,
+  nor does one in a block marked as another language (`text`, `sh`, …). A
+  code block's includes are found by their text, each on its own, so a block
+  that is not Rust as written (a `.gitignore` sample's `/*`) hides none after
+  it. An include whose path is anything else (a macro's variable, an
+  expression) is refused with its file and line, since its file cannot be
+  known, unless it is in a vendored package (below); a path built from
+  `OUT_DIR` names a file made at build time and is not asked for;
+- every file of a package with the `.cargo-checksum.json` that `cargo vendor`
+  writes beside its `Cargo.toml`. Where Cargo verifies that checksum, it
+  hashes every file it lists on every build and refuses to build when one
+  has changed, so the build reads each of them. Each is then a declared
+  input, so a change to any of them changes every key that covers it;
+- every path a build script's string literals name, from its package's
+  directory, where it runs and where Cargo resolves its
+  `cargo:rerun-if-changed` paths: `"cargo:rerun-if-changed=schema/a.json"`,
+  `fs::read("templates/b.txt")`, or a directory a tool takes (`"proto"`), and
+  then every file under it. A build script is `build.rs` beside a
+  `Cargo.toml`, or the file its `package.build` names.
+
+A package is **vendored** only where the tree shows that Cargo verifies its
+checksum: the package sits directly in a directory that a tracked
+`.cargo/config.toml` (or `.cargo/config`) names as a source's directory
+(`[source.NAME] directory = "vendor"`, as `cargo vendor` says to write), a
+tracked `Cargo.lock` pins its name and version from a registry or git, and
+the checksum the lock records is the one the file records. There an include
+whose path is not a literal (a third-party test macro's `include_bytes!($file)`)
+reads one of the package's own files, all required, so it is not refused,
+and its build script is not counted for the warning below. A checksum file
+anywhere else, planted or copied with a package out of that directory,
+proves nothing: Cargo never checks it, so the package is refused and warned
+of as any other.
 
 A [document](#documents) that a string literal in a Rust source names, as a test
 that reads it does (`fs::read("README.md")`), but no task declares, only warns:
@@ -310,6 +344,28 @@ tests/x.rs:LINE but not declared; declare it if a task reads it` and go on,
 since a help or message text names files too. A top-level document is named by
 its file name, a deeper one by its path; a comment or a doc comment that
 mentions a document names nothing.
+
+What a build script reads by a path built at run time (from the environment,
+from a directory it lists, or by a tool that finds its own files) cannot be
+seen. So while a build script exists and a file git lists under where sykli
+runs (tracked, or untracked and not ignored) is declared by no task that runs
+Cargo (one whose command names `cargo`, or which declares the `Cargo.toml`),
+`validate`, `plan --explain` and `run` warn and go on: `build.rs is a build
+script, and sykli requires only the files its includes and string literals
+name, never one read by a path built at run time; 1 file that no task running
+Cargo declares may be read by it (data/hidden.json): declare any a build
+script reads`. Explain lists it as `input_coverage.unseen_reads:
+{build_scripts, undeclared, such_as}`. A vendored package's build script is
+not counted, since its package is required whole. Nor is what `init` leaves
+out: `.sykli/`, `target/`, and sykli's own `sykli.json` and `sykli.lock`
+where sykli runs. A contract `init` writes declares every other tracked
+file, in the repository or kept outside it, so it warns only of untracked
+files: commit them, ignore them, or declare those a build script reads.
+
+A contract's paths start in the directory sykli runs in and cannot leave it,
+while the Cargo rule reads the whole repository. So in a subdirectory, a file
+outside it that the rule asks for can never be declared: `validate`, `run` and
+`init` say so, and name the repository's top level to run sykli in.
 
 In every graph, it also refuses an undeclared sibling of a declared input: a
 tracked file directly inside a folder that holds one of a task's inputs, which

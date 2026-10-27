@@ -7,6 +7,60 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Breaking
+- In a Cargo graph, `validate`, `run` and `plan --explain` refuse (exit 2) a
+  contract that leaves out any file git lists under a package with the
+  `.cargo-checksum.json` that `cargo vendor` writes beside its `Cargo.toml`.
+  Where Cargo verifies that checksum, it hashes every file the checksum
+  lists on every build, and refuses to build when one has changed, so the
+  build reads each of them; only its Rust sources and Cargo files were
+  required, so a change to a vendored data file kept a cached pass. `init`
+  already declared them.
+- In a Cargo graph, the same commands refuse a contract that leaves out a
+  file a build script's string literals name, from its package's directory
+  (where it runs, and where Cargo resolves `cargo:rerun-if-changed`), or a
+  file under a directory one names. A build script is `build.rs` beside a
+  `Cargo.toml`, or the file its `package.build` names. A file a build script
+  read kept a cached pass when it changed. `init` already declared them.
+- Inside a git repository, `init` judges the contract it would write as
+  `validate` and `run` do before any task, from the same listing, and writes
+  none they would refuse: it exits 1 with their reason and writes nothing.
+  In a subdirectory it wrote a contract they refused whenever a Rust source,
+  a Cargo file or a file under `tests/` lay outside it.
+
+### Added
+- While a build script exists and a file git lists under where sykli runs
+  (tracked, or untracked and not ignored) is declared by no task that runs
+  Cargo, `validate`, `run` and `plan --explain` warn, and go on, that what a
+  build script reads by a path built at run time is not seen, naming the
+  scripts and the first such files (`input_coverage.unseen_reads:
+  {build_scripts, undeclared, such_as}` in explain's JSON). A vendored
+  package's build script is not counted, nor is what `init` leaves out
+  (`.sykli/`, `target/`, and sykli's own `sykli.json` and `sykli.lock`), so
+  a contract `init` writes, in the repository or kept outside it, warns only
+  of untracked files.
+- When `validate`, `run` or `init` refuse for files outside the current
+  directory, the message begins with the repository's top level to run in,
+  and says that a contract run there cannot declare them (its paths cannot
+  leave the directory sykli runs in).
+
+### Fixed
+- An include whose path is not a literal (a third-party test macro's
+  `include_bytes!($file)`) is no longer refused in a vendored package: one
+  that sits directly in a directory a tracked `.cargo/config.toml` (or
+  `.cargo/config`) names as a source's directory, that a tracked
+  `Cargo.lock` pins from a registry or git by its name and version, with the
+  checksum its `.cargo-checksum.json` records. Every file of it is required.
+  The same code anywhere else, a checksum file planted or copied beside a
+  first-party manifest included, is still refused.
+- A doc comment's include is required only in a code block (fenced, unless
+  its info string names another language, or indented), which rustdoc
+  compiles as a doctest. One shown in prose or inline code, in a test's doc
+  comment too, no longer makes a contract refuse. A code block's includes
+  are found by their text, each on its own, so a block that is not Rust as
+  written hides none after it, and an include a doctest splits over lines,
+  which was missed, is now required.
+
 ## [0.7.0] - 2026-10-27
 
 Set in `Cargo.toml` only: no tag, release or crates.io publish has been made

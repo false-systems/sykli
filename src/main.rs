@@ -123,12 +123,19 @@ enum Command {
         2  refused for undeclared files, as `run` refuses it (also exit 2), or that check failed\n\n\
         Inside a git repository, validate also makes the check `run` makes before any task, so\n\
         its verdict depends on the work tree, not only on the contract and its lock. In a Cargo\n\
-        graph, every Rust source, Cargo file and file under tests/, and every file a source\n\
-        includes must be declared, and an include must name its path as a literal; a\n\
-        document a string literal names but no task declares only warns (exit 0). In every\n\
-        graph, each tracked file beside a task's declared\n\
-        inputs must be declared, except documents, licences and CI configuration; and a\n\
-        declared link to a directory needs every file under it declared. Neither the Cargo\n\
+        graph, every Rust source, Cargo file and file under tests/, every file a source\n\
+        includes (in code, or in a doc comment's code block), every file of a package with a\n\
+        .cargo-checksum.json beside its Cargo.toml, and every path a build script's string\n\
+        literals name must be declared, and an include must name its path as a literal\n\
+        unless its package is vendored: in a directory a tracked .cargo/config.toml names as a\n\
+        source's, and pinned by Cargo.lock with the checksum it records. A document a string\n\
+        literal names but no task declares only warns (exit 0), and so do build scripts while\n\
+        a file git lists is declared by no task that runs Cargo, since what they read by a\n\
+        path built at run time is not seen. In every graph, each tracked file\n\
+        beside a task's declared inputs must be declared, except documents, licences and CI\n\
+        configuration; and a declared link to a directory needs every file under it declared.\n\
+        A file outside the current directory cannot be declared from it: the refusal then\n\
+        names the repository's top level to run in. Neither the Cargo\n\
         files by name nor the sibling rule asks for the JSON contract being validated or\n\
         its sykli.lock (an include of either is still asked for). It does not check\n\
         that declared inputs exist, and it runs no task (a sykli.rs emitter is run, to read\n\
@@ -309,8 +316,14 @@ enum Command {
     #[command(after_help = "Exit codes:\n  \
         0  wrote the contract\n  \
         1  nothing to declare — no Cargo.toml, package.json, or go.mod — or, with\n     \
-           --contract, no git repository around the current directory or no way to write\n  \
+           --contract, no git repository around the current directory or no way to write;\n     \
+           or validate and run would refuse the contract it would write (nothing is written)\n  \
         2  the contract exists; pass --force to overwrite it\n\n\
+        Inside a git repository, init lists the whole repository once and judges the\n\
+        contract it would write as validate and run do before any task. In a subdirectory,\n\
+        the Cargo rule still reads the whole repository, and a contract's paths cannot leave\n\
+        the directory sykli runs in, so a file it asks for outside it refuses: run init at\n\
+        the repository's top level.\n\n\
         With --contract PATH outside the repository, the tasks are still inferred from\n\
         the git repository around the current directory, with paths from its root; the\n\
         contract and its sykli.lock are written to PATH's directory (created if needed)\n\
@@ -540,6 +553,10 @@ struct InputCoverage {
     /// that no task declares. They warn; they never make `refusal` refuse.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     named_inputs: Vec<NamedInput>,
+    /// Absent when there is nothing to warn of: what build scripts may read
+    /// that sykli cannot see. It warns; it never makes `refusal` refuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unseen_reads: Option<UnseenReads>,
 }
 
 impl InputCoverage {
@@ -572,6 +589,27 @@ fn is_cargo_graph(contract: &Contract) -> Result<bool, String> {
     Ok(names_cargo || declared_inputs(contract)?.contains_key(&absolute(Path::new("Cargo.toml"))?))
 }
 
+/// Whether `task` runs Cargo, so a build script runs in it: its command
+/// names `cargo`, or it declares the `Cargo.toml` where sykli runs (a
+/// wrapper that runs Cargo).
+fn runs_cargo(task: &sykli::Task) -> Result<bool, String> {
+    let names = task
+        .run
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+        .any(|word| word == "cargo");
+    if names {
+        return Ok(true);
+    }
+    let manifest = absolute(Path::new("Cargo.toml"))?;
+    let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+    for input in &task.inputs {
+        if absolute(&workdir.join(input))? == manifest {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What git lists for the undeclared-file checks, asked once for both. One
 /// `git ls-files --stage` lists the index; for a Cargo graph the same process
 /// also lists the untracked files that are not ignored (`--others`), which
@@ -593,12 +631,47 @@ struct Inventory {
     /// The contract and its lock, as given and as the listing spells them.
     evaluated: Vec<PathBuf>,
     listed: std::cell::OnceCell<Result<Listed, String>>,
+    /// What the build reads (`cargo_inputs::Reads`), from `listed`.
+    reads: std::cell::OnceCell<Result<cargo_inputs::Reads, String>>,
 }
 
-struct Listed {
-    root: PathBuf,
-    cached: Vec<PathBuf>,
-    others: Vec<PathBuf>,
+/// What git lists in the repository: every file in the index, and, when
+/// asked for, the untracked files it does not ignore, spelled from the
+/// repository's top level as the current directory spells it
+/// (`coverage_root`), which is `root`.
+pub(crate) struct Listed {
+    pub(crate) root: PathBuf,
+    pub(crate) cached: Vec<PathBuf>,
+    pub(crate) others: Vec<PathBuf>,
+}
+
+impl Listed {
+    /// One `git ls-files` of the whole repository, from its top level.
+    pub(crate) fn of_repository(others: bool) -> Result<Listed, String> {
+        let root = coverage_root()?;
+        let files = repo::files(&root, others)?;
+        let spelled = |paths: Vec<String>| {
+            paths
+                .into_iter()
+                .map(|path| absolute(&root.join(path)))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(Listed {
+            cached: spelled(files.cached)?,
+            others: spelled(files.others)?,
+            root,
+        })
+    }
+
+    /// Every file listed, once, but sykli's own state (`.sykli/`).
+    fn files(&self) -> BTreeSet<&PathBuf> {
+        let state = self.root.join(".sykli");
+        self.cached
+            .iter()
+            .chain(&self.others)
+            .filter(|path| !path.starts_with(&state))
+            .collect()
+    }
 }
 
 impl Inventory {
@@ -619,7 +692,26 @@ impl Inventory {
             cargo: is_cargo_graph(contract)?,
             evaluated,
             listed: std::cell::OnceCell::new(),
+            reads: std::cell::OnceCell::new(),
         })
+    }
+
+    /// The inventory of `contract` from a listing already made, with
+    /// untracked files (`Listed::of_repository(true)`), and what the build
+    /// reads from it when that is known too, as `init` has them: it judges
+    /// the contract it would write from the same listing it declares from.
+    pub(crate) fn given(
+        contract: &Contract,
+        contract_path: &Path,
+        listed: Listed,
+        reads: Option<cargo_inputs::Reads>,
+    ) -> Result<Self, String> {
+        let inventory = Inventory::new(contract, contract_path)?;
+        let _ = inventory.listed.set(Ok(listed));
+        if let Some(reads) = reads {
+            let _ = inventory.reads.set(Ok(reads));
+        }
+        Ok(inventory)
     }
 
     /// Whether `path`, as the listing spells it, is the contract being run
@@ -630,20 +722,20 @@ impl Inventory {
 
     fn listed(&self) -> Result<&Listed, String> {
         self.listed
+            .get_or_init(|| Listed::of_repository(self.cargo))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// What the build reads among the files listed: every Rust source is
+    /// read once, for the Cargo rule and the warning of what build scripts
+    /// may read unseen alike.
+    fn reads(&self) -> Result<&cargo_inputs::Reads, String> {
+        self.reads
             .get_or_init(|| {
-                let root = coverage_root()?;
-                let files = repo::files(&root, self.cargo)?;
-                let spelled = |paths: Vec<String>| {
-                    paths
-                        .into_iter()
-                        .map(|path| absolute(&root.join(path)))
-                        .collect::<Result<Vec<_>, _>>()
-                };
-                Ok(Listed {
-                    cached: spelled(files.cached)?,
-                    others: spelled(files.others)?,
-                    root,
-                })
+                let listed = self.listed()?;
+                let files = listed.files().into_iter().cloned().collect::<Vec<_>>();
+                cargo_inputs::Reads::of(&listed.root, &files)
             })
             .as_ref()
             .map_err(Clone::clone)
@@ -690,44 +782,87 @@ fn named_warning(named: &NamedInput) -> String {
     )
 }
 
-/// The Cargo inputs no task declares, which refuse, and the documents a
-/// source names that no task declares, which warn.
+/// What build scripts may read that sykli cannot see, while a file git
+/// lists (tracked, or untracked and not ignored) is declared by no task that
+/// runs Cargo, where the build script runs. It warns, never refuses: the
+/// files a build script's includes and string literals name are required
+/// (`cargo_inputs::Reads`), but one it reads by a path built at run time
+/// (from the environment, a file it lists, a tool it runs) is not seen, and
+/// could be any such file. What `init` leaves out is not counted
+/// (`init::never_declared`), so a contract `init` writes, kept in the
+/// repository or outside it, counts only untracked files.
+#[derive(Serialize)]
+struct UnseenReads {
+    build_scripts: Vec<String>,
+    /// How many files no task running Cargo declares.
+    undeclared: usize,
+    /// The first of them, those in a build script's package first.
+    such_as: Vec<String>,
+}
+
+fn unseen_warning(unseen: &UnseenReads) -> String {
+    let (scripts, its, them) = match unseen.build_scripts.as_slice() {
+        [one] => (format!("{one} is a build script"), "its", "it"),
+        many => (
+            format!("{} are build scripts", many.join(", ")),
+            "their",
+            "them",
+        ),
+    };
+    let files = match unseen.undeclared {
+        1 => "1 file that no task running Cargo declares".to_string(),
+        count => format!("{count} files that no task running Cargo declares"),
+    };
+    let mut such_as = unseen.such_as.join(", ");
+    if unseen.undeclared > unseen.such_as.len() {
+        such_as.push_str(&format!(
+            ", and {} more",
+            unseen.undeclared - unseen.such_as.len()
+        ));
+    }
+    format!(
+        "{scripts}, and sykli requires only the files {its} includes and string literals name, \
+         never one read by a path built at run time; {files} may be read by {them} ({such_as}): \
+         declare any a build script reads"
+    )
+}
+
+/// What the Cargo rule finds: the Cargo inputs no task declares, which
+/// refuse; the documents a source names that no task declares, and what
+/// build scripts may read unseen, which warn.
+#[derive(Default)]
+struct CargoCoverage {
+    missing: Vec<String>,
+    named: Vec<NamedInput>,
+    unseen: Option<UnseenReads>,
+}
+
 fn cargo_missing_inputs(
     contract: &Contract,
     inventory: &Inventory,
-) -> Result<(Vec<String>, Vec<NamedInput>), String> {
+) -> Result<CargoCoverage, String> {
     // This is checked on every invocation, before execution can reuse cached passes. Its
     // input is the current file inventory, not the contract's existing list.
     if !inventory.cargo {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(CargoCoverage::default());
     }
     let listed = inventory.listed()?;
     let root = &listed.root;
-    let state = root.join(".sykli");
     let declared = declared_inputs(contract)?;
-    let files = listed
-        .cached
-        .iter()
-        .chain(&listed.others)
-        .filter(|path| !path.starts_with(&state))
-        .collect::<BTreeSet<_>>();
-    // Cargo's files by name and every listed file a listed Rust source
-    // includes refuse (`cargo_inputs`, which `init` declares by), and so does
-    // an include that names no knowable file; a document a string names warns.
+    let files = listed.files();
+    // Cargo's files by name and every listed file the build reads otherwise
+    // (`cargo_inputs::Reads`: what a source includes, a checksummed package,
+    // what a build script names) refuse, which `init` declares by, and so
+    // does an include that names no knowable file; a document a string names
+    // warns.
     let shown = |path: &Path| {
         path.strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/")
     };
-    let mut sources = cargo_inputs::Sources::default();
-    for path in &files {
-        if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
-            let text = fs::read(path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-            sources.read(path, &String::from_utf8_lossy(&text), &shown(path));
-        }
-    }
+    let reads = inventory.reads()?;
+    let sources = reads.sources();
     if let Some(refusal) = sources.refusal() {
         return Err(refusal);
     }
@@ -742,7 +877,7 @@ fn cargo_missing_inputs(
         // The contract being run and its lock are not asked for by name,
         // but are when a source includes them (sykli#73).
         let by_name = cargo_inputs::by_name(relative) && !inventory.evaluated(path);
-        if by_name || sources.included().contains(*path) {
+        if by_name || reads.reads(path) {
             wanted.insert((*path).clone());
         } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
             if let Some(at) = sources.named_at(&shown(path)) {
@@ -772,32 +907,152 @@ fn cargo_missing_inputs(
             Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
         }
     }
-    Ok((missing.into_iter().collect(), named.into_iter().collect()))
+    // What build scripts may read unseen: any file listed under where sykli
+    // runs (a file outside it no contract run here can declare) that no
+    // task running Cargo declares, but what `init` leaves out
+    // (`init::never_declared`), the contract and its lock, and what cannot
+    // be declared.
+    let mut unseen = None;
+    if !reads.build_scripts().is_empty() {
+        let here = absolute(Path::new("."))?;
+        let mut covered = BTreeSet::new();
+        for task in &contract.tasks {
+            if runs_cargo(task)? {
+                let workdir = task.workdir.as_deref().unwrap_or_else(|| Path::new("."));
+                for input in &task.inputs {
+                    covered.insert(absolute(&workdir.join(input))?);
+                }
+            }
+        }
+        let undeclared = files
+            .iter()
+            .filter(|path| {
+                let Ok(relative) = path.strip_prefix(&here) else {
+                    return false;
+                };
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                !crate::init::never_declared(&relative, None)
+                    && !inventory.evaluated(path)
+                    && !covered.contains(**path)
+                    && declarable(path)
+            })
+            .collect::<BTreeSet<_>>();
+        if !undeclared.is_empty() {
+            const SHOWN: usize = 5;
+            let packages = reads
+                .build_scripts()
+                .iter()
+                .filter_map(|script| script.parent())
+                .collect::<Vec<_>>();
+            let mut such_as = undeclared
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>();
+            such_as.sort_by_key(|path| {
+                let elsewhere = !packages.iter().any(|package| path.starts_with(package));
+                (elsewhere, *path)
+            });
+            unseen = Some(UnseenReads {
+                build_scripts: reads
+                    .build_scripts()
+                    .iter()
+                    .map(|script| shown(script))
+                    .collect(),
+                undeclared: undeclared.len(),
+                such_as: such_as.into_iter().take(SHOWN).map(shown).collect(),
+            });
+        }
+    }
+    Ok(CargoCoverage {
+        missing: missing.into_iter().collect(),
+        named: named.into_iter().collect(),
+        unseen,
+    })
 }
 
 /// Why `run` refuses this contract before any task, for files it leaves
 /// undeclared (`cargo_missing_inputs`, `folder_missing_inputs`, then
 /// `link_missing_inputs`), if it does, after warning of each document a
-/// source names that no task declares. `validate` asks the same inside a git
-/// repository, so a contract it accepts is one `run` starts.
+/// source names that no task declares and of what build scripts may read
+/// unseen. `validate` asks the same inside a git repository, so a contract
+/// it accepts is one `run` starts, and so does `init` before it writes one.
 fn undeclared_refusal(contract: &Contract, path: &Path) -> Result<Option<String>, String> {
-    let inventory = Inventory::new(contract, path)?;
-    let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
-    for named in &named {
+    undeclared_refusal_of(contract, &Inventory::new(contract, path)?)
+}
+
+/// `undeclared_refusal` of an inventory already made.
+pub(crate) fn undeclared_refusal_of(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<Option<String>, String> {
+    let cargo = cargo_missing_inputs(contract, inventory)?;
+    for named in &cargo.named {
         eprintln!("warning: {}", named_warning(named));
     }
-    if !missing.is_empty() {
-        return Ok(Some(cargo_coverage_error(&missing)));
+    if let Some(unseen) = &cargo.unseen {
+        eprintln!("warning: {}", unseen_warning(unseen));
     }
-    let folders = folder_missing_inputs(contract, &inventory)?;
+    if !cargo.missing.is_empty() {
+        let lead = outside_here(inventory, &cargo.missing)?;
+        return Ok(Some(lead + &cargo_coverage_error(&cargo.missing)));
+    }
+    let folders = folder_missing_inputs(contract, inventory)?;
     if !folders.is_empty() {
-        return Ok(Some(folder_coverage_error(&folders)));
+        let paths = folders
+            .iter()
+            .map(|input| input.path.clone())
+            .collect::<Vec<_>>();
+        return Ok(Some(
+            outside_here(inventory, &paths)? + &folder_coverage_error(&folders),
+        ));
     }
-    let linked = link_missing_inputs(contract, &inventory)?;
+    let linked = link_missing_inputs(contract, inventory)?;
     if !linked.is_empty() {
-        return Ok(Some(link_coverage_error(&linked)));
+        let paths = linked
+            .iter()
+            .map(|input| input.path.clone())
+            .collect::<Vec<_>>();
+        return Ok(Some(
+            outside_here(inventory, &paths)? + &link_coverage_error(&linked),
+        ));
     }
     Ok(None)
+}
+
+/// Where to run instead, to lead a refusal that names files (`paths`, from
+/// the repository's top level) outside the current directory: a contract's
+/// paths start where sykli runs and cannot leave it, so a contract run here
+/// can never declare them. Empty otherwise.
+fn outside_here(inventory: &Inventory, paths: &[String]) -> Result<String, String> {
+    let root = &inventory.listed()?.root;
+    let here = absolute(Path::new("."))?;
+    let Ok(below) = here.strip_prefix(root) else {
+        return Ok(String::new());
+    };
+    if below.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    let outside = paths
+        .iter()
+        .filter(|path| !Path::new(path.as_str()).starts_with(below))
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    if outside.is_empty() {
+        return Ok(String::new());
+    }
+    let below = below.to_string_lossy().replace('\\', "/");
+    let (are, them) = if outside.len() == 1 {
+        ("is", "it")
+    } else {
+        ("are", "them")
+    };
+    Ok(format!(
+        "run sykli at the repository's top level, {}: {} {are} outside {below}/, where it runs, \
+         and a contract run here cannot declare {them}, since its paths cannot leave this \
+         directory. ",
+        root.display(),
+        outside.join(", ")
+    ))
 }
 
 fn cargo_coverage_error(missing: &[String]) -> String {
@@ -1366,12 +1621,13 @@ fn input_coverage(
             })
         })
         .collect::<Result<_, String>>()?;
-    let (cargo_missing_inputs, named_inputs) = cargo_missing_inputs(contract, &inventory)?;
+    let cargo = cargo_missing_inputs(contract, &inventory)?;
     Ok(InputCoverage {
         base_commit,
         paths,
-        cargo_missing_inputs,
-        named_inputs,
+        cargo_missing_inputs: cargo.missing,
+        named_inputs: cargo.named,
+        unseen_reads: cargo.unseen,
         folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
         link_missing_inputs: link_missing_inputs(contract, &inventory)?,
     })
@@ -2010,6 +2266,9 @@ fn main() -> ExitCode {
                             }
                             for named in &coverage.named_inputs {
                                 println!("  warning: {}", named_warning(named));
+                            }
+                            if let Some(unseen) = &coverage.unseen_reads {
+                                println!("  warning: {}", unseen_warning(unseen));
                             }
                             println!(
                                 "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."

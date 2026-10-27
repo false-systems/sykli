@@ -41,6 +41,9 @@ const PRE_PUSH_GIVEN: &[&str] = &["cat-file"];
 /// inventory once, after discovery (none with the repository given).
 const VALIDATE: &[&str] = &["rev-parse", "ls-files"];
 const VALIDATE_GIVEN: &[&str] = &["ls-files"];
+/// `init` finds the repository and lists it once, for what it declares and
+/// for the judgement of the contract it would write.
+const INIT: &[&str] = &["rev-parse", "ls-files"];
 
 const ZEROS: &str = "0000000000000000000000000000000000000000";
 
@@ -260,6 +263,42 @@ fn validate_stays_within_its_git_budget() {
         scratch.counted(&with(&["validate", contract], &scratch.facts()), None),
         0,
         VALIDATE_GIVEN,
+    );
+}
+
+/// `init` lists the repository once, and judges the contract it would write
+/// from that same listing (`validate` and `run`'s refusal): no git process
+/// beyond discovery and the one listing, where it writes and where it
+/// refuses.
+#[test]
+fn init_judges_its_contract_within_its_git_budget() {
+    let scratch = Scratch::new("init");
+    fs::write(
+        scratch.repo.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(scratch.repo.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    fs::create_dir_all(scratch.repo.join("app/src")).unwrap();
+    fs::write(
+        scratch.repo.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(scratch.repo.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+    scratch.commit("crates");
+    within(
+        "init",
+        scratch.counted(&["init", "--no-lock"], None),
+        0,
+        INIT,
+    );
+    // In a subdirectory, `src/lib.rs` above it refuses the contract.
+    within(
+        "init (refused in a subdirectory)",
+        scratch.counted_in(&scratch.repo.join("app"), &["init", "--no-lock"], None),
+        1,
+        INIT,
     );
 }
 
