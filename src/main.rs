@@ -540,6 +540,10 @@ struct InputCoverage {
     /// that no task declares. They warn; they never make `refusal` refuse.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     named_inputs: Vec<NamedInput>,
+    /// Absent when there is nothing to warn of: what build scripts may read
+    /// that sykli cannot see. It warns; it never makes `refusal` refuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unseen_reads: Option<UnseenReads>,
 }
 
 impl InputCoverage {
@@ -593,12 +597,47 @@ struct Inventory {
     /// The contract and its lock, as given and as the listing spells them.
     evaluated: Vec<PathBuf>,
     listed: std::cell::OnceCell<Result<Listed, String>>,
+    /// What the build reads (`cargo_inputs::Reads`), from `listed`.
+    reads: std::cell::OnceCell<Result<cargo_inputs::Reads, String>>,
 }
 
-struct Listed {
-    root: PathBuf,
-    cached: Vec<PathBuf>,
-    others: Vec<PathBuf>,
+/// What git lists in the repository: every file in the index, and, when
+/// asked for, the untracked files it does not ignore, spelled from the
+/// repository's top level as the current directory spells it
+/// (`coverage_root`), which is `root`.
+pub(crate) struct Listed {
+    pub(crate) root: PathBuf,
+    pub(crate) cached: Vec<PathBuf>,
+    pub(crate) others: Vec<PathBuf>,
+}
+
+impl Listed {
+    /// One `git ls-files` of the whole repository, from its top level.
+    pub(crate) fn of_repository(others: bool) -> Result<Listed, String> {
+        let root = coverage_root()?;
+        let files = repo::files(&root, others)?;
+        let spelled = |paths: Vec<String>| {
+            paths
+                .into_iter()
+                .map(|path| absolute(&root.join(path)))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(Listed {
+            cached: spelled(files.cached)?,
+            others: spelled(files.others)?,
+            root,
+        })
+    }
+
+    /// Every file listed, once, but sykli's own state (`.sykli/`).
+    fn files(&self) -> BTreeSet<&PathBuf> {
+        let state = self.root.join(".sykli");
+        self.cached
+            .iter()
+            .chain(&self.others)
+            .filter(|path| !path.starts_with(&state))
+            .collect()
+    }
 }
 
 impl Inventory {
@@ -619,6 +658,7 @@ impl Inventory {
             cargo: is_cargo_graph(contract)?,
             evaluated,
             listed: std::cell::OnceCell::new(),
+            reads: std::cell::OnceCell::new(),
         })
     }
 
@@ -630,20 +670,20 @@ impl Inventory {
 
     fn listed(&self) -> Result<&Listed, String> {
         self.listed
+            .get_or_init(|| Listed::of_repository(self.cargo))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// What the build reads among the files listed: every Rust source is
+    /// read once, for the Cargo rule and the warning of what build scripts
+    /// may read unseen alike.
+    fn reads(&self) -> Result<&cargo_inputs::Reads, String> {
+        self.reads
             .get_or_init(|| {
-                let root = coverage_root()?;
-                let files = repo::files(&root, self.cargo)?;
-                let spelled = |paths: Vec<String>| {
-                    paths
-                        .into_iter()
-                        .map(|path| absolute(&root.join(path)))
-                        .collect::<Result<Vec<_>, _>>()
-                };
-                Ok(Listed {
-                    cached: spelled(files.cached)?,
-                    others: spelled(files.others)?,
-                    root,
-                })
+                let listed = self.listed()?;
+                let files = listed.files().into_iter().cloned().collect::<Vec<_>>();
+                cargo_inputs::Reads::of(&listed.root, &files)
             })
             .as_ref()
             .map_err(Clone::clone)
@@ -690,44 +730,85 @@ fn named_warning(named: &NamedInput) -> String {
     )
 }
 
-/// The Cargo inputs no task declares, which refuse, and the documents a
-/// source names that no task declares, which warn.
+/// What build scripts may read that sykli cannot see, while a tracked file is
+/// declared by no task. It warns, never refuses: the files a build script's
+/// includes and string literals name are required (`cargo_inputs::Reads`),
+/// but one it reads by a path built at run time (from the environment, a
+/// file it lists, a tool it runs) is not seen, and could be any file no
+/// task declares. A contract that declares every tracked file, as `init`
+/// writes it, leaves none.
+#[derive(Serialize)]
+struct UnseenReads {
+    build_scripts: Vec<String>,
+    /// How many tracked files no task declares.
+    undeclared: usize,
+    /// The first of them, those in a build script's package first.
+    such_as: Vec<String>,
+}
+
+fn unseen_warning(unseen: &UnseenReads) -> String {
+    let (scripts, its, them) = match unseen.build_scripts.as_slice() {
+        [one] => (format!("{one} is a build script"), "its", "it"),
+        many => (
+            format!("{} are build scripts", many.join(", ")),
+            "their",
+            "them",
+        ),
+    };
+    let files = match unseen.undeclared {
+        1 => "1 tracked file no task declares".to_string(),
+        count => format!("{count} tracked files no task declares"),
+    };
+    let mut such_as = unseen.such_as.join(", ");
+    if unseen.undeclared > unseen.such_as.len() {
+        such_as.push_str(&format!(
+            ", and {} more",
+            unseen.undeclared - unseen.such_as.len()
+        ));
+    }
+    format!(
+        "{scripts}, and sykli requires only the files {its} includes and string literals name, \
+         never one read by a path built at run time; {files} may be read by {them} ({such_as}): \
+         declare any a build script reads"
+    )
+}
+
+/// What the Cargo rule finds: the Cargo inputs no task declares, which
+/// refuse; the documents a source names that no task declares, and what
+/// build scripts may read unseen, which warn.
+#[derive(Default)]
+struct CargoCoverage {
+    missing: Vec<String>,
+    named: Vec<NamedInput>,
+    unseen: Option<UnseenReads>,
+}
+
 fn cargo_missing_inputs(
     contract: &Contract,
     inventory: &Inventory,
-) -> Result<(Vec<String>, Vec<NamedInput>), String> {
+) -> Result<CargoCoverage, String> {
     // This is checked on every invocation, before execution can reuse cached passes. Its
     // input is the current file inventory, not the contract's existing list.
     if !inventory.cargo {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(CargoCoverage::default());
     }
     let listed = inventory.listed()?;
     let root = &listed.root;
-    let state = root.join(".sykli");
     let declared = declared_inputs(contract)?;
-    let files = listed
-        .cached
-        .iter()
-        .chain(&listed.others)
-        .filter(|path| !path.starts_with(&state))
-        .collect::<BTreeSet<_>>();
-    // Cargo's files by name and every listed file a listed Rust source
-    // includes refuse (`cargo_inputs`, which `init` declares by), and so does
-    // an include that names no knowable file; a document a string names warns.
+    let files = listed.files();
+    // Cargo's files by name and every listed file the build reads otherwise
+    // (`cargo_inputs::Reads`: what a source includes, a vendored package,
+    // what a build script names) refuse, which `init` declares by, and so
+    // does an include that names no knowable file; a document a string names
+    // warns.
     let shown = |path: &Path| {
         path.strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/")
     };
-    let mut sources = cargo_inputs::Sources::default();
-    for path in &files {
-        if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
-            let text = fs::read(path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-            sources.read(path, &String::from_utf8_lossy(&text), &shown(path));
-        }
-    }
+    let reads = inventory.reads()?;
+    let sources = reads.sources();
     if let Some(refusal) = sources.refusal() {
         return Err(refusal);
     }
@@ -742,7 +823,7 @@ fn cargo_missing_inputs(
         // The contract being run and its lock are not asked for by name,
         // but are when a source includes them (sykli#73).
         let by_name = cargo_inputs::by_name(relative) && !inventory.evaluated(path);
-        if by_name || sources.included().contains(*path) {
+        if by_name || reads.reads(path) {
             wanted.insert((*path).clone());
         } else if cargo_inputs::docs(relative) && !declared.contains_key(*path) {
             if let Some(at) = sources.named_at(&shown(path)) {
@@ -772,28 +853,89 @@ fn cargo_missing_inputs(
             Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
         }
     }
-    Ok((missing.into_iter().collect(), named.into_iter().collect()))
+    // What build scripts may read unseen: any tracked file no task declares,
+    // but the ones `init` never declares (sykli's state and Cargo's build
+    // directory where sykli runs, the contract and its lock, what cannot be
+    // declared).
+    let mut unseen = None;
+    if !reads.build_scripts().is_empty() {
+        let build = absolute(Path::new("target"))?;
+        let state = root.join(".sykli");
+        let undeclared = listed
+            .cached
+            .iter()
+            .filter(|path| {
+                !path.starts_with(&state)
+                    && !path.starts_with(&build)
+                    && !inventory.evaluated(path)
+                    && !declared.contains_key(*path)
+                    && declarable(path)
+            })
+            .collect::<BTreeSet<_>>();
+        if !undeclared.is_empty() {
+            const SHOWN: usize = 5;
+            let packages = reads
+                .build_scripts()
+                .iter()
+                .filter_map(|script| script.parent())
+                .collect::<Vec<_>>();
+            let mut such_as = undeclared.iter().collect::<Vec<_>>();
+            such_as.sort_by_key(|path| {
+                let elsewhere = !packages.iter().any(|package| path.starts_with(package));
+                (elsewhere, (**path).clone())
+            });
+            unseen = Some(UnseenReads {
+                build_scripts: reads
+                    .build_scripts()
+                    .iter()
+                    .map(|script| shown(script))
+                    .collect(),
+                undeclared: undeclared.len(),
+                such_as: such_as
+                    .into_iter()
+                    .take(SHOWN)
+                    .map(|path| shown(path))
+                    .collect(),
+            });
+        }
+    }
+    Ok(CargoCoverage {
+        missing: missing.into_iter().collect(),
+        named: named.into_iter().collect(),
+        unseen,
+    })
 }
 
 /// Why `run` refuses this contract before any task, for files it leaves
 /// undeclared (`cargo_missing_inputs`, `folder_missing_inputs`, then
 /// `link_missing_inputs`), if it does, after warning of each document a
-/// source names that no task declares. `validate` asks the same inside a git
-/// repository, so a contract it accepts is one `run` starts.
+/// source names that no task declares and of what build scripts may read
+/// unseen. `validate` asks the same inside a git repository, so a contract
+/// it accepts is one `run` starts.
 fn undeclared_refusal(contract: &Contract, path: &Path) -> Result<Option<String>, String> {
-    let inventory = Inventory::new(contract, path)?;
-    let (missing, named) = cargo_missing_inputs(contract, &inventory)?;
-    for named in &named {
+    undeclared_refusal_of(contract, &Inventory::new(contract, path)?)
+}
+
+/// `undeclared_refusal` of an inventory already made.
+fn undeclared_refusal_of(
+    contract: &Contract,
+    inventory: &Inventory,
+) -> Result<Option<String>, String> {
+    let cargo = cargo_missing_inputs(contract, inventory)?;
+    for named in &cargo.named {
         eprintln!("warning: {}", named_warning(named));
     }
-    if !missing.is_empty() {
-        return Ok(Some(cargo_coverage_error(&missing)));
+    if let Some(unseen) = &cargo.unseen {
+        eprintln!("warning: {}", unseen_warning(unseen));
     }
-    let folders = folder_missing_inputs(contract, &inventory)?;
+    if !cargo.missing.is_empty() {
+        return Ok(Some(cargo_coverage_error(&cargo.missing)));
+    }
+    let folders = folder_missing_inputs(contract, inventory)?;
     if !folders.is_empty() {
         return Ok(Some(folder_coverage_error(&folders)));
     }
-    let linked = link_missing_inputs(contract, &inventory)?;
+    let linked = link_missing_inputs(contract, inventory)?;
     if !linked.is_empty() {
         return Ok(Some(link_coverage_error(&linked)));
     }
@@ -1366,12 +1508,13 @@ fn input_coverage(
             })
         })
         .collect::<Result<_, String>>()?;
-    let (cargo_missing_inputs, named_inputs) = cargo_missing_inputs(contract, &inventory)?;
+    let cargo = cargo_missing_inputs(contract, &inventory)?;
     Ok(InputCoverage {
         base_commit,
         paths,
-        cargo_missing_inputs,
-        named_inputs,
+        cargo_missing_inputs: cargo.missing,
+        named_inputs: cargo.named,
+        unseen_reads: cargo.unseen,
         folder_missing_inputs: folder_missing_inputs(contract, &inventory)?,
         link_missing_inputs: link_missing_inputs(contract, &inventory)?,
     })
@@ -2010,6 +2153,9 @@ fn main() -> ExitCode {
                             }
                             for named in &coverage.named_inputs {
                                 println!("  warning: {}", named_warning(named));
+                            }
+                            if let Some(unseen) = &coverage.unseen_reads {
+                                println!("  warning: {}", unseen_warning(unseen));
                             }
                             println!(
                                 "Unmapped paths are advisory except for missing Cargo inputs and undeclared tracked siblings of declared inputs, which block execution and cache reuse."

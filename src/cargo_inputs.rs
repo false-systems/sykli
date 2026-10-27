@@ -5,9 +5,11 @@
 //! accept, and stays accepted when documents are added.
 //!
 //! A Cargo build reads Cargo's own files (`by_name`), the files its Rust
-//! sources include, and any file a source names by its path (`Sources`).
+//! sources include (`Sources`), every file of a package `cargo vendor` wrote,
+//! and what its build scripts' string literals name (`Reads`).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 /// Whether `relative`, a path from the directory the contract's paths start
@@ -71,12 +73,209 @@ pub(crate) fn docs(relative: &Path) -> bool {
             .any(|directory| matches!(*directory, "docs" | ".github"))
 }
 
+/// What a Cargo build reads among the files git lists, beyond Cargo's files
+/// by name (`by_name`), which `init` declares and the completeness rule
+/// requires alike:
+/// - what its Rust sources include (`Sources`);
+/// - every file of a package `cargo vendor` wrote: a directory with a
+///   `Cargo.toml` and the `.cargo-checksum.json` it writes beside it. Cargo
+///   hashes every file the checksum lists on every build, and refuses to
+///   build when one has changed, so the build reads each of them; and an
+///   include in such a package, whose path may be no literal (a third-party
+///   test macro's `include_bytes!($file)`), reads one of its own files, all
+///   required, so it is not refused, while the same code anywhere else is;
+/// - what a build script's string literals name, from its package's
+///   directory (`build_named`): a build script runs during the build there,
+///   and hands each path it names to something that reads it (`std::fs`, a
+///   compiler, a code generator), or to Cargo (`cargo:rerun-if-changed=`,
+///   resolved from the same directory). A file, or every file under a
+///   directory. What it reads by a path built at run time is not seen
+///   (`build_scripts`, which `validate` and `run` warn of).
+pub(crate) struct Reads {
+    sources: Sources,
+    vendored: Vec<PathBuf>,
+    /// The build scripts outside vendored packages, which are read whole.
+    scripts: Vec<PathBuf>,
+    /// The paths their string literals name: files, or directories.
+    named: BTreeSet<PathBuf>,
+}
+
+impl Reads {
+    /// What the build reads among `files`, every file git lists (tracked,
+    /// or untracked and not ignored), spelled as the caller spells paths
+    /// (from the current directory, or absolute); `root`, the repository's
+    /// top level spelled the same way, is where shown paths start. Every
+    /// Rust source among them is read.
+    pub(crate) fn of(root: &Path, files: &[PathBuf]) -> Result<Reads, String> {
+        let listed = files.iter().map(PathBuf::as_path).collect::<BTreeSet<_>>();
+        let named_file =
+            |path: &Path, name: &str| path.file_name().is_some_and(|file| file == name);
+        let vendored = files
+            .iter()
+            .filter(|path| named_file(path, ".cargo-checksum.json"))
+            .filter_map(|path| path.parent())
+            .filter(|directory| listed.contains(directory.join("Cargo.toml").as_path()))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        let in_vendored = |path: &Path| vendored.iter().any(|package| path.starts_with(package));
+        // Each build script, with its package's directory.
+        let mut scripts = BTreeMap::new();
+        for manifest in files
+            .iter()
+            .filter(|path| named_file(path, "Cargo.toml") && !in_vendored(path))
+        {
+            let directory = manifest.parent().unwrap_or_else(|| Path::new(""));
+            let script = match build_setting(&fs::read_to_string(manifest).unwrap_or_default()) {
+                Build::Default => Some(directory.join("build.rs")),
+                Build::Path(path) => lexical(&directory.join(path)),
+                Build::Off => None,
+            };
+            if let Some(script) = script.filter(|script| listed.contains(script.as_path())) {
+                scripts.insert(script, directory.to_path_buf());
+            }
+        }
+        let mut sources = Sources {
+            vendored: vendored.clone(),
+            ..Sources::default()
+        };
+        let mut named = BTreeSet::new();
+        for path in files {
+            if !(path.extension().is_some_and(|ext| ext == "rs") && path.is_file()) {
+                continue;
+            }
+            let text = fs::read(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let text = String::from_utf8_lossy(&text);
+            let shown = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            sources.read(path, &text, &shown);
+            if let Some(package) = scripts.get(path) {
+                build_named(&text, package, &mut named);
+            }
+        }
+        Ok(Reads {
+            sources,
+            vendored,
+            scripts: scripts.into_keys().collect(),
+            named,
+        })
+    }
+
+    /// Whether the build reads `path`, one of the files `of` was given, by
+    /// what it holds rather than by its name: a source includes it, it is
+    /// in a vendored package, or a build script names it or a directory
+    /// above it.
+    pub(crate) fn reads(&self, path: &Path) -> bool {
+        self.sources.included.contains(path)
+            || self
+                .vendored
+                .iter()
+                .any(|package| path.starts_with(package))
+            || path.ancestors().any(|named| self.named.contains(named))
+    }
+
+    /// The build scripts outside vendored packages: what they read by a
+    /// path built at run time is not seen.
+    pub(crate) fn build_scripts(&self) -> &[PathBuf] {
+        &self.scripts
+    }
+
+    pub(crate) fn sources(&self) -> &Sources {
+        &self.sources
+    }
+}
+
+/// What a manifest says of its package's build script (`package.build`):
+/// none said, so `build.rs` beside it if there is one; a path from it; or
+/// none at all (`false`). Read line by line, without a TOML parser: a
+/// `build` key in the `[package]` table, or `package.build` before any
+/// table.
+enum Build {
+    Default,
+    Path(String),
+    Off,
+}
+
+fn build_setting(manifest: &str) -> Build {
+    let mut table = String::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            table = header.trim_end_matches(']').trim().to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        let build = (matches!(table.as_str(), "package" | "project") && key == "build")
+            || (table.is_empty() && key == "package.build");
+        if !build {
+            continue;
+        }
+        let value = value.split('#').next().unwrap_or("").trim();
+        return match value {
+            "false" => Build::Off,
+            "true" => Build::Default,
+            _ => match value
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .or_else(|| {
+                    value
+                        .strip_prefix('\'')
+                        .and_then(|rest| rest.strip_suffix('\''))
+                }) {
+                Some(path) => Build::Path(path.to_string()),
+                None => Build::Default,
+            },
+        };
+    }
+    Build::Default
+}
+
+/// Every path a string literal in the build script `text` names, from its
+/// package's directory `package`, into `named`: each run of path characters
+/// in a literal's value (so `"cargo:rerun-if-changed=schema/a.json"` names
+/// `schema/a.json`, and `"{}/proto/{}.proto"` names `proto`), without the
+/// separators it starts with (a piece joined onto a directory), resolved
+/// lexically. Neither the package's directory itself nor one above it is
+/// named: a build script that reads all of it reads by a path the scan does
+/// not see.
+fn build_named(text: &str, package: &Path, named: &mut BTreeSet<PathBuf>) {
+    let path = |c: char| {
+        c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~' | '/' | '\\')
+    };
+    for (_, literal) in scan(text).literals {
+        let unprefixed = literal.strip_prefix(['b', 'c']).unwrap_or(literal);
+        let value = string_literal(unprefixed).unwrap_or_else(|| literal.to_string());
+        for run in value.split(|c: char| !path(c)) {
+            let run = run.replace('\\', "/");
+            let run = run.trim_start_matches('/');
+            if run.is_empty() {
+                continue;
+            }
+            let Some(resolved) = lexical(&package.join(run)) else {
+                continue;
+            };
+            if !package.starts_with(&resolved) {
+                named.insert(resolved);
+            }
+        }
+    }
+}
+
 /// What a set of Rust sources read beyond Cargo's own files: the files they
 /// include, and every path their string literals name.
 #[derive(Default)]
 pub(crate) struct Sources {
     included: BTreeSet<PathBuf>,
     opaque: Vec<String>,
+    /// The directories of vendored packages, read whole (`Reads`): an
+    /// include in one whose path cannot be known is not refused.
+    vendored: Vec<PathBuf>,
     /// File names a string literal names alone (`"README.md"`), with where
     /// the first such literal is (`src/x.rs:LINE`).
     bare: HashMap<String, String>,
@@ -91,6 +290,12 @@ impl Sources {
     /// refusal names it.
     pub(crate) fn read(&mut self, source: &Path, text: &str, shown: &str) {
         let base = source.parent().unwrap_or_else(|| Path::new(""));
+        // A vendored package's files are all required, so what one of its
+        // includes reads is, whatever its path.
+        let vendored = self
+            .vendored
+            .iter()
+            .any(|package| source.starts_with(package));
         let Scanned { includes, literals } = scan(text);
         for (line, literal) in literals {
             index(
@@ -118,6 +323,7 @@ impl Sources {
                         .find(|directory| directory.join("Cargo.toml").is_file());
                     match (manifest, path.strip_prefix(['/', '\\'])) {
                         (Some(manifest), Some(rest)) => lexical(&manifest.join(rest)),
+                        _ if vendored => continue,
                         _ => {
                             self.opaque.push(format!(
                                 "{shown}:{line} (a path from CARGO_MANIFEST_DIR that does not \
@@ -127,6 +333,7 @@ impl Sources {
                         }
                     }
                 }
+                Include::Opaque if vendored => continue,
                 Include::Opaque => {
                     self.opaque
                         .push(format!("{shown}:{line} (the path is not a string literal)"));
@@ -144,6 +351,7 @@ impl Sources {
     /// The files the sources include, resolved as rustc resolves them: from
     /// the directory of the file that names them (from its manifest's for
     /// `CARGO_MANIFEST_DIR`), lexically, spelled as the sources were.
+    #[cfg(test)]
     pub(crate) fn included(&self) -> &BTreeSet<PathBuf> {
         &self.included
     }
@@ -1173,5 +1381,205 @@ mod tests {
         ] {
             assert!(!by_name(Path::new(path)), "{path}");
         }
+    }
+
+    /// A directory of files, made for one test and removed with it.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str, files: &[(&str, &str)]) -> Tree {
+            let root = std::env::temp_dir().join(format!(
+                "sykli-reads-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            for (path, contents) in files {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+            Tree(root)
+        }
+
+        /// What the build reads of every file in the tree.
+        fn reads(&self, files: &[(&str, &str)]) -> (Reads, Vec<PathBuf>) {
+            let listed = files
+                .iter()
+                .map(|(path, _)| self.0.join(path))
+                .collect::<Vec<_>>();
+            (Reads::of(&self.0, &listed).unwrap(), listed)
+        }
+
+        fn read(&self, reads: &Reads) -> Vec<String> {
+            let mut read = walk(&self.0)
+                .into_iter()
+                .filter(|path| reads.reads(path))
+                .map(|path| {
+                    path.strip_prefix(&self.0)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect::<Vec<_>>();
+            read.sort();
+            read
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn walk(directory: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// Every file of a package `cargo vendor` wrote is read, and an include
+    /// there whose path is no literal is not refused; the same code without
+    /// the checksum file beside its manifest is refused.
+    #[test]
+    fn a_vendored_package_is_read_whole() {
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("src/lib.rs", "pub fn f() {}\n"),
+            ("vendor/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("vendor/a/.cargo-checksum.json", "{\"files\":{}}"),
+            (
+                "vendor/a/src/lib.rs",
+                "macro_rules! t { ($p:expr) => { include_bytes!($p) }; }\n",
+            ),
+            ("vendor/a/data/x.bin", "x"),
+            ("vendor/b/Cargo.toml", "[package]\nname = \"b\"\n"),
+            ("vendor/b/src/lib.rs", "pub fn g() {}\n"),
+            ("vendor/b/data/y.bin", "y"),
+        ];
+        let tree = Tree::new("vendored", &files);
+        let (reads, _) = tree.reads(&files);
+        assert_eq!(reads.sources().refusal(), None);
+        assert_eq!(
+            tree.read(&reads),
+            [
+                "vendor/a/.cargo-checksum.json",
+                "vendor/a/Cargo.toml",
+                "vendor/a/data/x.bin",
+                "vendor/a/src/lib.rs",
+            ]
+        );
+        // A checksum git does not list makes no package vendored.
+        let unlisted = files
+            .iter()
+            .filter(|(path, _)| !path.ends_with(".cargo-checksum.json"))
+            .copied()
+            .collect::<Vec<_>>();
+        let (reads, _) = tree.reads(&unlisted);
+        assert!(
+            reads
+                .sources()
+                .refusal()
+                .is_some_and(|refusal| refusal.contains("vendor/a/src/lib.rs:1")),
+            "{:?}",
+            reads.sources().refusal()
+        );
+    }
+
+    #[test]
+    fn a_manifest_names_its_build_script_or_none() {
+        for (manifest, expected) in [
+            ("[package]\nname = \"x\"\n", "default"),
+            (
+                "[package]\nbuild = \"tools/build.rs\" # why\n",
+                "tools/build.rs",
+            ),
+            ("[package]\nbuild = 'b.rs'\n", "b.rs"),
+            ("[package]\nbuild = false\n", "off"),
+            ("[package]\nbuild = true\n", "default"),
+            ("package.build = \"top.rs\"\n[dependencies]\n", "top.rs"),
+            ("[dependencies]\nbuild = \"1\"\n", "default"),
+            ("[workspace]\nmembers = []\n", "default"),
+        ] {
+            let found = match build_setting(manifest) {
+                Build::Default => "default".to_string(),
+                Build::Path(path) => path,
+                Build::Off => "off".to_string(),
+            };
+            assert_eq!(found, expected, "{manifest}");
+        }
+    }
+
+    /// A build script's string literals name files and directories from its
+    /// package's directory: a `cargo:rerun-if-changed` path, a path a read
+    /// or a tool takes, a piece a path is joined from. A word that names no
+    /// file reads nothing, and neither the package itself nor anything above
+    /// it is named.
+    #[test]
+    fn a_build_script_s_literals_name_what_it_reads_from_its_package() {
+        let files = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            (
+                "crates/a/build.rs",
+                concat!(
+                    "fn main() {\n",
+                    "    println!(\"cargo::rerun-if-changed=schema/a.json\");\n",
+                    "    println!(\"cargo:rerun-if-changed=proto\");\n",
+                    "    let _ = std::fs::read(r\"templates\\b.txt\");\n",
+                    "    let _ = format!(\"{}/gen/{}.in\", 1, 2);\n",
+                    "    let _ = std::fs::read(\"../shared/common.txt\");\n",
+                    "    let _ = std::fs::read_dir(\".\");\n",
+                    "    let _ = std::fs::read(\"../..\");\n",
+                    "    // \"notes.txt\" in a comment names nothing.\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "crates/a/src/lib.rs",
+                "pub const S: &str = \"lib-named.txt\";\n",
+            ),
+            ("crates/a/schema/a.json", "{}"),
+            ("crates/a/proto/x.proto", ""),
+            ("crates/a/proto/sub/y.proto", ""),
+            ("crates/a/templates/b.txt", ""),
+            ("crates/a/gen/one.in", ""),
+            ("crates/a/notes.txt", ""),
+            ("crates/a/lib-named.txt", ""),
+            ("crates/a/other.txt", ""),
+            ("crates/shared/common.txt", ""),
+            ("README.md", ""),
+        ];
+        let tree = Tree::new("build-script", &files);
+        let (reads, _) = tree.reads(&files);
+        assert_eq!(
+            reads
+                .build_scripts()
+                .iter()
+                .map(|script| script.strip_prefix(&tree.0).unwrap().to_path_buf())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("crates/a/build.rs")]
+        );
+        assert_eq!(
+            tree.read(&reads),
+            [
+                "crates/a/gen/one.in",
+                "crates/a/proto/sub/y.proto",
+                "crates/a/proto/x.proto",
+                "crates/a/schema/a.json",
+                "crates/a/templates/b.txt",
+                "crates/shared/common.txt",
+            ]
+        );
     }
 }

@@ -101,23 +101,31 @@ fn cargo(
         return Ok(None);
     }
     let (tracked, untracked) = listing(root)?;
-    let source = |path: &str| Path::new(path).extension().is_some_and(|ext| ext == "rs");
-    let mut sources = cargo_inputs::Sources::default();
-    for path in tracked.iter().chain(&untracked) {
-        let file = root.join(path);
-        if source(path) && file.is_file() {
-            let text = fs::read(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
-            sources.read(Path::new(path), &String::from_utf8_lossy(&text), path);
+    // Paths as the current directory spells them, which `root` is.
+    let spelled = |path: &str| {
+        if root == Path::new(".") {
+            PathBuf::from(path)
+        } else {
+            root.join(path)
         }
-    }
-    if let Some(refusal) = sources.refusal() {
+    };
+    let files = tracked
+        .iter()
+        .chain(&untracked)
+        .filter(|path| !path.starts_with(".sykli/"))
+        .map(|path| spelled(path))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let top = if root == Path::new(".") {
+        Path::new("")
+    } else {
+        root
+    };
+    let reads = cargo_inputs::Reads::of(top, &files)?;
+    if let Some(refusal) = reads.sources().refusal() {
         return Err(refusal);
     }
-    let included = sources
-        .included()
-        .iter()
-        .map(|named| named.to_string_lossy().replace('\\', "/"))
-        .collect::<BTreeSet<_>>();
     let mut inputs = BTreeSet::new();
     let mut build = 0;
     let listed = tracked
@@ -135,7 +143,7 @@ fn cargo(
             continue;
         }
         let relative = Path::new(path);
-        let required = cargo_inputs::by_name(relative) || included.contains(path);
+        let required = cargo_inputs::by_name(relative) || reads.reads(&spelled(path));
         let wanted = required || (tracked && !metadata(path, contract));
         if wanted && declarable(root, path, notes) {
             inputs.insert(path.clone());
@@ -175,15 +183,26 @@ fn cargo(
 /// the `git ls-files` the completeness rule reads (`repo::files`). Outside a
 /// git repository nothing says what is ignored, so every file counts as
 /// tracked but hidden entries, symbolic links, `node_modules` and Cargo's
-/// top-level `target`; Cargo's configuration is hidden and counts too.
+/// top-level `target`; Cargo's configuration is hidden and counts too, and
+/// so does the `.cargo-checksum.json` that `cargo vendor` writes beside a
+/// manifest.
 fn listing(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     if crate::repo::repository().is_err() {
         let mut tracked = walk(root, Path::new(""), &[], &["node_modules"], &["target"]);
+        let checksums = tracked
+            .iter()
+            .filter_map(|path| path.strip_suffix("Cargo.toml"))
+            .filter(|directory| directory.is_empty() || directory.ends_with('/'))
+            .map(|directory| format!("{directory}.cargo-checksum.json"))
+            .filter(|checksum| root.join(checksum).is_file())
+            .collect::<Vec<_>>();
+        tracked.extend(checksums);
         for file in [".cargo/config.toml", ".cargo/config"] {
             if root.join(file).is_file() {
                 tracked.push(file.into());
             }
         }
+        tracked.sort();
         return Ok((tracked, Vec::new()));
     }
     let here = std::env::current_dir()
