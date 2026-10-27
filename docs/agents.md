@@ -224,7 +224,9 @@ untracked files. A
 build script's modules are read as sources, not as the script, so their string
 literals name nothing. A macro a dependency exports that includes a file reads
 it from the file that invokes the macro (rustc resolves an include from the
-outermost call site), which the scan does not follow, vendored or not.
+outermost call site), which the scan does not follow, vendored or not. A
+fence inside an HTML block of a doc comment (after `<details>` with no blank
+line between) is taken for a fence, though Markdown reads it as HTML.
 
 **A subdirectory.** Declared paths start in the directory sykli runs in and
 cannot leave it (`..` is refused), while the Cargo rule lists the whole
