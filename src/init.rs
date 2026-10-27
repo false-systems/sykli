@@ -22,6 +22,8 @@ pub struct Detected {
     pub tasks: Vec<Task>,
     pub looked_for: Vec<&'static str>,
     pub notes: Vec<String>,
+    /// What a Cargo build reads, from the listing given to `detect`.
+    reads: Option<cargo_inputs::Reads>,
 }
 
 /// One ecosystem's contribution: a name to prefix with when several coexist.
@@ -30,12 +32,21 @@ struct Ecosystem {
     tasks: Vec<Task>,
 }
 
-/// What `root` implies. `contract` is the name of the contract being written
-/// when it lies at the top level of `root`, which no task declares.
-pub fn detect(root: &Path, contract: Option<&str>) -> Result<Detected, String> {
+/// What `root`, the current directory, implies. `contract` is the name of
+/// the contract being written when it lies at the top level of `root`, which
+/// no task declares. `listed` is what git lists in the repository around it
+/// (`Listed::of_repository`), None outside one.
+pub fn detect(
+    root: &Path,
+    contract: Option<&str>,
+    listed: Option<&crate::Listed>,
+) -> Result<Detected, String> {
     let looked_for = vec!["Cargo.toml", "package.json", "go.mod"];
     let mut notes = Vec::new();
-    let cargo = cargo(root, contract, &mut notes)?;
+    let (cargo, reads) = match cargo(root, contract, listed, &mut notes)? {
+        Some((ecosystem, reads)) => (Some(ecosystem), reads),
+        None => (None, None),
+    };
     let found: Vec<Ecosystem> = [cargo, npm(root, &mut notes), go(root)]
         .into_iter()
         .flatten()
@@ -59,6 +70,7 @@ pub fn detect(root: &Path, contract: Option<&str>) -> Result<Detected, String> {
         tasks,
         looked_for,
         notes,
+        reads,
     })
 }
 
@@ -81,58 +93,70 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
 /// dependency, a file a source includes, data its tests read (in `tests/`,
 /// a top-level `fixtures/`, beside a pin), and nothing can tell all of them
 /// apart from the files nothing reads. So every cargo task declares every
-/// file git tracks here (`listing`), documents included (a test may read a
-/// folder of Markdown cases), and every symbolic link but one that leads
-/// out of the repository, which cannot be bound; all it leaves out is
-/// `.sykli/`, `target/`, and sykli's own contract and lock at the top
-/// level. An untracked file is declared only when the completeness rule
-/// counts it (Cargo's files by name, and every file a source includes), so
-/// `run` accepts the contract `init` writes,
-/// and an include whose path cannot be known refuses here as it does in
-/// `run`. A file that is declared and read by nothing costs cache hits when
-/// it changes; one that is read and not declared keeps a cached pass it
-/// does not deserve.
+/// file git tracks here, documents included (a test may read a folder of
+/// Markdown cases), and every symbolic link but one that leads out of the
+/// repository, which cannot be bound; all it leaves out is `.sykli/`,
+/// `target/`, and sykli's own contract and lock at the top level. An
+/// untracked file is declared only when the completeness rule counts it
+/// (Cargo's files by name, and every file the build reads otherwise:
+/// `cargo_inputs::Reads`), so `run` accepts the contract `init` writes, and
+/// an include whose path cannot be known refuses here as it does in `run`.
+/// In a git repository, what the build reads is found from the whole
+/// repository's listing, `listed`, the one the completeness rule reads, and
+/// returned with the tasks, so `write` judges the contract from it too. A
+/// file that is declared and read by nothing costs cache hits when it
+/// changes; one that is read and not declared keeps a cached pass it does
+/// not deserve.
 fn cargo(
     root: &Path,
     contract: Option<&str>,
+    listed: Option<&crate::Listed>,
     notes: &mut Vec<String>,
-) -> Result<Option<Ecosystem>, String> {
+) -> Result<Option<(Ecosystem, Option<cargo_inputs::Reads>)>, String> {
     if !root.join("Cargo.toml").is_file() {
         return Ok(None);
     }
-    let (tracked, untracked) = listing(root)?;
-    // Paths as the current directory spells them, which `root` is.
-    let spelled = |path: &str| {
-        if root == Path::new(".") {
-            PathBuf::from(path)
-        } else {
-            root.join(path)
+    // Every file listed, absolute, as `Reads` and the completeness rule spell
+    // them, from where shown paths start; and the files under `root`, as
+    // paths from it, tracked and untracked, with how each is spelled.
+    let here = crate::absolute(root)?;
+    let (files, top, tracked, untracked) = match listed {
+        Some(listed) => {
+            let under = |paths: &[PathBuf]| {
+                paths
+                    .iter()
+                    .filter_map(|path| path.strip_prefix(&here).ok())
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .collect::<Vec<_>>()
+            };
+            (
+                listed.files().into_iter().cloned().collect::<Vec<_>>(),
+                listed.root.clone(),
+                under(&listed.cached),
+                under(&listed.others),
+            )
+        }
+        None => {
+            let tracked = walked(root);
+            let files = tracked
+                .iter()
+                .map(|path| here.join(path))
+                .collect::<Vec<_>>();
+            (files, here.clone(), tracked, Vec::new())
         }
     };
-    let files = tracked
-        .iter()
-        .chain(&untracked)
-        .filter(|path| !path.starts_with(".sykli/"))
-        .map(|path| spelled(path))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let top = if root == Path::new(".") {
-        Path::new("")
-    } else {
-        root
-    };
-    let reads = cargo_inputs::Reads::of(top, &files)?;
+    let spelled = |path: &str| here.join(path);
+    let reads = cargo_inputs::Reads::of(&top, &files)?;
     if let Some(refusal) = reads.sources().refusal() {
         return Err(refusal);
     }
     let mut inputs = BTreeSet::new();
     let mut build = 0;
-    let listed = tracked
+    let paths = tracked
         .iter()
         .map(|path| (path, true))
         .chain(untracked.iter().map(|path| (path, false)));
-    for (path, tracked) in listed {
+    for (path, tracked) in paths {
         if path.starts_with(".sykli/") {
             continue;
         }
@@ -142,8 +166,10 @@ fn cargo(
             build += 1;
             continue;
         }
-        let relative = Path::new(path);
-        let required = cargo_inputs::by_name(relative) || reads.reads(&spelled(path));
+        let full = spelled(path);
+        // By name from the repository's top level, as the rule asks.
+        let relative = full.strip_prefix(&top).unwrap_or(&full);
+        let required = cargo_inputs::by_name(relative) || reads.reads(&full);
         let wanted = required || (tracked && !metadata(path, contract));
         if wanted && declarable(root, path, notes) {
             inputs.insert(path.clone());
@@ -163,7 +189,7 @@ fn cargo(
             "{build} files under target/, Cargo's build directory, are not declared; ignore it in .gitignore"
         ));
     }
-    Ok(Some(Ecosystem {
+    let ecosystem = Ecosystem {
         name: "cargo",
         tasks: vec![
             task("fmt", "cargo fmt --check", &[], inputs.clone()),
@@ -175,41 +201,32 @@ fn cargo(
             ),
             task("test", "cargo test --workspace", &["fmt"], inputs),
         ],
-    }))
+    };
+    Ok(Some((ecosystem, listed.map(|_| reads))))
 }
 
-/// The files under `root`, as paths from it, split into tracked and
-/// untracked: git's index and the untracked files it does not ignore, from
-/// the `git ls-files` the completeness rule reads (`repo::files`). Outside a
-/// git repository nothing says what is ignored, so every file counts as
-/// tracked but hidden entries, symbolic links, `node_modules` and Cargo's
-/// top-level `target`; Cargo's configuration is hidden and counts too, and
-/// so does the `.cargo-checksum.json` that `cargo vendor` writes beside a
-/// manifest.
-fn listing(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
-    if crate::repo::repository().is_err() {
-        let mut tracked = walk(root, Path::new(""), &[], &["node_modules"], &["target"]);
-        let checksums = tracked
-            .iter()
-            .filter_map(|path| path.strip_suffix("Cargo.toml"))
-            .filter(|directory| directory.is_empty() || directory.ends_with('/'))
-            .map(|directory| format!("{directory}.cargo-checksum.json"))
-            .filter(|checksum| root.join(checksum).is_file())
-            .collect::<Vec<_>>();
-        tracked.extend(checksums);
-        for file in [".cargo/config.toml", ".cargo/config"] {
-            if root.join(file).is_file() {
-                tracked.push(file.into());
-            }
+/// Outside a git repository nothing says what is ignored, so every file
+/// under `root`, as paths from it, counts as tracked but hidden entries,
+/// symbolic links, `node_modules` and Cargo's top-level `target`; Cargo's
+/// configuration is hidden and counts too, and so does the
+/// `.cargo-checksum.json` that `cargo vendor` writes beside a manifest.
+fn walked(root: &Path) -> Vec<String> {
+    let mut tracked = walk(root, Path::new(""), &[], &["node_modules"], &["target"]);
+    let checksums = tracked
+        .iter()
+        .filter_map(|path| path.strip_suffix("Cargo.toml"))
+        .filter(|directory| directory.is_empty() || directory.ends_with('/'))
+        .map(|directory| format!("{directory}.cargo-checksum.json"))
+        .filter(|checksum| root.join(checksum).is_file())
+        .collect::<Vec<_>>();
+    tracked.extend(checksums);
+    for file in [".cargo/config.toml", ".cargo/config"] {
+        if root.join(file).is_file() {
+            tracked.push(file.into());
         }
-        tracked.sort();
-        return Ok((tracked, Vec::new()));
     }
-    let here = std::env::current_dir()
-        .map_err(|error| error.to_string())?
-        .join(root);
-    let files = crate::repo::files(&here, true)?;
-    Ok((files.cached, files.others))
+    tracked.sort();
+    tracked
 }
 
 /// sykli's own contract and lock at the top level, and the contract being
@@ -374,12 +391,8 @@ fn walk(
     found
 }
 
-pub fn render(tasks: Vec<Task>) -> Result<String, String> {
-    let contract = Contract {
-        schema: "sykli-contract.v1".into(),
-        tasks,
-    };
-    let mut text = serde_json::to_string_pretty(&contract).map_err(|error| error.to_string())?;
+pub fn render(contract: &Contract) -> Result<String, String> {
+    let mut text = serde_json::to_string_pretty(contract).map_err(|error| error.to_string())?;
     text.push('\n');
     Ok(text)
 }
@@ -449,7 +462,19 @@ fn write(
         Place::Repository => path.file_name().and_then(|name| name.to_str()),
         Place::Outside => None,
     };
-    let detected = match detect(&root, contract) {
+    // One listing of the whole repository, for what the tasks declare and
+    // for the judgement of the contract they make.
+    let listed = match crate::repo::repository() {
+        Ok(_) => match crate::Listed::of_repository(true) {
+            Ok(listed) => Some(listed),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        },
+        Err(_) => None,
+    };
+    let detected = match detect(&root, contract, listed.as_ref()) {
         Ok(detected) => detected,
         Err(error) => {
             eprintln!("error: {error}");
@@ -480,7 +505,30 @@ fn write(
         .flat_map(|task| task.inputs.iter())
         .collect::<BTreeSet<_>>()
         .len();
-    let text = match render(detected.tasks) {
+    let written = Contract {
+        schema: "sykli-contract.v1".into(),
+        tasks: detected.tasks,
+    };
+    // What `validate` and `run` refuse before any task, judged from the same
+    // listing: `init` writes no contract they would refuse. In a
+    // subdirectory, the Cargo rule still reads the whole repository, and a
+    // contract's paths cannot leave where sykli runs, so the refusal names
+    // the top level to run in.
+    if let Some(listed) = listed {
+        let judged = crate::Inventory::given(&written, path, listed, detected.reads)
+            .and_then(|inventory| crate::undeclared_refusal_of(&written, &inventory));
+        match judged {
+            Ok(None) => {}
+            Ok(Some(refusal)) | Err(refusal) => {
+                eprintln!(
+                    "error: validate and run would refuse the contract init would write here, so \
+                     it writes none: {refusal}"
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let text = match render(&written) {
         Ok(text) => text,
         Err(error) => {
             eprintln!("error: {error}");

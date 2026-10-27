@@ -662,6 +662,24 @@ impl Inventory {
         })
     }
 
+    /// The inventory of `contract` from a listing already made, with
+    /// untracked files (`Listed::of_repository(true)`), and what the build
+    /// reads from it when that is known too, as `init` has them: it judges
+    /// the contract it would write from the same listing it declares from.
+    pub(crate) fn given(
+        contract: &Contract,
+        contract_path: &Path,
+        listed: Listed,
+        reads: Option<cargo_inputs::Reads>,
+    ) -> Result<Self, String> {
+        let inventory = Inventory::new(contract, contract_path)?;
+        let _ = inventory.listed.set(Ok(listed));
+        if let Some(reads) = reads {
+            let _ = inventory.reads.set(Ok(reads));
+        }
+        Ok(inventory)
+    }
+
     /// Whether `path`, as the listing spells it, is the contract being run
     /// or its lock.
     fn evaluated(&self, path: &Path) -> bool {
@@ -911,13 +929,13 @@ fn cargo_missing_inputs(
 /// `link_missing_inputs`), if it does, after warning of each document a
 /// source names that no task declares and of what build scripts may read
 /// unseen. `validate` asks the same inside a git repository, so a contract
-/// it accepts is one `run` starts.
+/// it accepts is one `run` starts, and so does `init` before it writes one.
 fn undeclared_refusal(contract: &Contract, path: &Path) -> Result<Option<String>, String> {
     undeclared_refusal_of(contract, &Inventory::new(contract, path)?)
 }
 
 /// `undeclared_refusal` of an inventory already made.
-fn undeclared_refusal_of(
+pub(crate) fn undeclared_refusal_of(
     contract: &Contract,
     inventory: &Inventory,
 ) -> Result<Option<String>, String> {
@@ -929,17 +947,66 @@ fn undeclared_refusal_of(
         eprintln!("warning: {}", unseen_warning(unseen));
     }
     if !cargo.missing.is_empty() {
-        return Ok(Some(cargo_coverage_error(&cargo.missing)));
+        let hint = outside_here(inventory, &cargo.missing)?;
+        return Ok(Some(cargo_coverage_error(&cargo.missing) + &hint));
     }
     let folders = folder_missing_inputs(contract, inventory)?;
     if !folders.is_empty() {
-        return Ok(Some(folder_coverage_error(&folders)));
+        let paths = folders
+            .iter()
+            .map(|input| input.path.clone())
+            .collect::<Vec<_>>();
+        return Ok(Some(
+            folder_coverage_error(&folders) + &outside_here(inventory, &paths)?,
+        ));
     }
     let linked = link_missing_inputs(contract, inventory)?;
     if !linked.is_empty() {
-        return Ok(Some(link_coverage_error(&linked)));
+        let paths = linked
+            .iter()
+            .map(|input| input.path.clone())
+            .collect::<Vec<_>>();
+        return Ok(Some(
+            link_coverage_error(&linked) + &outside_here(inventory, &paths)?,
+        ));
     }
     Ok(None)
+}
+
+/// Where to run instead, when a refusal names files (`paths`, from the
+/// repository's top level) outside the current directory: a
+/// contract's paths start where sykli runs and cannot leave it, so a
+/// contract run here can never declare them. Empty otherwise.
+fn outside_here(inventory: &Inventory, paths: &[String]) -> Result<String, String> {
+    let root = &inventory.listed()?.root;
+    let here = absolute(Path::new("."))?;
+    let Ok(below) = here.strip_prefix(root) else {
+        return Ok(String::new());
+    };
+    if below.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    let outside = paths
+        .iter()
+        .filter(|path| !Path::new(path.as_str()).starts_with(below))
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    if outside.is_empty() {
+        return Ok(String::new());
+    }
+    let below = below.to_string_lossy().replace('\\', "/");
+    let (are, them) = if outside.len() == 1 {
+        ("is", "it")
+    } else {
+        ("are", "them")
+    };
+    Ok(format!(
+        "; {} {are} outside {below}/, where sykli runs, and a contract run here cannot declare \
+         {them}, since its paths cannot leave this directory: run sykli at the repository's top \
+         level, {}",
+        outside.join(", "),
+        root.display()
+    ))
 }
 
 fn cargo_coverage_error(missing: &[String]) -> String {
