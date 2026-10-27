@@ -205,12 +205,12 @@ enum Include {
 /// Every `include_str!`, `include_bytes!` and `include!` invocation in the
 /// Rust source `text`, with its line. Code is read as Rust is: string and
 /// character literals and comments are not code, so an invocation written
-/// inside one is not one. Doc comments are read too, since a doctest
-/// compiles, but only their literal invocations count: a doc comment that
-/// describes an include in prose names no file. An argument built from
-/// `OUT_DIR` names a file made at build time, which is not in git and is not
-/// returned. Also every string literal in code, as written, with its line,
-/// for `index`.
+/// inside one is not one. Doc comments are read as rustdoc reads them
+/// (`Docs`): the invocations in their code blocks count, since a doctest
+/// compiles, and their prose, inline code included, names no file. An
+/// argument built from `OUT_DIR` names a file made at build time, which is
+/// not in git and is not returned. Also every string literal in code, as
+/// written, with its line, for `index`.
 fn scan(text: &str) -> Scanned<'_> {
     let bytes = text.as_bytes();
     // The line at a position, counted on from the last position asked
@@ -226,26 +226,30 @@ fn scan(text: &str) -> Scanned<'_> {
     };
     let mut found = Vec::new();
     let mut literals = Vec::new();
+    let mut docs = Docs::default();
     let mut at = 0;
     while at < bytes.len() {
         let rest = &text[at..];
         if rest.starts_with("//") {
             let end = rest.find('\n').map_or(text.len(), |end| at + end);
-            let doc =
-                (rest.starts_with("///") && !rest.starts_with("////")) || rest.starts_with("//!");
-            if doc {
-                documented(&text[at..end], &mut found);
+            if rest.starts_with("///") && !rest.starts_with("////") {
+                docs.comment(text, at, end, Kind::Outer, [&text[at + 3..end]]);
+            } else if rest.starts_with("//!") {
+                docs.comment(text, at, end, Kind::Inner, [&text[at + 3..end]]);
             }
             at = end;
             continue;
         }
         if rest.starts_with("/*") {
             let end = block_comment_end(text, at);
-            let doc =
-                (rest.starts_with("/**") && !rest.starts_with("/***") && !rest.starts_with("/**/"))
-                    || rest.starts_with("/*!");
-            if doc {
-                documented(&text[at..end], &mut found);
+            let outer =
+                rest.starts_with("/**") && !rest.starts_with("/***") && !rest.starts_with("/**/");
+            if outer || rest.starts_with("/*!") {
+                let inner = text[at + 3..end]
+                    .strip_suffix("*/")
+                    .unwrap_or(&text[at + 3..end]);
+                let kind = if outer { Kind::Outer } else { Kind::Inner };
+                docs.comment(text, at, end, kind, inner.split('\n').map(undecorated));
             }
             at = end;
             continue;
@@ -276,37 +280,246 @@ fn scan(text: &str) -> Scanned<'_> {
         }
         at += rest.chars().next().map_or(1, char::len_utf8);
     }
+    // A doctest's includes, read from its code as any code is. Their line is
+    // not kept, and one whose path is not a literal is passed over: a doc
+    // comment is never refused.
+    if !docs.code.trim_matches(|c| c == ';' || c == '\n').is_empty() {
+        found.extend(
+            scan(&docs.code)
+                .includes
+                .into_iter()
+                .filter(|(_, include)| *include != Include::Opaque)
+                .map(|(_, include)| (0, include)),
+        );
+    }
     Scanned {
         includes: found,
         literals,
     }
 }
 
-/// The literal invocations in a doc comment. Their line is not kept: only
-/// a refusal names one, and a doc comment's prose is never refused.
-fn documented(comment: &str, found: &mut Vec<(usize, Include)>) {
-    let mut at = 0;
-    while let Some(offset) = comment[at..].find("include") {
-        let start = at + offset;
-        at = start + "include".len();
-        if start > 0 && identifier(comment.as_bytes()[start - 1]) {
-            continue;
-        }
-        let mut end = at;
-        while end < comment.len() && identifier(comment.as_bytes()[end]) {
-            end += 1;
-        }
-        if !matches!(
-            &comment[start..end],
-            "include" | "include_str" | "include_bytes"
-        ) {
-            continue;
-        }
-        match invocation(comment, end) {
-            Some(Include::Opaque) | None => {}
-            Some(include) => found.push((0, include)),
-        }
+/// Which item a doc comment documents: the one after it (`///`, `/**`) or
+/// the one around it (`//!`, `/*!`).
+#[derive(Clone, Copy)]
+enum Kind {
+    Outer,
+    Inner,
+}
+
+/// A line of a block doc comment without the ` * ` that decorates it; a
+/// line without one keeps its indentation, so an indented block stays
+/// indented.
+fn undecorated(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    match trimmed.strip_prefix('*') {
+        Some(rest) if !trimmed.starts_with("*/") => rest,
+        _ => line,
     }
+}
+
+/// The code of a source's doc comments, as rustdoc reads Markdown: the
+/// lines of a fenced code block (unless its info string names another
+/// language) and indented lines, and nothing of their prose, inline code
+/// included. rustdoc compiles a doc comment's code blocks as doctests, and
+/// nothing else in it.
+///
+/// Where the structure is unclear, every reading is kept, and a line any
+/// reading takes for code is code, so a doctest's include is never missed
+/// (the cost is a file asked for that nothing reads): a line indented by
+/// four columns or more counts whatever the common indentation is; and a
+/// doc comment that does not follow the last one directly (code, an
+/// attribute or a plain comment between them) may document the same item,
+/// so a fence still open there stays open in one reading and is closed in
+/// another.
+#[derive(Default)]
+struct Docs {
+    outer: Readings,
+    inner: Readings,
+    code: String,
+}
+
+/// The readings of one kind of doc comment so far, and where the last one
+/// ended.
+#[derive(Default)]
+struct Readings {
+    readings: Vec<Reading>,
+    last: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Reading {
+    Prose,
+    /// Inside a fenced block opened by `len` of `fence`; `rust` when
+    /// rustdoc compiles it.
+    Fence {
+        fence: u8,
+        len: usize,
+        rust: bool,
+    },
+}
+
+impl Docs {
+    /// The doc comment at `at..end` of `text`, of `kind`, as `lines`.
+    fn comment<'a>(
+        &mut self,
+        text: &str,
+        at: usize,
+        end: usize,
+        kind: Kind,
+        lines: impl IntoIterator<Item = &'a str>,
+    ) {
+        let state = match kind {
+            Kind::Outer => &mut self.outer,
+            Kind::Inner => &mut self.inner,
+        };
+        let follows = state
+            .last
+            .is_some_and(|last| text[last..at].trim().is_empty());
+        if !follows {
+            if !state.readings.contains(&Reading::Prose) {
+                state.readings.push(Reading::Prose);
+            }
+            // Nothing joins code across doc comments that do not follow
+            // each other.
+            self.code.push_str(";\n");
+        }
+        for line in lines {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if state.read(line) {
+                self.code.push_str(line);
+                self.code.push('\n');
+            } else {
+                self.code.push_str(";\n");
+            }
+        }
+        state.last = Some(end);
+    }
+}
+
+impl Readings {
+    /// Read one line of a doc comment: whether any reading takes it for
+    /// code rustdoc compiles.
+    fn read(&mut self, line: &str) -> bool {
+        let indent = line
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .map(|c| if c == '\t' { 4 } else { 1 })
+            .sum::<usize>();
+        let trimmed = line.trim_start();
+        let fence = fence_of(trimmed);
+        let mut code = false;
+        let mut next = Vec::new();
+        for reading in &self.readings {
+            match *reading {
+                Reading::Prose => match fence {
+                    Some((fence, len, info)) => next.push(Reading::Fence {
+                        fence,
+                        len,
+                        rust: compiled(info),
+                    }),
+                    None => {
+                        code |= indent >= 4 && !trimmed.is_empty();
+                        next.push(Reading::Prose);
+                    }
+                },
+                Reading::Fence {
+                    fence: open,
+                    len: opened,
+                    rust,
+                } => {
+                    let closes = fence.is_some_and(|(fence, len, info)| {
+                        fence == open && len >= opened && info.is_empty()
+                    });
+                    if closes {
+                        next.push(Reading::Prose);
+                    }
+                    // Indented by four columns or more, a closing fence may
+                    // be the block's content instead.
+                    if !closes || indent >= 4 {
+                        code |= rust;
+                        next.push(*reading);
+                    }
+                }
+            }
+        }
+        self.readings.clear();
+        for reading in next {
+            if !self.readings.contains(&reading) {
+                self.readings.push(reading);
+            }
+        }
+        code
+    }
+}
+
+/// The fence a line of a doc comment opens or closes, with leading
+/// whitespace removed: its character, its length (three or more) and its
+/// info string.
+fn fence_of(trimmed: &str) -> Option<(u8, usize, &str)> {
+    let fence = *trimmed.as_bytes().first()?;
+    if !matches!(fence, b'`' | b'~') {
+        return None;
+    }
+    let len = trimmed.bytes().take_while(|byte| *byte == fence).count();
+    (len >= 3).then(|| (fence, len, trimmed[len..].trim()))
+}
+
+/// Whether rustdoc compiles a fenced block with this info string: unless it
+/// names another language and not `rust` as well. Words rustdoc reads as
+/// test attributes (`no_run`, `ignore`, `should_panic`, an edition) and
+/// unknown ones count as Rust here, so what a doctest includes is never
+/// missed.
+fn compiled(info: &str) -> bool {
+    const OTHER: &[&str] = &[
+        "text",
+        "txt",
+        "plain",
+        "plaintext",
+        "console",
+        "sh",
+        "shell",
+        "bash",
+        "zsh",
+        "fish",
+        "powershell",
+        "ps1",
+        "bat",
+        "cmd",
+        "toml",
+        "json",
+        "jsonc",
+        "yaml",
+        "yml",
+        "ini",
+        "md",
+        "markdown",
+        "html",
+        "xml",
+        "css",
+        "c",
+        "cpp",
+        "c++",
+        "h",
+        "python",
+        "py",
+        "js",
+        "javascript",
+        "ts",
+        "typescript",
+        "go",
+        "java",
+        "diff",
+        "sql",
+        "dot",
+        "mermaid",
+        "csv",
+    ];
+    let words = info
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    words.iter().any(|word| word == "rust")
+        || !words.iter().any(|word| OTHER.contains(&word.as_str()))
 }
 
 /// What the invocation whose macro name ends at `at` names, or None when
