@@ -209,16 +209,22 @@ struct Update {
 }
 
 fn updates(input: &str) -> Result<Vec<Update>, String> {
+    let object_id =
+        |id: &str| matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit());
     input
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(
             |line| match line.split_whitespace().collect::<Vec<_>>()[..] {
-                [_, local_sha, remote_ref, remote_sha] => Ok(Update {
-                    local_sha: local_sha.into(),
-                    remote_ref: remote_ref.into(),
-                    remote_sha: remote_sha.into(),
-                }),
+                [_, local_sha, remote_ref, remote_sha]
+                    if object_id(local_sha) && object_id(remote_sha) =>
+                {
+                    Ok(Update {
+                        local_sha: local_sha.into(),
+                        remote_ref: remote_ref.into(),
+                        remote_sha: remote_sha.into(),
+                    })
+                }
                 _ => Err(format!("unexpected pre-push input line {line:?}")),
             },
         )
@@ -1051,6 +1057,29 @@ fn executable(_: &Path) -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_push_refuses_malformed_object_ids() {
+        let zero = "0".repeat(40);
+        for bad in [
+            "aaaaaa€aaaaaa",
+            "abc",
+            "",
+            "HEAD",
+            "gggggggggggggggggggggggggggggggggggggggg",
+        ] {
+            for (local, remote) in [(bad, zero.as_str()), (zero.as_str(), bad)] {
+                let line = format!("refs/heads/main {local} refs/heads/main {remote}");
+                assert!(updates(&line).is_err(), "accepted {line:?}");
+            }
+        }
+        for length in [40, 64] {
+            let id = "a".repeat(length);
+            let zero = "0".repeat(length);
+            assert!(updates(&format!("refs/heads/main {id} refs/heads/main {zero}")).is_ok());
+            assert!(updates(&format!("(delete) {zero} refs/heads/main {id}")).is_ok());
+        }
+    }
 
     /// The losing side of two first pushes: the directory is missing when
     /// looked at and present when created. Losing that race is fine.
