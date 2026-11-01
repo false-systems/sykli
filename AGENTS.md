@@ -282,3 +282,11 @@ or Node (JavaScript/TypeScript): not for tools, scripts, CI helpers, tests,
 dashboards or glue. A thin shell step in a CI workflow is fine; anything with
 logic is Rust. Existing Python or Node files are debt to be rewritten, not
 precedent to follow.
+
+## Lessons
+
+<!-- This repository's accepted knowledge: one line per node, each marked with its id, written here through a pull request when a person accepts one. A line changed here by hand is replaced the next time it is written: change a lesson where it is decided. -->
+
+- <!-- lesson: sykli-doc-comment-includes-count --> **fact**: sykli's Cargo inputs check counts a file include written in a doc comment as a real include, so the contract then asks for that file. Reword the comment, or declare the file in a task's inputs. (as of 2026-10-27)
+- <!-- lesson: sykli-pre-push-only-verifies-receipt --> **fact**: sykli's pre-commit hook runs the whole configured graph, but its pre-push hook only checks for an existing receipt on gated branches and runs no checks itself. Feature branches are not gated by default. Project detection covers only Cargo, npm and Go, so Elixir/Erlang repos need tasks written by hand. (as of 2026-10-27)
+- <!-- lesson: sykli-runs-on-windows-quote-paths-in-test-shells --> **lesson**: sykli is also checked on Windows: windows-latest CI, plus clippy and a type check for the Windows target. Never split a path at ':', because drive letters contain one. Quote every path in shell commands that tests build, because sh on Windows reads backslashes as escapes. (as of 2026-10-27)
