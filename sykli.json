@@ -30,7 +30,8 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs"
+        "tests/snapshot.rs",
+        "tests/instructions.rs"
       ]
     },
     {
@@ -84,7 +85,8 @@
         "tests/forgery.rs",
         "tests/runs.rs",
         "tests/worktree_cache.rs",
-        "tests/snapshot.rs"
+        "tests/snapshot.rs",
+        "tests/instructions.rs"
       ]
     },
     {
@@ -131,7 +133,8 @@
         "action/binary.sh",
         "action/plan.sh",
         "action/summary.sh",
-        "action/verify.sh"
+        "action/verify.sh",
+        "tests/instructions.rs"
       ]
     }
   ]
