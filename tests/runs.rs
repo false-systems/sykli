@@ -1338,6 +1338,9 @@ fn resume_refuses_a_run_whose_coordinator_is_alive() {
     let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
     let run = answer["run"].as_str().unwrap().to_owned();
     f.wait_ready("t");
+    // Counted before the coordinator appends Started, the records would
+    // grow by that append while the resume is refused.
+    f.wait_started("t");
     let records = || {
         fs::read_dir(f.runs_dir().join(&run).join("records"))
             .unwrap()
