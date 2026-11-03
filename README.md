@@ -728,7 +728,10 @@ git commit -m "Enable local checks"
 
 Install Rust's `rustfmt` and `clippy` components first. Skip `cargo
 generate-lockfile` when the lockfile already exists; regenerating it can change
-dependency resolution. If you already have a Sykli contract, review and edit it
+dependency resolution. If `.gitignore` lists `Cargo.lock`, as older library
+templates did, remove that line before `sykli init`: otherwise `init` does not
+declare the lockfile, and `git add` refuses it while staging the rest. If you
+already have a Sykli contract, review and edit it
 instead of running `init` again. Review the generated graph and staged changes
 before committing. Cargo discovery includes formatting, Clippy and tests, not
 only a fast formatting check. It captures files present at initialization:
@@ -760,8 +763,8 @@ branch (falling back to `main`/`master`), not every feature branch.
 
 Adding a security or dependency checker means declaring its command and all
 relevant inputs, and installing that checker separately. A cached pass covers
-those declared inputs; it does not establish that a remote advisory database
-or an undeclared tool changed. A working-tree check is not a full-history
+those declared inputs; it is not re-run when a remote advisory database or an
+undeclared tool changes. A working-tree check is not a full-history
 secret scan. Local hooks are also not an enforcement boundary: callers can
 bypass them, so keep required CI or server-side policy where applicable.
 
