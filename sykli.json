@@ -134,7 +134,9 @@
         "action/plan.sh",
         "action/summary.sh",
         "action/verify.sh",
-        "tests/instructions.rs"
+        "tests/instructions.rs",
+        "GEMINI.md",
+        "docs/architecture.md"
       ]
     }
   ]
