@@ -31,7 +31,11 @@
         "tests/runs.rs",
         "tests/worktree_cache.rs",
         "tests/snapshot.rs"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     },
     {
       "name": "installer",
@@ -85,7 +89,11 @@
         "tests/runs.rs",
         "tests/worktree_cache.rs",
         "tests/snapshot.rs"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     },
     {
       "name": "test",
@@ -132,7 +140,11 @@
         "action/plan.sh",
         "action/summary.sh",
         "action/verify.sh"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     }
   ]
 }
