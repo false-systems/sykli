@@ -70,15 +70,21 @@ jobs:
       - uses: actions/checkout@v7
       - if: matrix.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential file musl-tools
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.85"
-          targets: ${{ matrix.target }}
+      # rust-toolchain.toml decides which toolchain cargo runs here, so the
+      # target is added to that one: the binary is built with what CI tests.
+      - name: Install the pinned toolchain and the target
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --target ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Verify and package
         run: |
           set -euo pipefail
-          name="sykli-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
+          # A tag names the archive; a run started by hand from a branch
+          # whose name holds a slash still makes a valid file name.
+          ref=${GITHUB_REF_NAME//\//-}
+          name="sykli-${ref}-${{ matrix.platform }}-${{ matrix.arch }}"
           if [ "${{ matrix.platform }}" = windows ]; then
             binary="target/${{ matrix.target }}/release/sykli.exe"
             "$binary" --help >/dev/null
