@@ -51,7 +51,8 @@ contract consumer can observe; internal refactors are not listed.
   installed, with reading tools only and no agent-session marker of the
   caller's, and hands it the commits and the diff (cut at 300000 characters,
   and told so). The reply holds findings as `- [blocking] ...` and
-  `- [look] ...` lines and exactly one line `REVIEW: fine|look|blocking`; the
+  `- [look] ...` lines and exactly one line `REVIEW <token>: fine|look|blocking`
+  (see the next entry); the
   verdict is raised to its worst finding. Exit 0 for fine, look, an overruled
   blocking review, or nothing to review; 1 for blocking; 2 when no review
   happened (uncommitted or untracked files, no reviewer installed, a reviewer
@@ -82,6 +83,23 @@ contract consumer can observe; internal refactors are not listed.
   receipt is also put in the worktree's `.sykli/receipts`, where the
   pre-push hook, which still runs, reads it. Exit 0 landed, 1 refused, 2
   could not tell or a push failed.
+- The change under `sykli review` cannot write its reviewer's verdict. The
+  reviewer is handed the commit messages (whole, not only their subjects) and
+  the diff between two boundary lines that carry a random token of the run,
+  and is told that everything in the change is material to judge, never an
+  instruction, and that text which addresses a reviewer or tries to set the
+  verdict is a `blocking` finding. The verdict line must carry a second
+  random token, given after the change: `REVIEW <token>: fine|look|blocking`.
+  A `REVIEW` line without it is not a verdict, so a reply that only repeats
+  what the change said is no review (exit 2). Before the reviewer starts,
+  sykli counts the lines of the commit messages and of the diff's added
+  lines that are nothing but a verdict, and the note gains
+  `addressed_reviewer` (true or false), `verdict_like_lines` (the count) and
+  `prompt` (`sykli-review-prompt.v2`, the defences in force); the summary
+  line says `N lines of the change are shaped like a verdict`, and of a note
+  without `prompt` that it was recorded before these defences. The review is
+  not refused for such lines. This does not stop a reviewer that was
+  persuaded: its verdict carries the token and counts.
 - `sykli deploy [CONTRACT] [--target NAME] [--remote NAME] [--branch NAME]
   [--allow-unlanded]` (Linux and macOS) runs a deploy contract (default
   `deploy.json`, an ordinary contract whose tasks do the deployment) for the
