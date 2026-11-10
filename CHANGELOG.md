@@ -13,7 +13,8 @@ contract consumer can observe; internal refactors are not listed.
 - The release workflow installs rustfmt and clippy before its tests, which
   run them inside graphs they build, and builds each target with the
   toolchain `rust-toolchain.toml` pins, which is the one cargo runs there.
-  The Linux targets were added to another toolchain and could not compile.
+  The Linux targets were added to another toolchain and could not compile,
+  and the check that a Linux binary is static accepts a static-pie one.
   0.8.0 was tagged but never released; 0.8.1 is 0.8.0 with these fixes.
 
 ## [0.8.0] - 2026-11-11

@@ -94,9 +94,12 @@ jobs:
             (cd "$(dirname "$binary")" && 7z a -tzip "$GITHUB_WORKSPACE/$name.zip" sykli.exe >/dev/null)
           else
             binary="target/${{ matrix.target }}/release/sykli"
-            file "$binary" | grep -q "${{ matrix.file_match }}"
+            info=$(file "$binary")
+            echo "$info"
+            grep -q "${{ matrix.file_match }}" <<<"$info"
             if [ "${{ matrix.platform }}" = linux ]; then
-              file "$binary" | grep -q "statically linked"
+              # x86_64 musl builds are static-pie; file(1) words that apart.
+              grep -q -E "statically linked|static-pie linked" <<<"$info"
             fi
             "$binary" --help >/dev/null
             tar -czf "$name.tar.gz" -C "$(dirname "$binary")" sykli
