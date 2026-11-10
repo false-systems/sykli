@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 552" fill="none" role="img" aria-labelledby="t d">
+<title id="t">sykli run twice, then sykli verify after a change</title>
+<desc id="d">Three commands and their output. The first sykli run passes two tasks, lint and test, and writes a receipt. The second sykli run finds nothing changed and reuses both results. Then a file is edited, and sykli verify refuses the receipt because the tree is no longer the one it records.</desc>
+<rect width="1200" height="552" fill="#f1ebdc"/>
+<g stroke="#171715" stroke-width="2"><path d="M40 40H56M48 32V48M1144 512H1160M1152 504V520"/></g>
+<g stroke="#b9b3a5" stroke-width="1"><path d="M64 96H1136M64 132H1136M64 168H1136M64 204H1136M64 240H1136M64 276H1136M64 312H1136M64 348H1136M64 384H1136M64 420H1136M64 456H1136M64 492H1136M64 528H1136"/></g>
+<rect x="64" y="494" width="6" height="32" fill="#d4aa4e"/>
+<g font-family="'Geist Mono', ui-monospace, Menlo, Consolas, monospace" font-size="20">
+<text x="84" y="86" fill="#171715" font-weight="600"><tspan fill="#c75b36">$</tspan> sykli run</text>
+<text x="84" y="122" fill="#57594f">passed: lint</text>
+<text x="84" y="158" fill="#57594f">passed: test</text>
+<text x="84" y="194" fill="#57594f">receipt: .sykli/receipts/rcpt_89317086….json</text>
+<text x="84" y="266" fill="#171715" font-weight="600"><tspan fill="#c75b36">$</tspan> sykli run</text>
+<text x="84" y="302" fill="#57594f">cached: lint</text>
+<text x="84" y="338" fill="#57594f">cached: test</text>
+<text x="84" y="374" fill="#57594f">receipt: .sykli/receipts/rcpt_379ff4b4….json</text>
+<text x="84" y="446" fill="#171715" font-weight="600"><tspan fill="#c75b36">$</tspan> echo 'echo sneaky' &gt; lint.sh</text>
+<text x="84" y="482" fill="#171715" font-weight="600"><tspan fill="#c75b36">$</tspan> sykli verify .sykli/receipts/rcpt_379ff4b4….json</text>
+<text x="84" y="518" fill="#171715">refused: tree expected 98019716… but got 3ba0f24c…</text>
+</g>
+</svg>

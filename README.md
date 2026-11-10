@@ -5,6 +5,12 @@
 Sykli is one binary that runs your repository's checks as a declared graph
 and keeps proof of what passed. *Sykli* is Finnish for *cycle*.
 
+It is for someone who works with coding agents such as Claude Code, Codex, pi
+or opencode, and for anyone tired of re-running every check. Reach for it when
+an agent says "the tests pass" and you want that tied to the exact files it
+ran against. You need Git, a POSIX `sh` and, to install from source, Rust.
+Only `sykli review` needs an agent CLI.
+
 Most repositories know their checks only as a list of commands in a CI file.
 Nobody can say which of them a change needs, whether last night's pass still
 holds, or what exactly was tested. Sykli makes the checks a graph you declare:
@@ -18,31 +24,32 @@ It decides which of them need to run and keeps a verifiable record of what did.
 
 ## See it
 
-Two tasks, `lint` then `test`, each reading one script. Real output, hashes
-shortened:
+<img src="docs/assets/see-it.svg" alt="sykli run passes lint and test and writes a receipt. A second sykli run reuses both results: cached. After lint.sh is edited, sykli verify refuses the receipt: tree expected 98019716… but got 3ba0f24c…" width="100%">
+
+Two tasks, `lint` then `test`, each reading one script. The first run passes
+both and writes a receipt. The second finds nothing changed and runs nothing.
+Then a file is edited, and the receipt is refused. Real output, trimmed,
+hashes shortened.
+
+<details><summary>The same, as text</summary>
 
 ```console
 $ sykli run
-running: lint
 passed: lint
-running: test
 passed: test
-receipt: …/.sykli/receipts/rcpt_18b86d1f….json
+receipt: .sykli/receipts/rcpt_89317086….json
 
-$ sykli run                                   # nothing changed: nothing runs
+$ sykli run
 cached: lint
 cached: test
+receipt: .sykli/receipts/rcpt_379ff4b4….json
 
-$ sykli verify .sykli/receipt.json --contract sykli.json
-ok: tree 777d2ada…
-ok: outcome passed with 2 task records
-verified: receipt matches this tree and contract
-
-$ echo 'echo sneaky' > lint.sh                # change the code after the fact
-$ sykli verify .sykli/receipt.json --contract sykli.json
-mismatch: tree expected a07b2a09… but got 777d2ada…
-refused: tree expected a07b2a09… but got 777d2ada…
+$ echo 'echo sneaky' > lint.sh
+$ sykli verify .sykli/receipts/rcpt_379ff4b4….json
+refused: tree expected 98019716… but got 3ba0f24c…
 ```
+
+</details>
 
 Once the code changes, the old receipt no longer verifies. The
 [reference](docs/reference.md#see-it-in-30-seconds) has the whole run and the
@@ -59,13 +66,25 @@ cargo install --git https://github.com/false-systems/sykli --branch main --locke
 This version is not on crates.io yet. Once it is published,
 `cargo install sykli --locked` installs it; until then, use the command above.
 
+It runs on Linux, macOS and Windows. `review`, `land`, `deploy`, `deployed`,
+`status` and `resume` are on Linux and macOS only.
+
 Running tasks needs Git, a POSIX `sh` and your project's own toolchain. On
 Windows, Git for Windows supplies `sh`.
 
 ## Use
 
-In a Cargo, npm or Go repository with at least one commit, in the order you
-meet them:
+The 60-second start, in a Cargo, npm or Go repository with at least one
+commit:
+
+```sh
+sykli init             # write sykli.json: one task per check it finds, with its inputs
+sykli run              # run them; prints passed or failed per task, and a receipt
+sykli hook install     # git now refuses a commit that fails, and a push to the default branch without a receipt
+```
+
+Run `sykli run` again and every task says `cached`: nothing changed, so
+nothing runs. The commands in full, in the order you meet them:
 
 ```sh
 sykli init             # detect the ecosystems, write sykli.json and pin it
