@@ -103,6 +103,9 @@ Install from source with Rust 1.85 or newer:
 cargo install --git https://github.com/false-systems/sykli --branch main --locked sykli
 ```
 
+This version is not on crates.io yet. Once it is published,
+`cargo install sykli --locked` installs it; until then, use the command above.
+
 Then, in an existing Cargo, npm or Go repository with at least one commit
 (in one with none, `run` exits 2):
 
