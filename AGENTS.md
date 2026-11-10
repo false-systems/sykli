@@ -6,6 +6,7 @@ The guide for every coding agent here (Codex, Claude Code, Gemini, Copilot, Curs
 
 - Own graph parsing, validation, planning, execution, caching, and receipts.
 - Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
+- The one exception, by the owner's decision: `review`, `land`, `deploy`, `deployed`. `docs/architecture.md` states its limits.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. (Production attempts once kept 2.0 GB of build trees against 14 MB of declared products.)
@@ -45,3 +46,11 @@ A new source, test or fixture file goes into the `inputs` of the `fmt`, `clippy`
 - Validate locally before pushing (the gate above, and any check your launch prompt names). CI runs the Linux gate and the Windows tests on every pull request and on `main`, on `ubuntu-latest` and `windows-latest` (the repository is public, so hosted runners are free; macOS is covered locally). Do not push a release tag (`release.yml` builds five targets) unless told to.
 - `.sykli/` and other tools' local state directories are ignored.
 - Code is Rust or Elixir/Erlang; never add Python, Go or Node.
+
+## Lessons
+
+<!-- This repository's accepted knowledge: one line per node, each marked with its id, written here through a pull request when a person accepts one. A line changed here by hand is replaced the next time it is written: change a lesson where it is decided. -->
+
+- <!-- lesson: sykli-doc-comment-includes-count --> **fact**: sykli's Cargo inputs check counts a file include written in a doc comment as a real include, so the contract then asks for that file. Reword the comment, or declare the file in a task's inputs. (as of 2026-10-27)
+- <!-- lesson: sykli-pre-push-only-verifies-receipt --> **fact**: sykli's pre-commit hook runs the whole configured graph, but its pre-push hook only checks for an existing receipt on gated branches and runs no checks itself. Feature branches are not gated by default. Project detection covers only Cargo, npm and Go, so Elixir/Erlang repos need tasks written by hand. (as of 2026-10-27)
+- <!-- lesson: sykli-runs-on-windows-quote-paths-in-test-shells --> **lesson**: sykli is also checked on Windows: windows-latest CI, plus clippy and a type check for the Windows target. Never split a path at ':', because drive letters contain one. Quote every path in shell commands that tests build, because sh on Windows reads backslashes as escapes. (as of 2026-10-27)
