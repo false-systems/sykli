@@ -21,7 +21,11 @@ mod hook;
 mod init;
 #[cfg(unix)]
 mod journal;
+#[cfg(unix)]
+mod land;
 mod repo;
+#[cfg(unix)]
+mod review;
 #[cfg(unix)]
 mod runs;
 mod worktree_cache;
@@ -417,6 +421,91 @@ enum Command {
     Hook {
         #[command(subcommand)]
         hook: Hook,
+    },
+    /// Have a fresh agent review the commit checked out against the remote's default branch
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  fine, look, a blocking review a person overruled, or nothing to review (the\n     \
+           commit is already in the branch)\n  \
+        1  blocking\n  \
+        2  no review happened: uncommitted or untracked files, no reviewer installed, a\n     \
+           reviewer that failed, ran out of time or gave no verdict, an unknown default\n     \
+           branch, or a kept note that is not a review. Never a pass.\n\n\
+        The change is every commit from the merge base with refs/remotes/REMOTE/BRANCH to\n\
+        HEAD; nothing is fetched. BRANCH is the default branch as the pre-push hook finds\n\
+        it (what refs/remotes/REMOTE/HEAD names, else main or master, whichever this clone\n\
+        has), or the one --branch names.\n\n\
+        The reviewer is the first of `codex`, `claude` on PATH that no commit of the change\n\
+        names in a Co-Authored-By trailer, else the first on PATH; the review records\n\
+        whether it was another agent than the author (yes, no, or unknown when no commit\n\
+        names one). It is started in a session of its own with reading tools only (codex:\n\
+        a read-only sandbox and no user config.toml; claude: Read, Grep and Glob, no\n\
+        settings, hooks or configured servers), is handed the commits and the diff (cut\n\
+        at 300000 characters, and told so), and has 20 minutes for all of it. An agent\n\
+        CLI still reads the instruction files it always reads (codex: the person's own\n\
+        AGENTS.md for it, and the repository's), so a finding can cite them. Its reply\n\
+        holds one line per finding, `- [blocking] ...` or `- [look] ...`, and exactly one\n\
+        line `REVIEW: fine`, `REVIEW: look` or `REVIEW: blocking`; the verdict is raised\n\
+        to its worst finding. What it printed while working is shown only when it failed.\n\n\
+        The verdict is kept as a git note on the commit's tree under\n\
+        refs/notes/sykli/review (JSON, sykli-review.v1), and answers only for the base it\n\
+        was read against: the same change is not reviewed twice, and the same tree on\n\
+        another base is reviewed again. `sykli land` pushes it.\n\n\
+        A review is a model's judgement, not a proof, and the author is known only from\n\
+        commit trailers.")]
+    Review {
+        /// The remote whose default branch the change is against
+        #[arg(long, default_value = "origin", value_name = "NAME")]
+        remote: String,
+        /// Review against this branch of the remote instead of its default branch
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+        /// Let the kept blocking review of this commit cross, with the reason. Only a
+        /// person at a terminal: stdin and stderr are terminals and no agent session's
+        /// marker is in the environment. Who cannot be known, so the reason and the
+        /// time are recorded
+        #[arg(long, value_name = "WHY")]
+        overrule: Option<String>,
+    },
+    /// Put the commit checked out on the remote's default branch, when it is proven and reviewed
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  landed: the branch is this commit, and its receipt and review are shared\n  \
+        1  refused, saying what is missing; nothing was pushed\n  \
+        2  could not tell (git, the contract or a journal could not be read, the default\n     \
+           branch is unknown), or a push failed\n\n\
+        Refuses unless all of these hold for the commit checked out: nothing is\n\
+        uncommitted or untracked; the remote's default branch (as `review` finds it, or\n\
+        --branch), fetched now, is an ancestor of it, else merge that in, then prove and\n\
+        review the result; its tree has a passing receipt that verifies for it, as\n\
+        `status --commit` judges every receipt this clone keeps by the repository's\n\
+        contract (sykli.rs, else sykli.json); and a review of this tree against exactly\n\
+        that branch tip is kept and is not blocking, or a person overruled it.\n\n\
+        A receipt another clone shared (a note under refs/notes/sykli/receipt) counts\n\
+        only where this clone knows nothing of the tree, never after a failure or a\n\
+        conflict recorded here, and only if it passes `verify --commit` here with every\n\
+        task passed or cached.\n\n\
+        Then the receipt is attached to the tree as a note under refs/notes/sykli/receipt\n\
+        (the receipt file, or the copy its run kept when the file is gone; with neither\n\
+        and no shared note, land refuses: the branch does not move without proof to\n\
+        share), the remote's notes are fetched and merged (on the same tree this clone's\n\
+        note stays), the notes are pushed first, and only then HEAD is pushed to the\n\
+        branch with a lease on the tip that was checked, so a landing that raced this one\n\
+        makes the push fail (exit 2) instead of landing an unreviewed change. The receipt\n\
+        is also put in this worktree's .sykli/receipts, where the pre-push hook reads\n\
+        receipts and judges them itself.\n\n\
+        Another clone reads both with\n  \
+          git fetch REMOTE 'refs/notes/sykli/*:refs/notes/sykli/*'\n  \
+          git notes --ref refs/notes/sykli/receipt show COMMIT^{tree} > receipt.json\n  \
+          sykli verify receipt.json --commit COMMIT\n\
+        A shared receipt is evidence as any receipt is: consistent, not proven.")]
+    Land {
+        /// The remote to land on
+        #[arg(long, default_value = "origin", value_name = "NAME")]
+        remote: String,
+        /// Land on this branch of the remote instead of its default branch
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
     },
 }
 
@@ -2122,6 +2211,14 @@ fn main() -> ExitCode {
                 force,
             } => hook::install(pre_commit, pre_push, force),
         },
+        #[cfg(unix)]
+        Command::Review {
+            remote,
+            branch,
+            overrule,
+        } => review::command(&remote, branch.as_deref(), overrule.as_deref()),
+        #[cfg(unix)]
+        Command::Land { remote, branch } => land::command(&remote, branch.as_deref()),
         Command::Plan {
             contract,
             changed,

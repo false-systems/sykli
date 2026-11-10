@@ -1,7 +1,8 @@
 Product boundaries:
 
 - Own graph parsing, validation, planning, execution, caching, and receipts.
-- Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
+- Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution, except as the next rule names. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
+- The path from a passing receipt to the default branch is sykli's too, by the repository owner's decision (November 2026), so that proving, reviewing and landing a commit are one tool's records about one tree. `review` starts an installed agent CLI as a reviewer, with reading tools only; `land` fetches from and pushes to the git remote the person names. They are the only commands that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
@@ -249,6 +250,31 @@ test hook
 (`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
 crash window; release builds have none. On Windows `runs` is a stub of
 uninhabited types and a run is in memory, as before.
+
+**Review and landing (`src/review.rs`, `src/land.rs`, Unix only).** Both take
+the worktree's root and run git there (`review::git`), so their tests use
+real repositories with a bare remote and no process-wide state. `review`
+judges `merge-base(refs/remotes/REMOTE/BRANCH, HEAD)..HEAD` (the branch by
+`default_branch`, which reuses `hook::default_branches`), picks the reviewer
+(`authors` from `Co-Authored-By` trailers, `choose`), and talks to it in
+`converse`: the prompt is written, and both pipes are read, on threads beside
+one deadline, so a reviewer that stalls, exits non-zero, leaves its prompt
+unread or leaves a child holding its pipes is no review (exit 2). The reply
+is parsed by `parse_verdict` (exactly one `REVIEW:` line, raised to the worst
+finding) and kept as a `sykli-review.v1` note on the tree under
+`refs/notes/sykli/review` (`write_note` stores the bytes as a blob first, so
+a note holds them exactly). A kept record answers only for its `base`.
+`AGENT_MARKERS` are removed from the reviewer's environment and refuse
+`--overrule`, which also needs a terminal (`person_at_terminal`). `land`
+takes its proof from a `Prover` (injected in tests; `sykli_proof` asks
+`commit_status` and, only where its verdict is `none`, `verify` on the shared
+receipt note, both in this process), requires the fetched branch tip to be an
+ancestor of HEAD and the kept review's `base` to be that tip, attaches the
+receipt under `refs/notes/sykli/receipt`, copies it to the worktree's
+`.sykli/receipts` for the pre-push hook (`keep_for_hook`), merges and pushes
+the notes (`fetch_notes`, `push_notes`, strategy `ours`) and then pushes with
+`--force-with-lease` on the checked tip. `tests/land.rs` runs the binary with
+a script as the `codex` on a `PATH` that holds no real agent.
 
 **Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the
 coordinator at each checkpoint and of a task, SIGTERM/SIGINT, a stale

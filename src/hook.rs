@@ -237,7 +237,7 @@ fn absent(sha: &str) -> bool {
 }
 
 /// How the gated branches were chosen.
-enum Chosen {
+pub(crate) enum Chosen {
     /// Named with `--branch`, or the default branch `refs/remotes/REMOTE/HEAD` names.
     Known,
     /// No `refs/remotes/REMOTE/HEAD`: `main` and `master` are gated.
@@ -277,7 +277,7 @@ fn remote_head(repository: &repo::Repository, remote: &str) -> Option<String> {
 /// The remote's default branch as `refs/remotes/REMOTE/HEAD` names it, when
 /// the ref it names exists (`target` is the ref, and `exists` says whether
 /// it does, as one batch answered); else `main` and `master`.
-fn default_branches(
+pub(crate) fn default_branches(
     remote: Option<&str>,
     target: Option<&str>,
     exists: bool,
