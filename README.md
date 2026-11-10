@@ -850,6 +850,11 @@ The limits:
   it was handed, raised nothing. It is not a proof, a second model may
   disagree, and text in the change can try to steer its reader. Read the
   findings.
+- **The reviewer brings its own standing instructions.** It starts without
+  the asking session's conversation, settings, hooks and servers, but an
+  agent CLI still reads the instruction files it always reads: `codex`
+  loads the person's own `AGENTS.md` for it as well as the repository's. A
+  finding can therefore rest on a rule the repository does not state.
 - **Notes merge in favour of the local one.** Where this clone and the remote
   both hold a note for a tree, this clone's stays and is what gets pushed.
   Whoever can push to the repository can write these notes, as they can write

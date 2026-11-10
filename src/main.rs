@@ -439,9 +439,11 @@ enum Command {
         names in a Co-Authored-By trailer, else the first on PATH; the review records\n\
         whether it was another agent than the author (yes, no, or unknown when no commit\n\
         names one). It is started in a session of its own with reading tools only (codex:\n\
-        a read-only sandbox and no user configuration; claude: Read, Grep and Glob, no\n\
+        a read-only sandbox and no user config.toml; claude: Read, Grep and Glob, no\n\
         settings, hooks or configured servers), is handed the commits and the diff (cut\n\
-        at 300000 characters, and told so), and has 20 minutes for all of it. Its reply\n\
+        at 300000 characters, and told so), and has 20 minutes for all of it. An agent\n\
+        CLI still reads the instruction files it always reads (codex: the person's own\n\
+        AGENTS.md for it, and the repository's), so a finding can cite them. Its reply\n\
         holds one line per finding, `- [blocking] ...` or `- [look] ...`, and exactly one\n\
         line `REVIEW: fine`, `REVIEW: look` or `REVIEW: blocking`; the verdict is raised\n\
         to its worst finding. What it printed while working is shown only when it failed.\n\n\
