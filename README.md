@@ -107,7 +107,11 @@ the same tree, and for no other.
 - A receipt is a record, not a signature. It shows that the tree and contract
   match; it does not prove who ran the tasks or that they ran.
 - A review is a model's judgement, recorded with who gave it. It is not proof
-  that the change is correct.
+  that the change is correct. A change can carry text that tries to steer its
+  reviewer. Sykli fences the change off, counts a verdict only with a token
+  the change cannot know, and records what it saw; that stops a planted
+  verdict line, not a reviewer that was persuaded
+  ([measured](docs/reference.md#a-change-that-addresses-its-reviewer)).
 - It runs no server and keeps no state outside the repository and its Git
   directory.
 

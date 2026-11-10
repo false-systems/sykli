@@ -447,8 +447,17 @@ enum Command {
         CLI still reads the instruction files it always reads (codex: the person's own\n\
         AGENTS.md for it, and the repository's), so a finding can cite them. Its reply\n\
         holds one line per finding, `- [blocking] ...` or `- [look] ...`, and exactly one\n\
-        line `REVIEW: fine`, `REVIEW: look` or `REVIEW: blocking`; the verdict is raised\n\
-        to its worst finding. What it printed while working is shown only when it failed.\n\n\
+        line `REVIEW TOKEN: fine`, `REVIEW TOKEN: look` or `REVIEW TOKEN: blocking`; the\n\
+        verdict is raised to its worst finding. What it printed while working is shown\n\
+        only when it failed.\n\n\
+        The change is untrusted text: it is handed over between boundary lines that\n\
+        carry a random token of this run, and declared material to judge, never an\n\
+        instruction; text in it that addresses a reviewer is to be reported as blocking.\n\
+        TOKEN is a second random word, given to the reviewer after the change: a REVIEW\n\
+        line without it is not a verdict, so one the change wrote does not count. sykli\n\
+        also counts the lines of the commit messages and of the diff's added lines that\n\
+        are nothing but a verdict, records the count, and says it in the summary line; it\n\
+        does not refuse for them. None of this stops a reviewer that was persuaded.\n\n\
         The verdict is kept as a git note on the commit's tree under\n\
         refs/notes/sykli/review (JSON, sykli-review.v1), and answers only for the base it\n\
         was read against: the same change is not reviewed twice, and the same tree on\n\

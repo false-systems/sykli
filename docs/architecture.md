@@ -207,9 +207,19 @@ judges `merge-base(refs/remotes/REMOTE/BRANCH, HEAD)..HEAD` (the branch by
 (`authors` from `Co-Authored-By` trailers, `choose`), and talks to it in
 `converse`: the prompt is written, and both pipes are read, on threads beside
 one deadline, so a reviewer that stalls, exits non-zero, leaves its prompt
-unread or leaves a child holding its pipes is no review (exit 2). The reply
-is parsed by `parse_verdict` (exactly one `REVIEW:` line, raised to the worst
-finding) and kept as a `sykli-review.v1` note on the tree under
+unread or leaves a child holding its pipes is no review (exit 2). The change
+is untrusted text handed to a model, so `prompt` puts the commit messages and
+the diff between boundary lines that carry `Tokens::boundary` (random per
+run, checked not to occur in the change: `token_not_in`), declares the block
+material before it and ended after it, and gives `Tokens::verdict` only after
+it. The reply is parsed by `parse_verdict` (exactly one line `REVIEW <verdict
+token>: LEVEL`, raised to the worst finding; a `REVIEW` line without the
+token is ignored, so one quoted or dictated by the change is no verdict).
+`verdict_like_lines` counts the whole-line verdicts (`verdict_shaped`) in the
+commit messages and the diff's added lines before the reviewer runs; the
+record keeps the count, `addressed_reviewer` and `PROMPT`, the version of
+these defences (absent on older notes). None of it detects a reviewer that
+was persuaded. The record is kept as a `sykli-review.v1` note on the tree under
 `refs/notes/sykli/review` (`write_note` stores the bytes as a blob first, so
 a note holds them exactly). A kept record answers only for its `base`.
 `AGENT_MARKERS` are removed from the reviewer's environment and refuse

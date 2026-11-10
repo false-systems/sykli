@@ -396,7 +396,7 @@ pub(crate) fn command(remote: &str, branch: Option<&str>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::tests::{Fixture, identify, run_git};
+    use crate::review::tests::{Fixture, identify, run_git, tokened};
     use crate::review::{Agent, overrule};
 
     const BASE: &str = "refs/remotes/origin/main";
@@ -742,7 +742,7 @@ mod tests {
         }
 
         fn review(&self, reply: &'static str) {
-            let reviewer = move |_: Agent, _: &str, _: &Path| Ok(reply.to_string());
+            let reviewer = move |_: Agent, prompt: &str, _: &Path| Ok(tokened(prompt, reply));
             review::review(&self.work, BASE, &[Agent::Codex], &reviewer)
                 .unwrap()
                 .unwrap();
