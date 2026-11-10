@@ -1,329 +1,51 @@
-Product boundaries:
+# Agent guide
+
+The guide for every coding agent here (Codex, Claude Code, Gemini, Copilot, Cursor and others read it or are pointed to it). When your launch prompt names a workset packet, that packet is the workset contract; run the check it names before committing. How sykli is built is in `docs/architecture.md`: read the part a change touches.
+
+## Product boundaries
 
 - Own graph parsing, validation, planning, execution, caching, and receipts.
-- Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution, except as the next rule names. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
-- The path from a passing receipt to the default branch is sykli's too, by the repository owner's decision (November 2026), so that proving, reviewing and landing a commit are one tool's records about one tree. `review` starts an installed agent CLI as a reviewer, with reading tools only; `land` fetches from and pushes to the git remote the person names. `deploy` runs an ordinary contract for a proven, landed commit and records that it passed, as a line on the commit's note; it is not the typed delivery that was removed (no artifact types, no environments, no rollout state: the deploying is whatever the contract's tasks do), and it uses the network only to share its record when a remote is named. `deployed` reads those records. These are the only commands that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.
+- Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
+- The one exception, by the owner's decision: `review`, `land`, `deploy`, `deployed`. `docs/architecture.md` states its limits.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
 - Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
-- **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs either a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. This rule exists because the boundaries above govern capabilities and dependencies and said nothing about retained state: production attempts kept every build tree they ran through — 2.0 GB against 14 MB of declared products — and the task cache carried `unbounded until family receipts define a real size/age eviction budget` as a comment rather than a limit. Both were invisible to every rule on this list.
-- Treat `sykli plan --json` as the agent-facing query surface; before handoff run sykli's own graph, `cargo run --quiet --locked -- run sykli.json --json` (the same run CI does).
-
-This file is the guidance for any coding agent working in this repository
-(Codex, Claude Code, Gemini, Copilot, Cursor and others read it or are pointed
-here). When your launch prompt names a workset packet, that packet is the
-workset contract; run the check it names before committing.
+- **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. (Production attempts once kept 2.0 GB of build trees against 14 MB of declared products.)
+- Treat `sykli plan --json` as the agent-facing query surface.
 
 ## Commands
 
-The repository gates itself with its own graph contract. This is the check to
-run before any commit or handoff; it is what CI runs on `main`:
+The repository gates itself with its own contract, as CI does on `main`. Run it before any commit or handoff:
 
 ```sh
-cargo run --quiet -- run sykli.json --json | jq '{outcome, tasks:[.tasks[]|{name,outcome}]}'
+cargo run --quiet --locked -- run sykli.json --json | jq '{outcome, tasks:[.tasks[]|{name,outcome}]}'
 ```
 
-It runs `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-`cargo test --workspace --locked`, `sh -n install.sh` and the Action script
-checks, caching by content. Pieces on their own:
+It runs `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `sh -n install.sh` and the Action script checks, cached by content. Pieces on their own:
 
 ```sh
-cargo build                                   # binary lands in the shared target dir, not ./target
-cargo test --workspace --locked               # everything
-cargo test --test cli                         # one integration suite: cli, init, runs, boundary, worktree_cache
-cargo test --test runs -- detached            # tests by substring
-cargo test --bin sykli journal                # unit tests in one module
-cargo check --workspace --all-targets --target x86_64-pc-windows-msvc   # Windows type-check (target is installed)
-cargo run --quiet -- lock sykli.json          # re-pin after editing sykli.json
+cargo test --test cli               # one suite: cli, init, runs, boundary, worktree_cache
+cargo test --test runs -- detached  # tests by substring
+cargo test --bin sykli journal      # one module's unit tests
+cargo check --workspace --all-targets --target x86_64-pc-windows-msvc   # Windows type-check
+cargo run --quiet -- lock sykli.json   # re-pin after editing sykli.json
 ```
 
-The CLI binary lands in Cargo's target directory, which `CARGO_TARGET_DIR` or a
-Cargo config may move outside the checkout; prefer `cargo run --quiet --`.
-macOS has no `timeout`; use `perl -e 'alarm 300; exec @ARGV' -- <cmd>` to bound
-a run. `tests/runs.rs` is Unix-only and takes 10 to 15 s; a hang there
-usually means a test waits on a FIFO-latched task it never released
-(`release`, `unlatch`).
+Prefer `cargo run --quiet --`: `CARGO_TARGET_DIR` or a Cargo config may put the binary outside the checkout. macOS has no `timeout`; bound a run with `perl -e 'alarm 300; exec @ARGV' -- <cmd>`. `tests/runs.rs` is Unix-only and takes 10 to 15 s; a hang there usually means a test waits on a FIFO-latched task it never released (`release`, `unlatch`).
 
-When adding a source, test or fixture file, add it to the `inputs` of the
-`fmt`, `clippy` and `test` tasks in `sykli.json` (fixtures to `test` only),
-then run `sykli lock sykli.json`. The contract lists files explicitly;
-nothing is globbed.
+A new source, test or fixture file goes into the `inputs` of the `fmt`, `clippy` and `test` tasks in `sykli.json` (fixtures to `test` only), then `sykli lock sykli.json`. Nothing is globbed.
 
 ## Toolchain constraints
 
-- Edition 2024 with `rust-version = "1.85"` declared in `Cargo.toml`. CI does
-  not test 1.85: the workflow installs it, but `rust-toolchain.toml` pins 1.98
-  and overrides it, so CI builds with 1.98. Let-chains (`if let … && …`, stable
-  since 1.88) therefore compile in CI without a warning, yet break the declared
-  1.85. Keep them out (use `Option::filter`, `is_some_and`, or a nested `if`)
-  and run `cargo +1.85 check --workspace --all-targets --locked` before pushing.
-- No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls
-  (`flock`, `fcntl`, `setsid`, `setpgid`, `kill`, `killpg`, `signal`) are
-  declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via
-  libc. On Windows, `BCryptGenRandom` (bcrypt.dll, for the inherit key) is
-  declared once, in `windows_random` in `src/main.rs`.
-- `src/journal.rs` and `src/runs.rs` are `#[cfg(unix)]` (on Windows `runs` is a
-  stub of uninhabited types), and so are `status` and `resume`; anything only
-  Unix code uses must be `cfg_attr(not(unix), allow(dead_code))`.
+- Edition 2024, `rust-version = "1.85"`. `rust-toolchain.toml` pins 1.98, so CI builds with 1.98, where let-chains (`if let … && …`, stable since 1.88) compile without a warning yet break 1.85. Keep them out (`Option::filter`, `is_some_and`, a nested `if`) and run `cargo +1.85 check --workspace --all-targets --locked` before pushing.
+- No dependencies beyond clap, serde, serde_json, sha2. Unix syscalls are declared once, in `unsafe extern "C"` blocks in `src/journal.rs`, not via libc; on Windows, `BCryptGenRandom` once, in `windows_random` in `src/main.rs`.
+- `src/journal.rs`, `src/runs.rs`, `status` and `resume` are `#[cfg(unix)]` (on Windows `runs` is a stub of uninhabited types); anything only Unix code uses must be `cfg_attr(not(unix), allow(dead_code))`.
 
-## Architecture
+## Working rules
 
-One binary, one identity model. Every identity is a
-domain-separated SHA-256 over canonical JSON (`canonical::identity`), computed
-after `canonical::decode` has rejected duplicate keys and floats. Existing
-domains and schema meanings never change; incompatible changes are a new `.vN`.
-
-**Graph runs (`src/main.rs`, `src/lib.rs`, `src/init.rs`, `src/cargo_inputs.rs`).** A
-`sykli-contract.v1` names tasks, commands, declared input files and `after`
-ordering. `run` executes level by level under `sh -c --` with a null stdin and
-an environment of only `PATH`/`HOME`/`TMPDIR` plus declared `env` and
-`inherit` variables (inherited values reach the task; only their digests reach
-the receipt, keyed: HMAC-SHA256 under 32 random bytes of the clone's own,
-`sykli/inherit-key` in the common git directory, made only by a run,
-`inherited_keyed_digests`; the plain `inherited_digests` is no longer written,
-so no receipt holds a digest a guess can be checked against). A declared `env` value may name `${worktree_cache}`
-(`src/worktree_cache.rs`): `<git-common-dir>/sykli/worktrees/<id>/cache`, the
-16-hex id from the worktree's incarnation: its resolved top level and git
-directory (read from its `.git`, no git process) and the token in that git
-directory's `sykli-incarnation`, so a worktree made again at one path gets a
-new directory. `<id>/` is made aside and renamed into place with a
-`worktree.json` marker and a `lease` beside `cache/`, which the tasks own (a
-`cargo clean` takes nothing of sykli's). Placeholder rules (`check`, through
-`authored`) apply only where a contract is written or run (`validate`, `lock`,
-`plan`, `run`, resume, the coordinator), never in `parse_contract`/`validate`,
-which judging shares: `verify` and `status --commit` judge an old contract as
-it ran. `prepare` (run, resume, detached coordinator) makes and holds it shared
-before the run is recorded; `launch` expands it and lets tasks that name it
-inherit the lease; `prune`, called where runs are pruned, renames the
-directories of gone (and not `locked`) incarnations aside under an exclusive
-lease, and `remove_pruned` deletes them at the end of `conclude`. Keys cover
-the value as declared, never the expanded path. Inside a git hook, the directory git prepends to `PATH`
-(`GIT_EXEC_PATH`) is taken off again (`without_git_prepend`), so hooked and
-manual runs share keys. A task's cache key covers its declaration, input digests
-(content plus execute bits), runtime fingerprint (for a Cargo graph, including
-the `rustc -vV`/`cargo -V` the task shell resolves: `graph_runtime`, sykli#64),
-inherited-value digests, and
-the cache keys of its `after` dependencies, so a downstream task never reuses a
-pass recorded against upstream outputs it did not see. The receipt's subject
-binds the git tree OID (computed from a temporary index seeded from HEAD, with
-`.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
-staged: schema and record consistency (2), contract lock and contract hash (4),
-tree and inputs (3), outcome (1). It proves consistency, not authorship; the
-README says so. With `--commit` the inputs stage (`inputs_check`,
-`InputsAt::judge`) judges each declared input at its exact path (`found_at`
-walks the trees by exact bytes: `Found`, `Absence`): the run's record
-(`InputRecord`: `sha256`, `mode` as git has it, `object` from the run's own
-snapshot, read in a second round of the snapshot's `cat-file`, with a third
-only for symbolic links) must have the commit's entry, the commit's blob bytes
-(or what `git --attr-source=COMMIT cat-file --filters` makes of them, by the
-commit's attributes, one process per converted input, streamed: `checked_out`),
-and the entry's execute bit; a symbolic link is followed to the declared input
-it names (`PathFacts::file_behind`; a `..` may only leave the link's own
-directories, `link_target`). Input blobs are hashed as they are read and kept
-only up to `INPUT_BLOB_KEPT` (`Session::ask_bounded`). The commit's trees and
-blobs come from a second round of the verify or hook `cat-file` session
-(`repo::Session`, `input_names`, `inputs_from`). An input the run read where
-the commit has nothing is refused, unless a task declares it as an output.
-The records must hash to `inputs_digest` (`records_check`, also without
-`--commit`, where `checkout_records_check` also compares each record with the
-checkout's); older receipts are recomputed from the same blobs
-(`older_inputs_check`). Declared paths are named lexically from the top
-level (`declared_path`), never through the checkout. Exit 3. `sykli.lock` is
-`sykli-lock.v2`, one entry per contract file in its directory.
-`run`/`plan`/`lock` exit 2 when they cannot evaluate, 1 for a failed task.
-Declared paths resolve against the current directory, so a
-contract outside the git toplevel of the current directory (decided on
-resolved paths, `outside_repository`) makes `main` absolutize command-line
-paths and enter that toplevel first (`enter_for_contract`); hooks absolutize
-`--contract` and enter the root themselves. Receipts record `lock_digest`
-(SHA-256 of the lock file, read once with the pin in `load_pinned`); `verify`
-reads an outside contract and its lock from their files even with
-`--commit`, and only for such a contract compares `lock_digest` (exit 4).
-A task of such a contract declares the files beside it that it reads as
-`contract_inputs`, paths from the contract's directory: the run reads them
-once into the subject (`contract_input_records`, no tree entry), their
-digests join the task's key (only when it has any, so other keys are
-unchanged), each task's records go into its receipt and the journal's
-subject, and its shell gets `SYKLI_CONTRACT_DIR`, a copy of exactly those
-files hashed as they are copied, checked against the records and removed
-when it ends (`ContractCopy`: 0700 under an unguessable name, made
-exclusively, `fresh_directory`, `private_name`; the user's own stale ones,
-unchanged for a day, pruned by `prune_stale_copies`). `placed` (`validate`,
-`lock`, `plan`, `run`; nothing without a repository) refuses them in a
-contract inside the repository, and refuses a task of an outside contract
-that names the contract's directory in `run` or `env` (sykli#75), in text
-read with the task's HOME and a leading `~` expanded, quotes and escapes
-removed, and `//`, `/./` collapsed (`spelled_out`), a path in a repository
-the directory holds excepted; `verify` and `judge` compare them with the
-files beside the contract (`contract_inputs_check`, exit 3).
-Git is asked as little as possible, and `tests/git_calls.rs` holds the
-budgets (counted through `GIT_TRACE2_EVENT`). `src/repo.rs` finds the
-repository once per process (one `git rev-parse`, or `--repo-root` and
-`--git-common-dir` from the caller, then none) and asks object questions in
-one `git cat-file --batch` (`ask`, `Answers`). `run` builds one snapshot
-(`snapshot`: HEAD's tree from the batch, then `read-tree`, `add` excluding
-`.sykli` by a glob pathspec, `write-tree`) and one `git ls-files` for both
-undeclared-file checks (`Inventory`, through `repo::files`; the Cargo files by name and the
-sibling check leave out the JSON contract being run and its lock, however
-spelled, `evaluated`, sykli#73, and an include of either is still asked
-for), which
-`validate` asks too (`undeclared_refusal`, exit 2); `init` declares from the
-same listing, made once from the top level (`Listed::of_repository`), and
-judges the contract it would write with that refusal before writing it
-(`Inventory::given`, `undeclared_refusal_of`); a refusal for files outside the
-current directory names the top level (`outside_here`). What Cargo reads (by
-name; what sources include, in code or a doc comment's code block; every file
-of a package with a `.cargo-checksum.json`; what build scripts' string
-literals name: `Reads`, over `Sources`, a small Rust lexer; a package is
-vendored, its opaque includes exempt, only as `vendored` proves it from the
-Cargo configuration and `Cargo.lock`) and what is a document (`docs`,
-which the sibling check never asks for; `init` declares them) are
-`cargo_inputs` for both; the documents string literals name, and what build
-scripts may read unseen (`UnseenReads`, which counts nothing `init` leaves
-out, `init::never_declared`), only warn. A declared symbolic link to a file in the repository is read through;
-one to a directory in the repository or to nothing is recorded by its text
-(`link_text`, `InputRecord::link`), with every file under such a directory
-required of the same task, and one that leads out of the repository is
-refused (`link_missing_inputs`), as is a workdir, input or output that a
-link on its way leads out of it (`through_links_out`, `leads`: every link
-followed by its text, chained or dangling, at most `LINK_HOPS`, and judged
-where its chain ends, `Part::LinkEnd`; sykli#54;
-judged before any task, so a link a task makes while it runs is not seen). A text record is judged by the commit's link
-text (`judge_link`), after a third round of the same `cat-file` asks where it
-leads (`link_target_names`, `PathFacts::around`).
-`verify --commit` and `hook pre-push`
-read every commit fact in one batch (`commit_names`, `ContractNames`) and
-judge receipts against them (`judge`); the pre-push hook validates branch
-names in-process and reads `refs/remotes/REMOTE/HEAD` from the common
-directory.
-
-**Durable graph runs (`src/runs.rs`, `src/journal.rs`, Unix only).** Every
-`run` is journaled in `<git-common-dir>/sykli/runs/<run-id>/` with the
-machinery in `src/journal.rs` (hash-chained envelopes, exclusive synced
-`publish`, `journal-lock`, flock `Lease`), synced with `fsync(2)`
-(`canonical::sync`). A dropped `Lease` is unlocked (`LOCK_UN`), not
-just closed: a child process another thread is spawning (a task or `git`,
-through `fork` or `posix_spawn` alike) has a copy of its descriptor until it
-execs, and the lock with it. One handed to a child (`inherit`) is
-only closed, so the child keeps it. The first record, `requested`, holds
-the contract as run (canonical JSON), the subject with its input records,
-the runtime fingerprint and the task list, and is durable before any task is
-dispatched; the run id is its identity. Each task is then `reused`,
-`settled` (blocked, or errored before running) or attempted: `dispatched`
-(attempt lease taken first), `started` (process group), and one end:
-`finished` (exit or signal; the task record kept first as
-`outputs/<sha256>.json`), `interrupted` (sykli's signal handler stopped it)
-or `lost` (a later coordinator found it unfinished). Every record carries the
-coordinator's generation (`requested` 1, each `resumed` +1); `History::apply`
-refuses a stale generation, a second end, a pass without exit 0, a retry
-that does not supersede the last attempt, and a conclusion before every task
-is decided. A coordinator's generation is fixed when it creates, receives or
-takes over the run; once a newer one has written, it is `fenced` and writes
-nothing more. The receipt is built only from accepted records (`coordinate`,
-`conclude`), so it round-trips (`TaskReceipt` is `Deserialize`) and gains
-only `run`. Tasks run in their own process group holding their attempt's
-lease (so an orphan reads as running; so does one whose recorded process
-group still exists, `group_exists`, which `resume` also refuses unless
-`--assume-ended`); SIGINT/SIGTERM/SIGHUP stop every
-group (TERM, KILL after 3 s), an attempt sykli signalled is `interrupted`
-whatever it exits with, a pass accepted less than 100 ms before
-sykli's own handler ran is `withdrawn`, with every pass decided after it
-(`withdraw_before_stop`: the same stop may have reached the task first; a run
-waits that long after its last pass before concluding, `wait_out_stop_window`), and the run records `stopped`, exit 128+N, no
-receipt.
-`conclude` keeps the receipt as `rcpt_<digest>.json` in the run's directory
-(`publish`, named by digest so a fenced coordinator cannot replace it)
-before it records `concluded`; `status --run` reports it as `receipt.kept`.
-`status --run` is a pure view of the journal and leases; `resume --run`
-re-checks worktree, contract, lock, runtime and subject before taking over;
-`run --detach` hands the lease to a `setsid` coordinator
-(`__run_coordinator`), and nothing else: every other descriptor is marked
-close-on-exec first (`close_inherited_on_exec`). `drifted` errors a task
-whose declared inputs changed
-during the run. `status --commit` judges every kept receipt of a commit's
-tree with `judge`; a receipt is `recorded` when its run (or the run's
-tombstone in `sykli/pruned-runs/`, left by `prune`: a run is created aside and
-renamed into place with its lease held, and `remove_run` takes a lease only if
-it exists and moves the run aside before deleting it) concluded with it, and
-the verdict lets the newest recorded result decide, never an unrecorded pass
-over a recorded failure (`conflict`). `checkpoint(POINT)` is a debug-build
-test hook
-(`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
-crash window; release builds have none. On Windows `runs` is a stub of
-uninhabited types and a run is in memory, as before.
-
-**Review and landing (`src/review.rs`, `src/land.rs`, Unix only).** Both take
-the worktree's root and run git there (`review::git`), so their tests use
-real repositories with a bare remote and no process-wide state. `review`
-judges `merge-base(refs/remotes/REMOTE/BRANCH, HEAD)..HEAD` (the branch by
-`default_branch`, which reuses `hook::default_branches`), picks the reviewer
-(`authors` from `Co-Authored-By` trailers, `choose`), and talks to it in
-`converse`: the prompt is written, and both pipes are read, on threads beside
-one deadline, so a reviewer that stalls, exits non-zero, leaves its prompt
-unread or leaves a child holding its pipes is no review (exit 2). The reply
-is parsed by `parse_verdict` (exactly one `REVIEW:` line, raised to the worst
-finding) and kept as a `sykli-review.v1` note on the tree under
-`refs/notes/sykli/review` (`write_note` stores the bytes as a blob first, so
-a note holds them exactly). A kept record answers only for its `base`.
-`AGENT_MARKERS` are removed from the reviewer's environment and refuse
-`--overrule`, which also needs a terminal (`person_at_terminal`). `land`
-takes its proof from a `Prover` (injected in tests; `sykli_proof` asks
-`commit_status` and, only where its verdict is `none`, `verify` on the shared
-receipt note, both in this process), requires the fetched branch tip to be an
-ancestor of HEAD and the kept review's `base` to be that tip, attaches the
-receipt under `refs/notes/sykli/receipt`, copies it to the worktree's
-`.sykli/receipts` for the pre-push hook (`keep_for_hook`), merges and pushes
-the notes (`fetch_notes`, `push_notes`, strategy `ours`) and then pushes with
-`--force-with-lease` on the checked tip. `tests/land.rs` runs the binary with
-a script as the `codex` on a `PATH` that holds no real agent.
-
-**Deployments (`src/deploy.rs`, Unix only).** `preflight` refuses unless
-nothing is uncommitted, `land::sykli_proof` says the tree is proven (by the
-gate contract at the top level, `gate_contract`), and HEAD is an ancestor of
-`refs/remotes/REMOTE/BRANCH` as it stands (`landed`: yes, no, or unknown;
-nothing is fetched; `--allow-unlanded` turns no and unknown into
-`unlanded: true`). `command` then calls `run_reusing(.., reuse: false)`: the
-same run, journal and receipt as `run`, with `LocalCache::restore` answering
-nothing, so every task runs; `ran_receipt` still refuses a receipt with a
-task that is not `passed`. Only then, and only if HEAD did not move, `record`
-appends one `sykli-deployment.v1` line to the commit's note under
-`refs/notes/sykli/deploy`; `share` merges with `cat_sort_uniq`, so lines of
-two clones on one commit are all kept and their order means nothing
-(`latest` goes by `at`). `recorded` counts every line that is not a
-deployment of the commit it is on instead of dropping it, and returns None
-when the notes ref is not here: unknown, not "nothing deployed".
-
-**Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the
-coordinator at each checkpoint and of a task, SIGTERM/SIGINT, a stale
-coordinator, a replayed completion, inputs changed mid-run, concurrent cache
-stores; each ends on `nothing_unknown_passed`. Its tasks wait at FIFO
-latches to hold a run mid-flight; any new test that runs a latched task again
-must release the latch again. Its hook tests skip under `--release`.
-`resume_refuses_a_run_whose_coordinator_is_alive` pins the `run-busy` words
-that the lease's `lease-busy` tag becomes.
-`tests/cli.rs` pins the help flags other tools detect
-(`help_lists_the_flags_other_tools_detect`).
-
-## Working rules in this repository
-
-- Never push to `main`; branch, push, open a PR. Never merge without the
-  owner's explicit approval of that PR. Push a branch only when it is complete
-  and say so: merges here have repeatedly caught branches mid-push.
-- Validate locally before pushing (`sykli run sykli.json`, and any workset
-  check your launch prompt names);
-  CI then runs the Linux gate and the Windows tests on every pull request and
-  on `main`. The repository is public, so standard hosted runners are free;
-  keep to `ubuntu-latest` and `windows-latest` (macOS is the development host
-  and is covered locally). Do not push a release tag (`release.yml` builds
-  five targets) unless told to.
+- Never push to `main`; branch, push, open a PR. Never merge without the owner's explicit approval of that PR. Push a branch only when it is complete and say so: merges here have repeatedly caught branches mid-push.
+- Validate locally before pushing (the gate above, and any check your launch prompt names). CI runs the Linux gate and the Windows tests on every pull request and on `main`, on `ubuntu-latest` and `windows-latest` (the repository is public, so hosted runners are free; macOS is covered locally). Do not push a release tag (`release.yml` builds five targets) unless told to.
 - `.sykli/` and other tools' local state directories are ignored.
-
-## Languages
-
-Code in this repository is **Rust, or Elixir/Erlang**. Never add Python, Go
-or Node (JavaScript/TypeScript): not for tools, scripts, CI helpers, tests,
-dashboards or glue. A thin shell step in a CI workflow is fine; anything with
-logic is Rust. Existing Python or Node files are debt to be rewritten, not
-precedent to follow.
+- Code is Rust or Elixir/Erlang; never add Python, Go or Node.
 
 ## Lessons
 
