@@ -7,6 +7,16 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-11
+
+### Fixed
+- The release workflow installs rustfmt and clippy before its tests, which
+  run them inside graphs they build, and builds each target with the
+  toolchain `rust-toolchain.toml` pins, which is the one cargo runs there.
+  The Linux targets were added to another toolchain and could not compile,
+  and the check that a Linux binary is static accepts a static-pie one.
+  0.8.0 was tagged but never released; 0.8.1 is 0.8.0 with these fixes.
+
 ## [0.8.0] - 2026-11-11
 
 ### Breaking
@@ -1056,6 +1066,7 @@ commit `f536224`, the bootstrap of the Rust rewrite.
   tarball and checks it against the release's `SHA256SUMS`.
 
 [Unreleased]: https://github.com/false-systems/sykli/commits/main
+[0.8.1]: https://github.com/false-systems/sykli/releases/tag/v0.8.1
 [0.8.0]: https://github.com/false-systems/sykli/releases/tag/v0.8.0
 [0.6.0]: https://github.com/false-systems/sykli/commit/7f0cf67
 [0.2.0]: https://github.com/false-systems/sykli/commit/1c4e247
