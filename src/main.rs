@@ -17,6 +17,8 @@ use sykli::{Contract, Task};
 
 mod canonical;
 mod cargo_inputs;
+#[cfg(unix)]
+mod deploy;
 mod hook;
 mod init;
 #[cfg(unix)]
@@ -504,6 +506,83 @@ enum Command {
         /// Land on this branch of the remote instead of its default branch
         #[arg(long, value_name = "BRANCH")]
         branch: Option<String>,
+    },
+    /// Run a deploy contract for a proven, landed commit, and record that it went out
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  the deploy contract passed and the deployment is recorded (and shared, with\n     \
+           --remote)\n  \
+        1  refused, saying what is missing, before anything ran; or the deploy run failed:\n     \
+           nothing is recorded as deployed, and what its tasks did before failing is not\n     \
+           known to sykli\n  \
+        2  could not tell (git, a contract, the default branch); or the deploy run passed\n     \
+           but its record could not be written, or could not be shared with --remote (it\n     \
+           says which, and how to share it by hand)\n  \
+        128+N  the deploy run was stopped by signal N: nothing is recorded\n\n\
+        CONTRACT is an ordinary sykli contract whose tasks do the deployment (deploy.json,\n\
+        pinned in sykli.lock like any other: `sykli lock deploy.json`). Its tasks must be\n\
+        safe to repeat: every task runs on every deploy, whatever the cache holds (a pass\n\
+        reused from the cache would be a deployment that never happened), a failed or\n\
+        interrupted deploy is simply run again, and nothing is rolled back. Tasks get what\n\
+        `run` gives them: the commit is the one checked out, and --target is a name for\n\
+        the record, not something a task is told; keep one contract per target.\n\n\
+        Refuses unless: nothing is uncommitted or untracked; the commit's tree has a\n\
+        passing receipt of the repository's gate contract (sykli.rs, else sykli.json) that\n\
+        verifies for the commit, as `land` judges it; and the commit is in the remote's\n\
+        default branch (REMOTE is --remote, else origin; the branch as `review` finds it,\n\
+        or --branch) as this clone last fetched it. deploy fetches nothing: fetch first.\n\
+        --allow-unlanded lets a commit out that is not in that branch, or where that\n\
+        cannot be told, and the record says `unlanded`.\n\n\
+        Then it runs CONTRACT as `sykli run CONTRACT` does, receipt and journal included,\n\
+        and when every task passed appends one JSON line to a git note on the commit\n\
+        under refs/notes/sykli/deploy (sykli-deployment.v1: commit, tree, target,\n\
+        contract, contract_digest, receipt_digest, at, unlanded). With --remote NAME the\n\
+        remote's records are fetched and merged (every line of both is kept) and the\n\
+        notes are pushed; without it the record stays in this clone and the git commands\n\
+        that share it are printed.\n\n\
+        A record says that the deploy contract passed for that commit here, at that time.\n\
+        It is not signed, and it is not proof of what is running anywhere now.")]
+    Deploy {
+        /// Path to the deploy contract, a sykli-contract.v1 JSON file; may be outside the repository
+        #[arg(default_value = "deploy.json")]
+        contract: PathBuf,
+        /// What the deployment is recorded under, one word
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        target: String,
+        /// The remote whose default branch must contain the commit (origin when not
+        /// given); when given, the record is also shared with it
+        #[arg(long, value_name = "NAME")]
+        remote: Option<String>,
+        /// The branch of the remote that must contain the commit, instead of its default branch
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+        /// Deploy a commit that is not in that branch, or where that cannot be told; recorded as unlanded
+        #[arg(long)]
+        allow_unlanded: bool,
+    },
+    /// What went out: the latest recorded deployment of each target, from this clone's notes
+    #[cfg(unix)]
+    #[command(after_help = "Exit codes:\n  \
+        0  printed what this clone has recorded, which may be nothing\n  \
+        2  not a git repository, or the notes could not be read\n\n\
+        Reads refs/notes/sykli/deploy in this clone and nothing else; it fetches nothing.\n\
+        For each target, the deployment with the latest time: its commit, the commit's\n\
+        subject, when (UTC), and whether it was unlanded. With --json, one\n\
+        sykli-deployed.v1 document: `recorded` (whether this clone has the notes at all),\n\
+        `targets`, and `unreadable`, the number of recorded lines that are not a\n\
+        sykli-deployment.v1 of the commit they are on (they are counted, never shown as a\n\
+        deployment).\n\n\
+        Unknown stays unknown: when this clone has no record, it says that nothing has been\n\
+        recorded here, not that nothing was deployed. Another clone may hold records:\n  \
+          git fetch REMOTE 'refs/notes/sykli/deploy:refs/notes/sykli/deploy'\n\
+        A deployment made outside `sykli deploy`, or never shared, is not here either.")]
+    Deployed {
+        /// Show only this target
+        #[arg(long, value_name = "NAME")]
+        target: Option<String>,
+        /// Print one JSON document (sykli-deployed.v1) on stdout
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2026,6 +2105,8 @@ fn main() -> ExitCode {
         Command::Validate { contract, .. }
         | Command::Run { contract, .. }
         | Command::Lock { contract } => enter_for_contract(contract, &mut []),
+        #[cfg(unix)]
+        Command::Deploy { contract, .. } => enter_for_contract(contract, &mut []),
         Command::Verify {
             receipt, contract, ..
         } => enter_for_contract(contract, &mut [receipt]),
@@ -2217,6 +2298,22 @@ fn main() -> ExitCode {
         } => review::command(&remote, branch.as_deref(), overrule.as_deref()),
         #[cfg(unix)]
         Command::Land { remote, branch } => land::command(&remote, branch.as_deref()),
+        #[cfg(unix)]
+        Command::Deploy {
+            contract,
+            target,
+            remote,
+            branch,
+            allow_unlanded,
+        } => deploy::command(
+            &contract,
+            &target,
+            remote.as_deref(),
+            branch.as_deref(),
+            allow_unlanded,
+        ),
+        #[cfg(unix)]
+        Command::Deployed { target, json } => deploy::deployed(target.as_deref(), json),
         Command::Plan {
             contract,
             changed,
@@ -3866,6 +3963,10 @@ struct LocalCache {
     /// it without touching the environment: `set_var` is process-global and
     /// unsound beside the rest of a threaded test binary.
     receipt_budget: usize,
+    /// Whether a pass is restored from the cache. A deploy run restores
+    /// none: a task that did not run deployed nothing. Passes are stored
+    /// either way.
+    reuse: bool,
 }
 
 /// Default cache budget: 1 GiB.
@@ -4061,7 +4162,6 @@ fn checkpoint(point: &str) -> Result<(), String> {
 
 /// Run a contract: record the run durably before any task is dispatched
 /// (Unix), decide every task, and write the receipt from what was accepted.
-#[allow(clippy::too_many_arguments)]
 fn run(
     contract_path: &Path,
     contract: &Contract,
@@ -4070,6 +4170,32 @@ fn run(
     lock_digest: Option<String>,
     json: bool,
     detach: bool,
+) -> Result<Ran, String> {
+    run_reusing(
+        contract_path,
+        contract,
+        levels,
+        contract_hash,
+        lock_digest,
+        json,
+        detach,
+        true,
+    )
+}
+
+/// `run`, where `reuse` says whether a pass may be restored from the cache.
+/// Without it every task that is not blocked runs, as a deployment must: one
+/// that did not run did not happen.
+#[allow(clippy::too_many_arguments)]
+fn run_reusing(
+    contract_path: &Path,
+    contract: &Contract,
+    levels: &[Vec<usize>],
+    contract_hash: String,
+    lock_digest: Option<String>,
+    json: bool,
+    detach: bool,
+    reuse: bool,
 ) -> Result<Ran, String> {
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
@@ -4088,7 +4214,8 @@ fn run(
     // is a run that cannot be evaluated, not a task that errored.
     worktree_cache::prepare(contract)?;
     let runtime = graph_runtime(contract)?;
-    let cache = LocalCache::new(Path::new(&subject.repository));
+    let mut cache = LocalCache::new(Path::new(&subject.repository));
+    cache.reuse = reuse;
     cache.bound();
     let progress = Progress::of(json);
     #[cfg(unix)]
@@ -5722,6 +5849,7 @@ impl LocalCache {
             receipts: repository.join(".sykli/receipts"),
             budget: cache_budget(),
             receipt_budget: receipt_budget(),
+            reuse: true,
         }
     }
 
@@ -5958,6 +6086,9 @@ fn restore_file(source: &Path, target: &Path, suffix: &str, digest: &str) -> Res
 
 impl Cache for LocalCache {
     fn restore(&self, task: &Task, key: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
+        if !self.reuse {
+            return None;
+        }
         let started = Instant::now();
         let directory = self.cache.join(key);
         let entry = self.inspect(task, key, &runtime.fingerprint).ok()?;

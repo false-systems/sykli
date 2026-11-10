@@ -82,6 +82,30 @@ contract consumer can observe; internal refactors are not listed.
   receipt is also put in the worktree's `.sykli/receipts`, where the
   pre-push hook, which still runs, reads it. Exit 0 landed, 1 refused, 2
   could not tell or a push failed.
+- `sykli deploy [CONTRACT] [--target NAME] [--remote NAME] [--branch NAME]
+  [--allow-unlanded]` (Linux and macOS) runs a deploy contract (default
+  `deploy.json`, an ordinary contract whose tasks do the deployment) for the
+  commit checked out. It refuses (exit 1) unless nothing is uncommitted, the
+  commit's tree has a passing receipt of the gate contract that verifies for
+  it, and the commit is in the remote's default branch as last fetched (it
+  fetches nothing; `--allow-unlanded` overrides and is recorded). It runs the
+  contract as `run` does, except that no pass is reused from the cache: every
+  task runs on every deploy, so its tasks must be safe to repeat. When every
+  task passed it appends one JSON line to a git note on the commit under
+  `refs/notes/sykli/deploy` (`sykli-deployment.v1`: `commit`, `tree`,
+  `target`, `contract`, `contract_digest`, `receipt_digest`, `at`,
+  `unlanded`). A failed deploy run records nothing as deployed (exit 1). With
+  `--remote NAME` it fetches and merges the remote's records (every line of
+  both kept) and pushes the notes; without it, it prints the git commands
+  that do. Exit 2 when it could not tell, or when the run passed but the
+  record could not be written or shared.
+- `sykli deployed [--target NAME] [--json]` (Linux and macOS) prints the
+  latest recorded deployment of each target (commit, subject, time, and
+  whether it was unlanded) from this clone's notes; `--json` prints
+  `sykli-deployed.v1` (`recorded`, `targets`, `unreadable`). Where this
+  clone has no record it says that nothing has been recorded here, not that
+  nothing was deployed; a recorded line that is not a deployment of its
+  commit is counted (`unreadable`), never shown as one.
 
 ### Fixed
 - An include whose path is not a literal (a third-party test macro's

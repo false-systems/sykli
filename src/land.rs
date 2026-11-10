@@ -263,10 +263,11 @@ pub(crate) fn push_notes(
 
 /// What sykli itself knows of the commit: first what this clone's receipts
 /// say (`status --commit`), then whether a receipt another clone shared for
-/// its tree verifies here (`verify --commit`). Asked in this process, from
-/// the repository's top level, by the repository's own contract.
+/// its tree verifies here (`verify --commit`). Asked in this process, by the
+/// repository's own contract: the one at its top level, wherever the
+/// command was typed.
 pub(crate) fn sykli_proof(root: &Path, commit: &str, tree: &str) -> Result<Proof, String> {
-    let contract = crate::resolve_contract(PathBuf::from("sykli.rs"));
+    let contract = gate_contract(root);
     let status = crate::commit_status(commit, &contract)?;
     let verdict = status["verdict"].as_str().unwrap_or("unknown");
     if verdict == "passed" {
@@ -303,6 +304,17 @@ pub(crate) fn sykli_proof(root: &Path, commit: &str, tree: &str) -> Result<Proof
     } else {
         Proof::Not("the shared receipt verifies, but not every task in it passed".into())
     })
+}
+
+/// The repository's gate contract, as `run` picks it at the top level:
+/// `sykli.rs`, or `sykli.json` when only that exists.
+fn gate_contract(root: &Path) -> PathBuf {
+    let emitter = root.join("sykli.rs");
+    if !emitter.exists() && root.join("sykli.json").exists() {
+        root.join("sykli.json")
+    } else {
+        emitter
+    }
 }
 
 /// The bytes of a verified passing receipt, as `status --commit` judged
