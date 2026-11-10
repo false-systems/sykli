@@ -7,6 +7,8 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-11
+
 ### Breaking
 - In a Cargo graph, `validate`, `run` and `plan --explain` refuse (exit 2) a
   contract that leaves out any file git lists under a package with the
@@ -1054,6 +1056,7 @@ commit `f536224`, the bootstrap of the Rust rewrite.
   tarball and checks it against the release's `SHA256SUMS`.
 
 [Unreleased]: https://github.com/false-systems/sykli/commits/main
+[0.8.0]: https://github.com/false-systems/sykli/releases/tag/v0.8.0
 [0.6.0]: https://github.com/false-systems/sykli/commit/7f0cf67
 [0.2.0]: https://github.com/false-systems/sykli/commit/1c4e247
 [0.1.0]: https://github.com/false-systems/sykli/commit/f536224
