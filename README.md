@@ -114,6 +114,7 @@ the same tree, and for no other.
 ## More
 
 - [Reference](docs/reference.md): every command, the cache, durable runs, hooks, review, land and deploy.
+- [Local checks before committing and pushing](docs/reference.md#local-checks-before-committing-and-pushing): set up the hooks in an existing repository.
 - [Agent guide](docs/agents.md): JSON queries, explanations and commit status for coding agents.
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [security policy](SECURITY.md).
 - [Licence](LICENSE): MIT.
