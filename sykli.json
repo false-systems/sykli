@@ -23,6 +23,12 @@
         "src/worktree_cache.rs",
         "src/hook.rs",
         "src/repo.rs",
+        "src/review.rs",
+        "src/land.rs",
+
+        "src/deploy.rs",
+        "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
@@ -31,7 +37,11 @@
         "tests/runs.rs",
         "tests/worktree_cache.rs",
         "tests/snapshot.rs"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     },
     {
       "name": "installer",
@@ -77,6 +87,12 @@
         "src/worktree_cache.rs",
         "src/hook.rs",
         "src/repo.rs",
+        "src/review.rs",
+        "src/land.rs",
+
+        "src/deploy.rs",
+        "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
@@ -85,7 +101,11 @@
         "tests/runs.rs",
         "tests/worktree_cache.rs",
         "tests/snapshot.rs"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     },
     {
       "name": "test",
@@ -113,6 +133,12 @@
         "src/worktree_cache.rs",
         "src/hook.rs",
         "src/repo.rs",
+        "src/review.rs",
+        "src/land.rs",
+
+        "src/deploy.rs",
+        "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
@@ -132,7 +158,11 @@
         "action/plan.sh",
         "action/summary.sh",
         "action/verify.sh"
-      ]
+      ],
+      "env": {
+        "CARGO_BUILD_BUILD_DIR": "${worktree_cache}/cargo-build",
+        "CARGO_TARGET_DIR": "${worktree_cache}/cargo-target"
+      }
     }
   ]
 }

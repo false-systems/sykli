@@ -292,6 +292,17 @@ fn update(sha: &str, remote_ref: &str) -> String {
 }
 
 #[test]
+fn pre_push_malformed_object_ids_are_errors_not_panics() {
+    let root = repo("push-malformed-oid", READS_FILE);
+    for bad in ["aaaaaaaaaaa€", "abc", "HEAD"] {
+        let out = pre_push(&root, "origin", &[update(bad, "refs/heads/main")]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("unexpected pre-push input line"));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pre_push_to_main_requires_a_passing_receipt_of_the_pushed_commit() {
     let root = repo("push", READS_FILE);
     let head = git(&root, &["rev-parse", "HEAD"]);
