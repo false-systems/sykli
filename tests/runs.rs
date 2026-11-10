@@ -331,6 +331,33 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The records a run's journal holds, counted as the journal reads them:
+/// a writer's temporary file (`.tmp-…`, linked into place and then removed)
+/// is not a record, so a count taken while the coordinator writes one does
+/// not see it.
+fn records_in(dir: &Path) -> usize {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| !name.to_string_lossy().starts_with('.'))
+        .count()
+}
+
+#[test]
+fn a_writers_temporary_file_is_not_a_record() {
+    let dir = std::env::temp_dir().join(format!(
+        "sykli-runs-records-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("00000000000000000001.json"), "{}").unwrap();
+    fs::write(dir.join(".tmp-1-2-3"), "{}").unwrap();
+    let counted = records_in(&dir);
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(counted, 1);
+}
+
 fn mkfifo(path: &Path) {
     let _ = fs::remove_file(path);
     assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
@@ -538,8 +565,7 @@ fn window_02_the_run_is_recorded_before_any_task_is_dispatched() {
     f.kill_at(&["run", "sykli.json", "--json"], "after-record");
     let run = f.run_id();
     let records = f.runs_dir().join(&run).join("records");
-    let names = fs::read_dir(&records).unwrap().count();
-    assert_eq!(names, 1, "only the request is recorded");
+    assert_eq!(records_in(&records), 1, "only the request is recorded");
     let first: Value =
         serde_json::from_slice(&fs::read(records.join("00000000000000000001.json")).unwrap())
             .unwrap();
@@ -1338,11 +1364,10 @@ fn resume_refuses_a_run_whose_coordinator_is_alive() {
     let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
     let run = answer["run"].as_str().unwrap().to_owned();
     f.wait_ready("t");
-    let records = || {
-        fs::read_dir(f.runs_dir().join(&run).join("records"))
-            .unwrap()
-            .count()
-    };
+    // Counted before the coordinator appends Started, the records would
+    // grow by that append while the resume is refused.
+    f.wait_started("t");
+    let records = || records_in(&f.runs_dir().join(&run).join("records"));
     let before = records();
 
     let out = f.resume(&run);
@@ -1374,9 +1399,7 @@ fn resume_refuses_a_changed_source() {
     f.unlatch();
     f.kill_at(&["run", "sykli.json", "--json"], "after-dispatch");
     let run = f.run_id();
-    let before = fs::read_dir(f.runs_dir().join(&run).join("records"))
-        .unwrap()
-        .count();
+    let before = records_in(&f.runs_dir().join(&run).join("records"));
     fs::write(f.repo.join("file.txt"), "changed\n").unwrap();
     let out = f.resume(&run);
     assert_eq!(out.status.code(), Some(2));
@@ -1385,9 +1408,7 @@ fn resume_refuses_a_changed_source() {
         "{}",
         text(&out.stderr)
     );
-    let after = fs::read_dir(f.runs_dir().join(&run).join("records"))
-        .unwrap()
-        .count();
+    let after = records_in(&f.runs_dir().join(&run).join("records"));
     assert_eq!(before, after, "a refused resume records nothing");
     assert_eq!(f.status(&run)["state"], "lost");
 }
