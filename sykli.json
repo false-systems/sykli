@@ -25,7 +25,10 @@
         "src/repo.rs",
         "src/review.rs",
         "src/land.rs",
+
+        "src/deploy.rs",
         "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
@@ -86,7 +89,10 @@
         "src/repo.rs",
         "src/review.rs",
         "src/land.rs",
+
+        "src/deploy.rs",
         "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",
@@ -129,7 +135,10 @@
         "src/repo.rs",
         "src/review.rs",
         "src/land.rs",
+
+        "src/deploy.rs",
         "tests/land.rs",
+        "tests/deploy.rs",
         "tests/boundary.rs",
         "tests/external.rs",
         "tests/git_calls.rs",

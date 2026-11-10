@@ -17,6 +17,7 @@
   <a href="#how-it-works">How it works</a> ·
   <a href="#in-ci">CI</a> ·
   <a href="#review-and-land">Review and land</a> ·
+  <a href="#deploy-and-what-went-out">Deploy</a> ·
   <a href="docs/agents.md">Agents</a> ·
   <a href="#command-map">Commands</a>
 </p>
@@ -864,6 +865,68 @@ The limits:
   default branch moves, the merged result is a new tree, to be proven and
   reviewed again.
 
+## Deploy, and what went out
+
+A deployment is an ordinary contract, `deploy.json`, whose tasks do the
+deploying. `sykli deploy` runs it for a commit that is proven and landed, and
+keeps a record (Linux and macOS):
+
+```sh
+sykli lock deploy.json      # pin it, like any contract
+sykli deploy                # run deploy.json for the commit checked out
+sykli deployed              # the latest recorded deployment of each target
+```
+
+**`sykli deploy [CONTRACT] [--target NAME] [--remote NAME]`** refuses (exit 1)
+unless nothing is uncommitted, the commit's tree has a passing receipt of the
+gate contract (`sykli.json`) that verifies for the commit, and the commit is
+in the remote's default branch as this clone last fetched it. It fetches
+nothing itself, so fetch first. `--allow-unlanded` lets a commit out that is
+not in that branch, or where that cannot be told, and the record says so.
+
+Then it runs the contract as `sykli run CONTRACT` does, with one difference:
+**every task runs on every deploy.** A pass reused from the cache would be a
+deployment that never happened. So the tasks of a deploy contract must be
+safe to repeat: a failed or interrupted deploy is run again, and nothing is
+rolled back. `--target` (default `default`) is a name for the record, not
+something a task is told; keep one contract per target.
+
+When every task passed, the deployment is recorded as one JSON line appended
+to a git note on the **commit** under `refs/notes/sykli/deploy`
+(`sykli-deployment.v1`: commit, tree, target, contract, contract_digest,
+receipt_digest, at, unlanded). A failed deploy run records nothing as
+deployed, and says so. With `--remote NAME` the remote's records are fetched
+and merged, every line of both kept, and the notes are pushed; without it the
+record stays in this clone and the git commands that share it are printed.
+
+| Exit | `sykli deploy` |
+|---|---|
+| `0` | the deploy contract passed and the deployment is recorded |
+| `1` | refused before anything ran, or the deploy run failed: nothing is recorded |
+| `2` | could not tell; or deployed, but the record could not be written or shared |
+| `128+N` | the deploy run was stopped by signal N: nothing is recorded |
+
+**`sykli deployed [--target NAME] [--json]`** prints, for each target, the
+latest deployment this clone has a record of:
+
+```console
+$ sykli deployed
+default: 22a831bdcfad  Add a deploy contract that publishes the greeting  2026-11-10 18:48:36 UTC
+staging: eafcbb0aaba4  (commit not in this clone)  2026-11-10 18:45:48 UTC  (unlanded)
+```
+
+It reads this clone's notes and fetches nothing. Unknown stays unknown: where
+there is no record it says that nothing has been recorded here, not that
+nothing was deployed. Fetch other clones' records with
+`git fetch origin 'refs/notes/sykli/deploy:refs/notes/sykli/deploy'`.
+
+The limits: a record says that the deploy contract passed for that commit, in
+some clone, at a time that clone's clock gave. It is not signed, anyone who
+can push can write one, and it is not proof of what is running anywhere now. A
+deployment made some other way, or never shared, is not in it. A deploy run
+that fails halfway leaves whatever its tasks did; sykli knows only that it
+did not pass.
+
 ## Keep the contract outside the repository
 
 A contract does not have to be committed. You can keep a repository's
@@ -1191,6 +1254,7 @@ The cache, the receipts and runs are bounded, and each limit is stated:
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or landed, replaced when that tree is reviewed or landed again; they are git objects and grow with the trees landed, as the history does. `land` also puts the receipt it rests on in `.sykli/receipts`, under the receipt limit above | — |
+| Deployment records, in git (`refs/notes/sykli/deploy`) | **One line per deployment**, on the deployed commit's note; a log, which grows with the deployments made and is never trimmed by sykli | — |
 | Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. Not pruned on Windows (remove them by hand when no run is live) | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
@@ -1213,6 +1277,8 @@ entry costs a re-run, never a result.
 | `hook` | Git hook entrypoints that gate what is committed and pushed |
 | `review` | Have a fresh agent review the commit checked out against the default branch; the verdict is kept as a note on its tree |
 | `land` | Push a proven, reviewed commit to the default branch, sharing its receipt and review as notes |
+| `deploy` | Run a deploy contract for a proven, landed commit, every task every time, and record the deployment as a note on the commit |
+| `deployed` | The latest recorded deployment of each target, from this clone's notes |
 
 Every command documents its flags and exit codes in `sykli <command> --help`.
 
