@@ -16,6 +16,7 @@
   <a href="#start-in-your-repository">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#in-ci">CI</a> ·
+  <a href="#review-and-land">Review and land</a> ·
   <a href="docs/agents.md">Agents</a> ·
   <a href="#command-map">Commands</a>
 </p>
@@ -768,6 +769,96 @@ safe.
 A commit with no `sykli.json` or `sykli.rs`, pushed where there was none
 before, passes with a note.
 
+## Review and land
+
+Two commands take a proven commit the rest of the way to the default branch
+without a pull request (Linux and macOS):
+
+```sh
+sykli run        # prove the commit: a receipt of its tree
+sykli review     # a fresh agent reads the change and gives a verdict
+sykli land       # put it on the default branch, with its evidence
+```
+
+**`sykli review`** reviews the commit checked out against the remote's default
+branch (`--remote NAME`, default `origin`; the branch is found as the pre-push
+hook finds it, or named with `--branch`). The change is every commit from the
+merge base to `HEAD`, and nothing may be uncommitted. It starts the first of
+`codex` and `claude` on `PATH` that no commit of the change names in a
+`Co-Authored-By` trailer, or else the first one installed, as a session of its
+own with reading tools only, and hands it the commits and the diff. The reply
+is one line per finding, `- [blocking] ...` or `- [look] ...`, and one line
+`REVIEW: fine`, `REVIEW: look` or `REVIEW: blocking`; the verdict is raised to
+its worst finding. It prints one summary line and the findings:
+
+```console
+$ sykli review
+review: look (0 blocking, 1 to look at) by codex, another agent than the author
+  [look] src/parse.rs:41: the new branch has no test.
+```
+
+| Exit | `sykli review` |
+|---|---|
+| `0` | `fine`, `look`, a blocking review a person overruled, or nothing to review |
+| `1` | `blocking` |
+| `2` | no review happened: uncommitted files, no reviewer installed, or a reviewer that failed, ran out of its 20 minutes, did not take its whole prompt or gave no verdict. Never a pass |
+
+A person who accepts a blocking finding runs
+`sykli review --overrule "<why>"` at a terminal. It is refused through a pipe
+and inside an agent session; it records the reason and the time, since who
+typed it cannot be known.
+
+**`sykli land`** fetches the default branch and refuses (exit 1, saying what
+is missing) unless nothing is uncommitted, that branch is an ancestor of
+`HEAD` (otherwise merge it in, then prove and review the result), the commit's
+tree has a passing receipt that verifies for the commit
+(`sykli status --commit`), and a review of this tree against exactly that
+branch tip is kept and is not blocking, or was overruled. A receipt another
+clone shared counts only where this clone knows nothing of the tree, never
+after a failure recorded here, and only if it verifies here. Then it attaches
+the receipt to the tree as a note, merges the remote's notes, pushes the
+notes first, and only then pushes `HEAD` to the branch, with a lease on the
+tip it checked: a landing that raced this one makes the push fail instead of
+landing a change nobody reviewed against the new tip. The pre-push hook still
+runs for that push and judges the same receipt.
+
+| Exit | `sykli land` |
+|---|---|
+| `0` | landed: the branch is this commit, and its receipt and review are shared |
+| `1` | refused; nothing was pushed |
+| `2` | could not tell, or a push failed |
+
+Both records are git notes on the commit's **tree**, so they follow the
+content, not the commit id: reviews under `refs/notes/sykli/review` (JSON,
+`sykli-review.v1`: tree, head, base, level, findings, reviewer, authors,
+independent, at, overruled), receipts under `refs/notes/sykli/receipt` (the
+receipt as `run` wrote it). Git does not fetch notes by default. Another clone
+checks a landed commit without running anything:
+
+```sh
+git fetch origin 'refs/notes/sykli/*:refs/notes/sykli/*'
+git notes --ref refs/notes/sykli/receipt show "$(git rev-parse COMMIT^{tree})" > receipt.json
+sykli verify receipt.json --commit COMMIT
+```
+
+The limits:
+
+- **The author is known only from trailers.** A commit without a
+  `Co-Authored-By` trailer names no agent, and the review then records
+  `independent: unknown`, not yes. A trailer is text anyone can write.
+- **A level is a model's judgement.** `fine` means one model, reading a diff
+  it was handed, raised nothing. It is not a proof, a second model may
+  disagree, and text in the change can try to steer its reader. Read the
+  findings.
+- **Notes merge in favour of the local one.** Where this clone and the remote
+  both hold a note for a tree, this clone's stays and is what gets pushed.
+  Whoever can push to the repository can write these notes, as they can write
+  receipts: a shared receipt is evidence only once `sykli verify --commit`
+  passes on it, and even then it is [consistent, not proven](#what-a-receipt-proves-and-what-it-doesnt).
+- A kept review answers only for the base it was read against. After the
+  default branch moves, the merged result is a new tree, to be proven and
+  reviewed again.
+
 ## Keep the contract outside the repository
 
 A contract does not have to be committed. You can keep a repository's
@@ -1094,6 +1185,7 @@ The cache, the receipts and runs are bounded, and each limit is stated:
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
+| Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or landed, replaced when that tree is reviewed or landed again; they are git objects and grow with the trees landed, as the history does. `land` also puts the receipt it rests on in `.sykli/receipts`, under the receipt limit above | — |
 | Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. Not pruned on Windows (remove them by hand when no run is live) | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
@@ -1114,6 +1206,8 @@ entry costs a re-run, never a result.
 | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
 | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
 | `hook` | Git hook entrypoints that gate what is committed and pushed |
+| `review` | Have a fresh agent review the commit checked out against the default branch; the verdict is kept as a note on its tree |
+| `land` | Push a proven, reviewed commit to the default branch, sharing its receipt and review as notes |
 
 Every command documents its flags and exit codes in `sykli <command> --help`.
 

@@ -43,6 +43,45 @@ contract consumer can observe; internal refactors are not listed.
   directory, the message begins with the repository's top level to run in,
   and says that a contract run there cannot declare them (its paths cannot
   leave the directory sykli runs in).
+- `sykli review [--remote NAME] [--branch NAME]` (Linux and macOS) has a
+  fresh agent review the commit checked out against the remote's default
+  branch, found as the pre-push hook finds it: every commit from the merge
+  base to `HEAD`. It starts the first of `codex` and `claude` on `PATH` that
+  no commit of the change names in a `Co-Authored-By` trailer, else the first
+  installed, with reading tools only and no agent-session marker of the
+  caller's, and hands it the commits and the diff (cut at 300000 characters,
+  and told so). The reply holds findings as `- [blocking] ...` and
+  `- [look] ...` lines and exactly one line `REVIEW: fine|look|blocking`; the
+  verdict is raised to its worst finding. Exit 0 for fine, look, an overruled
+  blocking review, or nothing to review; 1 for blocking; 2 when no review
+  happened (uncommitted or untracked files, no reviewer installed, a reviewer
+  that exits non-zero, runs past its 20 minutes, does not take its whole
+  prompt, leaves a process holding its pipes, or gives no verdict or several),
+  never a pass. The verdict is kept as a git note on the commit's tree under
+  `refs/notes/sykli/review` (`sykli-review.v1`: `tree`, `head`, `base`,
+  `level`, `findings`, `reviewer`, `authors`, `independent`, `at`,
+  `overruled`) and answers only for that base: the same change is not
+  reviewed twice, the same tree on another base is. `--overrule "<why>"` lets
+  a kept blocking review cross, only for a person at a terminal (stdin and
+  stderr are terminals and no agent-session marker is set), recording the
+  reason and the time.
+- `sykli land [--remote NAME] [--branch NAME]` (Linux and macOS) pushes the
+  commit checked out to the remote's default branch without a pull request.
+  It refuses (exit 1, saying what is missing) unless nothing is uncommitted,
+  the branch as fetched now is an ancestor of `HEAD`, the commit's tree has a
+  passing receipt that verifies for it (as `status --commit` judges what this
+  clone keeps), and a review of this tree against exactly that branch tip is
+  kept and is not blocking, or was overruled. A receipt another clone shared
+  counts only where this clone knows nothing of the tree, and only if it
+  passes `verify --commit` here with every task passed or cached. It then
+  attaches the receipt to the tree as a note under
+  `refs/notes/sykli/receipt` (the receipt file, or the copy its run kept),
+  fetches and merges the remote's notes (this clone's note stays on the same
+  tree), pushes the notes first, and pushes `HEAD` with a lease on the tip it
+  checked, so a landing that raced it fails (exit 2) instead of landing. The
+  receipt is also put in the worktree's `.sykli/receipts`, where the
+  pre-push hook, which still runs, reads it. Exit 0 landed, 1 refused, 2
+  could not tell or a push failed.
 
 ### Fixed
 - An include whose path is not a literal (a third-party test macro's
