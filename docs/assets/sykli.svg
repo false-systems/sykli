@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" fill="none" role="img" aria-labelledby="t d">
+<title id="t">sykli</title>
+<desc id="d">One exact version of the work, drawn as a circle, passes three checks in a row. Each leaves a record, and the records accumulate as a ruled stack.</desc>
+<rect width="1200" height="360" fill="#f1ebdc"/>
+<g stroke="#171715" stroke-width="2">
+<path d="M40 40H56M48 32V48M1144 320H1160M1152 312V328"/>
+<path d="M64 286H560" stroke="#b9b3a5"/>
+<circle cx="700" cy="130" r="46" fill="#c75b36" stroke="none"/>
+<path d="M746 130H800M880 130H920M1000 130H1040"/>
+<path d="M800 90H880V170H800Z" fill="#171715"/>
+<path d="M920 90H1000V170H920Z" fill="#171715"/>
+<path d="M1040 90H1120V170H1040Z" fill="#d4aa4e"/>
+<path d="M840 170V226M960 170V248M1080 170V270"/>
+<path d="M654 226H1120M654 248H1120M654 270H1120M654 292H1000"/>
+</g>
+<text x="64" y="188" font-family="Geist, 'Helvetica Neue', Arial, sans-serif" font-size="132" font-weight="600" letter-spacing="-7" fill="#171715">sykli</text>
+<text x="66" y="254" font-family="'Geist Mono', ui-monospace, Menlo, monospace" font-size="24" fill="#57594f">CHECKS DECLARED. PROOF KEPT.</text>
+</svg>
