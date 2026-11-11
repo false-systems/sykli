@@ -141,3 +141,5 @@ the same tree, and for no other.
 - [Agent guide](docs/agents.md): JSON queries, explanations and commit status for coding agents.
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [security policy](SECURITY.md).
 - [Licence](LICENSE): MIT.
+
+<p align="center"><sub>Part of <a href="https://false-systems.com">False Systems</a> · computing as craft</sub></p>
