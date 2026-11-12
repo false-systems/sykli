@@ -39,7 +39,11 @@ manual runs share keys. A task's cache key covers its declaration, input digests
 the `rustc -vV`/`cargo -V` the task shell resolves: `graph_runtime`, sykli#64),
 inherited-value digests, and
 the cache keys of its `after` dependencies, so a downstream task never reuses a
-pass recorded against upstream outputs it did not see. The receipt's subject
+pass recorded against upstream outputs it did not see. A task declaring
+`"reuse": false` (`Task::reuse`, serialized only when false, so no other key
+changes) is never offered to `Cache::restore` by `execute` and never stored by
+`conclude`; its `TaskReceipt` carries `reuse: false`, and
+`record_contradiction` refuses it recorded as `cached`. The receipt's subject
 binds the git tree OID (computed from a temporary index seeded from HEAD, with
 `.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
 staged: schema and record consistency (2), contract lock and contract hash (4),

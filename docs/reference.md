@@ -163,6 +163,15 @@ In a Cargo graph the runtime fingerprint also covers the Rust toolchain the
 task shell resolves (`rustc -vV`, `cargo -V`), so a pass recorded under one
 compiler is not reused under another.
 
+**A task can forbid reuse.** `"reuse": false` on a task makes it run on every
+run, whatever the cache holds: a deployment, a notification, anything whose
+effect is the point (`true`, the default, is not written). Its pass is never
+stored, its entry in the receipt says `"reuse": false`, and `verify` refuses
+(exit 2) a receipt that records such a task as `cached`. The field is part of
+the task's declaration, so adding it changes the task's cache key and the
+contract's hash: run `sykli lock` after. A task that runs `after` it is
+reused as usual unless it says so too.
+
 ### A graph you can try
 
 In a scratch Git repository:

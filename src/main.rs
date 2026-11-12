@@ -3900,6 +3900,18 @@ struct TaskReceipt {
     /// tasks that declare any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract_inputs: Option<BTreeMap<String, Option<InputRecord>>>,
+    /// False when the contract forbids reusing this task's pass
+    /// (`"reuse": false`), so it ran in this run. Written only then.
+    #[serde(default = "reusable", skip_serializing_if = "is_reusable")]
+    reuse: bool,
+}
+
+fn reusable() -> bool {
+    true
+}
+
+fn is_reusable(reuse: &bool) -> bool {
+    *reuse
 }
 
 #[derive(Serialize)]
@@ -4381,7 +4393,8 @@ fn conclude(
     }
     let receipt_name = path.file_name().unwrap().to_string_lossy();
     for (task, record) in contract.tasks.iter().zip(&receipt.tasks) {
-        if cacheable(record) {
+        // A pass no run may reuse is not stored for one to find.
+        if cacheable(record) && task.reuse {
             if let Err(error) = cache.store(task, record, &receipt_name) {
                 eprintln!("cache write failed for {}: {error}", task.name);
             }
@@ -4511,7 +4524,12 @@ fn execute(
             }
             match cache_key(task, runtime, &after, &subject.contract_inputs) {
                 Ok(key) => {
-                    if let Some(mut record) = cache.restore(task, &key, runtime) {
+                    // A task that forbids reuse runs whatever the cache holds.
+                    let restored = task
+                        .reuse
+                        .then(|| cache.restore(task, &key, runtime))
+                        .flatten();
+                    if let Some(mut record) = restored {
                         progress.line("cached", &task.name);
                         record.cache_key = Some(key.clone());
                         if let Some(coordinator) = coordinator {
@@ -5038,6 +5056,7 @@ fn launch(
             cache_key: None,
             inputs: None,
             contract_inputs: None,
+            reuse: task.reuse,
         }),
         ended,
     })
@@ -5146,6 +5165,7 @@ fn empty_task_receipt(
         cache_key: None,
         inputs: None,
         contract_inputs: None,
+        reuse: task.reuse,
     }
 }
 
@@ -6159,6 +6179,7 @@ impl Cache for LocalCache {
             cache_key: None,
             inputs: None,
             contract_inputs: None,
+            reuse: task.reuse,
         })
     }
 
@@ -6818,6 +6839,10 @@ fn record_contradiction(record: &TaskSummary, task: &Task) -> Option<String> {
                 task.name, record.exit_code, record.error
             ))
         }
+        "cached" if !task.reuse => Some(format!(
+            "task {} is cached, but the contract declares \"reuse\": false: it must run every time",
+            task.name
+        )),
         "failed" if record.exit_code == Some(0) => {
             Some(format!("task {} failed with exit code 0", task.name))
         }
@@ -8730,6 +8755,48 @@ mod tests {
         .collect()
     }
 
+    /// A cache that offers a pass for every task it is asked about, and
+    /// counts how often it was asked.
+    struct Offering(std::cell::Cell<usize>);
+
+    impl Cache for Offering {
+        fn restore(&self, task: &Task, _: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
+            self.0.set(self.0.get() + 1);
+            let mut record = empty_task_receipt(task, runtime, Outcome::Cached, "", "", false);
+            record.error = None;
+            record.class = None;
+            record.source = "cache".into();
+            Some(record)
+        }
+
+        fn store(&self, _: &Task, _: &TaskReceipt, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_task_that_forbids_reuse_runs_whatever_the_cache_offers() {
+        let task = |name: &str, reuse: bool| -> Task {
+            serde_json::from_value(serde_json::json!({"name": name, "run": "true", "reuse": reuse}))
+                .unwrap()
+        };
+        let contract = Contract {
+            schema: "sykli-contract.v1".into(),
+            tasks: vec![task("reused", true), task("ships", false)],
+        };
+        let offering = Offering(std::cell::Cell::new(0));
+        let decided = execute_all(
+            &contract,
+            &[vec![0, 1]],
+            &shell_runtime().unwrap(),
+            &offering,
+        );
+        assert_eq!(decided[0].outcome, Outcome::Cached);
+        assert_eq!(decided[1].outcome, Outcome::Passed);
+        assert!(decided[0].reuse && !decided[1].reuse);
+        assert_eq!(offering.0.get(), 1, "the cache is not asked for it at all");
+    }
+
     #[test]
     fn a_directory_is_named_by_its_path_not_by_a_longer_name() {
         let directory = "/home/a/gate";
@@ -9423,6 +9490,7 @@ mod tests {
                 runtime: None,
                 inherit: vec![],
                 contract_inputs: vec![],
+                reuse: true,
             }],
         };
         let runtime = shell_runtime().unwrap();

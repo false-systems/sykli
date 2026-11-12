@@ -37,6 +37,20 @@ pub struct Task {
     /// the task reaches them as `$SYKLI_CONTRACT_DIR/PATH`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contract_inputs: Vec<String>,
+    /// Whether a pass of this task may be reused from the cache. `false`
+    /// makes it run on every run, as a deployment must: one that did not run
+    /// did not happen. Written only when false, so no other task's key or
+    /// contract changes.
+    #[serde(default = "reused", skip_serializing_if = "is_reused")]
+    pub reuse: bool,
+}
+
+fn reused() -> bool {
+    true
+}
+
+fn is_reused(reuse: &bool) -> bool {
+    *reuse
 }
 
 pub struct Pipeline {
@@ -65,6 +79,7 @@ impl Pipeline {
             runtime: None,
             inherit: Vec::new(),
             contract_inputs: Vec::new(),
+            reuse: true,
         });
         TaskBuilder {
             task: self.contract.tasks.last_mut().unwrap(),
@@ -133,6 +148,13 @@ impl TaskBuilder<'_> {
     /// Pass these environment variables through from the invoking environment.
     pub fn inherit(self, names: &[&str]) -> Self {
         self.task.inherit = names.iter().map(|name| (*name).into()).collect();
+        self
+    }
+
+    /// `false`: never reuse a pass of this task from the cache; it runs on
+    /// every run.
+    pub fn reuse(self, reuse: bool) -> Self {
+        self.task.reuse = reuse;
         self
     }
 }

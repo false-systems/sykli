@@ -86,6 +86,7 @@ fn task(name: &str, run: &str, after: &[&str], inputs: BTreeSet<String>) -> Task
         runtime: None,
         inherit: Vec::new(),
         contract_inputs: Vec::new(),
+        reuse: true,
     }
 }
 

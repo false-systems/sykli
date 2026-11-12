@@ -7,6 +7,13 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Added
+- A task may declare `"reuse": false`: it runs on every run, whatever the
+  cache holds, its pass is never stored, and its receipt entry says
+  `"reuse": false`. `verify` refuses (exit 2) a receipt that records such a
+  task as `cached`. The field is part of the declaration, so it changes that
+  task's cache key and the contract's hash; no other key changes.
+
 ## [0.8.1] - 2026-11-11
 
 ### Fixed
