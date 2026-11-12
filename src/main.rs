@@ -17,14 +17,10 @@ use sykli::{Contract, Task};
 
 mod canonical;
 mod cargo_inputs;
-#[cfg(unix)]
-mod deploy;
 mod hook;
 mod init;
 #[cfg(unix)]
 mod journal;
-#[cfg(unix)]
-mod land;
 mod repo;
 #[cfg(unix)]
 mod review;
@@ -234,11 +230,26 @@ enum Command {
         #[arg(long, requires = "explain")]
         preview: bool,
     },
-    /// Inspect a graph run (--run), or what applies to a commit (--commit)
+    /// What is cooking on each local branch; or inspect a graph run (--run), or what applies to a commit (--commit)
     #[cfg(unix)]
     #[command(after_help = "Exit codes:\n  \
         0  records inspected (work may be unfinished)\n  \
-        2  unknown run, unreadable journal, or no such commit\n\n\
+        2  unknown run, unreadable journal, or no such commit; or, with neither flag, not a\n     \
+           git repository or git could not list the branches\n\n\
+        With neither --run nor --commit: one line per local branch (the one checked out\n\
+        marked *) against origin's default branch as this clone last fetched it\n\
+        (refs/remotes/origin/HEAD, else main or master, whichever this clone has): its\n\
+        commit; its proof, the verdict --commit gives for it by the contract the commit\n\
+        carries (proven, failed, none, conflict or pending; unknown, with why, when it\n\
+        cannot be judged); the review kept for its tree (fine, look, blocking, overruled,\n\
+        stale when it was read against another tip than that branch's, none, or - when\n\
+        the branch has nothing that branch lacks); and how far it is ahead of and behind\n\
+        that branch (needs git 2.41 or later; unknown otherwise). It reads this clone's\n\
+        refs, notes, receipts and runs and nothing else: nothing is fetched. Git is asked\n\
+        a fixed number of times, however many branches there are. With --json, one\n\
+        sykli-branch-status.v1 document: remote, base (branch and commit, or null),\n\
+        branches (branch, current, commit, tree, proof, review, ahead, behind; null where\n\
+        unknown) and warnings.\n\n\
         --run ID reads a run's journal (sykli-run-status.v1): its state (requested, running,\n\
         completed, interrupted, or lost when its coordinator ended without concluding it),\n\
         its subject and contract, each task's state (pending, running, passed, failed,\n\
@@ -258,7 +269,7 @@ enum Command {
         (`conflict`, with why). Like `verify`, it does not establish that tasks ran.")]
     Status {
         /// A graph run's id, as `run` printed it or its receipt's `run` names it
-        #[arg(long, required_unless_present = "commit", conflicts_with = "commit")]
+        #[arg(long, conflicts_with = "commit")]
         run: Option<String>,
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
@@ -273,7 +284,8 @@ enum Command {
         )]
         contract: PathBuf,
         /// Print one versioned JSON document on stdout (sykli-run-status.v1 with --run,
-        /// sykli-commit-status.v1 with --commit); an error goes to stderr and exits 2
+        /// sykli-commit-status.v1 with --commit, sykli-branch-status.v1 with neither); an
+        /// error goes to stderr and exits 2
         #[arg(long)]
         json: bool,
     },
@@ -461,7 +473,11 @@ enum Command {
         The verdict is kept as a git note on the commit's tree under\n\
         refs/notes/sykli/review (JSON, sykli-review.v1), and answers only for the base it\n\
         was read against: the same change is not reviewed twice, and the same tree on\n\
-        another base is reviewed again. `sykli land` pushes it.\n\n\
+        another base is reviewed again.\n\n\
+        Next comes `git push REMOTE HEAD:BRANCH` (it says so on stderr). The pre-push hook\n\
+        (`sykli hook install --pre-push`) lets that push move the branch only when this\n\
+        tree's review is against exactly the tip it replaces and is not blocking, or was\n\
+        overruled, and shares the review and the receipt with the remote first.\n\n\
         A review is a model's judgement, not a proof, and the author is known only from\n\
         commit trailers.")]
     Review {
@@ -477,123 +493,6 @@ enum Command {
         /// time are recorded
         #[arg(long, value_name = "WHY")]
         overrule: Option<String>,
-    },
-    /// Put the commit checked out on the remote's default branch, when it is proven and reviewed
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  landed: the branch is this commit, and its receipt and review are shared\n  \
-        1  refused, saying what is missing; nothing was pushed\n  \
-        2  could not tell (git, the contract or a journal could not be read, the default\n     \
-           branch is unknown), or a push failed\n\n\
-        Refuses unless all of these hold for the commit checked out: nothing is\n\
-        uncommitted or untracked; the remote's default branch (as `review` finds it, or\n\
-        --branch), fetched now, is an ancestor of it, else merge that in, then prove and\n\
-        review the result; its tree has a passing receipt that verifies for it, as\n\
-        `status --commit` judges every receipt this clone keeps by the repository's\n\
-        contract (sykli.rs, else sykli.json); and a review of this tree against exactly\n\
-        that branch tip is kept and is not blocking, or a person overruled it.\n\n\
-        A receipt another clone shared (a note under refs/notes/sykli/receipt) counts\n\
-        only where this clone knows nothing of the tree, never after a failure or a\n\
-        conflict recorded here, and only if it passes `verify --commit` here with every\n\
-        task passed or cached.\n\n\
-        Then the receipt is attached to the tree as a note under refs/notes/sykli/receipt\n\
-        (the receipt file, or the copy its run kept when the file is gone; with neither\n\
-        and no shared note, land refuses: the branch does not move without proof to\n\
-        share), the remote's notes are fetched and merged (on the same tree this clone's\n\
-        note stays), the notes are pushed first, and only then HEAD is pushed to the\n\
-        branch with a lease on the tip that was checked, so a landing that raced this one\n\
-        makes the push fail (exit 2) instead of landing an unreviewed change. The receipt\n\
-        is also put in this worktree's .sykli/receipts, where the pre-push hook reads\n\
-        receipts and judges them itself.\n\n\
-        Another clone reads both with\n  \
-          git fetch REMOTE 'refs/notes/sykli/*:refs/notes/sykli/*'\n  \
-          git notes --ref refs/notes/sykli/receipt show COMMIT^{tree} > receipt.json\n  \
-          sykli verify receipt.json --commit COMMIT\n\
-        A shared receipt is evidence as any receipt is: consistent, not proven.")]
-    Land {
-        /// The remote to land on
-        #[arg(long, default_value = "origin", value_name = "NAME")]
-        remote: String,
-        /// Land on this branch of the remote instead of its default branch
-        #[arg(long, value_name = "BRANCH")]
-        branch: Option<String>,
-    },
-    /// Run a deploy contract for a proven, landed commit, and record that it went out
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  the deploy contract passed and the deployment is recorded (and shared, with\n     \
-           --remote)\n  \
-        1  refused, saying what is missing, before anything ran; or the deploy run failed:\n     \
-           nothing is recorded as deployed, and what its tasks did before failing is not\n     \
-           known to sykli\n  \
-        2  could not tell (git, a contract, the default branch); or the deploy run passed\n     \
-           but its record could not be written, or could not be shared with --remote (it\n     \
-           says which, and how to share it by hand)\n  \
-        128+N  the deploy run was stopped by signal N: nothing is recorded\n\n\
-        CONTRACT is an ordinary sykli contract whose tasks do the deployment (deploy.json,\n\
-        pinned in sykli.lock like any other: `sykli lock deploy.json`). Its tasks must be\n\
-        safe to repeat: every task runs on every deploy, whatever the cache holds (a pass\n\
-        reused from the cache would be a deployment that never happened), a failed or\n\
-        interrupted deploy is simply run again, and nothing is rolled back. Tasks get what\n\
-        `run` gives them: the commit is the one checked out, and --target is a name for\n\
-        the record, not something a task is told; keep one contract per target.\n\n\
-        Refuses unless: nothing is uncommitted or untracked; the commit's tree has a\n\
-        passing receipt of the repository's gate contract (sykli.rs, else sykli.json) that\n\
-        verifies for the commit, as `land` judges it; and the commit is in the remote's\n\
-        default branch (REMOTE is --remote, else origin; the branch as `review` finds it,\n\
-        or --branch) as this clone last fetched it. deploy fetches nothing: fetch first.\n\
-        --allow-unlanded lets a commit out that is not in that branch, or where that\n\
-        cannot be told, and the record says `unlanded`.\n\n\
-        Then it runs CONTRACT as `sykli run CONTRACT` does, receipt and journal included,\n\
-        and when every task passed appends one JSON line to a git note on the commit\n\
-        under refs/notes/sykli/deploy (sykli-deployment.v1: commit, tree, target,\n\
-        contract, contract_digest, receipt_digest, at, unlanded). With --remote NAME the\n\
-        remote's records are fetched and merged (every line of both is kept) and the\n\
-        notes are pushed; without it the record stays in this clone and the git commands\n\
-        that share it are printed.\n\n\
-        A record says that the deploy contract passed for that commit here, at that time.\n\
-        It is not signed, and it is not proof of what is running anywhere now.")]
-    Deploy {
-        /// Path to the deploy contract, a sykli-contract.v1 JSON file; may be outside the repository
-        #[arg(default_value = "deploy.json")]
-        contract: PathBuf,
-        /// What the deployment is recorded under, one word
-        #[arg(long, default_value = "default", value_name = "NAME")]
-        target: String,
-        /// The remote whose default branch must contain the commit (origin when not
-        /// given); when given, the record is also shared with it
-        #[arg(long, value_name = "NAME")]
-        remote: Option<String>,
-        /// The branch of the remote that must contain the commit, instead of its default branch
-        #[arg(long, value_name = "BRANCH")]
-        branch: Option<String>,
-        /// Deploy a commit that is not in that branch, or where that cannot be told; recorded as unlanded
-        #[arg(long)]
-        allow_unlanded: bool,
-    },
-    /// What went out: the latest recorded deployment of each target, from this clone's notes
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  printed what this clone has recorded, which may be nothing\n  \
-        2  not a git repository, or the notes could not be read\n\n\
-        Reads refs/notes/sykli/deploy in this clone and nothing else; it fetches nothing.\n\
-        For each target, the deployment with the latest time: its commit, the commit's\n\
-        subject, when (UTC), and whether it was unlanded. With --json, one\n\
-        sykli-deployed.v1 document: `recorded` (whether this clone has the notes at all),\n\
-        `targets`, and `unreadable`, the number of recorded lines that are not a\n\
-        sykli-deployment.v1 of the commit they are on (they are counted, never shown as a\n\
-        deployment).\n\n\
-        Unknown stays unknown: when this clone has no record, it says that nothing has been\n\
-        recorded here, not that nothing was deployed. Another clone may hold records:\n  \
-          git fetch REMOTE 'refs/notes/sykli/deploy:refs/notes/sykli/deploy'\n\
-        A deployment made outside `sykli deploy`, or never shared, is not here either.")]
-    Deployed {
-        /// Show only this target
-        #[arg(long, value_name = "NAME")]
-        target: Option<String>,
-        /// Print one JSON document (sykli-deployed.v1) on stdout
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -614,25 +513,43 @@ enum Hook {
         #[arg(long)]
         contract: Option<PathBuf>,
     },
-    /// Refuse a push to the default branch without a passing receipt of the pushed commit's tree
+    /// Refuse a push to the default branch unless the pushed commit is proven and reviewed
     #[command(after_help = "Exit codes:\n  \
-        0  nothing pushed to a gated branch, every such push has a receipt that\n     \
-           passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
-        1  refused: a push to a gated branch has no such receipt\n  \
+        0  nothing pushed to a gated branch, or every such push is proven, reviewed and\n     \
+           shared (see below), or there is no sykli.json or sykli.rs\n  \
+        1  refused: a push to a gated branch has no passing receipt that verifies for its\n     \
+           commit, the tip it replaces is not an ancestor of it, its tree has no review\n     \
+           against exactly that tip, the review is blocking, or it deletes the branch\n  \
         2  could not evaluate: no git repository, unreadable input, a missing --contract,\n     \
-           or a --branch that is not a branch name\n\n\
+           or a --branch that is not a branch name; or the receipt and the review could\n     \
+           not be shared with the remote, so the branch does not move\n\n\
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
         With --branch, the gated branches are exactly those named (refs/heads/BRANCH for\n\
         each), and nothing is guessed. Without it, the gated branch is the default branch:\n\
         the one refs/remotes/REMOTE/HEAD names, else main and master. When that HEAD\n\
         names a ref that does not exist (a renamed default branch, pruned), main and\n\
         master are gated and a note says so.\n\
-        Deletions, tags and pushes to other branches pass. Receipts are looked for in this\n\
-        worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
-        is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
-        without one is refused when the branch had one (push with --no-verify to drop it).\n\
-        With --contract, that contract gates every push to a gated branch instead,\n\
-        whatever the commits carry; one outside the repository is read from its file.\n\
+        Tags and pushes to other branches pass and share nothing; a push of no branch at\n\
+        all (the notes this hook pushes itself) passes at once, silently, and runs no git.\n\
+        Deleting a gated branch is refused: pushed again, it would be new, with no tip to\n\
+        review against (push with --no-verify to do it on purpose). Receipts are looked for\n\
+        in this worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is\n\
+        gated is decided from the commits: the pushed commit's sykli.json gates it, and a\n\
+        commit without one is refused when the branch had one (push with --no-verify to\n\
+        drop it). With --contract, that contract gates every push to a gated branch\n\
+        instead, whatever the commits carry; one outside the repository is read from its\n\
+        file.\n\n\
+        On Linux and macOS a push to a gated branch also needs a review (`sykli review`):\n\
+        the tip git names as the remote sha must be an ancestor of the pushed commit, and\n\
+        the note under refs/notes/sykli/review on the commit's tree must be a review against\n\
+        exactly that tip that is not blocking, or that a person overruled. A branch new on\n\
+        the remote has no tip, and no review is asked. Then, before the branch moves, the\n\
+        receipt is attached to the tree as a note under refs/notes/sykli/receipt, the\n\
+        refs/notes/sykli/* where git is pushing (URL, the push URL where the remote has\n\
+        one) are fetched and merged (where both hold a note for a tree, this clone's\n\
+        stays), and the review and receipt notes are pushed there; if that fails, the\n\
+        push is refused (exit 2). A dry run reaches this hook too, and shares\n\
+        them as well. On Windows the push is judged by its receipt alone.\n\n\
         An accepted push's receipts are kept in the common git directory, as\n\
         sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
         A kept receipt is evidence for its commit, not proof the remote has it (dry runs\n\
@@ -640,7 +557,8 @@ enum Hook {
     PrePush {
         /// Remote name, as git passes it
         remote: Option<String>,
-        /// Remote URL, as git passes it (unused)
+        /// Remote URL, as git passes it: where git pushes, so where an accepted push's
+        /// receipt and review are shared (the remote's name when it is not given)
         url: Option<String>,
         /// Gate with this contract instead of the one each pushed commit carries,
         /// for example one kept outside the repository
@@ -2116,8 +2034,6 @@ fn main() -> ExitCode {
         Command::Validate { contract, .. }
         | Command::Run { contract, .. }
         | Command::Lock { contract } => enter_for_contract(contract, &mut []),
-        #[cfg(unix)]
-        Command::Deploy { contract, .. } => enter_for_contract(contract, &mut []),
         Command::Verify {
             receipt, contract, ..
         } => enter_for_contract(contract, &mut [receipt]),
@@ -2174,10 +2090,25 @@ fn main() -> ExitCode {
             json,
             ..
         } => {
-            // clap requires --run or --commit, so a status without --run has --commit.
+            // Neither --run nor --commit: what is cooking on each branch.
             let Some(rev) = commit else {
-                eprintln!("error: status takes --run ID or --commit REV");
-                return ExitCode::from(2);
+                return match branch_status() {
+                    Ok(status) => {
+                        if json {
+                            println!("{status}");
+                        } else {
+                            print!("{}", describe_branches(&status));
+                            for warning in status["warnings"].as_array().into_iter().flatten() {
+                                eprintln!("warning: {}", warning.as_str().unwrap_or("?"));
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        ExitCode::from(2)
+                    }
+                };
             };
             let mut contract = resolve_contract(contract);
             match enter_for_contract(&mut contract, &mut [])
@@ -2291,10 +2222,15 @@ fn main() -> ExitCode {
             Hook::PreCommit { contract } => hook::pre_commit(contract.as_deref()),
             Hook::PrePush {
                 remote,
-                url: _,
+                url,
                 contract,
                 branches,
-            } => hook::pre_push(remote.as_deref(), contract.as_deref(), &branches),
+            } => hook::pre_push(
+                remote.as_deref(),
+                url.as_deref(),
+                contract.as_deref(),
+                &branches,
+            ),
             Hook::Install {
                 pre_commit,
                 pre_push,
@@ -2307,24 +2243,6 @@ fn main() -> ExitCode {
             branch,
             overrule,
         } => review::command(&remote, branch.as_deref(), overrule.as_deref()),
-        #[cfg(unix)]
-        Command::Land { remote, branch } => land::command(&remote, branch.as_deref()),
-        #[cfg(unix)]
-        Command::Deploy {
-            contract,
-            target,
-            remote,
-            branch,
-            allow_unlanded,
-        } => deploy::command(
-            &contract,
-            &target,
-            remote.as_deref(),
-            branch.as_deref(),
-            allow_unlanded,
-        ),
-        #[cfg(unix)]
-        Command::Deployed { target, json } => deploy::deployed(target.as_deref(), json),
         Command::Plan {
             contract,
             changed,
@@ -2750,11 +2668,36 @@ fn describe_run(status: &serde_json::Value) -> String {
 /// recorded result, the newest receipt decides.
 #[cfg(unix)]
 fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, String> {
-    use serde_json::json;
     let repository = repo::repository()
         .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
     let (judged, at) = commit_facts(repository, rev, contract_path)?;
-    let (runs, unreadable) = runs::runs_of_tree(&at.tree)?;
+    status_of(&judged, &at, contract_path, &kept_receipts(repository))
+}
+
+/// A receipt this clone keeps, read: where it is, its bytes, and what it says.
+#[cfg(unix)]
+struct Kept {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    receipt: serde_json::Value,
+}
+
+#[cfg(unix)]
+fn read_kept(path: PathBuf) -> Option<Kept> {
+    let bytes = fs::read(&path).ok()?;
+    let receipt = serde_json::from_slice(&bytes).ok()?;
+    Some(Kept {
+        path,
+        bytes,
+        receipt,
+    })
+}
+
+/// Every receipt this clone keeps outside its runs, read once: this
+/// worktree's `.sykli/receipt.json` and `.sykli/receipts`, and those the
+/// pre-push hook kept in the common git directory.
+#[cfg(unix)]
+fn kept_receipts(repository: &repo::Repository) -> Vec<Kept> {
     let mut candidates = vec![repository.root.join(".sykli/receipt.json")];
     for directory in [
         repository.root.join(".sykli/receipts"),
@@ -2769,31 +2712,48 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             );
         }
     }
+    candidates.into_iter().filter_map(read_kept).collect()
+}
+
+/// `status --commit` for a commit whose facts are read, judging the
+/// receipts `kept` and those of the runs of its tree.
+#[cfg(unix)]
+fn status_of(
+    judged: &Judged,
+    at: &CommitAt,
+    contract_path: &Path,
+    kept: &[Kept],
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let (runs, unreadable) = runs::runs_of_tree(&at.tree)?;
     // A run's receipt where it was written, and the copy the run kept, which
     // outlives the worktree that wrote it; one receipt is judged once.
-    candidates.extend(runs.iter().flat_map(|run| {
-        [&run["receipt"]["path"], &run["receipt"]["kept"]["path"]]
-            .into_iter()
-            .filter_map(|path| path.as_str().map(PathBuf::from))
-    }));
+    let of_runs = runs
+        .iter()
+        .flat_map(|run| {
+            [&run["receipt"]["path"], &run["receipt"]["kept"]["path"]]
+                .into_iter()
+                .filter_map(|path| path.as_str().map(PathBuf::from))
+        })
+        .filter_map(read_kept)
+        .collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut current = Vec::new();
     let mut historical = Vec::new();
-    for path in candidates {
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
+    for Kept {
+        path,
+        bytes,
+        receipt,
+    } in kept.iter().chain(&of_runs)
+    {
         if receipt["subject"]["tree_oid"].as_str() != Some(at.tree.as_str()) {
             continue;
         }
-        let digest = sha256(&bytes);
+        let digest = sha256(bytes);
         if !seen.insert(digest.clone()) {
             continue;
         }
-        let path = spelled(&path);
+        let path = spelled(path);
         // A receipt whose run this clone keeps (or pruned) counts only once
         // that run has concluded with it: a coordinator stopped, or fenced
         // off, between the receipt and its conclusion did not finish the
@@ -2861,7 +2821,7 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             );
         let (judgement, stage, refusal_line) = match not_judged {
             Some((judgement, why)) => (judgement, None, Some(why)),
-            None => match judge(&path, Ok((&judged, &at))) {
+            None => match judge(&path, Ok((judged, at))) {
                 Ok(checks) => match checks.iter().find(|check| !check.ok) {
                     None => ("verified", None, None),
                     Some(first) => (
@@ -3078,6 +3038,273 @@ fn describe_commit(status: &serde_json::Value) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// `sykli status` with neither `--run` nor `--commit`: what is cooking
+/// (`sykli-branch-status.v1`). One entry per local branch: its commit; its
+/// proof, the verdict `status --commit` gives for it by the contract the
+/// commit carries; the review kept for its tree, against origin's default
+/// branch as this clone last fetched it; and how far it is ahead of and
+/// behind that branch. It reads this clone's refs, notes, receipts and runs,
+/// and nothing else. Git is asked a fixed number of times however many
+/// branches there are: `for-each-ref` for the branches and again for how far
+/// each is from the base, `notes list` for the reviews, and one `cat-file
+/// --batch` for every commit, its contract and inputs, and every review.
+#[cfg(unix)]
+fn branch_status() -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    const REMOTE: &str = "origin";
+    let repository = repo::repository().map_err(|_| "not inside a git repository".to_string())?;
+    // Contracts and receipts are looked for from the top level.
+    std::env::set_current_dir(&repository.root)
+        .map_err(|error| format!("cannot enter {}: {error}", repository.root.display()))?;
+    let contract = resolve_contract(PathBuf::from("sykli.rs"));
+    let mut warnings = Vec::new();
+
+    // Every local branch, and every branch of the remote this clone has.
+    let listed = git(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(tree)%00%(HEAD)",
+        "refs/heads/",
+        &format!("refs/remotes/{REMOTE}/"),
+    ])?;
+    struct Branch {
+        name: String,
+        commit: String,
+        tree: String,
+        current: bool,
+    }
+    let mut branches = Vec::new();
+    let mut remote_branches = HashMap::new();
+    for line in listed.lines() {
+        let [refname, commit, tree, head] = line.split('\0').collect::<Vec<_>>()[..] else {
+            return Err(format!("unexpected line from git for-each-ref: {line:?}"));
+        };
+        match refname.strip_prefix("refs/heads/") {
+            Some(name) => branches.push(Branch {
+                name: name.to_string(),
+                commit: commit.to_string(),
+                tree: tree.to_string(),
+                current: head == "*",
+            }),
+            None => {
+                remote_branches.insert(refname.to_string(), commit.to_string());
+            }
+        }
+    }
+
+    // The base, as the pre-push hook and `review` find the default branch:
+    // what refs/remotes/origin/HEAD names, else main or master, whichever
+    // this clone has.
+    let tracking = |branch: &str| format!("refs/remotes/{REMOTE}/{branch}");
+    let target = hook::remote_head(repository, REMOTE);
+    let exists = target
+        .as_deref()
+        .is_some_and(|target| remote_branches.contains_key(target));
+    let (candidates, _) = hook::default_branches(Some(REMOTE), target.as_deref(), exists);
+    let present = candidates
+        .iter()
+        .filter_map(|name| name.strip_prefix("refs/heads/"))
+        .filter(|branch| remote_branches.contains_key(&tracking(branch)))
+        .collect::<Vec<_>>();
+    let base = match present[..] {
+        [branch] => Some((
+            branch.to_string(),
+            remote_branches[&tracking(branch)].clone(),
+        )),
+        _ => {
+            warnings.push(format!(
+                "{REMOTE}'s default branch is unknown here, so the reviews and how far each \
+                 branch is from it are unknown: name it with `git remote set-head {REMOTE} --auto`"
+            ));
+            None
+        }
+    };
+
+    let mut distance = HashMap::new();
+    let mut notes = None;
+    if let Some((branch, _)) = &base {
+        if !branches.is_empty() {
+            match git(&[
+                "for-each-ref",
+                &format!("--format=%(refname)%00%(ahead-behind:{})", tracking(branch)),
+                "refs/heads/",
+            ]) {
+                Ok(listed) => {
+                    for line in listed.lines() {
+                        let counted = line.split_once('\0').and_then(|(refname, counts)| {
+                            let (ahead, behind) = counts.split_once(' ')?;
+                            Some((
+                                refname.strip_prefix("refs/heads/")?.to_string(),
+                                (ahead.parse::<u64>().ok()?, behind.parse::<u64>().ok()?),
+                            ))
+                        });
+                        distance.extend(counted);
+                    }
+                }
+                Err(error) => warnings.push(format!(
+                    "how far each branch is from {REMOTE}/{branch} is unknown (git 2.41 or \
+                     later counts it): {error}"
+                )),
+            }
+        }
+        match git(&["notes", "--ref", review::NOTES, "list"]) {
+            Ok(listed) => {
+                notes = Some(
+                    listed
+                        .lines()
+                        .filter_map(|line| line.split_once(' '))
+                        .map(|(blob, object)| (object.to_string(), blob.to_string()))
+                        .collect::<HashMap<_, _>>(),
+                );
+            }
+            Err(error) => warnings.push(format!("the reviews could not be listed: {error}")),
+        }
+    }
+
+    // One session: every branch's commit, contract and inputs, then every
+    // review note a branch's tree has.
+    let mut revs = branches
+        .iter()
+        .map(|branch| branch.commit.clone())
+        .collect::<Vec<_>>();
+    revs.sort();
+    revs.dedup();
+    let mut session = repository.session(Vec::new());
+    let facts = commits_facts(&mut session, &revs, &contract)?;
+    let blobs = branches
+        .iter()
+        .filter_map(|branch| notes.as_ref()?.get(&branch.tree).cloned())
+        .collect::<Vec<_>>();
+    let reviews = ask_in(&mut session, blobs)?;
+    session.finish()?;
+
+    let kept = kept_receipts(repository);
+    let proofs = revs
+        .iter()
+        .zip(&facts)
+        .map(|(rev, fact)| {
+            let verdict = fact
+                .as_ref()
+                .map_err(String::clone)
+                .and_then(|(judged, at)| {
+                    status_of(judged, at, &contract, &kept)
+                        .map(|status| status["verdict"].as_str().unwrap_or("unknown").to_string())
+                });
+            (rev.as_str(), verdict)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut entries = Vec::new();
+    for branch in &branches {
+        let proof = match &proofs[branch.commit.as_str()] {
+            Ok(verdict) if verdict == "passed" => "proven".to_string(),
+            Ok(verdict) => verdict.clone(),
+            Err(why) => {
+                warnings.push(format!("{}: the proof is unknown: {why}", branch.name));
+                "unknown".to_string()
+            }
+        };
+        let (ahead, behind) = distance
+            .get(&branch.name)
+            .map_or((None, None), |(ahead, behind)| {
+                (Some(*ahead), Some(*behind))
+            });
+        let review = match (&base, &notes) {
+            (Some(_), Some(_)) if ahead == Some(0) => Some("-".to_string()),
+            (Some((_, tip)), Some(notes)) => Some(match notes.get(&branch.tree) {
+                None => "none".to_string(),
+                Some(blob) => {
+                    let read = answer(&reviews, blob)
+                        .ok_or_else(|| format!("its note {blob} cannot be read"))
+                        .and_then(|note| review::record_of(&note.bytes, &branch.tree));
+                    match read {
+                        Err(why) => {
+                            warnings.push(format!(
+                                "{}: the review kept for its tree: {why}",
+                                branch.name
+                            ));
+                            "unreadable".to_string()
+                        }
+                        // A review answers only for the tip it was read
+                        // against.
+                        Ok(record) if record.base != *tip => "stale".to_string(),
+                        Ok(record) if record.overruled.is_some() => "overruled".to_string(),
+                        Ok(record) => record.level.to_string(),
+                    }
+                }
+            }),
+            _ => None,
+        };
+        entries.push(json!({
+            "branch": branch.name,
+            "current": branch.current,
+            "commit": branch.commit,
+            "tree": branch.tree,
+            "proof": proof,
+            "review": review,
+            "ahead": ahead,
+            "behind": behind,
+        }));
+    }
+    Ok(json!({
+        "schema": "sykli-branch-status.v1",
+        "remote": REMOTE,
+        "base": base.map(|(branch, commit)| json!({"branch": branch, "commit": commit})),
+        "branches": entries,
+        "warnings": warnings,
+    }))
+}
+
+/// `sykli status` for a person: what it is against, then one line per
+/// branch, the one checked out marked `*`.
+#[cfg(unix)]
+fn describe_branches(status: &serde_json::Value) -> String {
+    let short = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .map(|text| text.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "?".into())
+    };
+    let remote = status["remote"].as_str().unwrap_or("?");
+    let mut text = match status["base"]["branch"].as_str() {
+        Some(branch) => format!(
+            "against {remote}/{branch} at {}, as this clone last fetched it\n",
+            short(&status["base"]["commit"])
+        ),
+        None => format!("against nothing: {remote}'s default branch is unknown here\n"),
+    };
+    let branches = status["branches"].as_array().cloned().unwrap_or_default();
+    let width = branches
+        .iter()
+        .map(|branch| {
+            branch["branch"]
+                .as_str()
+                .map_or(1, |name| name.chars().count())
+        })
+        .max()
+        .unwrap_or(0);
+    for branch in &branches {
+        let count = |key: &str| {
+            branch[key]
+                .as_u64()
+                .map_or_else(|| "?".to_string(), |count| count.to_string())
+        };
+        text.push_str(&format!(
+            "{} {:width$}  {}  {:<8}  review {:<10}  {} ahead  {} behind\n",
+            if branch["current"] == true { "*" } else { " " },
+            branch["branch"].as_str().unwrap_or("?"),
+            short(&branch["commit"]),
+            branch["proof"].as_str().unwrap_or("?"),
+            branch["review"].as_str().unwrap_or("unknown"),
+            count("ahead"),
+            count("behind"),
+        ));
+    }
+    if branches.is_empty() {
+        text.push_str("no local branch\n");
+    }
+    text
 }
 
 /// `verify --json`: the verdict as one `sykli-verify.v1` document, with
@@ -3900,6 +4127,18 @@ struct TaskReceipt {
     /// tasks that declare any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract_inputs: Option<BTreeMap<String, Option<InputRecord>>>,
+    /// False when the contract forbids reusing this task's pass
+    /// (`"reuse": false`), so it ran in this run. Written only then.
+    #[serde(default = "reusable", skip_serializing_if = "is_reusable")]
+    reuse: bool,
+}
+
+fn reusable() -> bool {
+    true
+}
+
+fn is_reusable(reuse: &bool) -> bool {
+    *reuse
 }
 
 #[derive(Serialize)]
@@ -3974,10 +4213,6 @@ struct LocalCache {
     /// it without touching the environment: `set_var` is process-global and
     /// unsound beside the rest of a threaded test binary.
     receipt_budget: usize,
-    /// Whether a pass is restored from the cache. A deploy run restores
-    /// none: a task that did not run deployed nothing. Passes are stored
-    /// either way.
-    reuse: bool,
 }
 
 /// Default cache budget: 1 GiB.
@@ -4182,32 +4417,6 @@ fn run(
     json: bool,
     detach: bool,
 ) -> Result<Ran, String> {
-    run_reusing(
-        contract_path,
-        contract,
-        levels,
-        contract_hash,
-        lock_digest,
-        json,
-        detach,
-        true,
-    )
-}
-
-/// `run`, where `reuse` says whether a pass may be restored from the cache.
-/// Without it every task that is not blocked runs, as a deployment must: one
-/// that did not run did not happen.
-#[allow(clippy::too_many_arguments)]
-fn run_reusing(
-    contract_path: &Path,
-    contract: &Contract,
-    levels: &[Vec<usize>],
-    contract_hash: String,
-    lock_digest: Option<String>,
-    json: bool,
-    detach: bool,
-    reuse: bool,
-) -> Result<Ran, String> {
     // Stamped before any task runs, so the receipt's run time brackets every
     // task time it contains.
     let run_started_at_ms = unix_time_ms();
@@ -4225,8 +4434,7 @@ fn run_reusing(
     // is a run that cannot be evaluated, not a task that errored.
     worktree_cache::prepare(contract)?;
     let runtime = graph_runtime(contract)?;
-    let mut cache = LocalCache::new(Path::new(&subject.repository));
-    cache.reuse = reuse;
+    let cache = LocalCache::new(Path::new(&subject.repository));
     cache.bound();
     let progress = Progress::of(json);
     #[cfg(unix)]
@@ -4381,7 +4589,8 @@ fn conclude(
     }
     let receipt_name = path.file_name().unwrap().to_string_lossy();
     for (task, record) in contract.tasks.iter().zip(&receipt.tasks) {
-        if cacheable(record) {
+        // A pass no run may reuse is not stored for one to find.
+        if cacheable(record) && task.reuse {
             if let Err(error) = cache.store(task, record, &receipt_name) {
                 eprintln!("cache write failed for {}: {error}", task.name);
             }
@@ -4511,7 +4720,12 @@ fn execute(
             }
             match cache_key(task, runtime, &after, &subject.contract_inputs) {
                 Ok(key) => {
-                    if let Some(mut record) = cache.restore(task, &key, runtime) {
+                    // A task that forbids reuse runs whatever the cache holds.
+                    let restored = task
+                        .reuse
+                        .then(|| cache.restore(task, &key, runtime))
+                        .flatten();
+                    if let Some(mut record) = restored {
                         progress.line("cached", &task.name);
                         record.cache_key = Some(key.clone());
                         if let Some(coordinator) = coordinator {
@@ -5038,6 +5252,7 @@ fn launch(
             cache_key: None,
             inputs: None,
             contract_inputs: None,
+            reuse: task.reuse,
         }),
         ended,
     })
@@ -5146,6 +5361,7 @@ fn empty_task_receipt(
         cache_key: None,
         inputs: None,
         contract_inputs: None,
+        reuse: task.reuse,
     }
 }
 
@@ -5860,7 +6076,6 @@ impl LocalCache {
             receipts: repository.join(".sykli/receipts"),
             budget: cache_budget(),
             receipt_budget: receipt_budget(),
-            reuse: true,
         }
     }
 
@@ -6097,9 +6312,6 @@ fn restore_file(source: &Path, target: &Path, suffix: &str, digest: &str) -> Res
 
 impl Cache for LocalCache {
     fn restore(&self, task: &Task, key: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
-        if !self.reuse {
-            return None;
-        }
         let started = Instant::now();
         let directory = self.cache.join(key);
         let entry = self.inspect(task, key, &runtime.fingerprint).ok()?;
@@ -6159,6 +6371,7 @@ impl Cache for LocalCache {
             cache_key: None,
             inputs: None,
             contract_inputs: None,
+            reuse: task.reuse,
         })
     }
 
@@ -6818,6 +7031,10 @@ fn record_contradiction(record: &TaskSummary, task: &Task) -> Option<String> {
                 task.name, record.exit_code, record.error
             ))
         }
+        "cached" if !task.reuse => Some(format!(
+            "task {} is cached, but the contract declares \"reuse\": false: it must run every time",
+            task.name
+        )),
         "failed" if record.exit_code == Some(0) => {
             Some(format!("task {} failed with exit code 0", task.name))
         }
@@ -8204,36 +8421,91 @@ fn commit_facts(
     rev: &str,
     contract_path: &Path,
 ) -> Result<(Judged, CommitAt), String> {
+    let mut session = repository.session(Vec::new());
+    let mut facts = commits_facts(&mut session, &[rev.to_string()], contract_path)?;
+    session.finish()?;
+    facts.pop().ok_or("no commit was asked about")?
+}
+
+/// One commit's facts, or why they cannot be read.
+type Facts = Result<(Judged, CommitAt), String>;
+
+/// `commit_facts` for many commits in one session: one process, each round
+/// asked for every commit at once (the commits and their contracts, then
+/// the inputs those contracts declare, and a third where a declared link
+/// leads). One commit's error is its own; the session's is everyone's. The
+/// caller finishes the session, and may ask it more first.
+fn commits_facts(
+    session: &mut repo::Session,
+    revs: &[String],
+    contract_path: &Path,
+) -> Result<Vec<Facts>, String> {
     let outside = outside_repository(contract_path).is_some();
     // A path outside the repository named as inside cannot be asked about;
     // that is reported after the commit, as it always was.
-    let inside = (!outside).then(|| ContractNames::new(rev, contract_path));
-    let mut names = commit_names(rev).to_vec();
-    if let Some(Ok(inside)) = &inside {
-        names.extend(inside.names());
+    let insides = revs
+        .iter()
+        .map(|rev| (!outside).then(|| ContractNames::new(rev, contract_path)))
+        .collect::<Vec<_>>();
+    let mut names = Vec::new();
+    for (rev, inside) in revs.iter().zip(&insides) {
+        names.extend(commit_names(rev));
+        if let Some(Ok(inside)) = inside {
+            names.extend(inside.names());
+        }
     }
-    // One process, two rounds: the commit and its contract, then the inputs
-    // that contract declares (and a third where a declared link leads).
-    let mut session = repository.session(Vec::new());
-    let mut answers = ask_in(&mut session, names)?;
-    let mut at = commit_from(rev, &answers)?;
-    let judged = match inside {
-        None => Judged::from_file(contract_path, true)?,
-        Some(inside) => inside?.judged(&answers, &at.id)?,
-    };
-    answers.extend(ask_in_bounded(
-        &mut session,
-        input_names(rev, &judged.contract)?,
-        INPUT_BLOB_KEPT,
-    )?);
+    let mut answers = ask_in(session, names)?;
+    let mut facts = revs
+        .iter()
+        .zip(insides)
+        .map(|(rev, inside)| {
+            let at = commit_from(rev, &answers)?;
+            let judged = match inside {
+                None => Judged::from_file(contract_path, true)?,
+                Some(inside) => inside?.judged(&answers, &at.id)?,
+            };
+            Ok((judged, at))
+        })
+        .collect::<Vec<Facts>>();
+    let mut inputs = Vec::new();
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let named = match fact {
+            Ok((judged, _)) => input_names(rev, &judged.contract),
+            Err(_) => continue,
+        };
+        match named {
+            Ok(names) => inputs.extend(names),
+            Err(error) => *fact = Err(error),
+        }
+    }
+    answers.extend(ask_in_bounded(session, inputs, INPUT_BLOB_KEPT)?);
     // A third round, only for declared symbolic links: where they lead.
-    let around = link_target_names(rev, &judged.contract, &answers)?;
-    if !around.is_empty() {
-        answers.extend(ask_in(&mut session, around)?);
+    let mut around = Vec::new();
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let named = match fact {
+            Ok((judged, _)) => link_target_names(rev, &judged.contract, &answers),
+            Err(_) => continue,
+        };
+        match named {
+            Ok(names) => around.extend(names),
+            Err(error) => *fact = Err(error),
+        }
     }
-    session.finish()?;
-    at.inputs = Some(inputs_from(rev, &judged.contract, &answers)?);
-    Ok((judged, at))
+    if !around.is_empty() {
+        answers.extend(ask_in(session, around)?);
+    }
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let read = match fact {
+            Ok((judged, _)) => inputs_from(rev, &judged.contract, &answers),
+            Err(_) => continue,
+        };
+        match (read, fact) {
+            (Ok(read), Ok((_, at))) => at.inputs = Some(read),
+            (Err(error), fact) => *fact = Err(error),
+            (Ok(_), Err(_)) => {}
+        }
+    }
+    Ok(facts)
 }
 
 /// A receipt judged as evidence for a commit, against facts already read:
@@ -8728,6 +9000,48 @@ mod tests {
         .into_iter()
         .map(Option::unwrap)
         .collect()
+    }
+
+    /// A cache that offers a pass for every task it is asked about, and
+    /// counts how often it was asked.
+    struct Offering(std::cell::Cell<usize>);
+
+    impl Cache for Offering {
+        fn restore(&self, task: &Task, _: &str, runtime: &ShellRuntime) -> Option<TaskReceipt> {
+            self.0.set(self.0.get() + 1);
+            let mut record = empty_task_receipt(task, runtime, Outcome::Cached, "", "", false);
+            record.error = None;
+            record.class = None;
+            record.source = "cache".into();
+            Some(record)
+        }
+
+        fn store(&self, _: &Task, _: &TaskReceipt, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_task_that_forbids_reuse_runs_whatever_the_cache_offers() {
+        let task = |name: &str, reuse: bool| -> Task {
+            serde_json::from_value(serde_json::json!({"name": name, "run": "true", "reuse": reuse}))
+                .unwrap()
+        };
+        let contract = Contract {
+            schema: "sykli-contract.v1".into(),
+            tasks: vec![task("reused", true), task("ships", false)],
+        };
+        let offering = Offering(std::cell::Cell::new(0));
+        let decided = execute_all(
+            &contract,
+            &[vec![0, 1]],
+            &shell_runtime().unwrap(),
+            &offering,
+        );
+        assert_eq!(decided[0].outcome, Outcome::Cached);
+        assert_eq!(decided[1].outcome, Outcome::Passed);
+        assert!(decided[0].reuse && !decided[1].reuse);
+        assert_eq!(offering.0.get(), 1, "the cache is not asked for it at all");
     }
 
     #[test]
@@ -9423,6 +9737,7 @@ mod tests {
                 runtime: None,
                 inherit: vec![],
                 contract_inputs: vec![],
+                reuse: true,
             }],
         };
         let runtime = shell_runtime().unwrap();

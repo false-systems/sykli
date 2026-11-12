@@ -35,6 +35,19 @@ impl Scratch {
         fs::create_dir_all(&config).unwrap();
         fs::write(repo.join("file.txt"), "one\n").unwrap();
         git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        // A remote an accepted push to a gated branch shares its receipt
+        // with; a test that needs its own re-points it.
+        let origin = base.join("scratch-origin.git");
+        git(
+            &repo,
+            &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         // What a person's global ignore does for `.sykli/`, kept local here.
         fs::write(repo.join(".git/info/exclude"), ".sykli/\n").unwrap();
         commit(&repo, "fixture");
@@ -1093,7 +1106,8 @@ fn pre_push(repo: &Path, contract: Option<&Path>, sha: &str, remote_ref: &str) -
     }
     stdio::output(
         command
-            .args(["origin", "/nowhere/origin.git"])
+            .arg("origin")
+            .arg(repo.with_file_name("scratch-origin.git"))
             .current_dir(repo),
         format!("refs/heads/work {sha} {remote_ref} {ZEROS}\n").as_bytes(),
     )
@@ -1214,7 +1228,10 @@ fn a_hook_with_a_contract_outside_the_repository_gates_real_pushes() {
         repo,
         &["init", "--quiet", "--bare", origin.to_str().unwrap()],
     );
-    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        repo,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
     let hook = repo.join(".git/hooks/pre-push");
     fs::create_dir_all(hook.parent().unwrap()).unwrap();
     fs::write(
@@ -1360,7 +1377,8 @@ fn pre_push_flags(repo: &Path, contract: &Path, flags: &[&str], sha: &str, to: &
             .args(["hook", "pre-push", "--contract"])
             .arg(contract)
             .args(flags)
-            .args(["origin", "/nowhere/origin.git"])
+            .arg("origin")
+            .arg(repo.with_file_name("scratch-origin.git"))
             .current_dir(repo),
         format!("refs/heads/work {sha} {to} {ZEROS}\n").as_bytes(),
     )
@@ -1385,7 +1403,10 @@ fn naming_the_branch_refuses_the_pushes_a_guess_let_through() {
             origin.to_str().unwrap(),
         ],
     );
-    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        repo,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
     git(repo, &["push", "--quiet", "origin", "main:master"]);
     git(repo, &["remote", "set-head", "origin", "--auto"]);
     // The host renames master to main; after a pruning fetch, origin/HEAD

@@ -39,7 +39,11 @@ manual runs share keys. A task's cache key covers its declaration, input digests
 the `rustc -vV`/`cargo -V` the task shell resolves: `graph_runtime`, sykli#64),
 inherited-value digests, and
 the cache keys of its `after` dependencies, so a downstream task never reuses a
-pass recorded against upstream outputs it did not see. The receipt's subject
+pass recorded against upstream outputs it did not see. A task declaring
+`"reuse": false` (`Task::reuse`, serialized only when false, so no other key
+changes) is never offered to `Cache::restore` by `execute` and never stored by
+`conclude`; its `TaskReceipt` carries `reuse: false`, and
+`record_contradiction` refuses it recorded as `cached`. The receipt's subject
 binds the git tree OID (computed from a temporary index seeded from HEAD, with
 `.sykli/` excluded on both sides) and the declared-inputs digest. `verify` is
 staged: schema and record consistency (2), contract lock and contract hash (4),
@@ -181,7 +185,15 @@ tombstone in `sykli/pruned-runs/`, left by `prune`: a run is created aside and
 renamed into place with its lease held, and `remove_run` takes a lease only if
 it exists and moves the run aside before deleting it) concluded with it, and
 the verdict lets the newest recorded result decide, never an unrecorded pass
-over a recorded failure (`conflict`). `checkpoint(POINT)` is a debug-build
+over a recorded failure (`conflict`); its facts come from `commits_facts`, which
+asks the rounds of any number of commits in one `cat-file` session, and its
+verdict from `status_of` over receipts read once (`kept_receipts`). `status`
+with neither flag (`branch_status`) lists the local branches and origin's in
+one `for-each-ref`, picks the base as the hook does (`hook::remote_head`,
+`hook::default_branches`), counts ahead and behind in a second
+(`%(ahead-behind:)`), lists the review notes once, reads every branch's
+commit and review in one session, and judges each commit with `status_of`;
+it fetches nothing. `checkpoint(POINT)` is a debug-build
 test hook
 (`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
 crash window; release builds have none. On Windows `runs` is a stub of
@@ -199,8 +211,8 @@ that the lease's `lease-busy` tag becomes.
 (`help_lists_the_flags_other_tools_detect`).
 
 
-**Review and landing (`src/review.rs`, `src/land.rs`, Unix only).** Both take
-the worktree's root and run git there (`review::git`), so their tests use
+**Review (`src/review.rs`, Unix only).** It takes
+the worktree's root and runs git there (`review::git`), so its tests use
 real repositories with a bare remote and no process-wide state. `review`
 judges `merge-base(refs/remotes/REMOTE/BRANCH, HEAD)..HEAD` (the branch by
 `default_branch`, which reuses `hook::default_branches`), picks the reviewer
@@ -223,43 +235,32 @@ was persuaded. The record is kept as a `sykli-review.v1` note on the tree under
 `refs/notes/sykli/review` (`write_note` stores the bytes as a blob first, so
 a note holds them exactly). A kept record answers only for its `base`.
 `AGENT_MARKERS` are removed from the reviewer's environment and refuse
-`--overrule`, which also needs a terminal (`person_at_terminal`). `land`
-takes its proof from a `Prover` (injected in tests; `sykli_proof` asks
-`commit_status` and, only where its verdict is `none`, `verify` on the shared
-receipt note, both in this process), requires the fetched branch tip to be an
-ancestor of HEAD and the kept review's `base` to be that tip, attaches the
-receipt under `refs/notes/sykli/receipt`, copies it to the worktree's
-`.sykli/receipts` for the pre-push hook (`keep_for_hook`), merges and pushes
-the notes (`fetch_notes`, `push_notes`, strategy `ours`) and then pushes with
-`--force-with-lease` on the checked tip. `tests/land.rs` runs the binary with
-a script as the `codex` on a `PATH` that holds no real agent.
+`--overrule`, which also needs a terminal (`person_at_terminal`).
 
-**Deployments (`src/deploy.rs`, Unix only).** `preflight` refuses unless
-nothing is uncommitted, `land::sykli_proof` says the tree is proven (by the
-gate contract at the top level, `gate_contract`), and HEAD is an ancestor of
-`refs/remotes/REMOTE/BRANCH` as it stands (`landed`: yes, no, or unknown;
-nothing is fetched; `--allow-unlanded` turns no and unknown into
-`unlanded: true`). `command` then calls `run_reusing(.., reuse: false)`: the
-same run, journal and receipt as `run`, with `LocalCache::restore` answering
-nothing, so every task runs; `ran_receipt` still refuses a receipt with a
-task that is not `passed`. Only then, and only if HEAD did not move, `record`
-appends one `sykli-deployment.v1` line to the commit's note under
-`refs/notes/sykli/deploy`; `share` merges with `cat_sort_uniq`, so lines of
-two clones on one commit are all kept and their order means nothing
-(`latest` goes by `at`). `recorded` counts every line that is not a
-deployment of the commit it is on instead of dropping it, and returns None
-when the notes ref is not here: unknown, not "nothing deployed".
-
-**Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the
-coordinator at each checkpoint and of a task, SIGTERM/SIGINT, a stale
-coordinator, a replayed completion, inputs changed mid-run, concurrent cache
-stores; each ends on `nothing_unknown_passed`. Its tasks wait at FIFO
-latches to hold a run mid-flight; any new test that runs a latched task again
-must release the latch again. Its hook tests skip under `--release`.
-`resume_refuses_a_run_whose_coordinator_is_alive` pins the `run-busy` words
-that the lease's `lease-busy` tag becomes.
-`tests/cli.rs` pins the help flags other tools detect
-(`help_lists_the_flags_other_tools_detect`).
+**The gate to the default branch (`src/hook.rs`, `pre_push`).** Landing is
+a plain `git push`; the pre-push hook decides. It reads git's lines first and
+passes a push of no branch at once, with no git process (its own push of the
+notes comes back that way). For each accepted push to a gated branch,
+`reviewed` (Unix) asks what the one `cat-file` batch already answered (the
+remote sha's `^{commit}`, the remote-tracking branch) plus `merge-base
+--is-ancestor` and `review::read_record`: the tip git named must be an
+ancestor of the pushed commit and the kept review's `base` that tip, not
+blocking or overruled; a remote sha of zeros (a new branch) asks no review,
+so deleting a gated branch is refused. Then `share`, holding a lease on the
+common git directory itself (`journal::Lease::alone_within`, so concurrent
+pushes of one clone take turns and nothing is written for the lock), attaches
+each receipt under `refs/notes/sykli/receipt` (`review::write_note`), fetches
+`refs/notes/sykli/*` to `refs/notes-fetched/sykli/*` with `--prune` from the
+URL git hands the hook (the push URL, where a remote has one; the remote's name
+only when no URL is given), merges the review and receipt notes (`take_in`,
+`git notes merge -s ours`, so this clone's note on a tree stays) and pushes
+them there, taking in and pushing once
+more when the remote moved; a failure refuses the push (exit 2). Only then
+is the receipt kept in the common directory. On Windows the review and the
+sharing are not compiled: a push is judged by its receipt alone.
+`tests/push.rs` runs `git push` through the installed hook with a script as
+the `codex` on a `PATH` that holds no real agent; `tests/git_calls.rs` counts
+what the hook starts (not the processes git starts for a fetch or push).
 
 ## Working rules in this repository
 
@@ -284,6 +285,6 @@ logic is Rust. Existing Python or Node files are debt to be rewritten, not
 precedent to follow.
 
 
-## The path to the default branch and out
+## The path to the default branch
 
-The path from a passing receipt to the default branch is sykli's too, by the repository owner's decision, so that proving, reviewing and landing a commit are one tool's records about one tree. `review` starts an installed agent CLI as a reviewer, with reading tools only; `land` fetches from and pushes to the git remote the person names. `deploy` runs an ordinary contract for a proven, landed commit and records that it passed, as a line on the commit's note; it is not the typed delivery that was removed (no artifact types, no environments, no rollout state: the deploying is whatever the contract's tasks do), and it uses the network only to share its record when a remote is named. `deployed` reads those records. These are the only commands that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.
+sykli has one job, by the repository owner's decision of 2026-11-12: to decide whether code may go to the default branch, so that proving and reviewing a commit, and the decision to let it onto the branch, are one tool's records about one tree. Landing is a plain `git push` that the pre-push hook judges. `review` starts an installed agent CLI as a reviewer, with reading tools only; the pre-push hook, while git pushes, fetches notes from and pushes notes to the remote git is pushing to. A deployment is not sykli's: it is an ordinary contract the person runs (`sykli run deploy.json`), its tasks marked `"reuse": false`. These are the only parts that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.

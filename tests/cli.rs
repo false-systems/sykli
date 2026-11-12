@@ -502,6 +502,79 @@ fn run_json(root: &std::path::Path) -> (Option<i32>, serde_json::Value) {
     (out.status.code(), receipt)
 }
 
+/// A task that declares `"reuse": false` runs on every run, whatever the
+/// cache holds, as a deployment must, and its receipt entry says so; the task
+/// before it is reused as ever. No pass of it is stored for a later run to
+/// find, and a receipt that says it was reused contradicts its contract.
+#[test]
+fn a_task_that_forbids_reuse_runs_every_time_and_says_so() {
+    let root = graph_repo(
+        "no-reuse",
+        r#"{"schema":"sykli-contract.v1","tasks":[
+            {"name":"check","run":"true"},
+            {"name":"ship","run":"mkdir -p .sykli && echo shipped >> .sykli/shipped.log","after":["check"],"reuse":false}]}"#,
+    );
+    let task = |receipt: &serde_json::Value, name: &str| {
+        receipt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no task {name} in {receipt}"))
+    };
+    let (code, first) = run_json(&root);
+    assert_eq!(code, Some(0), "{first}");
+    assert_eq!(task(&first, "ship")["outcome"], "passed");
+    let (code, second) = run_json(&root);
+    assert_eq!(code, Some(0), "{second}");
+    assert_eq!(task(&second, "check")["outcome"], "cached");
+    assert_eq!(task(&second, "ship")["outcome"], "passed", "{second}");
+    assert_eq!(task(&second, "ship")["reuse"], false);
+    assert!(task(&second, "check").get("reuse").is_none(), "{second}");
+    assert_eq!(
+        fs::read_to_string(root.join(".sykli/shipped.log")).unwrap(),
+        "shipped\nshipped\n"
+    );
+    let (_, plan) = explain_json(&root, &[]);
+    let cache = |name: &str| {
+        plan["explanations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|explained| explained["task"] == name)
+            .map(|explained| explained["cache"]["status"].clone())
+            .unwrap()
+    };
+    assert_eq!(cache("check"), "available");
+    assert_eq!(cache("ship"), "missing", "{plan}");
+
+    let verify = |receipt: &serde_json::Value| {
+        let path = root.join(".sykli/edited-receipt.json");
+        fs::write(&path, receipt.to_string()).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .arg("verify")
+            .arg(&path)
+            .args(["--contract", "sykli.json"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(verify(&second).status.code(), Some(0));
+    let mut reused = second.clone();
+    for record in reused["tasks"].as_array_mut().unwrap() {
+        if record["name"] == "ship" {
+            record["outcome"] = "cached".into();
+            record["exit_code"] = serde_json::Value::Null;
+        }
+    }
+    let out = verify(&reused);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("reuse"), "{said}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn a_downstream_task_is_not_cached_against_outputs_it_never_saw() {
     let root = graph_repo(

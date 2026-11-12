@@ -45,8 +45,15 @@ impl Scratch {
         let base = std::env::temp_dir().join(format!("sykli-forgery-{name}-{nonce}"));
         let repo = base.join("repo");
         fs::create_dir_all(&repo).unwrap();
+        let origin = base.join("origin.git");
         let scratch = Scratch { base, repo };
         scratch.git(&["init", "--quiet", "--initial-branch=main"]);
+        // A remote an accepted push shares its receipt with, and the
+        // identity git writes that note as.
+        scratch.git(&["config", "user.name", "t"]);
+        scratch.git(&["config", "user.email", "t@t"]);
+        scratch.git(&["init", "--quiet", "--bare", origin.to_str().unwrap()]);
+        scratch.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
         fs::write(scratch.repo.join("file.txt"), "one\n").unwrap();
         fs::write(scratch.repo.join(".gitignore"), ".sykli/\n").unwrap();
         fs::write(scratch.repo.join("sykli.json"), contract).unwrap();
@@ -140,8 +147,9 @@ impl Scratch {
             serde_json::to_vec_pretty(receipt).unwrap(),
         )
         .unwrap();
+        let origin = self.base.join("origin.git");
         self.sykli(
-            &["hook", "pre-push", "origin", "/nowhere/origin.git"],
+            &["hook", "pre-push", "origin", origin.to_str().unwrap()],
             Some(&format!("refs/heads/work {sha} refs/heads/main {ZEROS}\n")),
         )
     }

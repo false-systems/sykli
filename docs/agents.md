@@ -86,10 +86,14 @@ Every command that looks for the repository accepts `--repo-root` and
 `--git-common-dir` (both, as `git rev-parse --path-format=absolute
 --show-toplevel --git-common-dir` prints them); with them sykli runs no git
 to find the repository; the root's `.git` must lead to the common directory
-(checked from files, or exit 2). `hook pre-push` then starts one git process, one
-`git cat-file --batch` for all pushed commits, `verify --commit` one,
-`validate` one (`git ls-files`, inside a repository), and `run` five; without
-them each starts one more.
+(checked from files, or exit 2). `hook pre-push` then starts one git process to
+judge every pushed commit, one `git cat-file --batch`; for a push it accepts
+onto a gated branch, two more for the review (`merge-base`, `notes show`)
+when the push replaces a tip, and five or six to share the evidence
+(`hash-object`, `notes add`, `fetch`, `for-each-ref`, a `notes merge` once the
+remote holds notes too, `push`). A push of no branch starts none.
+`verify --commit` starts one, `validate` one (`git ls-files`, inside a
+repository), and `run` five; without the facts each starts one more.
 
 Use `sykli plan --explain` to see why tasks are selected and inspect current
 cache evidence. It reads `sykli.json` automatically, even if `sykli.rs` also
@@ -360,3 +364,29 @@ that verify for that commit now, `historical` those of the same tree that do
 not, and `verdict` is `passed`, `failed`, `pending` or `none`. `sykli verify
 RECEIPT --commit REV --json` gives one receipt's verdict (`sykli-verify.v1`)
 with its trust tiers. Never infer a result from a receipt you parsed yourself.
+
+The way to the default branch is `sykli run`, `sykli review`,
+`git push origin HEAD:main`, with `sykli hook install --pre-push` run once
+per clone. The pre-push hook is the decision (Linux and macOS): it refuses
+(exit 1, and git does not push) a push to the default branch unless the
+pushed commit has a passing receipt that verifies for it, the tip it
+replaces is its ancestor, and its tree has a review against exactly that tip
+that is not blocking, or that a person overruled; then it shares the receipt
+and the review with the remote as notes (`refs/notes/sykli/receipt`,
+`refs/notes/sykli/review`) before the branch moves, and refuses (exit 2)
+when it cannot. Each refusal names what is missing and the command that
+supplies it (`sykli run sykli.json`, `sykli lock`, `git fetch`, `sykli
+review`); run that, and never push with `--no-verify` to get past it.
+`sykli review` exits 0 (`fine`, `look`, overruled, or nothing to review), 1
+(`blocking`) or 2 (no review happened); only a person at a terminal can
+overrule a blocking review, never an agent session.
+
+To see every local branch at once, use `sykli status --json`
+(`sykli-branch-status.v1`, Linux and macOS): against origin's default branch
+as this clone last fetched it (`base`, null when unknown here), each branch's
+`commit`, `proof` (`proven`, `failed`, `none`, `conflict`, `pending`, or
+`unknown` with a `warnings` entry), `review` (`fine`, `look`, `blocking`,
+`overruled`, `stale` when read against another tip, `none`, or `-` when the
+branch has nothing the base lacks; null when the base is unknown) and
+`ahead`/`behind` (null when unknown). It reads local state only and fetches
+nothing: `git fetch` first.

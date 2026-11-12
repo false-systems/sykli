@@ -66,8 +66,8 @@ cargo install --git https://github.com/false-systems/sykli --branch main --locke
 This version is not on crates.io yet. Once it is published,
 `cargo install sykli --locked` installs it; until then, use the command above.
 
-It runs on Linux, macOS and Windows. `review`, `land`, `deploy`, `deployed`,
-`status` and `resume` are on Linux and macOS only.
+It runs on Linux, macOS and Windows. `review`, `status` and `resume` are on
+Linux and macOS only, and so is the review the pre-push hook asks for.
 
 Running tasks needs Git, a POSIX `sh` and your project's own toolchain. On
 Windows, Git for Windows supplies `sh`.
@@ -80,7 +80,7 @@ commit:
 ```sh
 sykli init             # write sykli.json: one task per check it finds, with its inputs
 sykli run              # run them; prints passed or failed per task, and a receipt
-sykli hook install     # git now refuses a commit that fails, and a push to the default branch without a receipt
+sykli hook install     # git now refuses a commit that fails, and a push to the default branch without proof
 ```
 
 Run `sykli run` again and every task says `cached`: nothing changed, so
@@ -91,17 +91,25 @@ sykli init             # detect the ecosystems, write sykli.json and pin it
 sykli plan --explain   # which tasks a change needs and what is cached; runs nothing
 sykli run              # run the graph and write a receipt
 sykli verify RECEIPT --contract sykli.json   # does a receipt still match this tree?
-sykli hook install     # refuse a commit or a push that has no passing receipt
+sykli hook install     # refuse a commit, or a push to the default branch, that is not proven
 ```
 
-From a proven commit to production, on Linux and macOS:
+From a proven commit to the default branch, on Linux and macOS:
 
 ```sh
-sykli review           # a fresh agent reviews the change: fine, look or blocking
-sykli land             # push a proven, reviewed commit to the default branch
-sykli deploy           # run deploy.json for a landed commit and record it
-sykli deployed         # what went out to each target, and when
+sykli run                   # prove the commit: a receipt of its tree
+sykli review                # a fresh agent reviews the change: fine, look or blocking
+git push origin HEAD:main   # the pre-push hook lets a proven, reviewed commit through
+sykli status                # every local branch: proven? reviewed? how far from main?
 ```
+
+The pre-push hook (`sykli hook install --pre-push`) is what decides: it
+refuses a push to the default branch unless the commit has a passing receipt
+and a review against exactly the tip it replaces that is not blocking, and it
+shares both with the remote, as git notes, before the branch moves.
+
+A deployment is an ordinary contract run with `sykli run deploy.json`, its
+tasks marked `"reuse": false` so that they run every time.
 
 `sykli <command> --help` documents every flag and exit code.
 
@@ -136,7 +144,7 @@ the same tree, and for no other.
 
 ## More
 
-- [Reference](docs/reference.md): every command, the cache, durable runs, hooks, review, land and deploy.
+- [Reference](docs/reference.md): every command, the cache, durable runs, hooks, review and push, and deploying with a contract.
 - [Local checks before committing and pushing](docs/reference.md#local-checks-before-committing-and-pushing): set up the hooks in an existing repository.
 - [Agent guide](docs/agents.md): JSON queries, explanations and commit status for coding agents.
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [security policy](SECURITY.md).

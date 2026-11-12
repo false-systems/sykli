@@ -163,6 +163,15 @@ In a Cargo graph the runtime fingerprint also covers the Rust toolchain the
 task shell resolves (`rustc -vV`, `cargo -V`), so a pass recorded under one
 compiler is not reused under another.
 
+**A task can forbid reuse.** `"reuse": false` on a task makes it run on every
+run, whatever the cache holds: a deployment, a notification, anything whose
+effect is the point (`true`, the default, is not written). Its pass is never
+stored, its entry in the receipt says `"reuse": false`, and `verify` refuses
+(exit 2) a receipt that records such a task as `cached`. The field is part of
+the task's declaration, so adding it changes the task's cache key and the
+contract's hash: run `sykli lock` after. A task that runs `after` it is
+reused as usual unless it says so too.
+
 ### A graph you can try
 
 In a scratch Git repository:
@@ -715,7 +724,7 @@ editing the contract.
 | When | What Sykli actually does |
 |---|---|
 | Before commit | Runs the configured graph, reusing valid cached results, and verifies that it checked exactly the tree being committed. A failed checker blocks the commit. |
-| Before push | Verifies an existing passing receipt for the pushed commit on a gated branch. It does **not** execute a second graph or automatically run heavier tests. |
+| Before push | On a gated branch, verifies an existing passing receipt for the pushed commit and, on Linux and macOS, asks for its review against the tip it replaces, then shares both with the remote. It does **not** execute a second graph or automatically run heavier tests. |
 | On demand | `sykli run PATH` runs the entire selected contract. Use this for slow integration, recovery or formal checks you have declared. |
 
 Keep the commit graph fast enough for everyday use; Sykli does not impose a
@@ -775,10 +784,12 @@ safe.
   an ignored `name.json`) trips the untracked-file refusal while it writes;
   the fix belongs in that tool: write temporary files into an ignored
   directory.
-- `sykli hook pre-push` refuses a push that moves the remote's default branch
-  unless this worktree holds a receipt that passes
-  `sykli verify --commit` for the pushed commit. It looks in
-  `.sykli/receipt.json` and `.sykli/receipts/`. The default branch is the one
+- `sykli hook pre-push` decides whether a push may move the remote's default
+  branch. It refuses one unless this worktree holds a receipt that passes
+  `sykli verify --commit` for the pushed commit (it looks in
+  `.sykli/receipt.json` and `.sykli/receipts/`) and, on Linux and macOS, the
+  commit's tree has a review against exactly the tip the push replaces
+  ([review and push](#review-and-push)). The default branch is the one
   `refs/remotes/REMOTE/HEAD` names, or else `main` and `master`. That is a
   guess: git never moves `refs/remotes/REMOTE/HEAD` after the host renames its
   default branch, and the branch you protect need not be the default. Name the
@@ -786,11 +797,13 @@ safe.
   gates exactly `refs/heads/NAME` for each and guesses nothing. Without
   `--branch`, a `refs/remotes/REMOTE/HEAD` that names a ref that no longer
   exists counts as unknown: `main` and `master` are gated, and a note says so.
-  Deletions, tags and pushes to other branches pass. A refusal names the
-  command that produces a receipt: `sykli run sykli.json` with the commit
-  checked out, or `sykli lock` first when the contract differs from its lock.
-  Cached tasks make that run quick, and the run the pre-commit hook made
-  already counts.
+  Tags and pushes to other branches pass, and share nothing. A deletion of a
+  gated branch is refused: pushed again, the branch would be new, with no tip
+  to review against (`git push --no-verify` does it on purpose). A refusal
+  names the command that supplies what is missing: `sykli run sykli.json` with
+  the commit checked out, or `sykli lock` first when the contract differs from
+  its lock, or `sykli review`. Cached tasks make that run quick, and the run
+  the pre-commit hook made already counts.
 - When the hook accepts a push to the default branch, it copies the receipt
   that verified it into the repository's common git directory, as
   `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, named
@@ -817,15 +830,17 @@ safe.
 A commit with no `sykli.json` or `sykli.rs`, pushed where there was none
 before, passes with a note.
 
-## Review and land
+## Review and push
 
-Two commands take a proven commit the rest of the way to the default branch
-without a pull request (Linux and macOS):
+A proven commit goes the rest of the way to the default branch without a
+pull request, through a plain `git push` that the pre-push hook judges
+(Linux and macOS):
 
 ```sh
-sykli run        # prove the commit: a receipt of its tree
-sykli review     # a fresh agent reads the change and gives a verdict
-sykli land       # put it on the default branch, with its evidence
+sykli hook install --pre-push   # once per clone
+sykli run                       # prove the commit: a receipt of its tree
+sykli review                    # a fresh agent reads the change and gives a verdict
+git push origin HEAD:main       # the hook lets it through, with its evidence
 ```
 
 **`sykli review`** reviews the commit checked out against the remote's default
@@ -839,12 +854,14 @@ The reply is one line per finding, `- [blocking] ...` or `- [look] ...`, and
 one verdict line, `REVIEW <token>: fine`, `REVIEW <token>: look` or
 `REVIEW <token>: blocking`, where the token is a random word of this run
 ([why](#a-change-that-addresses-its-reviewer)); the verdict is raised to its
-worst finding. It prints one summary line and the findings:
+worst finding. It prints one summary line and the findings, and on stderr the
+push that comes next:
 
 ```console
 $ sykli review
 review: look (0 blocking, 1 to look at) by codex, another agent than the author
   [look] src/parse.rs:41: the new branch has no test.
+review: next: git push origin HEAD:main
 ```
 
 | Exit | `sykli review` |
@@ -858,32 +875,48 @@ A person who accepts a blocking finding runs
 and inside an agent session; it records the reason and the time, since who
 typed it cannot be known.
 
-**`sykli land`** fetches the default branch and refuses (exit 1, saying what
-is missing) unless nothing is uncommitted, that branch is an ancestor of
-`HEAD` (otherwise merge it in, then prove and review the result), the commit's
-tree has a passing receipt that verifies for the commit
-(`sykli status --commit`), and a review of this tree against exactly that
-branch tip is kept and is not blocking, or was overruled. A receipt another
-clone shared counts only where this clone knows nothing of the tree, never
-after a failure recorded here, and only if it verifies here. Then it attaches
-the receipt to the tree as a note, merges the remote's notes, pushes the
-notes first, and only then pushes `HEAD` to the branch, with a lease on the
-tip it checked: a landing that raced this one makes the push fail instead of
-landing a change nobody reviewed against the new tip. The pre-push hook still
-runs for that push and judges the same receipt.
+`review` is a command of its own, never a task of the gate: the pre-commit
+hook runs the gate on every commit, and a review costs a paid agent minutes.
 
-| Exit | `sykli land` |
-|---|---|
-| `0` | landed: the branch is this commit, and its receipt and review are shared |
-| `1` | refused; nothing was pushed |
-| `2` | could not tell, or a push failed |
+**`git push`** to the default branch goes through the
+[pre-push hook](#git-hooks), which refuses it (exit 1, saying what is missing
+and the command that supplies it) unless the pushed commit's tree has a
+passing receipt that verifies for the commit, the tip git names as the
+remote's (the remote sha on the hook's input) is an ancestor of the commit
+(otherwise merge it in, then prove and review the result), and a review of
+this tree against exactly that tip is kept and is not blocking, or was
+overruled. When this clone's copy of the branch is not that tip, the refusal
+says to fetch first. A branch new on the remote has no tip, and no review is
+asked. Git itself refuses a push that is not a fast-forward before it runs
+the hook; a forced one reaches the hook, and is refused for the commits it
+would drop.
+
+Then, before the branch moves, the hook shares the evidence where git is
+pushing (the URL git names, which is the push URL when the remote has one):
+it attaches the receipt to the tree as a note, fetches the `refs/notes/sykli/*`
+there and merges them into this clone's (where both hold a note for one tree,
+this clone's stays), and pushes the review and receipt notes there. If that
+fails, the push is refused (exit 2) and the branch does not move. Two pushes of one
+clone share one at a time. The hook's own push of the notes runs the hook
+again, for notes refs only, which pass at once and say nothing. A
+`git push --dry-run` reaches the hook too, and shares the evidence as well.
+On Windows the hook judges a push by its receipt alone: `review` and the
+sharing need Linux or macOS.
+
+```console
+$ git push origin HEAD:main
+sykli hook pre-push: 1a2b3c4d5e6f to refs/heads/main: .sykli/receipts/rcpt_….json is a passing run of its tree
+sykli hook pre-push: 1a2b3c4d5e6f is reviewed look against origin's main (9f8e7d6c5b4a)
+sykli hook pre-push: shared refs/notes/sykli/review and refs/notes/sykli/receipt with origin before the branch moves
+sykli hook pre-push: kept /…/.git/sykli/receipts/rcpt_….json as evidence for 1a2b3c4d5e6f
+```
 
 Both records are git notes on the commit's **tree**, so they follow the
 content, not the commit id: reviews under `refs/notes/sykli/review` (JSON,
 `sykli-review.v1`: tree, head, base, level, findings, reviewer, authors,
 independent, at, overruled), receipts under `refs/notes/sykli/receipt` (the
 receipt as `run` wrote it). Git does not fetch notes by default. Another clone
-checks a landed commit without running anything:
+checks a pushed commit without running anything:
 
 ```sh
 git fetch origin 'refs/notes/sykli/*:refs/notes/sykli/*'
@@ -990,67 +1023,79 @@ The limits:
   default branch moves, the merged result is a new tree, to be proven and
   reviewed again.
 
-## Deploy, and what went out
+## What is cooking
 
-A deployment is an ordinary contract, `deploy.json`, whose tasks do the
-deploying. `sykli deploy` runs it for a commit that is proven and landed, and
-keeps a record (Linux and macOS):
-
-```sh
-sykli lock deploy.json      # pin it, like any contract
-sykli deploy                # run deploy.json for the commit checked out
-sykli deployed              # the latest recorded deployment of each target
-```
-
-**`sykli deploy [CONTRACT] [--target NAME] [--remote NAME]`** refuses (exit 1)
-unless nothing is uncommitted, the commit's tree has a passing receipt of the
-gate contract (`sykli.json`) that verifies for the commit, and the commit is
-in the remote's default branch as this clone last fetched it. It fetches
-nothing itself, so fetch first. `--allow-unlanded` lets a commit out that is
-not in that branch, or where that cannot be told, and the record says so.
-
-Then it runs the contract as `sykli run CONTRACT` does, with one difference:
-**every task runs on every deploy.** A pass reused from the cache would be a
-deployment that never happened. So the tasks of a deploy contract must be
-safe to repeat: a failed or interrupted deploy is run again, and nothing is
-rolled back. `--target` (default `default`) is a name for the record, not
-something a task is told; keep one contract per target.
-
-When every task passed, the deployment is recorded as one JSON line appended
-to a git note on the **commit** under `refs/notes/sykli/deploy`
-(`sykli-deployment.v1`: commit, tree, target, contract, contract_digest,
-receipt_digest, at, unlanded). A failed deploy run records nothing as
-deployed, and says so. With `--remote NAME` the remote's records are fetched
-and merged, every line of both kept, and the notes are pushed; without it the
-record stays in this clone and the git commands that share it are printed.
-
-| Exit | `sykli deploy` |
-|---|---|
-| `0` | the deploy contract passed and the deployment is recorded |
-| `1` | refused before anything ran, or the deploy run failed: nothing is recorded |
-| `2` | could not tell; or deployed, but the record could not be written or shared |
-| `128+N` | the deploy run was stopped by signal N: nothing is recorded |
-
-**`sykli deployed [--target NAME] [--json]`** prints, for each target, the
-latest deployment this clone has a record of:
+`sykli status`, with neither `--run` nor `--commit`, shows every local branch
+at once, against origin's default branch as this clone last fetched it
+(Linux and macOS):
 
 ```console
-$ sykli deployed
-default: 22a831bdcfad  Add a deploy contract that publishes the greeting  2026-11-10 18:48:36 UTC
-staging: eafcbb0aaba4  (commit not in this clone)  2026-11-10 18:45:48 UTC  (unlanded)
+$ sykli status
+against origin/main at 3c1d9e0a7b21, as this clone last fetched it
+* cut/one-job  9f8e7d6c5b4a  proven    review fine        3 ahead  0 behind
+  docs/notes   1a2b3c4d5e6f  none      review stale       1 ahead  2 behind
+  main         3c1d9e0a7b21  proven    review -           0 ahead  0 behind
 ```
 
-It reads this clone's notes and fetches nothing. Unknown stays unknown: where
-there is no record it says that nothing has been recorded here, not that
-nothing was deployed. Fetch other clones' records with
-`git fetch origin 'refs/notes/sykli/deploy:refs/notes/sykli/deploy'`.
+The branch checked out is marked `*`. For each branch:
 
-The limits: a record says that the deploy contract passed for that commit, in
-some clone, at a time that clone's clock gave. It is not signed, anyone who
-can push can write one, and it is not proof of what is running anywhere now. A
-deployment made some other way, or never shared, is not in it. A deploy run
-that fails halfway leaves whatever its tasks did; sykli knows only that it
-did not pass.
+- **proof** is the verdict `status --commit` gives for its commit, by the
+  contract that commit carries: `proven` (a passing receipt that verifies for
+  that commit), `failed`, `none` (no receipt of its tree in this clone),
+  `conflict` or `pending`; `unknown`, with why on stderr, when it cannot be
+  judged (a commit that carries no contract, say).
+- **review** is the review kept for its tree: `fine`, `look`, `blocking`,
+  `overruled`, `stale` when it was read against another tip than the base's
+  (the pre-push hook would refuse it: review again), `none`, or `-` when the
+  branch has no commit the base lacks.
+- **ahead** and **behind** count commits against the base (git 2.41 or later;
+  `?` otherwise).
+
+It reads this clone's refs, notes, receipts and runs, and nothing else:
+nothing is fetched, so run `git fetch` first to see the remote as it is now.
+Git is asked a fixed number of times however many branches there are (two
+`for-each-ref`, one `notes list`, one `cat-file --batch`). `--json` prints one
+`sykli-branch-status.v1` document: `remote`, `base` (`branch` and `commit`,
+or null when the default branch is unknown here), `branches` (`branch`,
+`current`, `commit`, `tree`, `proof`, `review`, `ahead`, `behind`; null where
+unknown) and `warnings`.
+
+## Deploy with a contract
+
+A deployment is an ordinary contract whose tasks do the deploying, kept as
+`deploy.json` and pinned in `sykli.lock` like the gate. Mark every task that
+must happen on each deploy `"reuse": false`: a pass reused from the cache
+would be a deployment that never happened, so such a task runs every time,
+whatever the cache holds ([reuse](#how-it-works)). A task that runs `after`
+one is reused as usual unless it says so too.
+
+```json
+{
+  "schema": "sykli-contract.v1",
+  "tasks": [
+    { "name": "on-main", "run": "git merge-base --is-ancestor HEAD origin/main", "reuse": false },
+    { "name": "ship", "run": "sh deploy/ship.sh", "inputs": ["deploy/ship.sh"], "after": ["on-main"], "reuse": false }
+  ]
+}
+```
+
+```sh
+sykli lock deploy.json     # pin it, like any contract
+git fetch origin           # on-main asks what this clone last fetched
+sykli run deploy.json      # runs every task marked "reuse": false, every time
+```
+
+`on-main` refuses a commit that is not on the default branch, where the
+pre-push hook lets only a proven, reviewed commit through
+([review and push](#review-and-push)). The tasks of a deploy contract must
+be safe to repeat: a failed or interrupted deploy is run again (or resumed,
+which reruns a lost task at least once), and nothing is rolled back.
+
+What went out from this clone is in its receipts: a deploy run writes one
+like any run, each such task marked `"reuse": false`, and
+`sykli status --commit COMMIT --contract deploy.json` lists the runs of that
+commit's tree and judges their receipts. That is a record of what ran here,
+not of what is running anywhere now, and it stays in this clone.
 
 ## Keep the contract outside the repository
 
@@ -1378,8 +1423,7 @@ The cache, the receipts and runs are bounded, and each limit is stated:
 | Receipts | **200**; oldest removed first, never one that a live cache entry cites | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
-| Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or landed, replaced when that tree is reviewed or landed again; they are git objects and grow with the trees landed, as the history does. `land` also puts the receipt it rests on in `.sykli/receipts`, under the receipt limit above | — |
-| Deployment records, in git (`refs/notes/sykli/deploy`) | **One line per deployment**, on the deployed commit's note; a log, which grows with the deployments made and is never trimmed by sykli | — |
+| Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or pushed to the default branch, replaced when that tree is reviewed or pushed again; they are git objects and grow with the trees pushed, as the history does. The pre-push hook also fetches the remote's beside them, under `refs/notes-fetched/sykli/*`, pruned to what the remote holds | — |
 | Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. Not pruned on Windows (remove them by hand when no run is live) | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
@@ -1396,14 +1440,12 @@ entry costs a re-run, never a result.
 | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
 | `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
+| `status` | What is cooking: each local branch's proof, review and distance from the default branch, from local state |
 | `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
 | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
 | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |
-| `hook` | Git hook entrypoints that gate what is committed and pushed |
-| `review` | Have a fresh agent review the commit checked out against the default branch; the verdict is kept as a note on its tree |
-| `land` | Push a proven, reviewed commit to the default branch, sharing its receipt and review as notes |
-| `deploy` | Run a deploy contract for a proven, landed commit, every task every time, and record the deployment as a note on the commit |
-| `deployed` | The latest recorded deployment of each target, from this clone's notes |
+| `hook` | Git hook entrypoints that gate what is committed and pushed; pre-push decides whether a push may move the default branch and shares its receipt and review |
+| `review` | Have a fresh agent review the commit checked out against the default branch; the verdict is kept as a note on its tree, and the pre-push hook asks for it |
 
 Every command documents its flags and exit codes in `sykli <command> --help`.
 

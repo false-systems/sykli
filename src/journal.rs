@@ -336,6 +336,36 @@ impl Lease {
         }
     }
 
+    /// Hold `path`, an existing file or directory, opened to read and never
+    /// written, alone, waiting at most `within` while another process holds
+    /// it. For work that takes as long as the network does, such as the
+    /// pre-push hook sharing a push's evidence.
+    pub fn alone_within(path: &Path, within: std::time::Duration) -> Result<Self, String> {
+        let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            // SAFETY: owned descriptor; LOCK_EX | LOCK_NB never waits in the kernel.
+            if unsafe { flock(file.as_raw_fd(), 2 | 4) } == 0 {
+                return Ok(Self::held(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Err(format!("{}: {error}", path.display()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "{} remained locked for {} seconds by another process",
+                    path.display(),
+                    within.as_secs()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     pub fn journal(directory: &Path) -> Result<Self, String> {
         let path = directory.join("journal-lock");
         let file = match File::open(&path) {
