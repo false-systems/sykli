@@ -15,11 +15,15 @@
 //!   reviewer that failed, ran out of time or gave no verdict. Never a pass.
 //!
 //! What a review found is kept as a git note on the commit's tree
-//! (`refs/notes/sykli/review`), so every worktree of the clone reads it and
-//! `sykli land` can push it. It answers only for the base it was read
-//! against: the same tree on another base is another change. One note per
-//! tree, replaced when the tree is reviewed again, so the notes grow with the
-//! trees reviewed, as the commits themselves do.
+//! (`refs/notes/sykli/review`), so every worktree of the clone reads it, the
+//! pre-push hook asks for it when `git push` moves the default branch, and
+//! shares it with the remote before the branch moves. It answers only for
+//! the base it was read against: the same tree on another base is another
+//! change. One note per tree, replaced when the tree is reviewed again, so
+//! the notes grow with the trees reviewed, as the commits themselves do.
+//!
+//! It is a command of its own, never a task of the gate: the pre-commit hook
+//! runs the gate on every commit, and a review costs a paid agent minutes.
 
 use crate::{hook, repo};
 use serde::{Deserialize, Serialize};
@@ -968,8 +972,9 @@ pub(crate) fn command(remote: &str, branch: Option<&str>, overrule_why: Option<&
             let root = repository.root.as_path();
             let branch = default_branch(root, remote, branch)?;
             let base_ref = format!("refs/remotes/{remote}/{branch}");
+            let push = format!("git push {remote} HEAD:{branch}");
             match overrule_why {
-                None => reviewed(root, &base_ref, &format!("{remote}/{branch}")),
+                None => reviewed(root, &base_ref, &format!("{remote}/{branch}"), &push),
                 Some(why) if why.trim().is_empty() => {
                     Err("--overrule takes the reason, in words".to_string())
                 }
@@ -980,6 +985,7 @@ pub(crate) fn command(remote: &str, branch: Option<&str>, overrule_why: Option<&
                 .and_then(|()| overrule(root, &base_ref, why))
                 .map(|record| {
                     println!("{}", summary(&record));
+                    eprintln!("review: next: {push}");
                     FINE
                 }),
             }
@@ -990,8 +996,9 @@ pub(crate) fn command(remote: &str, branch: Option<&str>, overrule_why: Option<&
     }))
 }
 
-/// Review, and say what was found: one line, then the findings.
-fn reviewed(root: &Path, base_ref: &str, shown: &str) -> Result<u8, String> {
+/// Review, and say what was found: one line, then the findings; and on
+/// stderr, what comes next (`push`, the push the pre-push hook judges).
+fn reviewed(root: &Path, base_ref: &str, shown: &str, push: &str) -> Result<u8, String> {
     let Some(record) = review(root, base_ref, &installed(), &run_agent)? else {
         println!("review: nothing to review: this commit is already in {shown}");
         return Ok(FINE);
@@ -1003,9 +1010,11 @@ fn reviewed(root: &Path, base_ref: &str, shown: &str) -> Result<u8, String> {
     let code = exit_code(&record);
     if code == BLOCKING {
         eprintln!(
-            "review: blocking stops the landing. Fix it and commit, or a person runs \
+            "review: blocking stops `{push}`. Fix it and commit, or a person runs \
              `sykli review --overrule \"<why>\"` at a terminal."
         );
+    } else {
+        eprintln!("review: next: {push}");
     }
     Ok(code)
 }

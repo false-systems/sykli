@@ -369,6 +369,12 @@ fn questions(
     {
         let sha = &update.local_sha;
         names.extend(crate::commit_names(sha));
+        // For the review: whether this clone has the tip the push replaces,
+        // and where its own copy of that branch is.
+        if !absent(&update.remote_sha) {
+            names.push(format!("{}^{{commit}}", update.remote_sha));
+        }
+        names.extend(tracking(update, remote));
         match gate {
             Some((_, true)) => {}
             Some((contract, false)) => {
@@ -505,10 +511,238 @@ fn next_step(contract: &Path, drifted: bool, outside: bool, short: &str) -> Stri
     }
 }
 
-/// `sykli hook pre-push`: a push that moves the default branch needs a clean,
-/// passing receipt of exactly the commit it pushes. Whether a push is gated is
-/// decided from the commits, never from the working tree: the pushed commit's
-/// contract gates it, and a commit that drops the contract the branch had is
+/// A push to a gated branch whose receipt verified (and, on Linux and macOS,
+/// whose review counts): what is shared and kept for it.
+struct Accepted {
+    short: String,
+    /// The commit's tree, which its review and its shared receipt are on.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    tree: String,
+    /// The bytes of the receipt that verified.
+    receipt: Vec<u8>,
+}
+
+/// Where receipts travel: one note per tree, the receipt as `run` wrote it.
+#[cfg(unix)]
+pub(crate) const RECEIPTS: &str = "refs/notes/sykli/receipt";
+
+/// The notes a push to a gated branch shares: one review and one receipt
+/// per tree.
+#[cfg(unix)]
+const SHARED: [&str; 2] = [crate::review::NOTES, RECEIPTS];
+
+/// How long a push waits while another push of the same clone shares its
+/// evidence: a fetch and a push of notes, at the network's pace.
+#[cfg(unix)]
+const SHARE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The first twelve characters of an object id, for messages.
+#[cfg(unix)]
+fn short_id(id: &str) -> &str {
+    &id[..id.len().min(12)]
+}
+
+/// Whether the review kept for the pushed commit's tree lets it onto the
+/// branch: the tip the push replaces (the remote sha git named) is an
+/// ancestor of the commit, and the commit's tree was reviewed against
+/// exactly that tip, not blocking or overruled. A branch new on the remote
+/// has no tip to review against. `Ok(Ok(said))` lets it by, `Ok(Err(why))`
+/// refuses it with what is missing and the command that supplies it, and
+/// `Err` is what could not be told.
+#[cfg(unix)]
+fn reviewed(
+    root: &Path,
+    update: &Update,
+    tree: &str,
+    answers: &crate::Answers,
+    remote: Option<&str>,
+    branch_named: bool,
+) -> Result<Result<String, String>, String> {
+    use crate::review;
+    let short = short_id(&update.local_sha);
+    let branch = update
+        .remote_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&update.remote_ref);
+    let named_remote = remote.unwrap_or("REMOTE");
+    let on = format!("{named_remote}'s {branch}");
+    let tip = update.remote_sha.as_str();
+    if absent(tip) {
+        return Ok(Ok(format!(
+            "{on} is new: there is no tip to review {short} against, so no review is asked"
+        )));
+    }
+    if tip == update.local_sha {
+        return Ok(Ok(format!("{on} is already {short}")));
+    }
+    let tip_short = short_id(tip);
+    if crate::answer(answers, &format!("{tip}^{{commit}}")).is_none() {
+        return Ok(Err(format!(
+            "{on} is at {tip_short}, which this clone does not have: fetch it (git fetch \
+             {named_remote}), merge it in, then prove and review the result"
+        )));
+    }
+    if !is_ancestor(root, tip, &update.local_sha)? {
+        return Ok(Err(format!(
+            "{on} ({tip_short}) has commits {short} lacks: merge it in, then prove and review \
+             the result"
+        )));
+    }
+    // `sykli review` reviews against this clone's copy of the branch: when
+    // that is not the tip git named, it is fetched first.
+    let current = tracking(update, remote)
+        .and_then(|tracking| crate::answer(answers, &tracking))
+        .is_some_and(|tracking| tracking.id == tip);
+    let mut review = "sykli review".to_string();
+    if named_remote != "origin" {
+        review.push_str(&format!(" --remote {named_remote}"));
+    }
+    if branch_named {
+        review.push_str(&format!(" --branch {branch}"));
+    }
+    let run = format!(
+        "{}with {short} checked out, run: {review}",
+        if current {
+            String::new()
+        } else {
+            format!("fetch it (git fetch {named_remote}), then ")
+        }
+    );
+    let Some(record) = review::read_record(root, tree)? else {
+        return Ok(Err(format!(
+            "{short} is not reviewed against {on} ({tip_short}): {run}"
+        )));
+    };
+    if record.base != tip {
+        return Ok(Err(format!(
+            "{short} is not reviewed against {on} as it is now ({tip_short}); the review kept \
+             for its tree is against {}: {run}",
+            short_id(&record.base)
+        )));
+    }
+    if review::exit_code(&record) != 0 {
+        return Ok(Err(format!(
+            "the review of {short} against {on} is blocking ({} finding(s)): fix it and commit, \
+             or a person overrules it at a terminal with: sykli review --overrule \"<why>\"",
+            record.findings.len()
+        )));
+    }
+    Ok(Ok(format!(
+        "{short} is reviewed {} against {on} ({tip_short}){}",
+        record.level,
+        if record.overruled.is_some() {
+            ", and a person overruled it"
+        } else {
+            ""
+        }
+    )))
+}
+
+/// Whether `ancestor` is an ancestor of `descendant` (or the same commit).
+#[cfg(unix)]
+fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    let status = repo::git_command()
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git merge-base --is-ancestor {ancestor} {descendant} failed"
+        )),
+    }
+}
+
+/// Share the evidence of an accepted push before the branch moves: attach
+/// each receipt to its tree as a note, take in the remote's notes (where
+/// both hold a note for one tree, this clone's stays), and push the notes.
+/// When the remote's moved meanwhile, they are taken in again and the push
+/// is tried once more. Returns the notes refs pushed. That push runs this
+/// hook again, for notes refs only, which pass at once.
+#[cfg(unix)]
+fn share(root: &Path, remote: &str, accepted: &[Accepted]) -> Result<Vec<&'static str>, String> {
+    use crate::review;
+    for proven in accepted {
+        review::write_note(root, RECEIPTS, &proven.tree, &proven.receipt).map_err(|error| {
+            format!(
+                "the receipt could not be attached to tree {}: {error}",
+                proven.tree
+            )
+        })?;
+    }
+    let kept = take_in(root, remote)?;
+    let mut push = vec!["push", "--quiet", remote];
+    push.extend(kept.iter().copied());
+    if review::git(root, &push).is_ok() {
+        return Ok(kept);
+    }
+    // Another clone shared notes meanwhile: take them in and push once more.
+    take_in(root, remote)?;
+    review::git(root, &push)?;
+    Ok(kept)
+}
+
+/// Fetch the remote's sykli notes beside this clone's
+/// (`refs/notes-fetched/sykli/*`) and merge them in, keeping this clone's
+/// note where both hold one for a tree (`git notes merge -s ours`). Returns
+/// the shared notes refs this clone holds afterwards.
+#[cfg(unix)]
+fn take_in(root: &Path, remote: &str) -> Result<Vec<&'static str>, String> {
+    use crate::review;
+    review::git(
+        root,
+        &[
+            "fetch",
+            "--quiet",
+            "--prune",
+            remote,
+            "+refs/notes/sykli/*:refs/notes-fetched/sykli/*",
+        ],
+    )?;
+    let listed = review::git(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/notes/sykli/",
+            "refs/notes-fetched/sykli/",
+        ],
+    )?;
+    let present = listed.lines().collect::<std::collections::BTreeSet<_>>();
+    let mut kept = Vec::new();
+    for notes in SHARED {
+        let fetched = notes.replacen("refs/notes/", "refs/notes-fetched/", 1);
+        let here = present.contains(notes);
+        if present.contains(fetched.as_str()) {
+            if here {
+                review::git(
+                    root,
+                    &[
+                        "notes", "--ref", notes, "merge", "--quiet", "-s", "ours", &fetched,
+                    ],
+                )?;
+            } else {
+                review::git(root, &["update-ref", notes, &fetched])?;
+            }
+            kept.push(notes);
+        } else if here {
+            kept.push(notes);
+        }
+    }
+    Ok(kept)
+}
+
+/// `sykli hook pre-push`: the decision whether code may go to the default
+/// branch. A push that moves it needs a clean, passing receipt of exactly the
+/// commit it pushes and, on Linux and macOS, a review of that commit's tree
+/// against exactly the tip it replaces, which must be its ancestor; then the
+/// receipt and the review are shared with the remote before the branch moves
+/// (`share`). Whether a push is gated is decided from the commits, never from
+/// the working tree: the pushed commit's contract gates it, and a commit that
+/// drops the contract the branch had, or a deletion of the branch, is
 /// refused, so taking the gate off takes an explicit `--no-verify`.
 ///
 /// With `contract`, that contract gates every push to a gated branch,
@@ -532,18 +766,7 @@ pub(crate) fn pre_push(
     branches: &[String],
 ) -> ExitCode {
     const HOOK: &str = "pre-push";
-    let repository = match enter_repository(HOOK) {
-        Ok(repository) => repository,
-        Err(code) => return code,
-    };
-    let gate = match contract.map(|contract| named_contract(HOOK, contract)) {
-        Some(Ok(contract)) => {
-            let outside = crate::outside_repository(&contract).is_some();
-            Some((contract, outside))
-        }
-        Some(Err(code)) => return code,
-        None => None,
-    };
+    let branch_named = !branches.is_empty();
     let named = match named_branches(branches) {
         Ok(named) => named,
         Err(error) => {
@@ -562,6 +785,27 @@ pub(crate) fn pre_push(
             eprintln!("sykli hook {HOOK}: cannot read what is pushed: {error}");
             return ExitCode::from(CANNOT_EVALUATE);
         }
+    };
+    // Only a branch can be gated. A push of nothing else (tags, or the notes
+    // this hook pushes itself before the branch moves, which runs it again)
+    // passes at once, says nothing, and starts no git.
+    if !updates
+        .iter()
+        .any(|update| update.remote_ref.starts_with("refs/heads/"))
+    {
+        return ExitCode::SUCCESS;
+    }
+    let repository = match enter_repository(HOOK) {
+        Ok(repository) => repository,
+        Err(code) => return code,
+    };
+    let gate = match contract.map(|contract| named_contract(HOOK, contract)) {
+        Some(Ok(contract)) => {
+            let outside = crate::outside_repository(&contract).is_some();
+            Some((contract, outside))
+        }
+        Some(Err(code)) => return code,
+        None => None,
     };
     let pushed = updates
         .iter()
@@ -612,6 +856,20 @@ pub(crate) fn pre_push(
                 );
             }
         }
+    }
+    // A branch pushed again after it was deleted is new on the remote, with
+    // no tip to review against, so a deletion would take the gate off.
+    if let Some(deleted) = updates
+        .iter()
+        .find(|update| absent(&update.local_sha) && defaults.contains(&update.remote_ref))
+    {
+        eprintln!(
+            "sykli hook {HOOK}: refusing to delete {}: pushed again, it would be a new branch with \
+             no tip to review against, so this push would take the gate off. To do that on \
+             purpose, push with --no-verify",
+            deleted.remote_ref
+        );
+        return ExitCode::from(REFUSED);
     }
     // A named contract outside the repository is the same for every commit:
     // read once, from its file.
@@ -775,7 +1033,39 @@ pub(crate) fn pre_push(
                     update.remote_ref,
                     receipt.display()
                 );
-                accepted.push((short.to_string(), bytes));
+                // The commit's own tree, which reviews and shared receipts
+                // are kept on (the receipt's leaves out a tracked `.sykli`).
+                let tree = crate::answer(&answers, &format!("{sha}^{{tree}}"))
+                    .map(|tree| tree.id.clone())
+                    .or_else(|| at.as_ref().ok().map(|at| at.tree.clone()))
+                    .unwrap_or_default();
+                #[cfg(unix)]
+                match reviewed(
+                    &repository.root,
+                    update,
+                    &tree,
+                    &answers,
+                    remote,
+                    branch_named,
+                ) {
+                    Ok(Ok(said)) => eprintln!("sykli hook {HOOK}: {said}"),
+                    Ok(Err(refusal)) => {
+                        eprintln!(
+                            "sykli hook {HOOK}: refusing to push {short} to {}: {refusal}",
+                            update.remote_ref
+                        );
+                        return ExitCode::from(REFUSED);
+                    }
+                    Err(error) => {
+                        eprintln!("sykli hook {HOOK}: cannot judge the review of {short}: {error}");
+                        return ExitCode::from(CANNOT_EVALUATE);
+                    }
+                }
+                accepted.push(Accepted {
+                    short: short.to_string(),
+                    tree,
+                    receipt: bytes,
+                });
             }
             Err(reason) => {
                 eprintln!(
@@ -791,12 +1081,57 @@ pub(crate) fn pre_push(
             }
         }
     }
-    // Only once every ref is accepted: a refused push keeps nothing. Keeping
-    // evidence is a convenience, never a reason to stop the push.
+    // Only once every ref is accepted: a refused push shares and keeps
+    // nothing. The evidence reaches the remote before the branch moves, as
+    // the review and the receipt the branch rests on; a branch does not move
+    // without them, so a failure to share refuses the push.
+    #[cfg(unix)]
+    if !accepted.is_empty() {
+        let Some(remote) = remote else {
+            eprintln!(
+                "sykli hook {HOOK}: refusing the push: no remote is named (git names it when it \
+                 runs this hook), so the receipt and the review cannot be shared"
+            );
+            return ExitCode::from(CANNOT_EVALUATE);
+        };
+        // One push of this clone shares at a time: concurrent ones would
+        // contend for the same notes refs. The lock is on the common git
+        // directory itself, so nothing is written for it.
+        let shared = crate::journal::Lease::alone_within(&repository.common_dir, SHARE_WAIT)
+            .map_err(|error| format!("another push of this clone is sharing its evidence: {error}"))
+            .and_then(|_alone| share(&repository.root, remote, &accepted));
+        match shared {
+            Ok(shared) => eprintln!(
+                "sykli hook {HOOK}: shared {} with {remote} before the branch moves",
+                shared.join(" and ")
+            ),
+            Err(error) => {
+                eprintln!(
+                    "sykli hook {HOOK}: refusing the push: the receipt and the review could not \
+                     be shared with {remote}, and the branch does not move without them: {error}"
+                );
+                return ExitCode::from(CANNOT_EVALUATE);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if !accepted.is_empty() {
+        let _ = branch_named;
+        eprintln!(
+            "sykli hook {HOOK}: on this platform a push is judged by its receipt alone: the \
+             review it needs and the sharing of evidence run on Linux and macOS"
+        );
+    }
+    // Keeping evidence is a convenience, never a reason to stop the push.
     // The hook runs before the remote answers, and `--dry-run` reaches it
     // indistinguishably, so this is evidence for the commit, not proof that
     // the commit reached the remote.
-    for (short, bytes) in accepted {
+    for Accepted {
+        short,
+        receipt: bytes,
+        ..
+    } in accepted
+    {
         match keep_evidence(&repository.common_dir, &bytes) {
             Ok(kept) => eprintln!(
                 "sykli hook {HOOK}: kept {} as evidence for {short}",

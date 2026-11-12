@@ -21,8 +21,6 @@ mod hook;
 mod init;
 #[cfg(unix)]
 mod journal;
-#[cfg(unix)]
-mod land;
 mod repo;
 #[cfg(unix)]
 mod review;
@@ -459,7 +457,11 @@ enum Command {
         The verdict is kept as a git note on the commit's tree under\n\
         refs/notes/sykli/review (JSON, sykli-review.v1), and answers only for the base it\n\
         was read against: the same change is not reviewed twice, and the same tree on\n\
-        another base is reviewed again. `sykli land` pushes it.\n\n\
+        another base is reviewed again.\n\n\
+        Next comes `git push REMOTE HEAD:BRANCH` (it says so on stderr). The pre-push hook\n\
+        (`sykli hook install --pre-push`) lets that push move the branch only when this\n\
+        tree's review is against exactly the tip it replaces and is not blocking, or was\n\
+        overruled, and shares the review and the receipt with the remote first.\n\n\
         A review is a model's judgement, not a proof, and the author is known only from\n\
         commit trailers.")]
     Review {
@@ -475,46 +477,6 @@ enum Command {
         /// time are recorded
         #[arg(long, value_name = "WHY")]
         overrule: Option<String>,
-    },
-    /// Put the commit checked out on the remote's default branch, when it is proven and reviewed
-    #[cfg(unix)]
-    #[command(after_help = "Exit codes:\n  \
-        0  landed: the branch is this commit, and its receipt and review are shared\n  \
-        1  refused, saying what is missing; nothing was pushed\n  \
-        2  could not tell (git, the contract or a journal could not be read, the default\n     \
-           branch is unknown), or a push failed\n\n\
-        Refuses unless all of these hold for the commit checked out: nothing is\n\
-        uncommitted or untracked; the remote's default branch (as `review` finds it, or\n\
-        --branch), fetched now, is an ancestor of it, else merge that in, then prove and\n\
-        review the result; its tree has a passing receipt that verifies for it, as\n\
-        `status --commit` judges every receipt this clone keeps by the repository's\n\
-        contract (sykli.rs, else sykli.json); and a review of this tree against exactly\n\
-        that branch tip is kept and is not blocking, or a person overruled it.\n\n\
-        A receipt another clone shared (a note under refs/notes/sykli/receipt) counts\n\
-        only where this clone knows nothing of the tree, never after a failure or a\n\
-        conflict recorded here, and only if it passes `verify --commit` here with every\n\
-        task passed or cached.\n\n\
-        Then the receipt is attached to the tree as a note under refs/notes/sykli/receipt\n\
-        (the receipt file, or the copy its run kept when the file is gone; with neither\n\
-        and no shared note, land refuses: the branch does not move without proof to\n\
-        share), the remote's notes are fetched and merged (on the same tree this clone's\n\
-        note stays), the notes are pushed first, and only then HEAD is pushed to the\n\
-        branch with a lease on the tip that was checked, so a landing that raced this one\n\
-        makes the push fail (exit 2) instead of landing an unreviewed change. The receipt\n\
-        is also put in this worktree's .sykli/receipts, where the pre-push hook reads\n\
-        receipts and judges them itself.\n\n\
-        Another clone reads both with\n  \
-          git fetch REMOTE 'refs/notes/sykli/*:refs/notes/sykli/*'\n  \
-          git notes --ref refs/notes/sykli/receipt show COMMIT^{tree} > receipt.json\n  \
-          sykli verify receipt.json --commit COMMIT\n\
-        A shared receipt is evidence as any receipt is: consistent, not proven.")]
-    Land {
-        /// The remote to land on
-        #[arg(long, default_value = "origin", value_name = "NAME")]
-        remote: String,
-        /// Land on this branch of the remote instead of its default branch
-        #[arg(long, value_name = "BRANCH")]
-        branch: Option<String>,
     },
 }
 
@@ -535,25 +497,42 @@ enum Hook {
         #[arg(long)]
         contract: Option<PathBuf>,
     },
-    /// Refuse a push to the default branch without a passing receipt of the pushed commit's tree
+    /// Refuse a push to the default branch unless the pushed commit is proven and reviewed
     #[command(after_help = "Exit codes:\n  \
-        0  nothing pushed to a gated branch, every such push has a receipt that\n     \
-           passes `verify --commit`, or there is no sykli.json or sykli.rs\n  \
-        1  refused: a push to a gated branch has no such receipt\n  \
+        0  nothing pushed to a gated branch, or every such push is proven, reviewed and\n     \
+           shared (see below), or there is no sykli.json or sykli.rs\n  \
+        1  refused: a push to a gated branch has no passing receipt that verifies for its\n     \
+           commit, the tip it replaces is not an ancestor of it, its tree has no review\n     \
+           against exactly that tip, the review is blocking, or it deletes the branch\n  \
         2  could not evaluate: no git repository, unreadable input, a missing --contract,\n     \
-           or a --branch that is not a branch name\n\n\
+           or a --branch that is not a branch name; or the receipt and the review could\n     \
+           not be shared with the remote, so the branch does not move\n\n\
         Reads git's pre-push lines on stdin: <local ref> <local sha> <remote ref> <remote sha>.\n\
         With --branch, the gated branches are exactly those named (refs/heads/BRANCH for\n\
         each), and nothing is guessed. Without it, the gated branch is the default branch:\n\
         the one refs/remotes/REMOTE/HEAD names, else main and master. When that HEAD\n\
         names a ref that does not exist (a renamed default branch, pruned), main and\n\
         master are gated and a note says so.\n\
-        Deletions, tags and pushes to other branches pass. Receipts are looked for in this\n\
-        worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is gated\n\
-        is decided from the commits: the pushed commit's sykli.json gates it, and a commit\n\
-        without one is refused when the branch had one (push with --no-verify to drop it).\n\
-        With --contract, that contract gates every push to a gated branch instead,\n\
-        whatever the commits carry; one outside the repository is read from its file.\n\
+        Tags and pushes to other branches pass and share nothing; a push of no branch at\n\
+        all (the notes this hook pushes itself) passes at once, silently, and runs no git.\n\
+        Deleting a gated branch is refused: pushed again, it would be new, with no tip to\n\
+        review against (push with --no-verify to do it on purpose). Receipts are looked for\n\
+        in this worktree: .sykli/receipt.json and .sykli/receipts/*.json. Whether a push is\n\
+        gated is decided from the commits: the pushed commit's sykli.json gates it, and a\n\
+        commit without one is refused when the branch had one (push with --no-verify to\n\
+        drop it). With --contract, that contract gates every push to a gated branch\n\
+        instead, whatever the commits carry; one outside the repository is read from its\n\
+        file.\n\n\
+        On Linux and macOS a push to a gated branch also needs a review (`sykli review`):\n\
+        the tip git names as the remote sha must be an ancestor of the pushed commit, and\n\
+        the note under refs/notes/sykli/review on the commit's tree must be a review against\n\
+        exactly that tip that is not blocking, or that a person overruled. A branch new on\n\
+        the remote has no tip, and no review is asked. Then, before the branch moves, the\n\
+        receipt is attached to the tree as a note under refs/notes/sykli/receipt, the\n\
+        remote's refs/notes/sykli/* are fetched and merged (where both hold a note for a\n\
+        tree, this clone's stays), and the review and receipt notes are pushed; if that\n\
+        fails, the push is refused (exit 2). A dry run reaches this hook too, and shares\n\
+        them as well. On Windows the push is judged by its receipt alone.\n\n\
         An accepted push's receipts are kept in the common git directory, as\n\
         sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
         A kept receipt is evidence for its commit, not proof the remote has it (dry runs\n\
@@ -2226,8 +2205,6 @@ fn main() -> ExitCode {
             branch,
             overrule,
         } => review::command(&remote, branch.as_deref(), overrule.as_deref()),
-        #[cfg(unix)]
-        Command::Land { remote, branch } => land::command(&remote, branch.as_deref()),
         Command::Plan {
             contract,
             changed,

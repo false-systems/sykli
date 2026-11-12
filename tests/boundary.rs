@@ -11,7 +11,9 @@ use std::{
 };
 
 /// A git repository with `sykli.json` committed (and locked) as its only
-/// content besides `file.txt`.
+/// content besides `file.txt`, and a bare remote `origin`, which an accepted
+/// push to a gated branch shares its receipt with; it is kept inside the git
+/// directory, so it goes with the fixture.
 fn repo(name: &str, contract: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -22,6 +24,17 @@ fn repo(name: &str, contract: &str) -> PathBuf {
     fs::write(root.join("sykli.json"), contract).unwrap();
     fs::write(root.join("file.txt"), "one\n").unwrap();
     git(&root, &["init", "--quiet", "--initial-branch=main"]);
+    git(&root, &["config", "user.name", "t"]);
+    git(&root, &["config", "user.email", "t@t"]);
+    let origin = root.join(".git/origin.git");
+    git(
+        &root,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     assert!(sykli(&root, &["lock", "sykli.json"]).status.success());
     commit(&root, "fixture");
     root
@@ -363,9 +376,14 @@ fn pre_push_gates_only_the_default_branch() {
     let root = repo("pushbranch", READS_FILE);
     let head = git(&root, &["rev-parse", "HEAD"]);
     let feature = update(&head, "refs/heads/feature");
+    let out = pre_push(&root, "origin", std::slice::from_ref(&feature));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Deleting main would let it be pushed again as a new branch, with no
+    // tip to review against: refused, with the way to do it on purpose.
     let delete = format!("(delete) {ZEROS} refs/heads/main {head}");
     let out = pre_push(&root, "origin", &[feature, delete]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("--no-verify"));
     // Without the remote's HEAD, main and master are the default branch.
     let master = pre_push(&root, "origin", &[update(&head, "refs/heads/master")]);
     assert_eq!(master.status.code(), Some(1));
@@ -550,7 +568,7 @@ fn installed_hooks_gate_real_commits_and_pushes() {
     );
     git(
         &root,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
     );
     assert!(sykli(&root, &["hook", "install"]).status.success());
 
@@ -762,83 +780,25 @@ fn pre_push_judges_the_pushed_commit_not_the_checkout() {
     // `git push origin <first>:main`, not checked out.
     let out = pre_push(&root, "origin", &[update(&first, "refs/heads/main")]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // A force-push of the older, verified commit over the newer one.
+    // A force-push of the older, verified commit over the newer one: its
+    // receipt verifies, and on Linux and macOS the push is refused only
+    // because it would drop a commit the branch has. Elsewhere the receipt
+    // alone judges it.
     let force = format!("refs/heads/work {first} refs/heads/main {second}");
     let out = pre_push(&root, "origin", &[force]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stderr);
+    assert!(said.contains("is a passing run of its tree"), "{said}");
+    if cfg!(unix) {
+        assert_eq!(out.status.code(), Some(1), "{said}");
+        assert!(said.contains("has commits"), "{said}");
+    } else {
+        assert_eq!(out.status.code(), Some(0), "{said}");
+    }
     // HEAD with an unrelated unstaged edit and an untracked file.
     fs::write(root.join("other.txt"), "edited\n").unwrap();
     fs::write(root.join("scratch.tmp"), "x").unwrap();
     let out = pre_push(&root, "origin", &[update(&second, "refs/heads/main")]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    fs::remove_dir_all(root).unwrap();
-}
-
-/// The same three pushes through installed hooks and real `git push`.
-#[cfg(unix)]
-#[test]
-fn installed_pre_push_judges_the_pushed_commit_not_the_checkout() {
-    let root = repo("e2enotcheckedout", READS_FILE);
-    let origin = root.with_extension("origin.git");
-    let bin = Path::new(env!("CARGO_BIN_EXE_sykli")).parent().unwrap();
-    let path = std::env::join_paths(
-        std::iter::once(bin.to_path_buf())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let hooked = |args: &[&str]| {
-        Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .current_dir(&root)
-            .env("PATH", &path)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap()
-    };
-    git(
-        &root,
-        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
-    );
-    git(
-        &root,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    assert!(
-        sykli(&root, &["hook", "install", "--pre-push"])
-            .status
-            .success()
-    );
-    let first = git(&root, &["rev-parse", "HEAD"]);
-    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
-    fs::write(root.join("other.txt"), "more\n").unwrap();
-    let second = commit(&root, "second");
-    assert_eq!(sykli(&root, &["run", "sykli.json"]).status.code(), Some(0));
-
-    let out = hooked(&[
-        "push",
-        "--quiet",
-        "origin",
-        &format!("{first}:refs/heads/main"),
-    ]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    let out = hooked(&["push", "--quiet", "origin", "main"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    let out = hooked(&[
-        "push",
-        "--quiet",
-        "--force",
-        "origin",
-        &format!("{first}:refs/heads/main"),
-    ]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    fs::write(root.join("other.txt"), "edited\n").unwrap();
-    fs::write(root.join("scratch.tmp"), "x").unwrap();
-    let out = hooked(&["push", "--quiet", "origin", "main"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(git(&origin, &["rev-parse", "main"]), second);
-    fs::remove_dir_all(origin).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1071,7 +1031,7 @@ fn an_accepted_push_keeps_its_receipt_after_the_worktree_is_gone() {
     );
     git(
         &root,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
     );
     assert!(
         sykli(&root, &["hook", "install", "--pre-push"])
@@ -1377,12 +1337,20 @@ fn pre_push_branch_gates_exactly_the_named_branches() {
         assert_eq!(out.status.code(), Some(1), "{gated}: {}", text(&out.stderr));
     }
     assert_eq!(push(&both, "refs/heads/feature").status.code(), Some(0));
-    // A deletion and a tag pass, as they always have.
-    let delete = format!("(delete) {ZEROS} refs/heads/main {head}");
+    // A tag passes, as it always has; a deletion of a named branch is
+    // refused, and of another branch passes.
     let tag = format!("refs/tags/v1 {head} refs/tags/v1 {ZEROS}");
-    for line in [delete, tag.clone()] {
-        let out = pre_push_flags(&root, &both, std::slice::from_ref(&line));
-        assert_eq!(out.status.code(), Some(0), "{line}: {}", text(&out.stderr));
+    let out = pre_push_flags(&root, &both, std::slice::from_ref(&tag));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    for (deleted, code) in [("main", 1), ("feature", 0)] {
+        let delete = format!("(delete) {ZEROS} refs/heads/{deleted} {head}");
+        let out = pre_push_flags(&root, &both, &[delete]);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{deleted}: {}",
+            text(&out.stderr)
+        );
     }
     let out = pre_push_flags(&root, &["--branch", "v1"], &[tag]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

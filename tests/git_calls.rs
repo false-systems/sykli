@@ -1,9 +1,12 @@
 //! The git processes sykli starts, counted. Every git process writes one
-//! `"event":"start"` line to `GIT_TRACE2_EVENT`, nested ones included, so a
-//! count is the whole cost of a command in git processes. A hook runs on
-//! every push: sykli finds out what it needs from git once and passes it
-//! down, and a caller that already knows the repository can say so
-//! (`--repo-root`, `--git-common-dir`) and spare the discovery.
+//! `"event":"start"` line to `GIT_TRACE2_EVENT`, so a count is the cost of a
+//! command in git processes. A process git starts itself (the remote's end
+//! of a fetch or a push, here a local one) names its parent's session before
+//! a slash in its `sid`; that is git's cost of a fetch or push, which varies
+//! with git's version, and is not counted. A hook runs on every push: sykli
+//! finds out what it needs from git once and passes it down, and a caller
+//! that already knows the repository can say so (`--repo-root`,
+//! `--git-common-dir`) and spare the discovery.
 
 #[path = "support/stdio.rs"]
 mod stdio;
@@ -37,6 +40,38 @@ const VERIFY_COMMIT_GIVEN: &[&str] = &["cat-file"];
 /// Discovery and one `cat-file --batch` for every pushed commit.
 const PRE_PUSH: &[&str] = &["rev-parse", "cat-file"];
 const PRE_PUSH_GIVEN: &[&str] = &["cat-file"];
+/// What an accepted push to a gated branch adds, sharing its receipt before
+/// the branch moves: the note on the tree (`hash-object`, `notes add`), the
+/// remote's notes (`fetch`), which notes refs this clone then holds
+/// (`for-each-ref`), and the push of them. Linux and macOS only: elsewhere
+/// a push is judged by its receipt alone, and nothing is shared.
+const SHARE: &[&str] = if cfg!(unix) {
+    &["hash-object", "notes", "fetch", "for-each-ref", "push"]
+} else {
+    &[]
+};
+/// The same once the remote holds notes this clone holds too: their merge.
+const SHARE_AGAIN: &[&str] = if cfg!(unix) {
+    &[
+        "hash-object",
+        "notes",
+        "fetch",
+        "for-each-ref",
+        "notes",
+        "push",
+    ]
+} else {
+    &[]
+};
+/// What a push that replaces a tip adds before that, for the review: whether
+/// the tip is an ancestor (`merge-base`) and the review kept for the tree
+/// (`notes show`).
+#[cfg(unix)]
+const REVIEWED: &[&str] = &["merge-base", "notes"];
+
+fn and<'a>(first: &[&'a str], then: &[&'a str]) -> Vec<&'a str> {
+    first.iter().chain(then).copied().collect()
+}
 /// `validate` refuses what `run` refuses before any task, so it lists the
 /// inventory once, after discovery (none with the repository given).
 const VALIDATE: &[&str] = &["rev-parse", "ls-files"];
@@ -81,6 +116,13 @@ impl Scratch {
         };
         scratch.git(&["init", "--quiet", "--initial-branch=main"]);
         fs::write(scratch.repo.join(".git/info/exclude"), ".sykli/\n").unwrap();
+        // The remote an accepted push shares its receipt with, and the
+        // identity git writes that note as.
+        scratch.git(&["config", "user.name", "t"]);
+        scratch.git(&["config", "user.email", "t@t"]);
+        let origin = scratch.base.join("origin.git");
+        scratch.git(&["init", "--quiet", "--bare", origin.to_str().unwrap()]);
+        scratch.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
         scratch.commit("fixture");
         scratch
     }
@@ -194,6 +236,8 @@ fn started(trace: &Path) -> Vec<String> {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|event| event["event"] == "start")
+        // What sykli started, not what git started on its own.
+        .filter(|event| event["sid"].as_str().is_some_and(|sid| !sid.contains('/')))
         .map(|event| {
             let argv = event["argv"].as_array().cloned().unwrap_or_default();
             let mut words = argv.iter().skip(1).filter_map(|word| word.as_str());
@@ -316,9 +360,23 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
     let facts = scratch.facts();
     let none: [String; 0] = [];
 
-    for (given, run, verify, push) in [
-        (&none[..], RUN, VERIFY_COMMIT, PRE_PUSH),
-        (&facts[..], RUN_GIVEN, VERIFY_COMMIT_GIVEN, PRE_PUSH_GIVEN),
+    // The first accepted push finds no notes on the remote; the second finds
+    // the first one's, and merges them.
+    for (given, run, verify, push, accept) in [
+        (
+            &none[..],
+            RUN,
+            VERIFY_COMMIT,
+            PRE_PUSH,
+            and(PRE_PUSH, SHARE),
+        ),
+        (
+            &facts[..],
+            RUN_GIVEN,
+            VERIFY_COMMIT_GIVEN,
+            PRE_PUSH_GIVEN,
+            and(PRE_PUSH_GIVEN, SHARE_AGAIN),
+        ),
     ] {
         let label = if given.is_empty() { "" } else { " (given)" };
         let head = scratch.git(&["rev-parse", "HEAD"]);
@@ -368,7 +426,7 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
             &format!("pre-push, accepted{label}"),
             scratch.counted(&accepted, Some(&line(&head))),
             0,
-            push,
+            &accept,
         );
         // A new commit with no receipt is refused, within the same budget.
         fs::write(
@@ -474,8 +532,12 @@ fn a_committed_contract_and_a_guessed_branch_stay_within_the_budget() {
     let facts = scratch.facts();
     let none: [String; 0] = [];
     for (given, verify, push) in [
-        (&none[..], VERIFY_COMMIT, PRE_PUSH),
-        (&facts[..], VERIFY_COMMIT_GIVEN, PRE_PUSH_GIVEN),
+        (&none[..], VERIFY_COMMIT, and(PRE_PUSH, SHARE)),
+        (
+            &facts[..],
+            VERIFY_COMMIT_GIVEN,
+            and(PRE_PUSH_GIVEN, SHARE_AGAIN),
+        ),
     ] {
         let label = if given.is_empty() { "" } else { " (given)" };
         let receipt = scratch.base.join(format!("receipt{}.json", given.len()));
@@ -509,7 +571,7 @@ fn a_committed_contract_and_a_guessed_branch_stay_within_the_budget() {
                 Some(&format!("refs/heads/work {head} refs/heads/main {ZEROS}\n")),
             ),
             0,
-            push,
+            &push,
         );
     }
 }
@@ -650,8 +712,94 @@ fn judged_at_head(
             Some(&format!("refs/heads/work {head} refs/heads/main {ZEROS}\n")),
         ),
         0,
-        expected,
+        &and(expected, SHARE),
     );
+}
+
+/// A push that replaces a tip asks two things more, for the review (whether
+/// the tip is an ancestor, and the review kept for the tree), before it
+/// shares; and the hook's own push of the notes, which runs it again for
+/// notes refs only, starts no git at all.
+#[cfg(unix)]
+#[test]
+fn a_reviewed_push_and_the_hooks_own_notes_push_stay_within_their_budgets() {
+    let scratch = Scratch::new("reviewed");
+    fs::write(scratch.repo.join("sykli.json"), CONTRACT).unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", "sykli.json"])
+        .current_dir(&scratch.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    let tip = scratch.commit("contract");
+    scratch.git(&["push", "--quiet", "--no-verify", "origin", "main"]);
+    fs::write(scratch.repo.join("file.txt"), "one\n\n").unwrap();
+    fs::write(
+        scratch.repo.join("sykli.json"),
+        CONTRACT.replace("= one", "= one -o true"),
+    )
+    .unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", "sykli.json"])
+        .current_dir(&scratch.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    let head = scratch.commit("change");
+    let (out, _) = scratch.counted(&["run", "sykli.json"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // A review against the tip, as `sykli review` keeps it.
+    let tree = scratch.git(&["rev-parse", "HEAD^{tree}"]);
+    let review = serde_json::json!({
+        "schema": "sykli-review.v1", "tree": tree, "head": head, "base": tip,
+        "level": "fine", "findings": [], "reviewer": "codex", "authors": [],
+        "independent": "unknown", "at": 1, "overruled": null,
+    });
+    let note = scratch.base.join("review.json");
+    fs::write(&note, review.to_string()).unwrap();
+    scratch.git(&[
+        "notes",
+        "--ref",
+        "refs/notes/sykli/review",
+        "add",
+        "-F",
+        note.to_str().unwrap(),
+        &tree,
+    ]);
+    let line = format!("refs/heads/main {head} refs/heads/main {tip}\n");
+    let (out, started) = scratch.counted(
+        &["hook", "pre-push", "origin", "/nowhere/origin.git"],
+        Some(&line),
+    );
+    assert!(
+        text(&out.stderr).contains("is reviewed fine"),
+        "{}",
+        text(&out.stderr)
+    );
+    within(
+        "pre-push, reviewed",
+        (out, started),
+        0,
+        &and(&and(PRE_PUSH, REVIEWED), SHARE),
+    );
+
+    let notes = format!(
+        "refs/notes/sykli/receipt {head} refs/notes/sykli/receipt {ZEROS}\n\
+         refs/notes/sykli/review {head} refs/notes/sykli/review {ZEROS}\n"
+    );
+    let trace = scratch.base.join("notes-trace.json");
+    let out = stdio::output(
+        Command::new(env!("CARGO_BIN_EXE_sykli"))
+            .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+            .current_dir(&scratch.repo)
+            .env("GIT_TRACE2_EVENT", &trace)
+            .env("GIT_CONFIG_GLOBAL", scratch.base.join("empty-gitconfig")),
+        notes.as_bytes(),
+    )
+    .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "");
+    assert!(!trace.exists(), "a push of notes alone started git");
 }
 
 /// A receipt written before per-task input records has its inputs digest

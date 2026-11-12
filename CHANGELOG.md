@@ -14,7 +14,29 @@ contract consumer can observe; internal refactors are not listed.
   task as `cached`. The field is part of the declaration, so it changes that
   task's cache key and the contract's hash; no other key changes.
 
+### Breaking
+- The pre-push hook is the decision whether code may go to the default
+  branch, and takes over what `sykli land` guaranteed. On Linux and macOS a
+  push to a gated branch also needs the tip it replaces (the remote sha git
+  names) to be an ancestor of the pushed commit, and a review of the commit's
+  tree against exactly that tip that is not blocking, or that a person
+  overruled; a branch new on the remote asks no review. Then, before the
+  branch moves, the hook attaches the receipt to the tree as a note under
+  `refs/notes/sykli/receipt`, fetches and merges the remote's
+  `refs/notes/sykli/*` (this clone's note on a tree stays), and pushes the
+  review and receipt notes; when that fails the push is refused (exit 2).
+  A forced push that drops commits of the branch, and a deletion of a gated
+  branch, are refused (`--no-verify` does either on purpose). A push of no
+  branch passes at once and starts no git: the hook's own notes push runs it
+  again that way. On Windows a push is still judged by its receipt alone.
+- `sykli review` says on stderr what comes next (`review: next: git push
+  REMOTE HEAD:BRANCH`, or what a blocking review stops).
+
 ### Removed
+- `sykli land`: landing is a plain `git push origin HEAD:main` through the
+  pre-push hook (`sykli hook install --pre-push`), which asks for the same
+  proof and review and shares the same notes. It no longer takes a receipt
+  another clone shared as proof: the hook judges this worktree's receipts.
 - `sykli deploy` and `sykli deployed`, and the deployment records they kept
   under `refs/notes/sykli/deploy`. A deployment is an ordinary contract run
   with `sykli run deploy.json`, its tasks marked `"reuse": false`; what a

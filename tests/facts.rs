@@ -68,6 +68,20 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
+/// A bare remote `origin` beside `repo`, which an accepted push to a gated
+/// branch shares its receipt with, and the identity git writes those notes
+/// as.
+fn with_origin(repo: &Path) {
+    git(repo, &["config", "user.name", "t"]);
+    git(repo, &["config", "user.email", "t@t"]);
+    let origin = repo.with_extension("origin.git");
+    git(
+        repo,
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+}
+
 fn sykli(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Output {
     stdio::output(
         Command::new(env!("CARGO_BIN_EXE_sykli"))
@@ -189,6 +203,7 @@ fn the_repositorys_own_root_and_a_linked_worktrees_root_are_accepted() {
     let repo = scratch.base.join("r");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    with_origin(&repo);
     fs::write(repo.join("app.txt"), "ok\n").unwrap();
     fs::write(repo.join(".gitignore"), ".sykli/\n").unwrap();
     git(&repo, &["add", "--all"]);
@@ -363,6 +378,7 @@ fn a_git_dir_naming_the_given_repository_still_works() {
     let repo = scratch.base.join("r");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    with_origin(&repo);
     fs::write(repo.join("app.txt"), "ok\n").unwrap();
     fs::write(repo.join(".gitignore"), ".sykli/\n").unwrap();
     git(&repo, &["add", "--all"]);
