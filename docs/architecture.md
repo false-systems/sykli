@@ -238,22 +238,6 @@ the notes (`fetch_notes`, `push_notes`, strategy `ours`) and then pushes with
 `--force-with-lease` on the checked tip. `tests/land.rs` runs the binary with
 a script as the `codex` on a `PATH` that holds no real agent.
 
-**Deployments (`src/deploy.rs`, Unix only).** `preflight` refuses unless
-nothing is uncommitted, `land::sykli_proof` says the tree is proven (by the
-gate contract at the top level, `gate_contract`), and HEAD is an ancestor of
-`refs/remotes/REMOTE/BRANCH` as it stands (`landed`: yes, no, or unknown;
-nothing is fetched; `--allow-unlanded` turns no and unknown into
-`unlanded: true`). `command` then calls `run_reusing(.., reuse: false)`: the
-same run, journal and receipt as `run`, with `LocalCache::restore` answering
-nothing, so every task runs; `ran_receipt` still refuses a receipt with a
-task that is not `passed`. Only then, and only if HEAD did not move, `record`
-appends one `sykli-deployment.v1` line to the commit's note under
-`refs/notes/sykli/deploy`; `share` merges with `cat_sort_uniq`, so lines of
-two clones on one commit are all kept and their order means nothing
-(`latest` goes by `at`). `recorded` counts every line that is not a
-deployment of the commit it is on instead of dropping it, and returns None
-when the notes ref is not here: unknown, not "nothing deployed".
-
 **Tests.** `tests/runs.rs` (Unix) interrupts real runs: SIGKILL of the
 coordinator at each checkpoint and of a task, SIGTERM/SIGINT, a stale
 coordinator, a replayed completion, inputs changed mid-run, concurrent cache
@@ -288,6 +272,6 @@ logic is Rust. Existing Python or Node files are debt to be rewritten, not
 precedent to follow.
 
 
-## The path to the default branch and out
+## The path to the default branch
 
-The path from a passing receipt to the default branch is sykli's too, by the repository owner's decision, so that proving, reviewing and landing a commit are one tool's records about one tree. `review` starts an installed agent CLI as a reviewer, with reading tools only; `land` fetches from and pushes to the git remote the person names. `deploy` runs an ordinary contract for a proven, landed commit and records that it passed, as a line on the commit's note; it is not the typed delivery that was removed (no artifact types, no environments, no rollout state: the deploying is whatever the contract's tasks do), and it uses the network only to share its record when a remote is named. `deployed` reads those records. These are the only commands that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.
+The path from a passing receipt to the default branch is sykli's too, by the repository owner's decision, so that proving, reviewing and landing a commit are one tool's records about one tree. `review` starts an installed agent CLI as a reviewer, with reading tools only; `land` fetches from and pushes to the git remote the person names. A deployment is not sykli's: it is an ordinary contract the person runs (`sykli run deploy.json`), its tasks marked `"reuse": false`. These are the only commands that start an agent or use the network, they do so only while they run, and they add nothing to the contract or receipt schemas. Every other command stays offline and starts no agent; anything further on this path (a queue, a service, a second reviewer protocol) needs its own written condition.

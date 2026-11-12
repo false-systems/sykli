@@ -14,6 +14,14 @@ contract consumer can observe; internal refactors are not listed.
   task as `cached`. The field is part of the declaration, so it changes that
   task's cache key and the contract's hash; no other key changes.
 
+### Removed
+- `sykli deploy` and `sykli deployed`, and the deployment records they kept
+  under `refs/notes/sykli/deploy`. A deployment is an ordinary contract run
+  with `sykli run deploy.json`, its tasks marked `"reuse": false`; what a
+  clone deployed is in its receipts (`sykli status --commit COMMIT --contract
+  deploy.json`). Existing notes under `refs/notes/sykli/deploy` are left as
+  they are, and nothing reads them.
+
 ## [0.8.1] - 2026-11-11
 
 ### Fixed

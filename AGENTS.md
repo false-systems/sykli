@@ -6,9 +6,9 @@ The guide for every coding agent here (Codex, Claude Code, Gemini, Copilot, Curs
 
 - Own graph parsing, validation, planning, execution, caching, and receipts.
 - Stay a local, offline CLI: no server, network service, daemon, coordination, or agent execution. The coordinator of a run started with `run --detach` may finish the run after its initiating client exits; it is never a daemon: it ends with the run it was started for.
-- The one exception, by the owner's decision: `review`, `land`, `deploy`, `deployed`. `docs/architecture.md` states its limits.
+- The one exception, by the owner's decision: `review` and `land`. `docs/architecture.md` states its limits.
 - A container runtime and appending receipts to an external store wait until consumer repositories run v0 daily.
-- Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
+- Contract growth requires a named user and a written condition for the growth. Removed capabilities (coordination, servers, occurrences, actors, review primitives, webhooks, GUI, tiered caches, attestations, extra SDKs, watch mode, `deploy`/`deployed`, typed production, delivery, pull-request evidence) do not return without one. The last three are kept on the `archive/delivery-production` branch.
 - **Anything written under `.sykli/` is bounded, and the bound is stated where it is written.** A directory that grows with use needs a budget it is evicted against or a point at which it is discarded; "the operator can delete it" is not a bound. (Production attempts once kept 2.0 GB of build trees against 14 MB of declared products.)
 - Treat `sykli plan --json` as the agent-facing query surface.
 

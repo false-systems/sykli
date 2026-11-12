@@ -66,8 +66,8 @@ cargo install --git https://github.com/false-systems/sykli --branch main --locke
 This version is not on crates.io yet. Once it is published,
 `cargo install sykli --locked` installs it; until then, use the command above.
 
-It runs on Linux, macOS and Windows. `review`, `land`, `deploy`, `deployed`,
-`status` and `resume` are on Linux and macOS only.
+It runs on Linux, macOS and Windows. `review`, `land`, `status` and `resume`
+are on Linux and macOS only.
 
 Running tasks needs Git, a POSIX `sh` and your project's own toolchain. On
 Windows, Git for Windows supplies `sh`.
@@ -94,14 +94,15 @@ sykli verify RECEIPT --contract sykli.json   # does a receipt still match this t
 sykli hook install     # refuse a commit or a push that has no passing receipt
 ```
 
-From a proven commit to production, on Linux and macOS:
+From a proven commit to the default branch, on Linux and macOS:
 
 ```sh
 sykli review           # a fresh agent reviews the change: fine, look or blocking
 sykli land             # push a proven, reviewed commit to the default branch
-sykli deploy           # run deploy.json for a landed commit and record it
-sykli deployed         # what went out to each target, and when
 ```
+
+A deployment is an ordinary contract run with `sykli run deploy.json`, its
+tasks marked `"reuse": false` so that they run every time.
 
 `sykli <command> --help` documents every flag and exit code.
 
@@ -136,7 +137,7 @@ the same tree, and for no other.
 
 ## More
 
-- [Reference](docs/reference.md): every command, the cache, durable runs, hooks, review, land and deploy.
+- [Reference](docs/reference.md): every command, the cache, durable runs, hooks, review, land, and deploying with a contract.
 - [Local checks before committing and pushing](docs/reference.md#local-checks-before-committing-and-pushing): set up the hooks in an existing repository.
 - [Agent guide](docs/agents.md): JSON queries, explanations and commit status for coding agents.
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [security policy](SECURITY.md).
