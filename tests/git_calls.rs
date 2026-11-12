@@ -148,6 +148,11 @@ impl Scratch {
         self.git(&["rev-parse", "HEAD"])
     }
 
+    /// Where `origin` is, as git hands it to the pre-push hook.
+    fn origin_url(&self) -> String {
+        self.base.join("origin.git").to_str().unwrap().to_string()
+    }
+
     /// What a caller that already asked git passes: `--repo-root` and
     /// `--git-common-dir`, as `git rev-parse --path-format=absolute` gives them.
     fn facts(&self) -> Vec<String> {
@@ -358,6 +363,7 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
         .unwrap();
     assert!(lock.status.success(), "{}", text(&lock.stderr));
     let facts = scratch.facts();
+    let url = scratch.origin_url();
     let none: [String; 0] = [];
 
     // The first accepted push finds no notes on the remote; the second finds
@@ -420,7 +426,7 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
             given,
         );
         let mut accepted = pre_push.clone();
-        accepted.extend(["origin", "/nowhere/origin.git"]);
+        accepted.extend(["origin", url.as_str()]);
         let line = |sha: &str| format!("refs/heads/work {sha} refs/heads/main {ZEROS}\n");
         within(
             &format!("pre-push, accepted{label}"),
@@ -530,6 +536,7 @@ fn a_committed_contract_and_a_guessed_branch_stay_within_the_budget() {
         "refs/remotes/origin/main",
     ]);
     let facts = scratch.facts();
+    let url = scratch.origin_url();
     let none: [String; 0] = [];
     for (given, verify, push) in [
         (&none[..], VERIFY_COMMIT, and(PRE_PUSH, SHARE)),
@@ -563,7 +570,7 @@ fn a_committed_contract_and_a_guessed_branch_stay_within_the_budget() {
             verify,
         );
         let mut args = with(&["hook", "pre-push"], given);
-        args.extend(["origin", "/nowhere/origin.git"]);
+        args.extend(["origin", url.as_str()]);
         within(
             &format!("pre-push, guessed branch{label}"),
             scratch.counted(
@@ -672,6 +679,7 @@ fn judged_at_head(
 ) {
     let head = scratch.git(&["rev-parse", "HEAD"]);
     let path = scratch.base.join(format!("{label}.json"));
+    let url = scratch.origin_url();
     fs::write(&path, serde_json::to_vec(receipt).unwrap()).unwrap();
     within(
         &format!("verify --commit, {label}"),
@@ -707,7 +715,7 @@ fn judged_at_head(
                 "--branch",
                 "main",
                 "origin",
-                "/nowhere/origin.git",
+                &url,
             ],
             Some(&format!("refs/heads/work {head} refs/heads/main {ZEROS}\n")),
         ),
@@ -724,6 +732,7 @@ fn judged_at_head(
 #[test]
 fn a_reviewed_push_and_the_hooks_own_notes_push_stay_within_their_budgets() {
     let scratch = Scratch::new("reviewed");
+    let url = scratch.origin_url();
     fs::write(scratch.repo.join("sykli.json"), CONTRACT).unwrap();
     let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .args(["lock", "sykli.json"])
@@ -767,10 +776,7 @@ fn a_reviewed_push_and_the_hooks_own_notes_push_stay_within_their_budgets() {
         &tree,
     ]);
     let line = format!("refs/heads/main {head} refs/heads/main {tip}\n");
-    let (out, started) = scratch.counted(
-        &["hook", "pre-push", "origin", "/nowhere/origin.git"],
-        Some(&line),
-    );
+    let (out, started) = scratch.counted(&["hook", "pre-push", "origin", &url], Some(&line));
     assert!(
         text(&out.stderr).contains("is reviewed fine"),
         "{}",
@@ -790,7 +796,7 @@ fn a_reviewed_push_and_the_hooks_own_notes_push_stay_within_their_budgets() {
     let trace = scratch.base.join("notes-trace.json");
     let out = stdio::output(
         Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+            .args(["hook", "pre-push", "origin", &url])
             .current_dir(&scratch.repo)
             .env("GIT_TRACE2_EVENT", &trace)
             .env("GIT_CONFIG_GLOBAL", scratch.base.join("empty-gitconfig")),

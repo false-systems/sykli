@@ -147,8 +147,9 @@ impl Scratch {
             serde_json::to_vec_pretty(receipt).unwrap(),
         )
         .unwrap();
+        let origin = self.base.join("origin.git");
         self.sykli(
-            &["hook", "pre-push", "origin", "/nowhere/origin.git"],
+            &["hook", "pre-push", "origin", origin.to_str().unwrap()],
             Some(&format!("refs/heads/work {sha} refs/heads/main {ZEROS}\n")),
         )
     }

@@ -1106,7 +1106,8 @@ fn pre_push(repo: &Path, contract: Option<&Path>, sha: &str, remote_ref: &str) -
     }
     stdio::output(
         command
-            .args(["origin", "/nowhere/origin.git"])
+            .arg("origin")
+            .arg(repo.with_file_name("scratch-origin.git"))
             .current_dir(repo),
         format!("refs/heads/work {sha} {remote_ref} {ZEROS}\n").as_bytes(),
     )
@@ -1376,7 +1377,8 @@ fn pre_push_flags(repo: &Path, contract: &Path, flags: &[&str], sha: &str, to: &
             .args(["hook", "pre-push", "--contract"])
             .arg(contract)
             .args(flags)
-            .args(["origin", "/nowhere/origin.git"])
+            .arg("origin")
+            .arg(repo.with_file_name("scratch-origin.git"))
             .current_dir(repo),
         format!("refs/heads/work {sha} {to} {ZEROS}\n").as_bytes(),
     )

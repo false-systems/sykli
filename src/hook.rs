@@ -661,9 +661,15 @@ fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool, St
 /// both hold a note for one tree, this clone's stays), and push the notes.
 /// When the remote's moved meanwhile, they are taken in again and the push
 /// is tried once more. Returns the notes refs pushed. That push runs this
-/// hook again, for notes refs only, which pass at once.
+/// hook again, for notes refs only, which pass at once. `destination` is
+/// where git is pushing (the URL it names), both to take in from and to
+/// push to.
 #[cfg(unix)]
-fn share(root: &Path, remote: &str, accepted: &[Accepted]) -> Result<Vec<&'static str>, String> {
+fn share(
+    root: &Path,
+    destination: &str,
+    accepted: &[Accepted],
+) -> Result<Vec<&'static str>, String> {
     use crate::review;
     for proven in accepted {
         review::write_note(root, RECEIPTS, &proven.tree, &proven.receipt).map_err(|error| {
@@ -673,24 +679,24 @@ fn share(root: &Path, remote: &str, accepted: &[Accepted]) -> Result<Vec<&'stati
             )
         })?;
     }
-    let kept = take_in(root, remote)?;
-    let mut push = vec!["push", "--quiet", remote];
+    let kept = take_in(root, destination)?;
+    let mut push = vec!["push", "--quiet", destination];
     push.extend(kept.iter().copied());
     if review::git(root, &push).is_ok() {
         return Ok(kept);
     }
     // Another clone shared notes meanwhile: take them in and push once more.
-    take_in(root, remote)?;
+    take_in(root, destination)?;
     review::git(root, &push)?;
     Ok(kept)
 }
 
-/// Fetch the remote's sykli notes beside this clone's
+/// Fetch the sykli notes `destination` holds beside this clone's
 /// (`refs/notes-fetched/sykli/*`) and merge them in, keeping this clone's
 /// note where both hold one for a tree (`git notes merge -s ours`). Returns
 /// the shared notes refs this clone holds afterwards.
 #[cfg(unix)]
-fn take_in(root: &Path, remote: &str) -> Result<Vec<&'static str>, String> {
+fn take_in(root: &Path, destination: &str) -> Result<Vec<&'static str>, String> {
     use crate::review;
     review::git(
         root,
@@ -698,7 +704,7 @@ fn take_in(root: &Path, remote: &str) -> Result<Vec<&'static str>, String> {
             "fetch",
             "--quiet",
             "--prune",
-            remote,
+            destination,
             "+refs/notes/sykli/*:refs/notes-fetched/sykli/*",
         ],
     )?;
@@ -762,6 +768,7 @@ fn take_in(root: &Path, remote: &str) -> Result<Vec<&'static str>, String> {
 /// (`--repo-root`, `--git-common-dir`) that is the only git process.
 pub(crate) fn pre_push(
     remote: Option<&str>,
+    url: Option<&str>,
     contract: Option<&Path>,
     branches: &[String],
 ) -> ExitCode {
@@ -1087,19 +1094,23 @@ pub(crate) fn pre_push(
     // without them, so a failure to share refuses the push.
     #[cfg(unix)]
     if !accepted.is_empty() {
-        let Some(remote) = remote else {
+        // Where git pushes: the URL it names, which is the push URL when the
+        // remote fetches from elsewhere; the notes are taken in from there
+        // too, or a push whose notes another place lacks would never pass.
+        let Some(destination) = url.or(remote) else {
             eprintln!(
                 "sykli hook {HOOK}: refusing the push: no remote is named (git names it when it \
                  runs this hook), so the receipt and the review cannot be shared"
             );
             return ExitCode::from(CANNOT_EVALUATE);
         };
+        let remote = remote.unwrap_or(destination);
         // One push of this clone shares at a time: concurrent ones would
         // contend for the same notes refs. The lock is on the common git
         // directory itself, so nothing is written for it.
         let shared = crate::journal::Lease::alone_within(&repository.common_dir, SHARE_WAIT)
             .map_err(|error| format!("another push of this clone is sharing its evidence: {error}"))
-            .and_then(|_alone| share(&repository.root, remote, &accepted));
+            .and_then(|_alone| share(&repository.root, destination, &accepted));
         match shared {
             Ok(shared) => eprintln!(
                 "sykli hook {HOOK}: shared {} with {remote} before the branch moves",
@@ -1116,7 +1127,7 @@ pub(crate) fn pre_push(
     }
     #[cfg(not(unix))]
     if !accepted.is_empty() {
-        let _ = branch_named;
+        let _ = (branch_named, url);
         eprintln!(
             "sykli hook {HOOK}: on this platform a push is judged by its receipt alone: the \
              review it needs and the sharing of evidence run on Linux and macOS"

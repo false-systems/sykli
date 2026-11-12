@@ -293,7 +293,8 @@ fn pre_push(root: &Path, remote: &str, lines: &[String]) -> Output {
     let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
     stdio::output(
         Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(["hook", "pre-push", remote, "/nowhere/origin.git"])
+            .args(["hook", "pre-push", remote])
+            .arg(root.join(".git/origin.git"))
             .current_dir(root),
         input.as_bytes(),
     )
@@ -1142,7 +1143,8 @@ fn pre_push_with(root: &Path, lines: &[String], env: &[(&str, &str)]) -> Output 
     let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
     stdio::output(
         Command::new(env!("CARGO_BIN_EXE_sykli"))
-            .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+            .args(["hook", "pre-push", "origin"])
+            .arg(root.join(".git/origin.git"))
             .envs(env.iter().copied())
             .current_dir(root),
         input.as_bytes(),
@@ -1163,7 +1165,8 @@ fn concurrent_first_pushes_all_keep_their_receipt() {
         let mut children = (0..12)
             .map(|_| {
                 Command::new(env!("CARGO_BIN_EXE_sykli"))
-                    .args(["hook", "pre-push", "origin", "/nowhere/origin.git"])
+                    .args(["hook", "pre-push", "origin"])
+                    .arg(root.join(".git/origin.git"))
                     .current_dir(&root)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
@@ -1286,7 +1289,8 @@ fn pre_push_flags(root: &Path, flags: &[&str], lines: &[String]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_sykli"))
             .args(["hook", "pre-push"])
             .args(flags)
-            .args(["origin", "/nowhere/origin.git"])
+            .arg("origin")
+            .arg(root.join(".git/origin.git"))
             .current_dir(root),
         input.as_bytes(),
     )

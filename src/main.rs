@@ -545,9 +545,10 @@ enum Hook {
         exactly that tip that is not blocking, or that a person overruled. A branch new on\n\
         the remote has no tip, and no review is asked. Then, before the branch moves, the\n\
         receipt is attached to the tree as a note under refs/notes/sykli/receipt, the\n\
-        remote's refs/notes/sykli/* are fetched and merged (where both hold a note for a\n\
-        tree, this clone's stays), and the review and receipt notes are pushed; if that\n\
-        fails, the push is refused (exit 2). A dry run reaches this hook too, and shares\n\
+        refs/notes/sykli/* where git is pushing (URL, the push URL where the remote has\n\
+        one) are fetched and merged (where both hold a note for a tree, this clone's\n\
+        stays), and the review and receipt notes are pushed there; if that fails, the\n\
+        push is refused (exit 2). A dry run reaches this hook too, and shares\n\
         them as well. On Windows the push is judged by its receipt alone.\n\n\
         An accepted push's receipts are kept in the common git directory, as\n\
         sykli/receipts/rcpt_<sha256>.json, so they outlive the worktree; a failed copy only warns.\n\
@@ -556,7 +557,8 @@ enum Hook {
     PrePush {
         /// Remote name, as git passes it
         remote: Option<String>,
-        /// Remote URL, as git passes it (unused)
+        /// Remote URL, as git passes it: where git pushes, so where an accepted push's
+        /// receipt and review are shared (the remote's name when it is not given)
         url: Option<String>,
         /// Gate with this contract instead of the one each pushed commit carries,
         /// for example one kept outside the repository
@@ -2220,10 +2222,15 @@ fn main() -> ExitCode {
             Hook::PreCommit { contract } => hook::pre_commit(contract.as_deref()),
             Hook::PrePush {
                 remote,
-                url: _,
+                url,
                 contract,
                 branches,
-            } => hook::pre_push(remote.as_deref(), contract.as_deref(), &branches),
+            } => hook::pre_push(
+                remote.as_deref(),
+                url.as_deref(),
+                contract.as_deref(),
+                &branches,
+            ),
             Hook::Install {
                 pre_commit,
                 pre_push,

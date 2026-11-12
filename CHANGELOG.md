@@ -31,9 +31,11 @@ contract consumer can observe; internal refactors are not listed.
   tree against exactly that tip that is not blocking, or that a person
   overruled; a branch new on the remote asks no review. Then, before the
   branch moves, the hook attaches the receipt to the tree as a note under
-  `refs/notes/sykli/receipt`, fetches and merges the remote's
-  `refs/notes/sykli/*` (this clone's note on a tree stays), and pushes the
-  review and receipt notes; when that fails the push is refused (exit 2).
+  `refs/notes/sykli/receipt`, fetches and merges the `refs/notes/sykli/*`
+  where git is pushing (the URL git names the hook, the push URL where a
+  remote has one; this clone's note on a tree stays), and pushes the review
+  and receipt notes there; when that fails the push is refused (exit 2). The
+  hook's URL argument, unused before, now says where.
   A forced push that drops commits of the branch, and a deletion of a gated
   branch, are refused (`--no-verify` does either on purpose). A push of no
   branch passes at once and starts no git: the hook's own notes push runs it

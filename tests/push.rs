@@ -460,6 +460,56 @@ fn notes_another_clone_shared_are_kept_and_this_clones_win_on_its_tree() {
     world.done();
 }
 
+/// The notes go where git is pushing: a remote that fetches from a mirror
+/// and pushes elsewhere has its notes taken in from, and pushed to, the push
+/// URL git names, or a push whose notes the mirror lacks would be refused
+/// every time.
+#[test]
+fn notes_are_shared_with_the_url_git_pushes_to() {
+    let world = World::new("pushurl", "ok two\n");
+    exit(&world.sykli(&["run", "sykli.json"], &[]), 0);
+    exit(&world.sykli(&["review"], &[]), 0);
+    git(
+        &world.dir,
+        &["clone", "--quiet", "--bare", "origin.git", "mirror.git"],
+    );
+    git(
+        &world.work,
+        &["remote", "set-url", "origin", "../mirror.git"],
+    );
+    git(
+        &world.work,
+        &["remote", "set-url", "--push", "origin", "../origin.git"],
+    );
+    // Another clone shares a note with the remote the mirror has not seen.
+    let other = world.clone("other");
+    let elsewhere = git(&other, &["rev-parse", "HEAD^{tree}"]);
+    git(
+        &other,
+        &[
+            "notes", "--ref", RECEIPTS, "add", "-m", "theirs", &elsewhere,
+        ],
+    );
+    git(&other, &["push", "--quiet", "origin", RECEIPTS]);
+
+    let out = world.push(&MAIN);
+    exit(&out, 0);
+    let origin = world.origin();
+    assert_eq!(world.remote_main(), world.head());
+    assert_eq!(
+        git(&origin, &["notes", "--ref", RECEIPTS, "show", &elsewhere]),
+        "theirs"
+    );
+    assert!(
+        git(
+            &origin,
+            &["notes", "--ref", RECEIPTS, "show", &world.tree()]
+        )
+        .contains("sykli-receipt.v1")
+    );
+    world.done();
+}
+
 /// The evidence goes before the branch moves: a remote that refuses the
 /// notes gets no commit either.
 #[test]

@@ -166,7 +166,8 @@ fn a_subdirectory_given_as_the_repository_root_is_refused() {
         "main",
     ];
     push.extend(given);
-    push.extend(["origin", "/nowhere/origin.git"]);
+    let url = repo.with_extension("origin.git");
+    push.extend(["origin", url.to_str().unwrap()]);
     let line = format!("refs/heads/main {x} refs/heads/main {ZEROS}\n");
     let out = sykli(&repo, &push, Some(&line));
     assert_eq!(out.status.code(), Some(2), "{}", text_of(&out.stderr));
@@ -273,7 +274,8 @@ fn the_repositorys_own_root_and_a_linked_worktrees_root_are_accepted() {
             "main",
         ];
         push.extend(given);
-        push.extend(["origin", "/nowhere/origin.git"]);
+        let url = repo.with_extension("origin.git");
+        push.extend(["origin", url.to_str().unwrap()]);
         let line = format!("refs/heads/work {head} refs/heads/main {ZEROS}\n");
         let out = sykli(cwd, &push, Some(&line));
         assert_eq!(
@@ -342,7 +344,8 @@ fn exported_git_locations_do_not_steer_a_given_repository() {
         "main",
     ];
     push.extend(given);
-    push.extend(["origin", "/nowhere/origin.git"]);
+    let url = repo.with_extension("origin.git");
+    push.extend(["origin", url.to_str().unwrap()]);
     let line = format!("refs/heads/main {x} refs/heads/main {ZEROS}\n");
     for env in [
         vec![("GIT_WORK_TREE", copy.as_path())],
@@ -410,7 +413,8 @@ fn a_git_dir_naming_the_given_repository_still_works() {
         "main",
     ];
     push.extend(given);
-    push.extend(["origin", "/nowhere/origin.git"]);
+    let url = repo.with_extension("origin.git");
+    push.extend(["origin", url.to_str().unwrap()]);
     let line = format!("refs/heads/main {head} refs/heads/main {ZEROS}\n");
     let out = sykli_env(&repo, &push, Some(&line), &env);
     assert_eq!(out.status.code(), Some(0), "{}", text_of(&out.stderr));

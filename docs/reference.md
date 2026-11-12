@@ -891,11 +891,12 @@ asked. Git itself refuses a push that is not a fast-forward before it runs
 the hook; a forced one reaches the hook, and is refused for the commits it
 would drop.
 
-Then, before the branch moves, the hook shares the evidence: it attaches the
-receipt to the tree as a note, fetches the remote's `refs/notes/sykli/*` and
-merges them into this clone's (where both hold a note for one tree, this
-clone's stays), and pushes the review and receipt notes. If that fails, the
-push is refused (exit 2) and the branch does not move. Two pushes of one
+Then, before the branch moves, the hook shares the evidence where git is
+pushing (the URL git names, which is the push URL when the remote has one):
+it attaches the receipt to the tree as a note, fetches the `refs/notes/sykli/*`
+there and merges them into this clone's (where both hold a note for one tree,
+this clone's stays), and pushes the review and receipt notes there. If that
+fails, the push is refused (exit 2) and the branch does not move. Two pushes of one
 clone share one at a time. The hook's own push of the notes runs the hook
 again, for notes refs only, which pass at once and say nothing. A
 `git push --dry-run` reaches the hook too, and shares the evidence as well.

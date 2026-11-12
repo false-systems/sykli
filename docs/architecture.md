@@ -250,9 +250,11 @@ so deleting a gated branch is refused. Then `share`, holding a lease on the
 common git directory itself (`journal::Lease::alone_within`, so concurrent
 pushes of one clone take turns and nothing is written for the lock), attaches
 each receipt under `refs/notes/sykli/receipt` (`review::write_note`), fetches
-`refs/notes/sykli/*` to `refs/notes-fetched/sykli/*` with `--prune`, merges
-the review and receipt notes (`take_in`, `git notes merge -s ours`, so this
-clone's note on a tree stays) and pushes them, taking in and pushing once
+`refs/notes/sykli/*` to `refs/notes-fetched/sykli/*` with `--prune` from the
+URL git hands the hook (the push URL, where a remote has one; the remote's name
+only when no URL is given), merges the review and receipt notes (`take_in`,
+`git notes merge -s ours`, so this clone's note on a tree stays) and pushes
+them there, taking in and pushing once
 more when the remote moved; a failure refuses the push (exit 2). Only then
 is the receipt kept in the common directory. On Windows the review and the
 sharing are not compiled: a push is judged by its receipt alone.
