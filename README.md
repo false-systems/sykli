@@ -100,6 +100,7 @@ From a proven commit to the default branch, on Linux and macOS:
 sykli run                   # prove the commit: a receipt of its tree
 sykli review                # a fresh agent reviews the change: fine, look or blocking
 git push origin HEAD:main   # the pre-push hook lets a proven, reviewed commit through
+sykli status                # every local branch: proven? reviewed? how far from main?
 ```
 
 The pre-push hook (`sykli hook install --pre-push`) is what decides: it

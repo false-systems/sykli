@@ -230,11 +230,26 @@ enum Command {
         #[arg(long, requires = "explain")]
         preview: bool,
     },
-    /// Inspect a graph run (--run), or what applies to a commit (--commit)
+    /// What is cooking on each local branch; or inspect a graph run (--run), or what applies to a commit (--commit)
     #[cfg(unix)]
     #[command(after_help = "Exit codes:\n  \
         0  records inspected (work may be unfinished)\n  \
-        2  unknown run, unreadable journal, or no such commit\n\n\
+        2  unknown run, unreadable journal, or no such commit; or, with neither flag, not a\n     \
+           git repository or git could not list the branches\n\n\
+        With neither --run nor --commit: one line per local branch (the one checked out\n\
+        marked *) against origin's default branch as this clone last fetched it\n\
+        (refs/remotes/origin/HEAD, else main or master, whichever this clone has): its\n\
+        commit; its proof, the verdict --commit gives for it by the contract the commit\n\
+        carries (proven, failed, none, conflict or pending; unknown, with why, when it\n\
+        cannot be judged); the review kept for its tree (fine, look, blocking, overruled,\n\
+        stale when it was read against another tip than that branch's, none, or - when\n\
+        the branch has nothing that branch lacks); and how far it is ahead of and behind\n\
+        that branch (needs git 2.41 or later; unknown otherwise). It reads this clone's\n\
+        refs, notes, receipts and runs and nothing else: nothing is fetched. Git is asked\n\
+        a fixed number of times, however many branches there are. With --json, one\n\
+        sykli-branch-status.v1 document: remote, base (branch and commit, or null),\n\
+        branches (branch, current, commit, tree, proof, review, ahead, behind; null where\n\
+        unknown) and warnings.\n\n\
         --run ID reads a run's journal (sykli-run-status.v1): its state (requested, running,\n\
         completed, interrupted, or lost when its coordinator ended without concluding it),\n\
         its subject and contract, each task's state (pending, running, passed, failed,\n\
@@ -254,7 +269,7 @@ enum Command {
         (`conflict`, with why). Like `verify`, it does not establish that tasks ran.")]
     Status {
         /// A graph run's id, as `run` printed it or its receipt's `run` names it
-        #[arg(long, required_unless_present = "commit", conflicts_with = "commit")]
+        #[arg(long, conflicts_with = "commit")]
         run: Option<String>,
         /// Receipts and runs that apply to this commit, judged as `verify --commit` judges them
         #[arg(long, value_name = "REV")]
@@ -269,7 +284,8 @@ enum Command {
         )]
         contract: PathBuf,
         /// Print one versioned JSON document on stdout (sykli-run-status.v1 with --run,
-        /// sykli-commit-status.v1 with --commit); an error goes to stderr and exits 2
+        /// sykli-commit-status.v1 with --commit, sykli-branch-status.v1 with neither); an
+        /// error goes to stderr and exits 2
         #[arg(long)]
         json: bool,
     },
@@ -2072,10 +2088,25 @@ fn main() -> ExitCode {
             json,
             ..
         } => {
-            // clap requires --run or --commit, so a status without --run has --commit.
+            // Neither --run nor --commit: what is cooking on each branch.
             let Some(rev) = commit else {
-                eprintln!("error: status takes --run ID or --commit REV");
-                return ExitCode::from(2);
+                return match branch_status() {
+                    Ok(status) => {
+                        if json {
+                            println!("{status}");
+                        } else {
+                            print!("{}", describe_branches(&status));
+                            for warning in status["warnings"].as_array().into_iter().flatten() {
+                                eprintln!("warning: {}", warning.as_str().unwrap_or("?"));
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        ExitCode::from(2)
+                    }
+                };
             };
             let mut contract = resolve_contract(contract);
             match enter_for_contract(&mut contract, &mut [])
@@ -2630,11 +2661,36 @@ fn describe_run(status: &serde_json::Value) -> String {
 /// recorded result, the newest receipt decides.
 #[cfg(unix)]
 fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, String> {
-    use serde_json::json;
     let repository = repo::repository()
         .map_err(|_| "not inside a git repository; --commit names a commit".to_string())?;
     let (judged, at) = commit_facts(repository, rev, contract_path)?;
-    let (runs, unreadable) = runs::runs_of_tree(&at.tree)?;
+    status_of(&judged, &at, contract_path, &kept_receipts(repository))
+}
+
+/// A receipt this clone keeps, read: where it is, its bytes, and what it says.
+#[cfg(unix)]
+struct Kept {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    receipt: serde_json::Value,
+}
+
+#[cfg(unix)]
+fn read_kept(path: PathBuf) -> Option<Kept> {
+    let bytes = fs::read(&path).ok()?;
+    let receipt = serde_json::from_slice(&bytes).ok()?;
+    Some(Kept {
+        path,
+        bytes,
+        receipt,
+    })
+}
+
+/// Every receipt this clone keeps outside its runs, read once: this
+/// worktree's `.sykli/receipt.json` and `.sykli/receipts`, and those the
+/// pre-push hook kept in the common git directory.
+#[cfg(unix)]
+fn kept_receipts(repository: &repo::Repository) -> Vec<Kept> {
     let mut candidates = vec![repository.root.join(".sykli/receipt.json")];
     for directory in [
         repository.root.join(".sykli/receipts"),
@@ -2649,31 +2705,48 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             );
         }
     }
+    candidates.into_iter().filter_map(read_kept).collect()
+}
+
+/// `status --commit` for a commit whose facts are read, judging the
+/// receipts `kept` and those of the runs of its tree.
+#[cfg(unix)]
+fn status_of(
+    judged: &Judged,
+    at: &CommitAt,
+    contract_path: &Path,
+    kept: &[Kept],
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let (runs, unreadable) = runs::runs_of_tree(&at.tree)?;
     // A run's receipt where it was written, and the copy the run kept, which
     // outlives the worktree that wrote it; one receipt is judged once.
-    candidates.extend(runs.iter().flat_map(|run| {
-        [&run["receipt"]["path"], &run["receipt"]["kept"]["path"]]
-            .into_iter()
-            .filter_map(|path| path.as_str().map(PathBuf::from))
-    }));
+    let of_runs = runs
+        .iter()
+        .flat_map(|run| {
+            [&run["receipt"]["path"], &run["receipt"]["kept"]["path"]]
+                .into_iter()
+                .filter_map(|path| path.as_str().map(PathBuf::from))
+        })
+        .filter_map(read_kept)
+        .collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut current = Vec::new();
     let mut historical = Vec::new();
-    for path in candidates {
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
+    for Kept {
+        path,
+        bytes,
+        receipt,
+    } in kept.iter().chain(&of_runs)
+    {
         if receipt["subject"]["tree_oid"].as_str() != Some(at.tree.as_str()) {
             continue;
         }
-        let digest = sha256(&bytes);
+        let digest = sha256(bytes);
         if !seen.insert(digest.clone()) {
             continue;
         }
-        let path = spelled(&path);
+        let path = spelled(path);
         // A receipt whose run this clone keeps (or pruned) counts only once
         // that run has concluded with it: a coordinator stopped, or fenced
         // off, between the receipt and its conclusion did not finish the
@@ -2741,7 +2814,7 @@ fn commit_status(rev: &str, contract_path: &Path) -> Result<serde_json::Value, S
             );
         let (judgement, stage, refusal_line) = match not_judged {
             Some((judgement, why)) => (judgement, None, Some(why)),
-            None => match judge(&path, Ok((&judged, &at))) {
+            None => match judge(&path, Ok((judged, at))) {
                 Ok(checks) => match checks.iter().find(|check| !check.ok) {
                     None => ("verified", None, None),
                     Some(first) => (
@@ -2958,6 +3031,273 @@ fn describe_commit(status: &serde_json::Value) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// `sykli status` with neither `--run` nor `--commit`: what is cooking
+/// (`sykli-branch-status.v1`). One entry per local branch: its commit; its
+/// proof, the verdict `status --commit` gives for it by the contract the
+/// commit carries; the review kept for its tree, against origin's default
+/// branch as this clone last fetched it; and how far it is ahead of and
+/// behind that branch. It reads this clone's refs, notes, receipts and runs,
+/// and nothing else. Git is asked a fixed number of times however many
+/// branches there are: `for-each-ref` for the branches and again for how far
+/// each is from the base, `notes list` for the reviews, and one `cat-file
+/// --batch` for every commit, its contract and inputs, and every review.
+#[cfg(unix)]
+fn branch_status() -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    const REMOTE: &str = "origin";
+    let repository = repo::repository().map_err(|_| "not inside a git repository".to_string())?;
+    // Contracts and receipts are looked for from the top level.
+    std::env::set_current_dir(&repository.root)
+        .map_err(|error| format!("cannot enter {}: {error}", repository.root.display()))?;
+    let contract = resolve_contract(PathBuf::from("sykli.rs"));
+    let mut warnings = Vec::new();
+
+    // Every local branch, and every branch of the remote this clone has.
+    let listed = git(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(tree)%00%(HEAD)",
+        "refs/heads/",
+        &format!("refs/remotes/{REMOTE}/"),
+    ])?;
+    struct Branch {
+        name: String,
+        commit: String,
+        tree: String,
+        current: bool,
+    }
+    let mut branches = Vec::new();
+    let mut remote_branches = HashMap::new();
+    for line in listed.lines() {
+        let [refname, commit, tree, head] = line.split('\0').collect::<Vec<_>>()[..] else {
+            return Err(format!("unexpected line from git for-each-ref: {line:?}"));
+        };
+        match refname.strip_prefix("refs/heads/") {
+            Some(name) => branches.push(Branch {
+                name: name.to_string(),
+                commit: commit.to_string(),
+                tree: tree.to_string(),
+                current: head == "*",
+            }),
+            None => {
+                remote_branches.insert(refname.to_string(), commit.to_string());
+            }
+        }
+    }
+
+    // The base, as the pre-push hook and `review` find the default branch:
+    // what refs/remotes/origin/HEAD names, else main or master, whichever
+    // this clone has.
+    let tracking = |branch: &str| format!("refs/remotes/{REMOTE}/{branch}");
+    let target = hook::remote_head(repository, REMOTE);
+    let exists = target
+        .as_deref()
+        .is_some_and(|target| remote_branches.contains_key(target));
+    let (candidates, _) = hook::default_branches(Some(REMOTE), target.as_deref(), exists);
+    let present = candidates
+        .iter()
+        .filter_map(|name| name.strip_prefix("refs/heads/"))
+        .filter(|branch| remote_branches.contains_key(&tracking(branch)))
+        .collect::<Vec<_>>();
+    let base = match present[..] {
+        [branch] => Some((
+            branch.to_string(),
+            remote_branches[&tracking(branch)].clone(),
+        )),
+        _ => {
+            warnings.push(format!(
+                "{REMOTE}'s default branch is unknown here, so the reviews and how far each \
+                 branch is from it are unknown: name it with `git remote set-head {REMOTE} --auto`"
+            ));
+            None
+        }
+    };
+
+    let mut distance = HashMap::new();
+    let mut notes = None;
+    if let Some((branch, _)) = &base {
+        if !branches.is_empty() {
+            match git(&[
+                "for-each-ref",
+                &format!("--format=%(refname)%00%(ahead-behind:{})", tracking(branch)),
+                "refs/heads/",
+            ]) {
+                Ok(listed) => {
+                    for line in listed.lines() {
+                        let counted = line.split_once('\0').and_then(|(refname, counts)| {
+                            let (ahead, behind) = counts.split_once(' ')?;
+                            Some((
+                                refname.strip_prefix("refs/heads/")?.to_string(),
+                                (ahead.parse::<u64>().ok()?, behind.parse::<u64>().ok()?),
+                            ))
+                        });
+                        distance.extend(counted);
+                    }
+                }
+                Err(error) => warnings.push(format!(
+                    "how far each branch is from {REMOTE}/{branch} is unknown (git 2.41 or \
+                     later counts it): {error}"
+                )),
+            }
+        }
+        match git(&["notes", "--ref", review::NOTES, "list"]) {
+            Ok(listed) => {
+                notes = Some(
+                    listed
+                        .lines()
+                        .filter_map(|line| line.split_once(' '))
+                        .map(|(blob, object)| (object.to_string(), blob.to_string()))
+                        .collect::<HashMap<_, _>>(),
+                );
+            }
+            Err(error) => warnings.push(format!("the reviews could not be listed: {error}")),
+        }
+    }
+
+    // One session: every branch's commit, contract and inputs, then every
+    // review note a branch's tree has.
+    let mut revs = branches
+        .iter()
+        .map(|branch| branch.commit.clone())
+        .collect::<Vec<_>>();
+    revs.sort();
+    revs.dedup();
+    let mut session = repository.session(Vec::new());
+    let facts = commits_facts(&mut session, &revs, &contract)?;
+    let blobs = branches
+        .iter()
+        .filter_map(|branch| notes.as_ref()?.get(&branch.tree).cloned())
+        .collect::<Vec<_>>();
+    let reviews = ask_in(&mut session, blobs)?;
+    session.finish()?;
+
+    let kept = kept_receipts(repository);
+    let proofs = revs
+        .iter()
+        .zip(&facts)
+        .map(|(rev, fact)| {
+            let verdict = fact
+                .as_ref()
+                .map_err(String::clone)
+                .and_then(|(judged, at)| {
+                    status_of(judged, at, &contract, &kept)
+                        .map(|status| status["verdict"].as_str().unwrap_or("unknown").to_string())
+                });
+            (rev.as_str(), verdict)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut entries = Vec::new();
+    for branch in &branches {
+        let proof = match &proofs[branch.commit.as_str()] {
+            Ok(verdict) if verdict == "passed" => "proven".to_string(),
+            Ok(verdict) => verdict.clone(),
+            Err(why) => {
+                warnings.push(format!("{}: the proof is unknown: {why}", branch.name));
+                "unknown".to_string()
+            }
+        };
+        let (ahead, behind) = distance
+            .get(&branch.name)
+            .map_or((None, None), |(ahead, behind)| {
+                (Some(*ahead), Some(*behind))
+            });
+        let review = match (&base, &notes) {
+            (Some(_), Some(_)) if ahead == Some(0) => Some("-".to_string()),
+            (Some((_, tip)), Some(notes)) => Some(match notes.get(&branch.tree) {
+                None => "none".to_string(),
+                Some(blob) => {
+                    let read = answer(&reviews, blob)
+                        .ok_or_else(|| format!("its note {blob} cannot be read"))
+                        .and_then(|note| review::record_of(&note.bytes, &branch.tree));
+                    match read {
+                        Err(why) => {
+                            warnings.push(format!(
+                                "{}: the review kept for its tree: {why}",
+                                branch.name
+                            ));
+                            "unreadable".to_string()
+                        }
+                        // A review answers only for the tip it was read
+                        // against.
+                        Ok(record) if record.base != *tip => "stale".to_string(),
+                        Ok(record) if record.overruled.is_some() => "overruled".to_string(),
+                        Ok(record) => record.level.to_string(),
+                    }
+                }
+            }),
+            _ => None,
+        };
+        entries.push(json!({
+            "branch": branch.name,
+            "current": branch.current,
+            "commit": branch.commit,
+            "tree": branch.tree,
+            "proof": proof,
+            "review": review,
+            "ahead": ahead,
+            "behind": behind,
+        }));
+    }
+    Ok(json!({
+        "schema": "sykli-branch-status.v1",
+        "remote": REMOTE,
+        "base": base.map(|(branch, commit)| json!({"branch": branch, "commit": commit})),
+        "branches": entries,
+        "warnings": warnings,
+    }))
+}
+
+/// `sykli status` for a person: what it is against, then one line per
+/// branch, the one checked out marked `*`.
+#[cfg(unix)]
+fn describe_branches(status: &serde_json::Value) -> String {
+    let short = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .map(|text| text.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "?".into())
+    };
+    let remote = status["remote"].as_str().unwrap_or("?");
+    let mut text = match status["base"]["branch"].as_str() {
+        Some(branch) => format!(
+            "against {remote}/{branch} at {}, as this clone last fetched it\n",
+            short(&status["base"]["commit"])
+        ),
+        None => format!("against nothing: {remote}'s default branch is unknown here\n"),
+    };
+    let branches = status["branches"].as_array().cloned().unwrap_or_default();
+    let width = branches
+        .iter()
+        .map(|branch| {
+            branch["branch"]
+                .as_str()
+                .map_or(1, |name| name.chars().count())
+        })
+        .max()
+        .unwrap_or(0);
+    for branch in &branches {
+        let count = |key: &str| {
+            branch[key]
+                .as_u64()
+                .map_or_else(|| "?".to_string(), |count| count.to_string())
+        };
+        text.push_str(&format!(
+            "{} {:width$}  {}  {:<8}  review {:<10}  {} ahead  {} behind\n",
+            if branch["current"] == true { "*" } else { " " },
+            branch["branch"].as_str().unwrap_or("?"),
+            short(&branch["commit"]),
+            branch["proof"].as_str().unwrap_or("?"),
+            branch["review"].as_str().unwrap_or("unknown"),
+            count("ahead"),
+            count("behind"),
+        ));
+    }
+    if branches.is_empty() {
+        text.push_str("no local branch\n");
+    }
+    text
 }
 
 /// `verify --json`: the verdict as one `sykli-verify.v1` document, with
@@ -8074,36 +8414,91 @@ fn commit_facts(
     rev: &str,
     contract_path: &Path,
 ) -> Result<(Judged, CommitAt), String> {
+    let mut session = repository.session(Vec::new());
+    let mut facts = commits_facts(&mut session, &[rev.to_string()], contract_path)?;
+    session.finish()?;
+    facts.pop().ok_or("no commit was asked about")?
+}
+
+/// One commit's facts, or why they cannot be read.
+type Facts = Result<(Judged, CommitAt), String>;
+
+/// `commit_facts` for many commits in one session: one process, each round
+/// asked for every commit at once (the commits and their contracts, then
+/// the inputs those contracts declare, and a third where a declared link
+/// leads). One commit's error is its own; the session's is everyone's. The
+/// caller finishes the session, and may ask it more first.
+fn commits_facts(
+    session: &mut repo::Session,
+    revs: &[String],
+    contract_path: &Path,
+) -> Result<Vec<Facts>, String> {
     let outside = outside_repository(contract_path).is_some();
     // A path outside the repository named as inside cannot be asked about;
     // that is reported after the commit, as it always was.
-    let inside = (!outside).then(|| ContractNames::new(rev, contract_path));
-    let mut names = commit_names(rev).to_vec();
-    if let Some(Ok(inside)) = &inside {
-        names.extend(inside.names());
+    let insides = revs
+        .iter()
+        .map(|rev| (!outside).then(|| ContractNames::new(rev, contract_path)))
+        .collect::<Vec<_>>();
+    let mut names = Vec::new();
+    for (rev, inside) in revs.iter().zip(&insides) {
+        names.extend(commit_names(rev));
+        if let Some(Ok(inside)) = inside {
+            names.extend(inside.names());
+        }
     }
-    // One process, two rounds: the commit and its contract, then the inputs
-    // that contract declares (and a third where a declared link leads).
-    let mut session = repository.session(Vec::new());
-    let mut answers = ask_in(&mut session, names)?;
-    let mut at = commit_from(rev, &answers)?;
-    let judged = match inside {
-        None => Judged::from_file(contract_path, true)?,
-        Some(inside) => inside?.judged(&answers, &at.id)?,
-    };
-    answers.extend(ask_in_bounded(
-        &mut session,
-        input_names(rev, &judged.contract)?,
-        INPUT_BLOB_KEPT,
-    )?);
+    let mut answers = ask_in(session, names)?;
+    let mut facts = revs
+        .iter()
+        .zip(insides)
+        .map(|(rev, inside)| {
+            let at = commit_from(rev, &answers)?;
+            let judged = match inside {
+                None => Judged::from_file(contract_path, true)?,
+                Some(inside) => inside?.judged(&answers, &at.id)?,
+            };
+            Ok((judged, at))
+        })
+        .collect::<Vec<Facts>>();
+    let mut inputs = Vec::new();
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let named = match fact {
+            Ok((judged, _)) => input_names(rev, &judged.contract),
+            Err(_) => continue,
+        };
+        match named {
+            Ok(names) => inputs.extend(names),
+            Err(error) => *fact = Err(error),
+        }
+    }
+    answers.extend(ask_in_bounded(session, inputs, INPUT_BLOB_KEPT)?);
     // A third round, only for declared symbolic links: where they lead.
-    let around = link_target_names(rev, &judged.contract, &answers)?;
-    if !around.is_empty() {
-        answers.extend(ask_in(&mut session, around)?);
+    let mut around = Vec::new();
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let named = match fact {
+            Ok((judged, _)) => link_target_names(rev, &judged.contract, &answers),
+            Err(_) => continue,
+        };
+        match named {
+            Ok(names) => around.extend(names),
+            Err(error) => *fact = Err(error),
+        }
     }
-    session.finish()?;
-    at.inputs = Some(inputs_from(rev, &judged.contract, &answers)?);
-    Ok((judged, at))
+    if !around.is_empty() {
+        answers.extend(ask_in(session, around)?);
+    }
+    for (rev, fact) in revs.iter().zip(facts.iter_mut()) {
+        let read = match fact {
+            Ok((judged, _)) => inputs_from(rev, &judged.contract, &answers),
+            Err(_) => continue,
+        };
+        match (read, fact) {
+            (Ok(read), Ok((_, at))) => at.inputs = Some(read),
+            (Err(error), fact) => *fact = Err(error),
+            (Ok(_), Err(_)) => {}
+        }
+    }
+    Ok(facts)
 }
 
 /// A receipt judged as evidence for a commit, against facts already read:

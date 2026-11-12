@@ -380,3 +380,13 @@ review`); run that, and never push with `--no-verify` to get past it.
 `sykli review` exits 0 (`fine`, `look`, overruled, or nothing to review), 1
 (`blocking`) or 2 (no review happened); only a person at a terminal can
 overrule a blocking review, never an agent session.
+
+To see every local branch at once, use `sykli status --json`
+(`sykli-branch-status.v1`, Linux and macOS): against origin's default branch
+as this clone last fetched it (`base`, null when unknown here), each branch's
+`commit`, `proof` (`proven`, `failed`, `none`, `conflict`, `pending`, or
+`unknown` with a `warnings` entry), `review` (`fine`, `look`, `blocking`,
+`overruled`, `stale` when read against another tip, `none`, or `-` when the
+branch has nothing the base lacks; null when the base is unknown) and
+`ahead`/`behind` (null when unknown). It reads local state only and fetches
+nothing: `git fetch` first.

@@ -915,3 +915,65 @@ fn status_queries_stay_within_their_git_budgets() {
         assert_eq!(answer["runs"].as_array().unwrap().len(), 2);
     }
 }
+
+/// `sykli status` with neither flag asks git a fixed number of times,
+/// however many branches there are: discovery, the branches and the remote's
+/// (`for-each-ref`), how far each is from the base (`for-each-ref` again),
+/// the reviews (`notes list`), and one `cat-file --batch` for every commit,
+/// its contract and inputs, and every review. It fetches nothing.
+#[cfg(unix)]
+#[test]
+fn branch_status_asks_git_a_fixed_number_of_times() {
+    let scratch = Scratch::new("branches");
+    fs::write(scratch.repo.join("sykli.json"), CONTRACT).unwrap();
+    let lock = Command::new(env!("CARGO_BIN_EXE_sykli"))
+        .args(["lock", "sykli.json"])
+        .current_dir(&scratch.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", text(&lock.stderr));
+    scratch.commit("contract");
+    scratch.git(&["push", "--quiet", "--no-verify", "origin", "main"]);
+    scratch.git(&["fetch", "--quiet", "origin"]);
+    let run = || {
+        let (out, _) = scratch.counted(&["run", "sykli.json"], None);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    };
+    run();
+    for branch in ["one", "two", "three"] {
+        scratch.git(&["checkout", "--quiet", "-b", branch, "main"]);
+        fs::write(scratch.repo.join("src/a.txt"), format!("{branch}\n")).unwrap();
+        scratch.commit(branch);
+        run();
+    }
+    let facts = scratch.facts();
+    let none: [String; 0] = [];
+    for (given, expected) in [
+        (
+            &none[..],
+            &[
+                "rev-parse",
+                "for-each-ref",
+                "for-each-ref",
+                "notes",
+                "cat-file",
+            ][..],
+        ),
+        (
+            &facts[..],
+            &["for-each-ref", "for-each-ref", "notes", "cat-file"][..],
+        ),
+    ] {
+        let label = if given.is_empty() { "" } else { " (given)" };
+        let (out, started) = scratch.counted(&with(&["status", "--json"], given), None);
+        let answer: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out.stderr)));
+        assert_eq!(answer["base"]["branch"], "main", "{answer}");
+        let branches = answer["branches"].as_array().unwrap();
+        assert_eq!(branches.len(), 4, "{answer}");
+        for branch in branches {
+            assert_eq!(branch["proof"], "proven", "{answer}");
+        }
+        within(&format!("status{label}"), (out, started), 0, expected);
+    }
+}

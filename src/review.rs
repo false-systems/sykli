@@ -578,7 +578,12 @@ pub(crate) fn read_record(root: &Path, tree: &str) -> Result<Option<Record>, Str
     let Some(bytes) = read_note(root, NOTES, tree)? else {
         return Ok(None);
     };
-    let record: Record = serde_json::from_slice(&bytes)
+    record_of(&bytes, tree).map(Some)
+}
+
+/// The review a note on `tree` holds, as `read_record` judges it.
+pub(crate) fn record_of(bytes: &[u8], tree: &str) -> Result<Record, String> {
+    let record: Record = serde_json::from_slice(bytes)
         .map_err(|error| format!("the note on {tree} in {NOTES} is not a review: {error}"))?;
     if record.schema != SCHEMA {
         return Err(format!(
@@ -592,7 +597,7 @@ pub(crate) fn read_record(root: &Path, tree: &str) -> Result<Option<Record>, Str
             record.tree
         ));
     }
-    Ok(Some(record))
+    Ok(record)
 }
 
 fn write_record(root: &Path, record: &Record) -> Result<(), String> {

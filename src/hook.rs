@@ -255,7 +255,7 @@ pub(crate) enum Chosen {
 /// read that way: refs kept another way (reftable), a symbolic link, a file
 /// that does not parse, or a remote name that is not one by git's rules (so
 /// no path is ever built from it).
-fn remote_head(repository: &repo::Repository, remote: &str) -> Option<String> {
+pub(crate) fn remote_head(repository: &repo::Repository, remote: &str) -> Option<String> {
     let name = format!("refs/remotes/{remote}/HEAD");
     let ask_git = || git(&["symbolic-ref", "--quiet", &name]).ok();
     if !repo::remote_name(remote) || repository.common_dir.join("reftable").is_dir() {

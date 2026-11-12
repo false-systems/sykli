@@ -185,7 +185,15 @@ tombstone in `sykli/pruned-runs/`, left by `prune`: a run is created aside and
 renamed into place with its lease held, and `remove_run` takes a lease only if
 it exists and moves the run aside before deleting it) concluded with it, and
 the verdict lets the newest recorded result decide, never an unrecorded pass
-over a recorded failure (`conflict`). `checkpoint(POINT)` is a debug-build
+over a recorded failure (`conflict`); its facts come from `commits_facts`, which
+asks the rounds of any number of commits in one `cat-file` session, and its
+verdict from `status_of` over receipts read once (`kept_receipts`). `status`
+with neither flag (`branch_status`) lists the local branches and origin's in
+one `for-each-ref`, picks the base as the hook does (`hook::remote_head`,
+`hook::default_branches`), counts ahead and behind in a second
+(`%(ahead-behind:)`), lists the review notes once, reads every branch's
+commit and review in one session, and judges each commit with `status_of`;
+it fetches nothing. `checkpoint(POINT)` is a debug-build
 test hook
 (`SYKLI_TEST_PAUSE_AT`/`SYKLI_TEST_PAUSE_DIR`, `SYKLI_TEST_FAIL_AT`) at each
 crash window; release builds have none. On Windows `runs` is a stub of

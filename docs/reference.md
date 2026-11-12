@@ -1022,6 +1022,43 @@ The limits:
   default branch moves, the merged result is a new tree, to be proven and
   reviewed again.
 
+## What is cooking
+
+`sykli status`, with neither `--run` nor `--commit`, shows every local branch
+at once, against origin's default branch as this clone last fetched it
+(Linux and macOS):
+
+```console
+$ sykli status
+against origin/main at 3c1d9e0a7b21, as this clone last fetched it
+* cut/one-job  9f8e7d6c5b4a  proven    review fine        3 ahead  0 behind
+  docs/notes   1a2b3c4d5e6f  none      review stale       1 ahead  2 behind
+  main         3c1d9e0a7b21  proven    review -           0 ahead  0 behind
+```
+
+The branch checked out is marked `*`. For each branch:
+
+- **proof** is the verdict `status --commit` gives for its commit, by the
+  contract that commit carries: `proven` (a passing receipt that verifies for
+  that commit), `failed`, `none` (no receipt of its tree in this clone),
+  `conflict` or `pending`; `unknown`, with why on stderr, when it cannot be
+  judged (a commit that carries no contract, say).
+- **review** is the review kept for its tree: `fine`, `look`, `blocking`,
+  `overruled`, `stale` when it was read against another tip than the base's
+  (the pre-push hook would refuse it: review again), `none`, or `-` when the
+  branch has no commit the base lacks.
+- **ahead** and **behind** count commits against the base (git 2.41 or later;
+  `?` otherwise).
+
+It reads this clone's refs, notes, receipts and runs, and nothing else:
+nothing is fetched, so run `git fetch` first to see the remote as it is now.
+Git is asked a fixed number of times however many branches there are (two
+`for-each-ref`, one `notes list`, one `cat-file --batch`). `--json` prints one
+`sykli-branch-status.v1` document: `remote`, `base` (`branch` and `commit`,
+or null when the default branch is unknown here), `branches` (`branch`,
+`current`, `commit`, `tree`, `proof`, `review`, `ahead`, `behind`; null where
+unknown) and `warnings`.
+
 ## Deploy with a contract
 
 A deployment is an ordinary contract whose tasks do the deploying, kept as
@@ -1402,6 +1439,7 @@ entry costs a re-run, never a result.
 | `lock` | Re-pin a contract's hash in `sykli.lock` after you edit it |
 | `plan` | Select the tasks a change requires; `--explain` shows why and what's cached |
 | `run` | Execute the graph and record a receipt; durable on Linux and macOS (`--detach` hands it off) |
+| `status` | What is cooking: each local branch's proof, review and distance from the default branch, from local state |
 | `status --run` · `resume --run` | Read a run's journal; continue a run whose coordinator ended |
 | `status --commit` | Judge every kept receipt of a commit's tree for that commit: current and historical |
 | `verify` | Check a receipt against the current tree and contract; `--commit` ties it to a commit; `--json` |

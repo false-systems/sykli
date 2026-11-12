@@ -663,6 +663,149 @@ fn a_failed_run_is_not_proven_whatever_the_review_says() {
     world.done();
 }
 
+/// `sykli status`, with neither `--run` nor `--commit`: one line per local
+/// branch, from this clone's own state, against the remote's default branch
+/// as this clone last fetched it.
+#[test]
+fn status_shows_what_is_cooking_on_each_branch() {
+    let world = World::new("status", "ok two\n");
+    let status = |world: &World| {
+        let out = world.sykli(&["status", "--json"], &[]);
+        exit(&out, 0);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(status["schema"], "sykli-branch-status.v1");
+        status
+    };
+    let branch = |status: &serde_json::Value, name: &str| {
+        status["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["branch"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no branch {name} in {status}"))
+    };
+    let first = status(&world);
+    let main = world.remote_main();
+    assert_eq!(first["base"]["branch"], "main");
+    assert_eq!(first["base"]["commit"], main.as_str());
+    let work = branch(&first, "work");
+    assert_eq!(work["current"], true);
+    assert_eq!(work["commit"], world.head().as_str());
+    assert_eq!(work["proof"], "none");
+    assert_eq!(work["review"], "none");
+    assert_eq!(
+        (work["ahead"].clone(), work["behind"].clone()),
+        (1.into(), 0.into())
+    );
+    let local_main = branch(&first, "main");
+    assert_eq!(local_main["current"], false);
+    assert_eq!(
+        local_main["review"], "-",
+        "nothing ahead, nothing to review"
+    );
+    assert_eq!(local_main["ahead"], 0);
+
+    // Proven and reviewed; a branch whose run failed; one reviewed blocking.
+    exit(&world.sykli(&["run", "sykli.json"], &[]), 0);
+    exit(&world.sykli(&["review"], &[]), 0);
+    git(
+        &world.work,
+        &["checkout", "--quiet", "-b", "failing", "main"],
+    );
+    fs::write(world.work.join("file.txt"), "bad\n").unwrap();
+    commit(&world.work, "bad");
+    exit(&world.sykli(&["run", "sykli.json"], &[]), 1);
+    git(
+        &world.work,
+        &["checkout", "--quiet", "-b", "blocked", "main"],
+    );
+    fs::write(world.work.join("file.txt"), "ok blocked\n").unwrap();
+    commit(&world.work, "blocked");
+    let reply = [(
+        "FAKE_REPLY",
+        "- [blocking] file.txt:1: no.\\nREVIEW: blocking",
+    )];
+    exit(&world.sykli(&["review"], &reply), 1);
+    let blocked = world.tree();
+    git(&world.work, &["checkout", "--quiet", "work"]);
+    let now = status(&world);
+    assert_eq!(branch(&now, "work")["proof"], "proven");
+    assert_eq!(branch(&now, "work")["review"], "fine");
+    assert_eq!(branch(&now, "failing")["proof"], "failed");
+    assert_eq!(branch(&now, "failing")["review"], "none");
+    assert_eq!(branch(&now, "blocked")["review"], "blocking");
+    // What `review --overrule` records when a person runs it at a terminal.
+    let note = git(&world.work, &["notes", "--ref", REVIEWS, "show", &blocked]);
+    let mut note: serde_json::Value = serde_json::from_str(&note).unwrap();
+    note["overruled"] = serde_json::json!({"why": "accepted", "at": 1});
+    let file = world.dir.join("overruled.json");
+    fs::write(&file, note.to_string()).unwrap();
+    git(
+        &world.work,
+        &[
+            "notes",
+            "--ref",
+            REVIEWS,
+            "add",
+            "-f",
+            "-F",
+            file.to_str().unwrap(),
+            &blocked,
+        ],
+    );
+    assert_eq!(branch(&status(&world), "blocked")["review"], "overruled");
+
+    // The remote's main moves on: nothing is fetched, so nothing changes
+    // until this clone fetches. Then the review is of another base.
+    let other = world.clone("other");
+    fs::write(other.join("theirs.txt"), "theirs\n").unwrap();
+    commit(&other, "theirs");
+    git(&other, &["push", "--quiet", "origin", "HEAD:main"]);
+    assert_eq!(status(&world)["base"]["commit"], main.as_str());
+    git(&world.work, &["fetch", "--quiet", "origin"]);
+    let fetched = status(&world);
+    let work = branch(&fetched, "work");
+    assert_eq!(work["review"], "stale");
+    assert_eq!(
+        (work["ahead"].clone(), work["behind"].clone()),
+        (1.into(), 1.into())
+    );
+    assert_eq!(
+        work["proof"], "proven",
+        "the proof is of the commit, not the base"
+    );
+
+    // For a person: one line each, the current one marked.
+    let out = world.sykli(&["status"], &[]);
+    exit(&out, 0);
+    let said = text(&out.stdout);
+    let line = |name: &str| {
+        said.lines()
+            .find(|line| line[2..].starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("no line for {name}: {said}"))
+            .to_string()
+    };
+    let work = line("work");
+    assert!(work.starts_with("* "), "{said}");
+    for word in [
+        &world.head()[..12],
+        "proven",
+        "review stale",
+        "1 ahead",
+        "1 behind",
+    ] {
+        assert!(work.contains(word), "{word}: {said}");
+    }
+    assert!(line("failing").starts_with("  "), "{said}");
+    assert!(line("failing").contains("failed"), "{said}");
+    assert!(
+        said.lines().next().unwrap().contains("origin/main"),
+        "{said}"
+    );
+    world.done();
+}
+
 #[test]
 fn review_says_what_it_takes() {
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))

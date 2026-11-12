@@ -13,6 +13,15 @@ contract consumer can observe; internal refactors are not listed.
   `"reuse": false`. `verify` refuses (exit 2) a receipt that records such a
   task as `cached`. The field is part of the declaration, so it changes that
   task's cache key and the contract's hash; no other key changes.
+- `sykli status` with neither `--run` nor `--commit` (Linux and macOS) shows
+  what is cooking: one line per local branch, the one checked out marked,
+  with its commit, its proof (the verdict `status --commit` gives for it),
+  the review kept for its tree against origin's default branch as this clone
+  last fetched it (`fine`, `look`, `blocking`, `overruled`, `stale`, `none`,
+  or `-` with nothing to review), and how far it is ahead of and behind that
+  branch. `--json` prints `sykli-branch-status.v1`. It reads local state
+  only, fetches nothing, and asks git a fixed number of times however many
+  branches there are.
 
 ### Breaking
 - The pre-push hook is the decision whether code may go to the default
