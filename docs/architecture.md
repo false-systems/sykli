@@ -31,7 +31,12 @@ it ran. `prepare` (run, resume, detached coordinator) makes and holds it shared
 before the run is recorded; `launch` expands it and lets tasks that name it
 inherit the lease; `prune`, called where runs are pruned, renames the
 directories of gone (and not `locked`) incarnations aside under an exclusive
-lease, and `remove_pruned` deletes them at the end of `conclude`. Keys cover
+lease, and `remove_pruned` deletes them at the end of `conclude`. Before it,
+`bound` records the run's own directory's size on disk in `<id>/size` (whose
+time is the worktree's last ended run) and, while all of them together exceed
+`SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (10 GiB), sets aside the least recently
+ended one whose lease it can take; `held` sets aside a worktree's own directory
+first when its record alone exceeds the budget (`start_over`). Keys cover
 the value as declared, never the expanded path. Inside a git hook, the directory git prepends to `PATH`
 (`GIT_EXEC_PATH`) is taken off again (`without_git_prepend`), so hooked and
 manual runs share keys. A task's cache key covers its declaration, input digests
