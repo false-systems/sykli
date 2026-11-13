@@ -61,8 +61,24 @@
 //! incarnation is gone when its git directory holds another token or none,
 //! or its top level's `.git` no longer leads to that git directory (it was
 //! removed or moved), unless git keeps it locked (`git worktree lock`, for
-//! one on removable media). Windows has no leases here, so there these
-//! directories are made but never pruned.
+//! one on removable media).
+//!
+//! Budget (Linux and macOS): the directories of a clone's worktrees together
+//! hold at most `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 10 GiB; `0`
+//! keeps everything), because a worktree that still exists keeps its
+//! directory, and a build directory only grows (Cargo removes nothing it
+//! built before). When a run's work is done, it records in `<id>/size` how
+//! much its worktree's directory holds on disk (each hard link counted once);
+//! the file's time is when that worktree last ended a run. Then, while the
+//! clone's directories hold more than the budget, it sets aside the one whose
+//! worktree ended a run least recently, never one whose lease is held (its
+//! own included), and deletes what it set aside. A directory with no record
+//! (made by an older sykli, or whose runs never ended) is measured there, and
+//! counts as last used when it was made. A directory that held more than the
+//! whole budget when its worktree's last run ended is set aside when the next
+//! run there starts, unless another run there holds it, and that run says so
+//! and starts it empty: a cold build. Windows has no leases here, so there
+//! these directories are made but never pruned.
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,6 +93,29 @@ const MARKER: &str = "sykli-worktree-cache.v1";
 
 /// The directory a worktree's tasks get, inside its `<id>/`.
 const HANDED_OUT: &str = "cache";
+
+/// The file in a worktree's `<id>/` that records how many bytes its
+/// directory held on disk when a run of that worktree last ended; its
+/// modification time is when that was.
+#[cfg(unix)]
+const SIZE: &str = "size";
+
+/// Default budget for the directories of a clone's worktrees, together:
+/// 10 GiB. A judgement, not a measurement: one worktree's Cargo build here is
+/// 0.3 to 2.5 GB, so it keeps the builds of the few worktrees in use; one
+/// clone's twelve worktrees held 20 GB with no budget.
+#[cfg(unix)]
+const DEFAULT_BUDGET: u64 = 10 * 1024 * 1024 * 1024;
+
+/// The budget in bytes: `SYKLI_WORKTREE_CACHE_BUDGET_BYTES`, or the default;
+/// `0` keeps everything.
+#[cfg(unix)]
+fn budget() -> u64 {
+    std::env::var("SYKLI_WORKTREE_CACHE_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_BUDGET)
+}
 
 /// A piece of a declared `env` value.
 enum Piece<'a> {
@@ -439,6 +478,7 @@ fn held(common: &Path, worktree: &Worktree) -> Result<Prepared, String> {
     // its lease; then it is found, or made, again.
     #[cfg(unix)]
     {
+        start_over(&parent, &id, &directory);
         for _ in 0..3 {
             there(&parent, &id, worktree, &directory)?;
             if let Some(lease) = crate::journal::Lease::share(&directory.join("lease"))? {
@@ -571,14 +611,156 @@ pub(crate) fn prune(common: &Path) {
         if exists(&path, name) {
             continue;
         }
-        let aside = parent.join(format!(
-            ".pruning-{name}-{}-{}",
-            std::process::id(),
-            crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
         // The lease goes with this iteration: once the directory is aside,
         // no run takes it again (`Lease::share` looks at its path).
-        let _ = fs::rename(&path, &aside);
+        set_aside(&parent, name, &path);
+    }
+}
+
+/// Rename the `<id>/` at `path`, whose exclusive lease the caller holds,
+/// aside under `parent`, for `remove_pruned` to delete. Whether it went.
+#[cfg(unix)]
+fn set_aside(parent: &Path, id: &str, path: &Path) -> bool {
+    let aside = parent.join(format!(
+        ".pruning-{id}-{}-{}",
+        std::process::id(),
+        crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::rename(path, aside).is_ok()
+}
+
+/// What `<id>/size` records about the `<id>/` at `path`: the bytes its
+/// directory held when a run of its worktree last ended, and when that was.
+#[cfg(unix)]
+fn recorded(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let file = path.join(SIZE);
+    let size = fs::read_to_string(&file).ok()?.trim().parse().ok()?;
+    let at = fs::metadata(&file).and_then(|meta| meta.modified()).ok()?;
+    Some((size, at))
+}
+
+/// The bytes `path` and everything under it take on disk, as `du` counts
+/// them: allocated blocks, each file with several hard links once (Cargo
+/// links each final artifact to its copy in `deps/`), symbolic links never
+/// followed. Best effort: what cannot be read counts nothing.
+#[cfg(unix)]
+fn measure(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut seen = std::collections::HashSet::new();
+    let mut total: u64 = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if let Ok(entries) = fs::read_dir(&path) {
+                pending.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        } else if meta.nlink() > 1 && !seen.insert((meta.dev(), meta.ino())) {
+            continue;
+        }
+        total = total.saturating_add(meta.blocks().saturating_mul(512));
+    }
+    total
+}
+
+/// `bytes` for a person: in MiB below a GiB, in GiB from there.
+#[cfg(unix)]
+fn human(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let mib = bytes as f64 / MIB;
+    if mib < 1024.0 {
+        format!("{mib:.1} MiB")
+    } else {
+        format!("{:.1} GiB", mib / 1024.0)
+    }
+}
+
+/// Before a run takes its worktree's `<id>/` at `path`: when the directory
+/// held more than the whole budget as the worktree's last run ended, set it
+/// aside, so this run makes it again, empty, and say so. Not while another
+/// run of this worktree holds it; then a later run does it.
+#[cfg(unix)]
+fn start_over(parent: &Path, id: &str, path: &Path) {
+    let budget = budget();
+    let Some((size, _)) = recorded(path) else {
+        return;
+    };
+    if budget == 0 || size <= budget {
+        return;
+    }
+    let Ok(Some(_lease)) = crate::journal::Lease::acquire_existing(path) else {
+        return;
+    };
+    if set_aside(parent, id, path) {
+        eprintln!(
+            "warning: this worktree's build directory (${{worktree_cache}}) held {} when its last \
+             run ended, more than the {} that SYKLI_WORKTREE_CACHE_BUDGET_BYTES allows for all of \
+             this clone's worktrees together; it starts empty, so this run builds from scratch",
+            human(size),
+            human(budget)
+        );
+    }
+}
+
+/// Once a run's work is done: record how much its worktree's directory
+/// holds, then, while the directories of the clone's worktrees together hold
+/// more than the budget, set aside the one whose worktree ended a run least
+/// recently, never one whose lease is held (this run's own among them), for
+/// `remove_pruned` to delete. Best effort: what cannot be measured or taken
+/// now is by a later run.
+#[cfg(unix)]
+pub(crate) fn bound() {
+    if let Some(own) = PREPARED
+        .get()
+        .and_then(|prepared| prepared.directory.parent())
+    {
+        let _ = fs::write(
+            own.join(SIZE),
+            format!("{}\n", measure(&own.join(HANDED_OUT))),
+        );
+    }
+    let budget = budget();
+    if budget == 0 {
+        return;
+    }
+    let Ok(repository) = crate::repo::repository() else {
+        return;
+    };
+    let parent = repository.common_dir.join("sykli").join("worktrees");
+    let Ok(entries) = fs::read_dir(&parent) else {
+        return;
+    };
+    let mut directories = Vec::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_id(id) {
+            continue;
+        }
+        let id = id.to_owned();
+        let (size, at) = recorded(&path).unwrap_or_else(|| {
+            let made = fs::metadata(path.join("worktree.json"))
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (measure(&path.join(HANDED_OUT)), made)
+        });
+        directories.push((at, size, id, path));
+    }
+    let mut total: u64 = directories.iter().map(|(_, size, _, _)| size).sum();
+    directories.sort();
+    for (_, size, id, path) in directories {
+        if total <= budget {
+            break;
+        }
+        let Ok(Some(_lease)) = crate::journal::Lease::acquire_existing(&path) else {
+            continue;
+        };
+        if set_aside(&parent, &id, &path) {
+            total = total.saturating_sub(size);
+        }
     }
 }
 
@@ -699,6 +881,32 @@ mod tests {
         assert_ne!(one, id("/r", "/c/worktrees/s", "1"));
         // Made again at the same path, with the same git directory.
         assert_ne!(one, id("/r", "/c/worktrees/r", "2"));
+    }
+
+    /// A file and its hard links take its blocks once, as Cargo's final
+    /// artifacts and their copies in `deps/` do; a symbolic link is never
+    /// followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_is_measured_as_du_counts_it() {
+        let root = std::env::temp_dir().join(format!(
+            "sykli-measure-{}-{}",
+            std::process::id(),
+            crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("deps")).unwrap();
+        let mib = 1024 * 1024;
+        fs::write(root.join("deps/one"), vec![7u8; mib]).unwrap();
+        let alone = measure(&root);
+        assert!(alone >= mib as u64, "{alone}");
+        fs::hard_link(root.join("deps/one"), root.join("one")).unwrap();
+        std::os::unix::fs::symlink(root.join("deps"), root.join("again")).unwrap();
+        let linked = measure(&root);
+        assert!(linked < alone + mib as u64 / 2, "{alone} then {linked}");
+        fs::write(root.join("two"), vec![7u8; mib]).unwrap();
+        assert!(measure(&root) >= linked + mib as u64);
+        assert_eq!(measure(&root.join("missing")), 0);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
