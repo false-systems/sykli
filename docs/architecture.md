@@ -37,7 +37,18 @@ time is the worktree's last ended run) and, while all of them together exceed
 `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (10 GiB), sets aside the least recently
 ended one whose lease it can take; `held` sets aside a worktree's own directory
 first when its record alone exceeds the budget (`start_over`). Keys cover
-the value as declared, never the expanded path. Inside a git hook, the directory git prepends to `PATH`
+the value as declared, never the expanded path. `clean`
+(`src/worktree_cache/clean.rs`, Unix) explicitly inspects this same store,
+read-only unless `--apply` is given. It shares marker/liveness validation,
+disk measurement and the rename-aside protocol with automatic retention,
+but reports unknown state and errors instead of silently skipping them.
+`Lease::inspect_existing` opens an existing lock read-only and tries an
+exclusive lease (cache users hold shared leases); apply holds it through
+measurement, selection and removal, rechecking directory identity,
+ownership and the lease inode immediately before renaming. It never runs a contract or deletes
+Git worktrees, receipts or task-result caches.
+
+Inside a git hook, the directory git prepends to `PATH`
 (`GIT_EXEC_PATH`) is taken off again (`without_git_prepend`), so hooked and
 manual runs share keys. A task's cache key covers its declaration, input digests
 (content plus execute bits), runtime fingerprint (for a Cargo graph, including

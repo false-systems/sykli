@@ -271,6 +271,45 @@ impl Lease {
         Ok(Some(Self::held(file)))
     }
 
+    /// Inspect an existing cache lease without creating or writing a file.
+    /// Unlike `observe`, take it exclusively: cache users hold shared locks.
+    /// None means busy; missing, unreadable and replaced leases are errors.
+    pub fn inspect_existing(directory: &Path) -> Result<Option<Self>, String> {
+        let path = directory.join("lease");
+        let file = File::open(&path).map_err(err)?;
+        loop {
+            // SAFETY: owned descriptor; LOCK_EX | LOCK_NB on Unix.
+            if unsafe { flock(file.as_raw_fd(), 2 | 4) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::WouldBlock => return Ok(None),
+                std::io::ErrorKind::Interrupted => continue,
+                _ => return Err(err(error)),
+            }
+        }
+        let held = Self::held(file);
+        held.check_existing(directory)?;
+        Ok(Some(held))
+    }
+
+    /// A replaced lease would let a new user run beside the old lock we hold.
+    /// Recheck this immediately before an explicit remover renames its cache.
+    pub fn check_existing(&self, directory: &Path) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        let path = directory.join("lease");
+        let before = self.file.metadata().map_err(err)?;
+        let now = fs::symlink_metadata(&path).map_err(err)?;
+        if !now.is_file() || (before.dev(), before.ino()) != (now.dev(), now.ino()) {
+            return Err(format!(
+                "{} changed while its lease was held",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
     /// Hold the lease at `path` shared, beside any other shared holder,
     /// waiting while one holds it alone (a remover, briefly). None when,
     /// once it is held, `path` no longer names it, or its directory is

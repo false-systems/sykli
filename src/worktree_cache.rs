@@ -83,6 +83,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+#[cfg(unix)]
+mod clean;
+#[cfg(unix)]
+pub(crate) use clean::clean;
 use sykli::{Contract, Task};
 
 /// The one placeholder there is.
@@ -558,31 +563,87 @@ fn make(parent: &Path, id: &str, worktree: &Worktree, directory: &Path) -> Resul
 /// and the marker is what the directory is named by.
 #[cfg(unix)]
 fn exists(directory: &Path, id: &str) -> bool {
-    let Some(marker) = fs::read(directory.join("worktree.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Marker>(&bytes).ok())
-        .filter(|marker| marker.schema == MARKER)
-    else {
-        return false;
-    };
+    owner(directory, id)
+        .and_then(|worktree| present(&worktree))
+        .unwrap_or(false)
+}
+
+/// Validate ownership separately from liveness: unreadable state is not a
+/// gone worktree when an explicit cleanup must explain what it can remove.
+#[cfg(unix)]
+fn owner(directory: &Path, id: &str) -> Result<Worktree, String> {
+    let path = directory.join("worktree.json");
+    let meta = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular marker file", path.display()));
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let marker: Marker =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     let worktree = Worktree {
         root: marker.root,
         gitdir: marker.gitdir,
         incarnation: marker.incarnation,
     };
+    if marker.schema != MARKER
+        || worktree.id()? != id
+        || !Path::new(&worktree.root).is_absolute()
+        || !Path::new(&worktree.gitdir).is_absolute()
+    {
+        return Err(format!("{} does not identify this cache", path.display()));
+    }
+    Ok(worktree)
+}
+
+#[cfg(unix)]
+fn present(worktree: &Worktree) -> Result<bool, String> {
+    let missing = |e: std::io::Error| -> Result<bool, String> {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(e.to_string())
+        }
+    };
     // Its git directory holds its token: git has not removed and made it
     // again (as for a worktree made again at the same path).
-    let same = current_incarnation(Path::new(&worktree.gitdir))
-        .is_some_and(|token| token == worktree.incarnation);
-    let reachable = || {
-        fs::canonicalize(&worktree.root).is_ok_and(|root| {
-            root == Path::new(&worktree.root)
-                && gitdir_of(&root).is_some_and(|gitdir| gitdir == Path::new(&worktree.gitdir))
-        })
+    let token = match fs::read_to_string(Path::new(&worktree.gitdir).join(INCARNATION)) {
+        Ok(token) => token,
+        Err(e) => return missing(e),
     };
-    worktree.id().is_ok_and(|named| named == id)
-        && same
-        && (Path::new(&worktree.gitdir).join("locked").exists() || reachable())
+    if token.trim() != worktree.incarnation {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(Path::new(&worktree.gitdir).join("locked")) {
+        Ok(_) => return Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let root = match fs::canonicalize(&worktree.root) {
+        Ok(root) => root,
+        Err(e) => return missing(e),
+    };
+    if root != Path::new(&worktree.root) {
+        return Ok(false);
+    }
+    let dot_git = root.join(".git");
+    let meta = match fs::metadata(&dot_git) {
+        Ok(meta) => meta,
+        Err(e) => return missing(e),
+    };
+    let target = if meta.is_dir() {
+        dot_git
+    } else {
+        let text =
+            fs::read_to_string(&dot_git).map_err(|e| format!("{}: {e}", dot_git.display()))?;
+        let target = text
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| format!("{} is not a gitdir file", dot_git.display()))?;
+        root.join(target.trim_end())
+    };
+    match fs::canonicalize(target) {
+        Ok(gitdir) => Ok(gitdir == Path::new(&worktree.gitdir)),
+        Err(e) => missing(e),
+    }
 }
 
 /// Set aside the directory of every worktree of the clone that is gone,
@@ -621,12 +682,18 @@ pub(crate) fn prune(common: &Path) {
 /// aside under `parent`, for `remove_pruned` to delete. Whether it went.
 #[cfg(unix)]
 fn set_aside(parent: &Path, id: &str, path: &Path) -> bool {
+    move_aside(parent, id, path).is_ok()
+}
+
+#[cfg(unix)]
+fn move_aside(parent: &Path, id: &str, path: &Path) -> Result<PathBuf, String> {
     let aside = parent.join(format!(
         ".pruning-{id}-{}-{}",
         std::process::id(),
         crate::canonical::NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    fs::rename(path, aside).is_ok()
+    fs::rename(path, &aside).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(aside)
 }
 
 /// What `<id>/size` records about the `<id>/` at `path`: the bytes its
@@ -645,24 +712,44 @@ fn recorded(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 /// followed. Best effort: what cannot be read counts nothing.
 #[cfg(unix)]
 fn measure(path: &Path) -> u64 {
+    measurement(path).0
+}
+
+/// Keep the background caller's best-effort count, but let inspection report
+/// an incomplete measurement as unknown instead of a complete-looking zero.
+#[cfg(unix)]
+fn measurement(path: &Path) -> (u64, Vec<String>) {
     use std::os::unix::fs::MetadataExt;
     let mut seen = std::collections::HashSet::new();
     let mut total: u64 = 0;
+    let mut errors = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(path) = pending.pop() {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
         };
         if meta.is_dir() {
-            if let Ok(entries) = fs::read_dir(&path) {
-                pending.extend(entries.flatten().map(|entry| entry.path()));
+            match fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => pending.push(entry.path()),
+                            Err(e) => errors.push(format!("{}: {e}", path.display())),
+                        }
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
         } else if meta.nlink() > 1 && !seen.insert((meta.dev(), meta.ino())) {
             continue;
         }
         total = total.saturating_add(meta.blocks().saturating_mul(512));
     }
-    total
+    (total, errors)
 }
 
 /// `bytes` for a person: in MiB below a GiB, in GiB from there.

@@ -689,6 +689,57 @@ macOS:
   If one worktree's fresh build is near the budget, raise it, or every few
   runs build cold.
 
+## Inspect and clean managed build caches
+
+On Linux and macOS, inspect a clone's `${worktree_cache}` directories without
+running a graph:
+
+```sh
+sykli clean                 # preview only: sizes, eligible caches, reasons for keeping others
+sykli clean --apply         # inspect again under exclusive locks, then remove eligible caches
+sykli clean --json          # the same report as sykli-clean.v1
+```
+
+The command works from any worktree or subdirectory of the clone and needs
+no contract. Preview creates no directories or files and does not update
+last-use timestamps. Apply uses the existing retention policy: remove caches
+whose worktree incarnation is gone, finish removals already set aside, then
+remove the least recently run caches until the remaining caches fit within
+`SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 10 GiB; `0` disables budget
+eviction, not orphan cleanup). Losing a build cache means a cold next build.
+
+Only the managed build-cache directories are candidates. Git worktrees and
+branches, arbitrary `target/` directories, task-result caches, receipts and
+run journals are untouched. A Git-locked worktree is not considered gone;
+its inactive cache can still be evicted for the size limit. Caches held by
+running tasks, including a task that outlives its coordinator, are retained.
+The exclusive lease stays held from inspection through removal. Apply checks
+directory identity, ownership and the lock file again before renaming the
+cache aside, so
+a replaced directory is not deleted. A failed deletion remains discoverable
+by the next cleanup or graph run.
+
+Sizes are current allocated disk space, counting hard links once within each
+cache and never following symbolic links. They are estimates of reclaimable
+space: links outside a cache, filesystem snapshots and concurrent activity
+can change what the filesystem frees. A live cache's size is unknown rather
+than measured while it changes. Malformed markers, missing leases,
+unfinished creation directories, unreadable contents and unrecognized
+entries are retained and reported. If any entry is unknown, totals are
+unknown and size-limit eviction is skipped; known orphans can still be
+removed. A symlink in place of the managed store is refused, not traversed.
+
+Exit codes: **0** complete inspection/removal, **2** repository or store
+unavailable (or report could not be encoded), **4** partial inspection or
+removal. Warnings appear on stderr and in the JSON report.
+
+`sykli-clean.v1` carries `apply`, `repository`, `budget_bytes`, `total_bytes`
+and `reclaimable_bytes` (the pre-removal estimates, `null` when incomplete),
+`removed_bytes` (the estimate for successful removals only), `warnings` and
+`entries`. Each entry names `path`, `worktree` (or `null`), `bytes` (or
+`null`), `action` (`keep`, `remove` in a preview, or `removed`) and `reason`.
+A preview is not a saved deletion plan: `--apply` computes a fresh report.
+
 ## In CI
 
 After checkout, install Sykli and your project's toolchain, then:
