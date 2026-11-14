@@ -1266,3 +1266,181 @@ fn detached_and_resumed_runs_get_the_same_directory() {
     assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
     assert_eq!(fixture.seen("dir-w"), foreground);
 }
+
+const MIB: u64 = 1024 * 1024;
+
+/// The command a task runs to count what its directory already holds (as
+/// `base/before-NAME`), then add one more MiB of its own to it, and note the
+/// directory (as `note_dir` does).
+fn fill(b: &str) -> String {
+    format!(
+        "ls \"$DIR\" | wc -l | tr -d ' ' > '{b}/before-'\"$(basename \"$(pwd)\")\" && \
+         head -c {MIB} /dev/urandom > \"$DIR/$$\" && {}",
+        note_dir(b)
+    )
+}
+
+/// A contract whose one task fills its worktree's directory on every run.
+fn filling(fixture: &Fixture) {
+    fixture.write("file.txt", "one\n");
+    fixture.contract(|b| {
+        json!([{
+            "name": "t",
+            "run": format!(
+                "{} && n=$(basename \"$(pwd)\") && if [ -e '{b}/hold-'$n ]; then \
+                 printf ready > '{b}/ready'; read token < '{b}/latch'; fi",
+                fill(b)
+            ),
+            "inputs": ["file.txt"],
+            "env": {"DIR": "${worktree_cache}"},
+            "reuse": false,
+        }])
+    });
+    fixture.commit_locked(&["sykli.json"]);
+}
+
+impl Fixture {
+    /// `run --json` in `dir` with the worktree directories' budget set to
+    /// `budget` bytes: it must pass; its standard error.
+    fn run_within(&self, dir: &Path, budget: u64) -> String {
+        let out = self
+            .sykli(dir, &["run", "sykli.json", "--json"])
+            .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", budget.to_string())
+            .output()
+            .unwrap();
+        let stderr = text(&out.stderr);
+        assert_eq!(outcome(&receipt(out, 0)), "passed", "{stderr}");
+        stderr
+    }
+
+    /// The `<id>/` of the worktree whose directory name is `name`.
+    fn own(&self, name: &str) -> PathBuf {
+        self.seen(&format!("dir-{name}"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    /// How many entries the worktree's directory held before its last run.
+    fn before(&self, name: &str) -> String {
+        fs::read_to_string(self.base.join(format!("before-{name}"))).unwrap()
+    }
+}
+
+/// The worktree directories of a clone are kept within a budget: once a run
+/// ends over it, the directories of the worktrees run least recently go
+/// first, although those worktrees still exist. A worktree whose directory
+/// went builds cold at its next run. `0` keeps everything.
+#[test]
+fn directories_over_the_budget_go_least_recently_run_first() {
+    let fixture = Fixture::new("budget");
+    filling(&fixture);
+    let [a, b, c] = ["a", "b", "c"].map(|name| fixture.worktree(name));
+    for tree in [&a, &b, &c] {
+        fixture.run_within(tree, 0);
+    }
+    let [in_a, in_b, in_c] = ["a", "b", "c"].map(|name| fixture.own(name));
+    assert!(in_a.is_dir() && in_b.is_dir() && in_c.is_dir());
+
+    // a holds 2 MiB, b and c 1 MiB each: b, run least recently, goes.
+    let budget = 3 * MIB + MIB / 2;
+    fixture.run_within(&a, budget);
+    assert_eq!(fixture.before("a"), "1\n", "a's own build was kept");
+    assert!(!in_b.exists(), "b's directory kept over the budget");
+    assert!(
+        in_a.is_dir() && in_c.is_dir(),
+        "more went than the budget asks"
+    );
+
+    // Then a, run before c was last.
+    fixture.run_within(&c, budget);
+    assert!(!in_a.exists(), "a's directory kept over the budget");
+    assert!(in_c.is_dir());
+
+    // b starts again from an empty directory: a cold build.
+    fixture.run_within(&b, budget);
+    assert_eq!(fixture.before("b"), "0\n", "b's old build came back");
+    assert!(in_b.is_dir() && in_c.is_dir());
+    assert_eq!(
+        fixture.caches_left().len(),
+        2,
+        "{:?}",
+        fixture.caches_left()
+    );
+}
+
+/// A worktree whose directory alone outgrows the budget gets it back empty
+/// at its next run, which says so: a build directory that only grows (Cargo
+/// never removes what it built before) is started over rather than kept.
+#[test]
+fn a_directory_over_the_budget_alone_starts_empty_at_its_next_run() {
+    let fixture = Fixture::new("alone");
+    filling(&fixture);
+    let w = fixture.worktree("w");
+    let budget = MIB + MIB / 2;
+    let said = fixture.run_within(&w, budget);
+    assert!(
+        !said.contains("SYKLI_WORKTREE_CACHE_BUDGET_BYTES"),
+        "{said}"
+    );
+    let said = fixture.run_within(&w, budget);
+    assert_eq!(fixture.before("w"), "1\n");
+    assert!(
+        !said.contains("SYKLI_WORKTREE_CACHE_BUDGET_BYTES"),
+        "{said}"
+    );
+    let own = fixture.own("w");
+
+    // Its run ended holding 2 MiB: the next one starts it empty.
+    let said = fixture.run_within(&w, budget);
+    assert_eq!(fixture.before("w"), "0\n", "kept over the budget");
+    assert!(
+        said.contains("warning:")
+            && said.contains("SYKLI_WORKTREE_CACHE_BUDGET_BYTES")
+            && said.contains("starts empty"),
+        "{said}"
+    );
+    assert_eq!(fixture.own("w"), own, "the same worktree, the same place");
+    assert_eq!(
+        fixture.caches_left(),
+        vec![own.file_name().unwrap().to_string_lossy().into_owned()],
+        "something set aside was left behind"
+    );
+}
+
+/// A directory a run holds is never taken for the budget, however long ago
+/// its worktree last ended a run; it goes once nothing holds it.
+#[test]
+fn a_directory_a_run_holds_is_never_taken_for_the_budget() {
+    let fixture = Fixture::new("held");
+    filling(&fixture);
+    let [a, b] = ["a", "b"].map(|name| fixture.worktree(name));
+    fixture.run_within(&b, 0);
+    let in_b = fixture.own("b");
+
+    let budget = MIB + MIB / 2;
+    fs::write(fixture.base.join("hold-b"), "").unwrap();
+    mkfifo(&fixture.base.join("latch"));
+    let mut live = fixture.sykli(&b, &["run", "sykli.json", "--json"]);
+    let live = live
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", budget.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("b's task is held", || fixture.base.join("ready").exists());
+
+    // a ends over the budget; b, run least recently, is held.
+    fixture.run_within(&a, budget);
+    let in_a = fixture.own("a");
+    assert!(in_b.is_dir(), "taken while its run was live");
+    assert!(in_a.is_dir());
+
+    // b's run ends over it: a, not held now, goes.
+    fs::remove_file(fixture.base.join("hold-b")).unwrap();
+    release(fixture.base.join("latch"));
+    let out = live.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(!in_a.exists(), "a's directory kept over the budget");
+    assert!(in_b.is_dir());
+}

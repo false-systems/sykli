@@ -7,6 +7,19 @@ contract consumer can observe; internal refactors are not listed.
 
 ## [Unreleased]
 
+### Added
+- The `${worktree_cache}` directories of a clone's worktrees together stay
+  within a budget (Linux and macOS): 10 GiB, or
+  `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything). Before, a
+  worktree that still existed kept its directory for ever, and a Cargo build
+  directory only grows: one clone's twelve worktrees held 20 GB. When a run's work
+  is done, it records in `<id>/size` how much its worktree's directory takes
+  on disk, then deletes the directories of the worktrees that ended a run
+  least recently until the clone is within the budget, never one a run holds.
+  Those worktrees' next runs build cold. A directory over the whole budget
+  alone is started empty by its worktree's next run, which says so on
+  standard error. Receipts, keys and contracts are unchanged.
+
 ## [0.9.0] - 2026-11-12
 
 sykli does one job: it decides whether code may go to the default branch.

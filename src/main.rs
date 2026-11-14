@@ -189,9 +189,12 @@ enum Command {
         build-dir ignores the second); the first gate in each worktree builds cold. Cache\n\
         keys cover the value as declared, never the directory. On Linux and macOS a run\n\
         holds the directory, and a later run removes it once its worktree is gone\n\
-        (removed, moved or pruned, and not locked). Any other ${...} in an env value, an\n\
-        unclosed one, a $${, $worktree_cache without braces in an env value, or\n\
-        ${worktree_cache} anywhere but an env value exits 2.")]
+        (removed, moved or pruned, and not locked). All worktrees' directories together stay\n\
+        within SYKLI_WORKTREE_CACHE_BUDGET_BYTES (default 10 GiB; 0 keeps everything): a run\n\
+        that ends over it deletes those of the worktrees run least recently, never one a run\n\
+        holds, and one over the budget alone starts empty at its worktree's next run.\n\
+        Any other ${...} in an env value, an unclosed one, a $${, $worktree_cache without\n\
+        braces in an env value, or ${worktree_cache} anywhere but an env value exits 2.")]
     Run {
         /// Path to a sykli-contract.v1 JSON file or a sykli.rs emitter (sykli.json when only it exists); may be outside the repository
         #[arg(default_value = "sykli.rs")]
@@ -4609,10 +4612,14 @@ fn conclude(
         Progress::Human => println!("receipt: {}", path.display()),
         Progress::Quiet => {}
     }
-    // What this run set aside when it was recorded (the directories of gone
-    // worktrees), deleted only now: their size never delays a run's start.
+    // What this run set aside (the directories of gone worktrees, and of
+    // those over the budget), deleted only now: their size never delays a
+    // run's start, and the result is out before any is measured.
     #[cfg(unix)]
-    worktree_cache::remove_pruned();
+    {
+        worktree_cache::bound();
+        worktree_cache::remove_pruned();
+    }
     Ok(Ran::Concluded {
         passed: matches!(receipt.outcome, Outcome::Passed | Outcome::Cached),
         receipt: path,
