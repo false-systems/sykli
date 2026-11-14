@@ -1444,3 +1444,334 @@ fn a_directory_a_run_holds_is_never_taken_for_the_budget() {
     assert!(!in_a.exists(), "a's directory kept over the budget");
     assert!(in_b.is_dir());
 }
+
+fn clean(f: &Fixture, apply: bool, budget: u64, code: i32) -> Value {
+    let mut command = f.sykli(&f.repo, &["clean", "--json"]);
+    command.env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", budget.to_string());
+    if apply {
+        command.arg("--apply");
+    }
+    receipt(command.output().unwrap(), code)
+}
+
+fn entry<'a>(report: &'a Value, path: &Path) -> &'a Value {
+    report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == path.to_str().unwrap())
+        .unwrap_or_else(|| panic!("missing {}: {report}", path.display()))
+}
+
+#[test]
+fn clean_previews_without_writing_then_applies_orphans_and_the_budget() {
+    let f = Fixture::new("clean");
+    filling(&f);
+    let [a, b, c] = ["a", "b", "c"].map(|name| f.worktree(name));
+    for tree in [&a, &b, &c] {
+        f.run_within(tree, 0);
+    }
+    let [ca, cb, cc] = ["a", "b", "c"].map(|name| f.own(name));
+    // A stale recorded size is not the current amount that can be reclaimed.
+    fs::write(cc.join("size"), "99999999999\n").unwrap();
+    // Make the ordering explicit, independent of filesystem clock resolution.
+    for (i, cache) in [&ca, &cb, &cc].into_iter().enumerate() {
+        fs::File::open(cache.join("size"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000 + i as u64))
+            .unwrap();
+    }
+    f.git(&f.repo, &["worktree", "remove", a.to_str().unwrap()]);
+    fs::write(b.join("unfinished.txt"), "keep this work\n").unwrap();
+    let before = f.status(&b);
+    let size_before = fs::metadata(cb.join("size")).unwrap().modified().unwrap();
+    let runs_before = fs::read_dir(f.repo.join(".git/sykli/runs"))
+        .unwrap()
+        .count();
+    let preview = clean(&f, false, MIB + MIB / 2, 0);
+    assert_eq!(preview["schema"], "sykli-clean.v1");
+    assert_eq!(preview["apply"], false);
+    assert_eq!(entry(&preview, &ca)["reason"], "worktree gone");
+    assert_eq!(entry(&preview, &cb)["reason"], "over budget");
+    assert_eq!(entry(&preview, &cc)["action"], "keep");
+    assert!(preview["reclaimable_bytes"].as_u64().unwrap() >= 2 * MIB);
+    assert!(ca.exists() && cb.exists() && cc.exists());
+    assert_eq!(
+        fs::metadata(cb.join("size")).unwrap().modified().unwrap(),
+        size_before
+    );
+    let text_preview = f.sykli(&f.repo, &["clean"]).output().unwrap();
+    assert!(
+        text_preview.status.success(),
+        "{}",
+        text(&text_preview.stderr)
+    );
+    assert!(text(&text_preview.stdout).contains("--apply"));
+    assert!(ca.exists());
+    let applied = clean(&f, true, MIB + MIB / 2, 0);
+    assert_eq!(entry(&applied, &ca)["action"], "removed");
+    assert_eq!(entry(&applied, &cb)["action"], "removed");
+    assert!(!ca.exists() && !cb.exists() && cc.exists());
+    assert_eq!(f.status(&b), before);
+    assert_eq!(
+        fs::read_dir(f.repo.join(".git/sykli/runs"))
+            .unwrap()
+            .count(),
+        runs_before
+    );
+    assert_eq!(clean(&f, true, 0, 0)["reclaimable_bytes"], 0);
+    assert!(cc.exists(), "zero disables budget eviction");
+}
+
+#[test]
+fn clean_in_a_fresh_repository_creates_no_state() {
+    let f = Fixture::new("clean-empty");
+    for apply in [false, true] {
+        let report = clean(&f, apply, 1, 0);
+        assert_eq!(report["total_bytes"], 0);
+        assert_eq!(report["entries"], json!([]));
+        assert!(!f.repo.join(".sykli").exists());
+        assert!(!f.repo.join(".git/sykli").exists());
+    }
+}
+
+#[test]
+fn clean_preserves_a_live_tasks_cache_after_its_coordinator_dies() {
+    let f = Fixture::new("clean-held");
+    f.write("file.txt", "one\n");
+    f.contract(|b| json!([{
+        "name": "t", "inputs": ["file.txt"], "env": {"DIR": "${worktree_cache}"},
+        "run": format!("{} && echo $$ > '{b}/pid' && printf ready > '{b}/ready'; read token < '{b}/latch'", fill(b)),
+    }]));
+    f.commit_locked(&["sykli.json"]);
+    let w = f.worktree("w");
+    mkfifo(&f.base.join("latch"));
+    let mut live = f
+        .sykli(&w, &["run", "--json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("cache held", || f.base.join("ready").exists());
+    let cache = f.own("w");
+    f.git(
+        &f.repo,
+        &["worktree", "remove", "--force", w.to_str().unwrap()],
+    );
+    for _ in 0..2 {
+        let report = clean(&f, true, 1, 4);
+        assert_eq!(entry(&report, &cache)["reason"], "in use");
+        assert_eq!(entry(&report, &cache)["action"], "keep");
+        assert!(cache.exists());
+        assert!(report["total_bytes"].is_null());
+        live.kill().ok();
+        live.wait().unwrap();
+    }
+    kill_group(&fs::read_to_string(f.base.join("pid")).unwrap());
+    assert_eq!(entry(&clean(&f, true, 1, 0), &cache)["action"], "removed");
+    assert!(!cache.exists());
+}
+
+#[test]
+fn clean_reports_unknown_state_and_never_follows_storage_links() {
+    let f = Fixture::new("clean-unknown");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    let cache = f.own("repo");
+    fs::write(cache.join("worktree.json"), "broken").unwrap();
+    let outside = f.base.join("unowned");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("precious"), "keep").unwrap();
+    let link = f.caches().join("0123456789abcdef");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let report = clean(&f, true, 1, 4);
+    assert!(report["total_bytes"].is_null());
+    assert!(report["reclaimable_bytes"].is_null());
+    assert!(!report["warnings"].as_array().unwrap().is_empty());
+    assert_eq!(entry(&report, &cache)["action"], "keep");
+    assert!(cache.exists() && link.is_symlink() && outside.join("precious").exists());
+    // A symlink above the store is refused too, without traversing it.
+    let moved = f.base.join("moved-store");
+    fs::rename(f.caches(), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, f.caches()).unwrap();
+    let out = f.sykli(&f.repo, &["clean", "--apply"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("symbolic link"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(moved.exists());
+}
+
+#[test]
+fn clean_finishes_an_interrupted_removal_and_keeps_locked_worktrees() {
+    let f = Fixture::new("clean-interrupted");
+    filling(&f);
+    let [a, b] = ["a", "b"].map(|name| f.worktree(name));
+    for tree in [&a, &b] {
+        f.run_within(tree, 0);
+    }
+    let [ca, cb] = ["a", "b"].map(|name| f.own(name));
+    f.git(&f.repo, &["worktree", "lock", b.to_str().unwrap()]);
+    fs::rename(&b, f.base.join("away")).unwrap();
+    let aside = f.caches().join(format!(
+        ".pruning-{}-123-0",
+        ca.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::rename(&ca, &aside).unwrap();
+    let preview = clean(&f, false, 0, 0);
+    assert_eq!(entry(&preview, &aside)["reason"], "interrupted removal");
+    assert_eq!(entry(&preview, &cb)["action"], "keep");
+    assert!(aside.exists());
+    let applied = clean(&f, true, 0, 0);
+    assert_eq!(entry(&applied, &aside)["action"], "removed");
+    assert!(!aside.exists() && cb.exists() && a.exists());
+}
+
+#[test]
+fn clean_reports_a_failed_removal_and_the_next_attempt_finishes_it() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let f = Fixture::new("clean-failure");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    let cache = f.own("repo");
+    let out = f
+        .sykli(&f.repo, &["clean", "--apply", "--json"])
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", "1")
+        .env("SYKLI_TEST_FAIL_AT", "clean-after-rename")
+        .output()
+        .unwrap();
+    let report = receipt(out, 4);
+    assert_eq!(report["removed_bytes"], 0);
+    assert!(
+        entry(&report, &cache)["reason"]
+            .as_str()
+            .unwrap()
+            .contains("injected failure")
+    );
+    assert!(!cache.exists());
+    let left = f.caches_left();
+    assert_eq!(left.len(), 1);
+    assert!(left[0].starts_with(".pruning-"));
+    let report = clean(&f, true, 1, 0);
+    assert!(report["removed_bytes"].as_u64().unwrap() >= MIB);
+    assert!(f.caches_left().is_empty());
+}
+
+#[test]
+fn clean_rechecks_directory_identity_before_removing_it() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let f = Fixture::new("clean-replaced");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    let cache = f.own("repo");
+    let latch = f.base.join("clean-before-remove.release");
+    mkfifo(&latch);
+    let child = f
+        .sykli(&f.repo, &["clean", "--apply", "--json"])
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", "1")
+        .env("SYKLI_TEST_PAUSE_AT", "clean-before-remove")
+        .env("SYKLI_TEST_PAUSE_DIR", &f.base)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until("clean reached its deletion check", || {
+        f.base.join("clean-before-remove.pid").exists()
+    });
+    let old = f.base.join("old-cache");
+    fs::rename(&cache, &old).unwrap();
+    fs::create_dir_all(cache.join("cache")).unwrap();
+    fs::copy(old.join("worktree.json"), cache.join("worktree.json")).unwrap();
+    fs::copy(old.join("lease"), cache.join("lease")).unwrap();
+    fs::write(cache.join("cache/new-work"), "must survive").unwrap();
+    release(latch);
+    let report = receipt(child.wait_with_output().unwrap(), 4);
+    assert!(
+        entry(&report, &cache)["reason"]
+            .as_str()
+            .unwrap()
+            .contains("changed during cleanup")
+    );
+    assert_eq!(
+        fs::read_to_string(cache.join("cache/new-work")).unwrap(),
+        "must survive"
+    );
+    assert!(old.join("cache").is_dir());
+}
+
+#[test]
+fn clean_keeps_unreadable_sizes_unknown_and_removes_only_known_orphans() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("clean-partial");
+    filling(&f);
+    let [a, b] = ["a", "b"].map(|name| f.worktree(name));
+    for tree in [&a, &b] {
+        f.run_within(tree, 0);
+    }
+    let [ca, cb] = ["a", "b"].map(|name| f.own(name));
+    f.git(&f.repo, &["worktree", "remove", a.to_str().unwrap()]);
+    let unreadable = cb.join("cache/hidden");
+    fs::create_dir(&unreadable).unwrap();
+    fs::write(unreadable.join("data"), "hidden data").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&unreadable).is_ok() {
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("skipped: this user can read mode-000 directories");
+        return;
+    }
+    let out = f
+        .sykli(&f.repo, &["clean", "--apply", "--json"])
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", "1")
+        .output()
+        .unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+    let report = receipt(out, 4);
+    assert!(report["total_bytes"].is_null());
+    assert!(entry(&report, &cb)["bytes"].is_null());
+    assert!(!ca.exists() && cb.exists());
+    assert!(report["removed_bytes"].as_u64().unwrap() >= MIB);
+}
+
+#[test]
+fn clean_retains_a_cache_whose_lease_was_replaced() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let f = Fixture::new("clean-lease-replaced");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    let cache = f.own("repo");
+    let latch = f.base.join("clean-before-remove.release");
+    mkfifo(&latch);
+    let child = f
+        .sykli(&f.repo, &["clean", "--apply", "--json"])
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", "1")
+        .env("SYKLI_TEST_PAUSE_AT", "clean-before-remove")
+        .env("SYKLI_TEST_PAUSE_DIR", &f.base)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until("clean holds the original lease", || {
+        f.base.join("clean-before-remove.pid").exists()
+    });
+    // A new run would lock this new inode, not the one clean holds.
+    fs::remove_file(cache.join("lease")).unwrap();
+    fs::write(cache.join("lease"), "").unwrap();
+    release(latch);
+    let report = receipt(child.wait_with_output().unwrap(), 4);
+    assert_eq!(entry(&report, &cache)["action"], "keep");
+    assert!(
+        entry(&report, &cache)["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lease")
+    );
+    assert!(cache.join("cache").is_dir());
+}

@@ -8,6 +8,13 @@ contract consumer can observe; internal refactors are not listed.
 ## [Unreleased]
 
 ### Added
+- `sykli clean` previews managed worktree build-cache cleanup without running
+  tasks (Linux and macOS). `--apply` removes caches of gone worktrees,
+  finishes interrupted removals, and evicts the least recently run caches
+  over the existing per-clone limit. It retains caches held by live tasks
+  and unknown state; partial inspection or removal exits 4, with unknown
+  totals rather than zero. `--json` prints `sykli-clean.v1`. Git worktrees,
+  arbitrary build folders, task-result caches and receipts are untouched.
 - The `${worktree_cache}` directories of a clone's worktrees together stay
   within a budget (Linux and macOS): 10 GiB, or
   `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything). Before, a

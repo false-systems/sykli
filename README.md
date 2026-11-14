@@ -66,7 +66,7 @@ cargo install --git https://github.com/false-systems/sykli --branch main --locke
 This version is not on crates.io yet. Once it is published,
 `cargo install sykli --locked` installs it; until then, use the command above.
 
-It runs on Linux, macOS and Windows. `review`, `status` and `resume` are on
+It runs on Linux, macOS and Windows. `review`, `status`, `resume` and `clean` are on
 Linux and macOS only, and so is the review the pre-push hook asks for.
 
 Running tasks needs Git, a POSIX `sh` and your project's own toolchain. On
@@ -101,6 +101,8 @@ sykli run                   # prove the commit: a receipt of its tree
 sykli review                # a fresh agent reviews the change: fine, look or blocking
 git push origin HEAD:main   # the pre-push hook lets a proven, reviewed commit through
 sykli status                # every local branch: proven? reviewed? how far from main?
+sykli clean                 # preview reclaimable managed build caches; changes nothing
+sykli clean --apply         # recheck locks and remove eligible caches, never worktrees
 ```
 
 The pre-push hook (`sykli hook install --pre-push`) is what decides: it

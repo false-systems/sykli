@@ -118,6 +118,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Preview reclaimable managed build caches; --apply removes eligible caches (Linux and macOS)
+    #[cfg(unix)]
+    #[command(
+        after_help = "Reads this clone's managed worktree build caches, without running tasks.\n\
+        Removes caches of gone worktrees and, over SYKLI_WORKTREE_CACHE_BUDGET_BYTES\n\
+        (default 10 GiB; 0 disables budget eviction), the least recently run caches.\n\
+        Live leases and unknown state are retained. Git worktrees, arbitrary target\n\
+        directories, task-result caches and receipts are never removed.\n\n\
+        Exit codes: 0 complete; 2 repository/store unavailable; 4 partial inspection or removal.\n\
+        --apply recomputes eligibility under locks; it does not execute an earlier preview."
+    )]
+    Clean {
+        /// Remove eligible caches after checking their ownership and exclusive leases
+        #[arg(long)]
+        apply: bool,
+        /// Print the inspection and removal results as JSON (sykli-clean.v1)
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate a declared contract without executing it
     #[command(after_help = "Exit codes:\n  \
         0  valid\n  \
@@ -2067,6 +2086,30 @@ fn main() -> ExitCode {
         });
     }
     match cli.command {
+        #[cfg(unix)]
+        Command::Clean { apply, json } => match worktree_cache::clean(apply) {
+            Ok(report) => {
+                if json {
+                    match serde_json::to_string(&report) {
+                        Ok(json) => println!("{json}"),
+                        Err(error) => {
+                            eprintln!("error: cannot encode cleanup report: {error}");
+                            return ExitCode::from(2);
+                        }
+                    }
+                } else {
+                    print!("{}", report.describe());
+                }
+                for warning in &report.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                ExitCode::from(if report.warnings.is_empty() { 0 } else { 4 })
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(2)
+            }
+        },
         #[cfg(unix)]
         Command::Status {
             run: Some(run),
