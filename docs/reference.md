@@ -674,8 +674,9 @@ macOS:
   run.
 - Then, while the directories hold more than the budget together, it deletes
   the one whose worktree ended a run least recently, never one whose lease a
-  run holds (its own included). That worktree still exists; its next run
-  builds cold.
+  run or task still holds. The finished run releases its own lock before
+  cleanup, so even its own oversized cache is removed now, without waiting
+  for a next run. That worktree still exists; its next run builds cold.
 - A directory with no record yet (made by an older sykli, or whose runs never
   ended) is measured then, and counts as last used when it was made.
 - A directory that held more than the whole budget when its worktree's last
@@ -1503,7 +1504,7 @@ The cache, the receipts and runs are bounded, and each limit is stated:
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or pushed to the default branch, replaced when that tree is reviewed or pushed again; they are git objects and grow with the trees pushed, as the history does. The pre-push hook also fetches the remote's beside them, under `refs/notes-fetched/sykli/*`, pruned to what the remote holds | — |
-| Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. All of them together: **10 GiB**; when a run ends over it, the directories of the worktrees run least recently are deleted, never one a run holds, and one over the budget alone starts empty at its worktree's next run. Not pruned on Windows (remove them by hand when no run is live) | `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything) |
+| Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. All of them together: **10 GiB**; when a run ends over it, the directories of the worktrees run least recently are deleted, including the finished run's own directory, never one a running task or another run holds. Not pruned on Windows (remove them by hand when no run is live) | `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything) |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
 receipt that a live cache entry cites is never evicted, because a cached result

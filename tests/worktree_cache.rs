@@ -1369,11 +1369,9 @@ fn directories_over_the_budget_go_least_recently_run_first() {
     );
 }
 
-/// A worktree whose directory alone outgrows the budget gets it back empty
-/// at its next run, which says so: a build directory that only grows (Cargo
-/// never removes what it built before) is started over rather than kept.
+/// A finished run must not leave its own oversized cache until another run.
 #[test]
-fn a_directory_over_the_budget_alone_starts_empty_at_its_next_run() {
+fn a_directory_over_the_budget_alone_is_removed_when_its_run_ends() {
     let fixture = Fixture::new("alone");
     filling(&fixture);
     let w = fixture.worktree("w");
@@ -1390,16 +1388,14 @@ fn a_directory_over_the_budget_alone_starts_empty_at_its_next_run() {
         "{said}"
     );
     let own = fixture.own("w");
-
-    // Its run ended holding 2 MiB: the next one starts it empty.
-    let said = fixture.run_within(&w, budget);
-    assert_eq!(fixture.before("w"), "0\n", "kept over the budget");
     assert!(
-        said.contains("warning:")
-            && said.contains("SYKLI_WORKTREE_CACHE_BUDGET_BYTES")
-            && said.contains("starts empty"),
-        "{said}"
+        !own.exists(),
+        "finished run left its oversized cache on disk"
     );
+
+    // The next run builds cold, but cleanup did not depend on it happening.
+    fixture.run_within(&w, budget);
+    assert_eq!(fixture.before("w"), "0\n", "kept over the budget");
     assert_eq!(fixture.own("w"), own, "the same worktree, the same place");
     assert_eq!(
         fixture.caches_left(),
@@ -1434,15 +1430,18 @@ fn a_directory_a_run_holds_is_never_taken_for_the_budget() {
     fixture.run_within(&a, budget);
     let in_a = fixture.own("a");
     assert!(in_b.is_dir(), "taken while its run was live");
-    assert!(in_a.is_dir());
+    assert!(
+        !in_a.exists(),
+        "finished cache kept while a live cache exceeds the limit"
+    );
 
-    // b's run ends over it: a, not held now, goes.
+    // b itself becomes eligible only after its task ends.
     fs::remove_file(fixture.base.join("hold-b")).unwrap();
     release(fixture.base.join("latch"));
     let out = live.wait_with_output().unwrap();
     assert!(out.status.success());
     assert!(!in_a.exists(), "a's directory kept over the budget");
-    assert!(in_b.is_dir());
+    assert!(!in_b.exists(), "finished oversized cache was retained");
 }
 
 fn clean(f: &Fixture, apply: bool, budget: u64, code: i32) -> Value {

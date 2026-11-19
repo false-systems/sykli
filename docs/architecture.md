@@ -35,7 +35,9 @@ lease, and `remove_pruned` deletes them at the end of `conclude`. Before it,
 `bound` records the run's own directory's size on disk in `<id>/size` (whose
 time is the worktree's last ended run) and, while all of them together exceed
 `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (10 GiB), sets aside the least recently
-ended one whose lease it can take; `held` sets aside a worktree's own directory
+ended one whose lease it can take. After recording its size, the concluded
+run closes its own lease before eviction, making its cache eligible too;
+inherited task descriptors still protect it if a child survives. `held` sets aside a worktree's own directory
 first when its record alone exceeds the budget (`start_over`). Keys cover
 the value as declared, never the expanded path. `clean`
 (`src/worktree_cache/clean.rs`, Unix) explicitly inspects this same store,

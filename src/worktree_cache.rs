@@ -71,8 +71,10 @@
 //! much its worktree's directory holds on disk (each hard link counted once);
 //! the file's time is when that worktree last ended a run. Then, while the
 //! clone's directories hold more than the budget, it sets aside the one whose
-//! worktree ended a run least recently, never one whose lease is held (its
-//! own included), and deletes what it set aside. A directory with no record
+//! worktree ended a run least recently, never one whose lease is still held
+//! by a run or task, and deletes what it set aside. The finished coordinator
+//! releases its own lease first, so its final build can also be removed.
+//! A directory with no record
 //! (made by an older sykli, or whose runs never ended) is measured there, and
 //! counts as last used when it was made. A directory that held more than the
 //! whole budget when its worktree's last run ended is set aside when the next
@@ -82,6 +84,8 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 #[cfg(unix)]
@@ -243,18 +247,18 @@ pub(crate) fn named_by(task: &Task) -> bool {
 }
 
 /// The directory this process expands `${worktree_cache}` to, with its
-/// lease held shared for as long as the process lives.
+/// lease held shared until the run has finished using it.
 struct Prepared {
     directory: PathBuf,
     #[cfg(unix)]
-    lease: crate::journal::Lease,
+    lease: Mutex<Option<crate::journal::Lease>>,
 }
 
 static PREPARED: OnceLock<Prepared> = OnceLock::new();
 
 /// Make this worktree's directory ready for `contract`, when one of its
-/// tasks names it: made if it is missing, and its lease held until this
-/// process ends. A contract that names no placeholder costs nothing.
+/// tasks names it: made if it is missing, and its lease held until cleanup
+/// after the run. A contract that names no placeholder costs nothing.
 pub(crate) fn prepare(contract: &Contract) -> Result<(), String> {
     if PREPARED.get().is_some() || !contract.tasks.iter().any(named_by) {
         return Ok(());
@@ -329,7 +333,9 @@ pub(crate) fn environment(task: &Task) -> Result<Vec<(&str, OsString)>, String> 
 pub(crate) fn inherit(task: &Task, command: &mut std::process::Command) {
     if named_by(task) {
         if let Some(prepared) = PREPARED.get() {
-            prepared.lease.inherit(command);
+            if let Some(lease) = prepared.lease.lock().unwrap().as_ref() {
+                lease.inherit(command);
+            }
         }
     }
 }
@@ -489,7 +495,7 @@ fn held(common: &Path, worktree: &Worktree) -> Result<Prepared, String> {
             if let Some(lease) = crate::journal::Lease::share(&directory.join("lease"))? {
                 return Ok(Prepared {
                     directory: handed_out()?,
-                    lease,
+                    lease: Mutex::new(Some(lease)),
                 });
             }
         }
@@ -794,7 +800,7 @@ fn start_over(parent: &Path, id: &str, path: &Path) {
 /// Once a run's work is done: record how much its worktree's directory
 /// holds, then, while the directories of the clone's worktrees together hold
 /// more than the budget, set aside the one whose worktree ended a run least
-/// recently, never one whose lease is held (this run's own among them), for
+/// recently, never one whose lease is held by another run or task, for
 /// `remove_pruned` to delete. Best effort: what cannot be measured or taken
 /// now is by a later run.
 #[cfg(unix)]
@@ -807,6 +813,13 @@ pub(crate) fn bound() {
             own.join(SIZE),
             format!("{}\n", measure(&own.join(HANDED_OUT))),
         );
+    }
+    // No more tasks are launched after conclusion. Close only our copy;
+    // Lease::inherit keeps the lock held by any surviving child. Otherwise
+    // our own cache would be ineligible forever during this cleanup, leaving
+    // an oversized final build on disk until someone runs here again.
+    if let Some(prepared) = PREPARED.get() {
+        prepared.lease.lock().unwrap().take();
     }
     let budget = budget();
     if budget == 0 {
