@@ -92,13 +92,45 @@ impl Fixture {
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
 
+    /// Sykli in `dir`, with a per-user state directory of the test's own
+    /// (`base/state`), so the clones it registers are only this test's: a
+    /// budget a test sets never reaches the clones of whoever runs it.
     fn sykli(&self, dir: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_sykli"));
         own_git_config(&mut command)
             .args(args)
             .current_dir(dir)
+            .env("XDG_STATE_HOME", self.base.join("state"))
             .stdin(Stdio::null());
         command
+    }
+
+    /// Another clone of the repository, `base/NAME`, on the same machine:
+    /// its own common git directory, so its own worktree directories.
+    fn clone_as(&self, name: &str) -> PathBuf {
+        let path = self.base.join(name);
+        self.git(
+            &self.base,
+            &[
+                "clone",
+                "--quiet",
+                self.repo.to_str().unwrap(),
+                path.to_str().unwrap(),
+            ],
+        );
+        path
+    }
+
+    /// The clones registered in this test's per-user state directory.
+    fn registered(&self) -> usize {
+        fs::read_dir(self.base.join("state/sykli/clones"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     /// A linked worktree `base/NAME` on a new branch NAME.
@@ -1369,6 +1401,62 @@ fn directories_over_the_budget_go_least_recently_run_first() {
     );
 }
 
+/// The budget is one for the machine, not one per clone: two clones each
+/// within it, together over it, lose the directory of the worktree run least
+/// recently, whichever clone holds it. Per clone, ten clones could hold ten
+/// budgets.
+#[test]
+fn clones_share_one_budget_least_recently_run_first() {
+    let fixture = Fixture::new("machine");
+    filling(&fixture);
+    let a = fixture.worktree("a");
+    let other = fixture.clone_as("other");
+    fixture.run_within(&a, 0);
+    fixture.run_within(&other, 0);
+    let [in_a, in_other] = ["a", "other"].map(|name| fixture.own(name));
+    assert_ne!(
+        in_a.parent(),
+        in_other.parent(),
+        "two clones, two common git directories"
+    );
+
+    // a holds 2 MiB and the other clone 1 MiB: each clone is within the
+    // budget, both together are over it. The other clone ran least recently.
+    let budget = 2 * MIB + MIB / 2;
+    fixture.run_within(&a, budget);
+    assert_eq!(fixture.before("a"), "1\n", "a's own build was kept");
+    assert!(
+        !in_other.exists(),
+        "the other clone's directory kept over the machine's budget"
+    );
+    assert!(in_a.is_dir());
+
+    // The other clone builds cold, and now a, run least recently, goes.
+    fixture.run_within(&other, budget);
+    assert_eq!(fixture.before("other"), "0\n", "its old build came back");
+    assert!(
+        !in_a.exists(),
+        "a's directory kept over the machine's budget"
+    );
+    assert!(in_other.is_dir());
+    assert_eq!(fixture.registered(), 2);
+}
+
+/// A clone deleted with its directories leaves no registration behind: the
+/// next run that bounds the machine drops it.
+#[test]
+fn a_deleted_clone_is_forgotten() {
+    let fixture = Fixture::new("forgotten");
+    filling(&fixture);
+    let gone = fixture.clone_as("gone");
+    fixture.run_within(&gone, 0);
+    fixture.run_within(&fixture.repo, 0);
+    assert_eq!(fixture.registered(), 2);
+    fs::remove_dir_all(&gone).unwrap();
+    fixture.run_within(&fixture.repo, 10 * MIB);
+    assert_eq!(fixture.registered(), 1, "a deleted clone stays registered");
+}
+
 /// A worktree whose directory alone outgrows the budget gets it back empty
 /// at its next run, which says so: a build directory that only grows (Cargo
 /// never removes what it built before) is started over rather than kept.
@@ -1523,6 +1611,75 @@ fn clean_previews_without_writing_then_applies_orphans_and_the_budget() {
     assert!(cc.exists(), "zero disables budget eviction");
 }
 
+/// `clean` in one clone covers every clone registered on the machine: a
+/// gone worktree's directory in another clone is removed, the budget counts
+/// every clone's directories, a deleted clone's registration is dropped by
+/// `--apply` (never by a preview), and a registered clone whose store is a
+/// symbolic link is reported, never followed: partial coverage, exit 4.
+#[test]
+fn clean_covers_every_clone_on_the_machine() {
+    let f = Fixture::new("clean-machine");
+    filling(&f);
+    let other = f.clone_as("other");
+    let away = f.base.join("away");
+    f.git(
+        &other,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "away",
+            away.to_str().unwrap(),
+        ],
+    );
+    let gone = f.clone_as("gone");
+    for tree in [&away, &gone, &other, &f.repo] {
+        f.run_within(tree, 0);
+    }
+    let [c_away, c_other, c_repo] = ["away", "other", "repo"].map(|name| f.own(name));
+    f.git(&other, &["worktree", "remove", away.to_str().unwrap()]);
+    fs::remove_dir_all(&gone).unwrap();
+    assert_eq!(f.registered(), 3);
+
+    let preview = clean(&f, false, MIB + MIB / 2, 0);
+    assert_eq!(preview["clones"].as_array().unwrap().len(), 2, "{preview}");
+    assert_eq!(entry(&preview, &c_away)["reason"], "worktree gone");
+    assert_eq!(entry(&preview, &c_other)["reason"], "over budget");
+    assert_eq!(entry(&preview, &c_repo)["action"], "keep");
+    assert!(c_away.exists() && c_other.exists());
+    assert_eq!(f.registered(), 3, "a preview changed the registrations");
+
+    let applied = clean(&f, true, MIB + MIB / 2, 0);
+    assert_eq!(entry(&applied, &c_away)["action"], "removed");
+    assert_eq!(entry(&applied, &c_other)["action"], "removed");
+    assert!(!c_away.exists() && !c_other.exists() && c_repo.exists());
+    assert_eq!(f.registered(), 2, "the deleted clone stayed registered");
+
+    // Another clone's store replaced by a symbolic link: not traversed.
+    let outside = f.base.join("unowned");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("precious"), "keep").unwrap();
+    let store = other.join(".git/sykli/worktrees");
+    fs::remove_dir_all(&store).unwrap();
+    std::os::unix::fs::symlink(&outside, &store).unwrap();
+    let report = clean(&f, true, 1, 4);
+    assert!(report["total_bytes"].is_null(), "{report}");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("symbolic link")),
+        "{report}"
+    );
+    assert!(outside.join("precious").exists() && store.is_symlink());
+    assert!(
+        c_repo.exists(),
+        "evicted for a budget whose total is unknown"
+    );
+}
+
 #[test]
 fn clean_in_a_fresh_repository_creates_no_state() {
     let f = Fixture::new("clean-empty");
@@ -1532,6 +1689,10 @@ fn clean_in_a_fresh_repository_creates_no_state() {
         assert_eq!(report["entries"], json!([]));
         assert!(!f.repo.join(".sykli").exists());
         assert!(!f.repo.join(".git/sykli").exists());
+        assert!(
+            !f.base.join("state").exists(),
+            "registered a clone with no store"
+        );
     }
 }
 

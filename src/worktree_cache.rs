@@ -87,6 +87,8 @@ use std::sync::OnceLock;
 #[cfg(unix)]
 mod clean;
 #[cfg(unix)]
+mod clones;
+#[cfg(unix)]
 pub(crate) use clean::clean;
 use sykli::{Contract, Task};
 
@@ -105,15 +107,17 @@ const HANDED_OUT: &str = "cache";
 #[cfg(unix)]
 const SIZE: &str = "size";
 
-/// Default budget for the directories of a clone's worktrees, together:
-/// 10 GiB. A judgement, not a measurement: one worktree's Cargo build here is
-/// 0.3 to 2.5 GB, so it keeps the builds of the few worktrees in use; one
-/// clone's twelve worktrees held 20 GB with no budget.
+/// Default budget for the directories of every worktree of every clone on
+/// the machine, together: 30 GiB. A judgement, not a measurement: one
+/// worktree's Cargo build is 0.3 to 2.5 GB for sykli itself and several GB
+/// for a larger workspace, so it keeps the builds of the worktrees in use
+/// across a few clones at once. It was 10 GiB per clone, and a budget per
+/// clone grows with the clones: ten active ones could hold 100 GiB.
 #[cfg(unix)]
-const DEFAULT_BUDGET: u64 = 10 * 1024 * 1024 * 1024;
+const DEFAULT_BUDGET: u64 = 30 * 1024 * 1024 * 1024;
 
-/// The budget in bytes: `SYKLI_WORKTREE_CACHE_BUDGET_BYTES`, or the default;
-/// `0` keeps everything.
+/// The budget in bytes, for the machine: `SYKLI_WORKTREE_CACHE_BUDGET_BYTES`,
+/// or the default; `0` keeps everything.
 #[cfg(unix)]
 fn budget() -> u64 {
     std::env::var("SYKLI_WORKTREE_CACHE_BUDGET_BYTES")
@@ -280,6 +284,16 @@ pub(crate) fn prepare(contract: &Contract) -> Result<(), String> {
         gitdir: text(&gitdir)?,
     };
     let prepared = held(&common, &worktree)?;
+    // So that a run in any clone on the machine counts this one's
+    // directories against the budget. Not fatal: this clone's own runs
+    // still bound them.
+    #[cfg(unix)]
+    if let Err(error) = clones::register(&common) {
+        eprintln!(
+            "warning: cannot register this clone for the machine's worktree directory budget \
+             ({error}); runs in other clones will not count its directories"
+        );
+    }
     let _ = PREPARED.set(prepared);
     Ok(())
 }
@@ -783,70 +797,93 @@ fn start_over(parent: &Path, id: &str, path: &Path) {
     if set_aside(parent, id, path) {
         eprintln!(
             "warning: this worktree's build directory (${{worktree_cache}}) held {} when its last \
-             run ended, more than the {} that SYKLI_WORKTREE_CACHE_BUDGET_BYTES allows for all of \
-             this clone's worktrees together; it starts empty, so this run builds from scratch",
+             run ended, more than the {} that SYKLI_WORKTREE_CACHE_BUDGET_BYTES allows for the \
+             worktrees of every clone on this machine together; it starts empty, so this run \
+             builds from scratch",
             human(size),
             human(budget)
         );
     }
 }
 
-/// Once a run's work is done: record how much its worktree's directory
-/// holds, then, while the directories of the clone's worktrees together hold
-/// more than the budget, set aside the one whose worktree ended a run least
-/// recently, never one whose lease is held (this run's own among them), for
-/// `remove_pruned` to delete. Best effort: what cannot be measured or taken
-/// now is by a later run.
+/// Once the work of a run that used its worktree's directory is done (only
+/// such a run can have grown them): record how much that directory holds,
+/// then, while the directories of every worktree of every clone registered
+/// on the machine together hold more than the budget, set aside the one
+/// whose worktree ended a run least recently, in whichever clone, never one
+/// whose lease is held (this run's own among them). This clone's go to
+/// `remove_pruned`; another clone's are deleted here, since its runs would
+/// find them only when they next run. A registered clone whose store is gone
+/// is forgotten. Each clone's store is read from the file system, with no git
+/// process. Best effort: what cannot be measured or taken now is by a later
+/// run.
 #[cfg(unix)]
 pub(crate) fn bound() {
-    if let Some(own) = PREPARED
+    let Some(own) = PREPARED
         .get()
         .and_then(|prepared| prepared.directory.parent())
-    {
-        let _ = fs::write(
-            own.join(SIZE),
-            format!("{}\n", measure(&own.join(HANDED_OUT))),
-        );
-    }
+    else {
+        return;
+    };
+    let _ = fs::write(
+        own.join(SIZE),
+        format!("{}\n", measure(&own.join(HANDED_OUT))),
+    );
     let budget = budget();
     if budget == 0 {
         return;
     }
-    let Ok(repository) = crate::repo::repository() else {
+    let Some(own_store) = own.parent() else {
         return;
     };
-    let parent = repository.common_dir.join("sykli").join("worktrees");
-    let Ok(entries) = fs::read_dir(&parent) else {
-        return;
-    };
-    let mut directories = Vec::new();
-    for path in entries.flatten().map(|entry| entry.path()) {
-        let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+    let mut stores = vec![own_store.to_path_buf()];
+    for registered in clones::registered().unwrap_or_default() {
+        let clones::Registered::Clone { file, common } = registered else {
             continue;
         };
-        if !is_id(id) {
-            continue;
+        match clones::store(&common) {
+            Ok(Some(store)) if !stores.contains(&store) => stores.push(store),
+            Ok(Some(_)) | Err(_) => {}
+            Ok(None) => clones::forget(&file),
         }
-        let id = id.to_owned();
-        let (size, at) = recorded(&path).unwrap_or_else(|| {
-            let made = fs::metadata(path.join("worktree.json"))
-                .and_then(|meta| meta.modified())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            (measure(&path.join(HANDED_OUT)), made)
-        });
-        directories.push((at, size, id, path));
     }
-    let mut total: u64 = directories.iter().map(|(_, size, _, _)| size).sum();
+    let mut directories = Vec::new();
+    for (index, store) in stores.iter().enumerate() {
+        let Ok(entries) = fs::read_dir(store) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !is_id(id) {
+                continue;
+            }
+            let id = id.to_owned();
+            let (size, at) = recorded(&path).unwrap_or_else(|| {
+                let made = fs::metadata(path.join("worktree.json"))
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (measure(&path.join(HANDED_OUT)), made)
+            });
+            directories.push((at, size, id, path, index));
+        }
+    }
+    let mut total: u64 = directories.iter().map(|(_, size, ..)| size).sum();
     directories.sort();
-    for (_, size, id, path) in directories {
+    for (_, size, id, path, index) in directories {
         if total <= budget {
             break;
         }
         let Ok(Some(_lease)) = crate::journal::Lease::acquire_existing(&path) else {
             continue;
         };
-        if set_aside(&parent, &id, &path) {
-            total = total.saturating_sub(size);
+        let Ok(aside) = move_aside(&stores[index], &id, &path) else {
+            continue;
+        };
+        total = total.saturating_sub(size);
+        if index != 0 {
+            let _ = fs::remove_dir_all(&aside);
         }
     }
 }
