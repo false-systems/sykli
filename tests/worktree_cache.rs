@@ -1404,6 +1404,69 @@ fn a_directory_over_the_budget_alone_is_removed_when_its_run_ends() {
     );
 }
 
+#[test]
+fn a_previously_oversized_cache_still_starts_empty_with_a_warning() {
+    let f = Fixture::new("startup-fallback");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    f.run_within(&f.repo, 0);
+    let said = f.run_within(&f.repo, MIB + MIB / 2);
+    assert_eq!(f.before("repo"), "0\n");
+    assert!(
+        said.contains("starts empty") && said.contains("SYKLI_WORKTREE_CACHE_BUDGET_BYTES"),
+        "{said}"
+    );
+}
+
+#[test]
+fn automatic_eviction_never_uses_an_old_lease_to_remove_a_new_live_cache() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let f = Fixture::new("eviction-replaced");
+    filling(&f);
+    f.run_within(&f.repo, 0);
+    let cache = f.own("repo");
+    let eviction_latch = f.base.join("lease-before-exclusive-lock.release");
+    mkfifo(&eviction_latch);
+    let evictor = f
+        .sykli(&f.repo, &["run", "--json"])
+        .env(
+            "SYKLI_WORKTREE_CACHE_BUDGET_BYTES",
+            (MIB + MIB / 2).to_string(),
+        )
+        .env("SYKLI_TEST_PAUSE_AT", "lease-before-exclusive-lock")
+        .env("SYKLI_TEST_PAUSE_DIR", &f.base)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("evictor opened the old lease", || {
+        f.base.join("lease-before-exclusive-lock.pid").exists()
+    });
+    fs::rename(&cache, f.base.join("old-cache")).unwrap();
+    fs::write(f.base.join("hold-repo"), "").unwrap();
+    let task_latch = f.base.join("latch");
+    mkfifo(&task_latch);
+    let live = f
+        .sykli(&f.repo, &["run", "--json"])
+        .env("SYKLI_WORKTREE_CACHE_BUDGET_BYTES", "0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("replacement cache in use", || f.base.join("ready").exists());
+    release(eviction_latch);
+    assert!(evictor.wait_with_output().unwrap().status.success());
+    let survived = cache.join("cache").is_dir();
+    release(task_latch);
+    assert!(live.wait_with_output().unwrap().status.success());
+    assert!(
+        survived,
+        "evictor removed a replacement cache protected by another task's lease"
+    );
+}
+
 /// A directory a run holds is never taken for the budget, however long ago
 /// its worktree last ended a run; it goes once nothing holds it.
 #[test]

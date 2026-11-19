@@ -264,11 +264,17 @@ impl Lease {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(err(error)),
         };
+        crate::checkpoint("lease-before-exclusive-lock")?;
         // SAFETY: the descriptor is owned by file; LOCK_EX | LOCK_NB on Unix.
         if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
             return Err(format!("lease-busy: {}", std::io::Error::last_os_error()));
         }
-        Ok(Some(Self::held(file)))
+        let held = Self::held(file);
+        // Another remover may have renamed this cache after we opened its
+        // lease. Holding that old inode does not protect a replacement at
+        // the same path. Never let its stale descriptor authorize removal.
+        held.check_existing(directory)?;
+        Ok(Some(held))
     }
 
     /// Inspect an existing cache lease without creating or writing a file.

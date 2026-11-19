@@ -39,7 +39,9 @@ ended one whose lease it can take. After recording its size, the concluded
 run closes its own lease before eviction, making its cache eligible too;
 inherited task descriptors still protect it if a child survives. `held` sets aside a worktree's own directory
 first when its record alone exceeds the budget (`start_over`). Keys cover
-the value as declared, never the expanded path. `clean`
+the value as declared, never the expanded path. Automatic removers verify that
+the exclusively acquired lease still names the current directory's lease;
+an old descriptor cannot authorize deletion of a replacement cache. `clean`
 (`src/worktree_cache/clean.rs`, Unix) explicitly inspects this same store,
 read-only unless `--apply` is given. It shares marker/liveness validation,
 disk measurement and the rename-aside protocol with automatic retention,

@@ -211,7 +211,8 @@ enum Command {
         (removed, moved or pruned, and not locked). All worktrees' directories together stay\n\
         within SYKLI_WORKTREE_CACHE_BUDGET_BYTES (default 10 GiB; 0 keeps everything): a run\n\
         that ends over it deletes those of the worktrees run least recently, never one a run\n\
-        holds, and one over the budget alone starts empty at its worktree's next run.\n\
+        or task still holds; the finished run's own directory is eligible too. An older\n\
+        oversized directory starts empty at its next run if nothing still holds it.\n\
         Any other ${...} in an env value, an unclosed one, a $${, $worktree_cache without\n\
         braces in an env value, or ${worktree_cache} anywhere but an env value exits 2.")]
     Run {
