@@ -9,22 +9,31 @@ contract consumer can observe; internal refactors are not listed.
 
 ### Added
 - `sykli clean` previews managed worktree build-cache cleanup without running
-  tasks (Linux and macOS). `--apply` removes caches of gone worktrees,
-  finishes interrupted removals, and evicts the least recently run caches
-  over the existing per-clone limit. It retains caches held by live tasks
-  and unknown state; partial inspection or removal exits 4, with unknown
-  totals rather than zero. `--json` prints `sykli-clean.v1`. Git worktrees,
+  tasks (Linux and macOS), for this clone and every other clone registered
+  on the machine. `--apply` removes caches of gone worktrees, finishes
+  interrupted removals, and evicts the least recently run caches over the
+  machine's limit, in whichever clone; it also drops the registration of a
+  clone that was deleted (a preview writes nothing). It retains caches held
+  by live tasks and unknown state; partial inspection or removal (an
+  unreadable or linked store of another clone among them) exits 4, with
+  unknown totals rather than zero. `--json` prints `sykli-clean.v1`, whose
+  `clones` names the common git directories covered. Git worktrees,
   arbitrary build folders, task-result caches and receipts are untouched.
-- The `${worktree_cache}` directories of a clone's worktrees together stay
-  within a budget (Linux and macOS): 10 GiB, or
+- The `${worktree_cache}` directories of every worktree of every clone on the
+  machine together stay within one budget (Linux and macOS): 30 GiB, or
   `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything). Before, a
   worktree that still existed kept its directory for ever, and a Cargo build
-  directory only grows: one clone's twelve worktrees held 20 GB. When a run's work
-  is done, it records in `<id>/size` how much its worktree's directory takes
-  on disk, then deletes the directories of the worktrees that ended a run
-  least recently until the clone is within the budget, never one a run holds.
-  Those worktrees' next runs build cold. A directory over the whole budget
-  alone is started empty by its worktree's next run, which says so on
+  directory only grows: one clone's twelve worktrees held 20 GB. A budget per
+  clone would grow with the clones, so a run that gives a worktree its
+  directory registers the clone, once, in `$XDG_STATE_HOME/sykli/clones/`
+  (or `~/.local/state/sykli/clones/`): one small file per clone, dropped once
+  the clone is deleted. When the work of a run that used its directory is
+  done, it records in `<id>/size` how much that directory takes on disk, then
+  deletes the directories of the worktrees that ended a run least recently,
+  in any registered clone, until the machine is within the budget, never one
+  a run holds. It reads each clone's store from the file system, with no git
+  process. Those worktrees' next runs build cold. A directory over the whole
+  budget alone is started empty by its worktree's next run, which says so on
   standard error. Receipts, keys and contracts are unchanged.
 
 ## [0.9.0] - 2026-11-12
