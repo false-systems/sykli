@@ -121,9 +121,10 @@ enum Command {
     /// Preview reclaimable managed build caches; --apply removes eligible caches (Linux and macOS)
     #[cfg(unix)]
     #[command(
-        after_help = "Reads this clone's managed worktree build caches, without running tasks.\n\
-        Removes caches of gone worktrees and, over SYKLI_WORKTREE_CACHE_BUDGET_BYTES\n\
-        (default 10 GiB; 0 disables budget eviction), the least recently run caches.\n\
+        after_help = "Reads the managed worktree build caches of this clone and of every other clone\n\
+        registered on this machine, without running tasks. Removes caches of gone worktrees\n\
+        and, over SYKLI_WORKTREE_CACHE_BUDGET_BYTES for all of them together (default\n\
+        30 GiB; 0 disables budget eviction), the least recently run caches, in any clone.\n\
         Live leases and unknown state are retained. Git worktrees, arbitrary target\n\
         directories, task-result caches and receipts are never removed.\n\n\
         Exit codes: 0 complete; 2 repository/store unavailable; 4 partial inspection or removal.\n\
@@ -208,10 +209,12 @@ enum Command {
         build-dir ignores the second); the first gate in each worktree builds cold. Cache\n\
         keys cover the value as declared, never the directory. On Linux and macOS a run\n\
         holds the directory, and a later run removes it once its worktree is gone\n\
-        (removed, moved or pruned, and not locked). All worktrees' directories together stay\n\
-        within SYKLI_WORKTREE_CACHE_BUDGET_BYTES (default 10 GiB; 0 keeps everything): a run\n\
-        that ends over it deletes those of the worktrees run least recently, never one a run\n\
-        holds, and one over the budget alone starts empty at its worktree's next run.\n\
+        (removed, moved or pruned, and not locked). The directories of every clone on this\n\
+        machine together stay within SYKLI_WORKTREE_CACHE_BUDGET_BYTES (default 30 GiB; 0\n\
+        keeps everything): a run that used its directory and ends over it deletes those of\n\
+        the worktrees run least recently, in any clone, never one a run holds, and one over\n\
+        the budget alone starts empty at its worktree's next run. Clones are registered in\n\
+        $XDG_STATE_HOME/sykli/clones (or ~/.local/state/sykli/clones).\n\
         Any other ${...} in an env value, an unclosed one, a $${, $worktree_cache without\n\
         braces in an env value, or ${worktree_cache} anywhere but an env value exits 2.")]
     Run {

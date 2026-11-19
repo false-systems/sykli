@@ -600,7 +600,8 @@ for code that never ran.
 - The first gate in each worktree builds cold. Later gates there are
   incremental.
 - Each worktree keeps build directories of its own on disk until it is gone,
-  or until the clone's worktree directories outgrow their budget (below).
+  or until the worktree directories of the machine's clones outgrow their
+  budget (below).
 - Adding the lines changes the contract's digest, so receipts from before
   them read as another contract's.
 - A sykli older than this one hands `${worktree_cache}` to the task as
@@ -662,20 +663,31 @@ delays its start. On Windows the directories are made but never pruned:
 remove `sykli/worktrees/` in the common git directory yourself, when no run
 is live.
 
-**The directories of a clone's worktrees together stay within a budget**:
-10 GiB, or `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything). A
-worktree that still exists keeps its directory, and a Cargo build directory
-only grows, since Cargo removes nothing it built before. So on Linux and
+**The directories of every worktree of every clone on the machine together
+stay within one budget**: 30 GiB, or `SYKLI_WORKTREE_CACHE_BUDGET_BYTES`
+(`0` keeps everything). A worktree that still exists keeps its directory, a
+Cargo build directory only grows, since Cargo removes nothing it built
+before, and a budget per clone would grow with the clones. So on Linux and
 macOS:
 
-- When a run's work is done and its result is out, it records how much its
-  worktree's directory takes on disk (as `du` counts it: each hard link
-  once), in `<id>/size`. The file's time is when that worktree last ended a
-  run.
-- Then, while the directories hold more than the budget together, it deletes
-  the one whose worktree ended a run least recently, never one whose lease a
-  run holds (its own included). That worktree still exists; its next run
-  builds cold.
+- A run that gives a worktree its directory registers the worktree's clone,
+  once, in the user's state directory: `$XDG_STATE_HOME/sykli/clones/`, or
+  `~/.local/state/sykli/clones/`. Each clone is one small file naming its
+  common git directory. A clone's file is dropped once its store
+  (`<common>/sykli/worktrees`) is gone, as it is when the clone is deleted;
+  a run there registers it again. Without `HOME` or `XDG_STATE_HOME` the run
+  says so on standard error, and only that clone's runs bound its
+  directories.
+- When the work of a run that used its worktree's directory is done and its
+  result is out, it records how much that directory takes on disk (as `du`
+  counts it: each hard link once), in `<id>/size`. The file's time is when
+  that worktree last ended a run. A run that names no `${worktree_cache}`
+  grew no directory, and bounds nothing.
+- Then, while the directories of every registered clone hold more than the
+  budget together, it deletes the one whose worktree ended a run least
+  recently, in whichever clone, never one whose lease a run holds (its own
+  included). That worktree still exists; its next run builds cold. Each
+  clone's store is read from the file system: no git process per clone.
 - A directory with no record yet (made by an older sykli, or whose runs never
   ended) is measured then, and counts as last used when it was made.
 - A directory that held more than the whole budget when its worktree's last
@@ -683,7 +695,7 @@ macOS:
   holds it. That run says so on standard error, and builds cold:
 
   ```text
-  warning: this worktree's build directory (${worktree_cache}) held 12.3 GiB when its last run ended, more than the 10.0 GiB that SYKLI_WORKTREE_CACHE_BUDGET_BYTES allows for all of this clone's worktrees together; it starts empty, so this run builds from scratch
+  warning: this worktree's build directory (${worktree_cache}) held 32.3 GiB when its last run ended, more than the 30.0 GiB that SYKLI_WORKTREE_CACHE_BUDGET_BYTES allows for the worktrees of every clone on this machine together; it starts empty, so this run builds from scratch
   ```
 
   If one worktree's fresh build is near the budget, raise it, or every few
@@ -691,7 +703,8 @@ macOS:
 
 ## Inspect and clean managed build caches
 
-On Linux and macOS, inspect a clone's `${worktree_cache}` directories without
+On Linux and macOS, inspect the `${worktree_cache}` directories of this
+clone and of every other clone registered on the machine (above), without
 running a graph:
 
 ```sh
@@ -700,13 +713,16 @@ sykli clean --apply         # inspect again under exclusive locks, then remove e
 sykli clean --json          # the same report as sykli-clean.v1
 ```
 
-The command works from any worktree or subdirectory of the clone and needs
-no contract. Preview creates no directories or files and does not update
-last-use timestamps. Apply uses the existing retention policy: remove caches
-whose worktree incarnation is gone, finish removals already set aside, then
-remove the least recently run caches until the remaining caches fit within
-`SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 10 GiB; `0` disables budget
-eviction, not orphan cleanup). Losing a build cache means a cold next build.
+The command works from any worktree or subdirectory of a clone and needs
+no contract. Preview creates no directories or files, does not update
+last-use timestamps, and drops no registration. Apply uses the existing
+retention policy over every registered clone: remove caches whose worktree
+incarnation is gone, finish removals already set aside, then remove the
+least recently run caches, in whichever clone, until the remaining caches
+fit within `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 30 GiB; `0`
+disables budget eviction, not orphan cleanup). It also registers the clone
+it runs in, when that clone has caches, and drops the registration of a
+clone whose store is gone. Losing a build cache means a cold next build.
 
 Only the managed build-cache directories are candidates. Git worktrees and
 branches, arbitrary `target/` directories, task-result caches, receipts and
@@ -727,13 +743,18 @@ than measured while it changes. Malformed markers, missing leases,
 unfinished creation directories, unreadable contents and unrecognized
 entries are retained and reported. If any entry is unknown, totals are
 unknown and size-limit eviction is skipped; known orphans can still be
-removed. A symlink in place of the managed store is refused, not traversed.
+removed. A symlink in place of this clone's managed store is refused (exit
+2), not traversed. Another registered clone whose store cannot be read, or
+is a symlink, or a registration that names no clone, is reported and makes
+the coverage partial: unknown totals, exit 4. So does a missing registry
+location (neither `HOME` nor `XDG_STATE_HOME`).
 
 Exit codes: **0** complete inspection/removal, **2** repository or store
 unavailable (or report could not be encoded), **4** partial inspection or
 removal. Warnings appear on stderr and in the JSON report.
 
-`sykli-clean.v1` carries `apply`, `repository`, `budget_bytes`, `total_bytes`
+`sykli-clean.v1` carries `apply`, `repository`, `clones` (the common git
+directories covered: this clone's first), `budget_bytes`, `total_bytes`
 and `reclaimable_bytes` (the pre-removal estimates, `null` when incomplete),
 `removed_bytes` (the estimate for successful removals only), `warnings` and
 `entries`. Each entry names `path`, `worktree` (or `null`), `bytes` (or
@@ -1503,7 +1524,8 @@ The cache, the receipts and runs are bounded, and each limit is stated:
 | Receipts of accepted pushes, in the common git directory | **200**; oldest removed first, never the one just kept | `SYKLI_RECEIPT_BUDGET` (`0` keeps every receipt) |
 | Runs, in the common git directory | **100** runs, each with its tasks' captured output (at most 1 MiB per stream per attempt) and a copy of its receipt; when a run starts, the oldest are removed, concluded ones first, never a run whose coordinator is alive; each removed run leaves a tombstone of a few hundred bytes (its state, tree and receipt), at most **1000**, oldest removed first | `SYKLI_RUN_BUDGET` (`0` keeps every run) |
 | Review and receipt notes, in git (`refs/notes/sykli/*`) | **One note per tree** reviewed or pushed to the default branch, replaced when that tree is reviewed or pushed again; they are git objects and grow with the trees pushed, as the history does. The pre-push hook also fetches the remote's beside them, under `refs/notes-fetched/sykli/*`, pruned to what the remote holds | — |
-| Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. All of them together: **10 GiB**; when a run ends over it, the directories of the worktrees run least recently are deleted, never one a run holds, and one over the budget alone starts empty at its worktree's next run. Not pruned on Windows (remove them by hand when no run is live) | `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything) |
+| Worktree directories (`${worktree_cache}`), in the common git directory | **One per worktree incarnation** whose contract names it, holding whatever its tasks put there (Cargo build directories can be gigabytes); set aside when a run starts once its worktree is gone or made again (unless git keeps it locked) and deleted when that run is done, never while a run in that worktree holds its lease. All of them together, in every clone on the machine: **30 GiB**; when a run that used its directory ends over it, the directories of the worktrees run least recently are deleted, in whichever clone, never one a run holds, and one over the budget alone starts empty at its worktree's next run. Not pruned on Windows (remove them by hand when no run is live) | `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (`0` keeps everything) |
+| Clone registrations, in the user's state directory (`$XDG_STATE_HOME/sykli/clones/`, or `~/.local/state/sykli/clones/`) | **One small file per clone** whose worktrees a run gave a directory (Linux and macOS), naming its common git directory; dropped by the first run, or `clean --apply`, that finds that clone's store gone | — |
 
 Both budgets are enforced when a run **starts** as well as when it stores. A
 receipt that a live cache entry cites is never evicted, because a cached result

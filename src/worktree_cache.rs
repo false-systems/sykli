@@ -63,18 +63,24 @@
 //! removed or moved), unless git keeps it locked (`git worktree lock`, for
 //! one on removable media).
 //!
-//! Budget (Linux and macOS): the directories of a clone's worktrees together
-//! hold at most `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 10 GiB; `0`
-//! keeps everything), because a worktree that still exists keeps its
-//! directory, and a build directory only grows (Cargo removes nothing it
-//! built before). When a run's work is done, it records in `<id>/size` how
-//! much its worktree's directory holds on disk (each hard link counted once);
-//! the file's time is when that worktree last ended a run. Then, while the
-//! clone's directories hold more than the budget, it sets aside the one whose
-//! worktree ended a run least recently, never one whose lease is held (its
-//! own included), and deletes what it set aside. A directory with no record
-//! (made by an older sykli, or whose runs never ended) is measured there, and
-//! counts as last used when it was made. A directory that held more than the
+//! Budget (Linux and macOS): the directories of every worktree of every
+//! clone on the machine together hold at most
+//! `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (default 30 GiB; `0` keeps
+//! everything), because a worktree that still exists keeps its directory, a
+//! build directory only grows (Cargo removes nothing it built before), and a
+//! budget per clone grows with the clones. A run that gives a worktree its
+//! directory registers its clone once (`clones`: one small file per clone in
+//! the user's state directory, dropped once the clone is deleted). When the
+//! work of a run that used its directory is done, it records in `<id>/size`
+//! how much that directory holds on disk (each hard link counted once); the
+//! file's time is when that worktree last ended a run. Then, while the
+//! directories of every registered clone hold more than the budget, it sets
+//! aside the one whose worktree ended a run least recently, in whichever
+//! clone, never one whose lease is held (its own included), and deletes what
+//! it set aside. Each clone's store is read from the file system, never by
+//! asking git. A directory with no record (made by an older sykli, or whose
+//! runs never ended) is measured there, and counts as last used when it was
+//! made. A directory that held more than the
 //! whole budget when its worktree's last run ended is set aside when the next
 //! run there starts, unless another run there holds it, and that run says so
 //! and starts it empty: a cold build. Windows has no leases here, so there
