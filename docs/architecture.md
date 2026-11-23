@@ -37,17 +37,21 @@ on disk in `<id>/size` (whose time is the worktree's last ended run) and,
 while the directories of every clone on the machine together exceed
 `SYKLI_WORKTREE_CACHE_BUDGET_BYTES` (30 GiB), sets aside the least recently
 ended one whose lease it can take, in whichever clone (another clone's is
-deleted there and then); `held` sets aside a worktree's own directory first
-when its record alone exceeds the budget (`start_over`). The clones are
-known from a registry in the user's state directory
-(`src/worktree_cache/clones.rs`: `$XDG_STATE_HOME/sykli/clones/`, or
-`~/.local/state/sykli/clones/`, one file per clone naming its common git
+deleted there and then); after recording its size, the concluded run closes
+its own lease before eviction, making its cache eligible too; inherited task
+descriptors still protect it if a child survives. `held` sets aside a
+worktree's own directory first when its record alone exceeds the budget
+(`start_over`). The clones are known from a registry in the user's state
+directory (`src/worktree_cache/clones.rs`: `$XDG_STATE_HOME/sykli/clones/`,
+or `~/.local/state/sykli/clones/`, one file per clone naming its common git
 directory, written by `prepare` once, dropped once that clone's store is
 gone); each store is read from the file system, with no git process per
 clone. This registry is sykli's only state outside a clone. Keys cover
-the value as declared, never the expanded path. `clean`
-(`src/worktree_cache/clean.rs`, Unix) explicitly inspects the same stores,
-this clone's and every registered clone's,
+the value as declared, never the expanded path. Automatic removers verify
+that the exclusively acquired lease still names the current directory's
+lease; an old descriptor cannot authorize deletion of a replacement cache.
+`clean` (`src/worktree_cache/clean.rs`, Unix) explicitly inspects the same
+stores, this clone's and every registered clone's,
 read-only unless `--apply` is given. It shares marker/liveness validation,
 disk measurement and the rename-aside protocol with automatic retention,
 but reports unknown state and errors instead of silently skipping them.

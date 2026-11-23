@@ -212,8 +212,9 @@ enum Command {
         (removed, moved or pruned, and not locked). The directories of every clone on this\n\
         machine together stay within SYKLI_WORKTREE_CACHE_BUDGET_BYTES (default 30 GiB; 0\n\
         keeps everything): a run that used its directory and ends over it deletes those of\n\
-        the worktrees run least recently, in any clone, never one a run holds, and one over\n\
-        the budget alone starts empty at its worktree's next run. Clones are registered in\n\
+        the worktrees run least recently, in any clone, never one a run or task still\n\
+        holds; the finished run's own directory is eligible too, and one over the budget\n\
+        alone starts empty at its worktree's next run. Clones are registered in\n\
         $XDG_STATE_HOME/sykli/clones (or ~/.local/state/sykli/clones).\n\
         Any other ${...} in an env value, an unclosed one, a $${, $worktree_cache without\n\
         braces in an env value, or ${worktree_cache} anywhere but an env value exits 2.")]

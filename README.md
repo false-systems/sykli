@@ -113,6 +113,11 @@ shares both with the remote, as git notes, before the branch moves.
 A deployment is an ordinary contract run with `sykli run deploy.json`, its
 tasks marked `"reuse": false` so that they run every time.
 
+Managed build caches are bounded per clone. Once a run finishes, its own
+cache is eligible for the size limit too; caches still used by a running
+task are protected. `sykli clean` shows what can be reclaimed without
+deleting worktrees or proof.
+
 `sykli <command> --help` documents every flag and exit code.
 
 ## How it works
