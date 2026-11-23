@@ -1204,11 +1204,36 @@ fn pre_commit_with_a_contract_outside_the_repository_checks_the_staged_tree() {
     git(repo, &["add", "--all"]);
     let out = hook(&contract);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("the staged tree passed"));
+    assert!(
+        text(&out.stderr).contains("the staged tree passed; kept"),
+        "the hook must say where it kept the receipt: {}",
+        text(&out.stderr)
+    );
     // That run is the evidence the push needs.
     let pushed = commit(repo, "with other");
     let out = pre_push(repo, Some(&contract), &pushed, "refs/heads/main");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // The kept receipt is what makes the commit proven where the worktree's
+    // own `.sykli/` cannot follow it: a clone that never ran anything still
+    // finds the evidence in the common git directory.
+    let out = sykli(
+        repo,
+        &[
+            "status",
+            "--commit",
+            "HEAD",
+            "--contract",
+            contract.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("passed"),
+        "a commit the hook proved must read as proven: {} | {}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
 
     let out = hook(&scratch.config.join("missing.json"));
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
