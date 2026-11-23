@@ -1215,25 +1215,39 @@ fn pre_commit_with_a_contract_outside_the_repository_checks_the_staged_tree() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
     // The kept receipt is what makes the commit proven where the worktree's
-    // own `.sykli/` cannot follow it: a clone that never ran anything still
-    // finds the evidence in the common git directory.
-    let out = sykli(
-        repo,
-        &[
-            "status",
-            "--commit",
-            "HEAD",
-            "--contract",
-            contract.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
-    assert!(
-        text(&out.stdout).contains("passed"),
-        "a commit the hook proved must read as proven: {} | {}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
+    // own `.sykli/` cannot follow it: the evidence sits in the common git
+    // directory, and `verify --commit` reads it from there.
+    let kept: Vec<PathBuf> = fs::read_dir(repo.join(".git/sykli/receipts"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rcpt_") && name.ends_with(".json"))
+        })
+        .collect();
+    assert!(!kept.is_empty(), "the hook kept no receipt");
+    for receipt in kept {
+        let out = sykli(
+            repo,
+            &[
+                "verify",
+                receipt.to_str().unwrap(),
+                "--contract",
+                contract.to_str().unwrap(),
+                "--commit",
+                "HEAD",
+            ],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "the kept receipt must verify for the commit: {} | {}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+    }
 
     let out = hook(&scratch.config.join("missing.json"));
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
