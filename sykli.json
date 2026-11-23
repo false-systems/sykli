@@ -69,6 +69,7 @@
       "inputs": [
         "Cargo.lock",
         "Cargo.toml",
+        "action.yml",
         "docs/verification/TestStdin.lean",
         "docs/verification/test-stdin.md",
         "rust-toolchain.toml",
@@ -122,6 +123,7 @@
         "GEMINI.md",
         "LICENSE",
         "README.md",
+        "action.yml",
         "action/binary.sh",
         "action/plan.sh",
         "action/summary.sh",
