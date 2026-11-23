@@ -189,7 +189,23 @@ pub(crate) fn pre_commit(contract: Option<&Path>) -> ExitCode {
     let committed = git(&["write-tree"]).and_then(|tree| commit_tree_oid(Path::new("."), &tree));
     match (ran, committed) {
         (Some(ran), Ok(committed)) if ran == committed => {
-            eprintln!("sykli hook {HOOK}: the staged tree passed");
+            // Keep the receipt where it outlives the worktree and `verify
+            // --commit` finds it, as an accepted push keeps its own: a commit
+            // made through this hook is then proven the moment it exists,
+            // and a merge of it carries the proof. A worktree's `.sykli/` is
+            // not that: it goes when the worktree does.
+            let kept = std::fs::read(&receipt)
+                .map_err(|error| format!("{}: {error}", receipt.display()))
+                .and_then(|bytes| keep_evidence(&root.common_dir, &bytes));
+            match kept {
+                Ok(kept) => eprintln!(
+                    "sykli hook {HOOK}: the staged tree passed; kept {}",
+                    kept.display()
+                ),
+                Err(error) => eprintln!(
+                    "sykli hook {HOOK}: the staged tree passed (the receipt was not kept: {error})"
+                ),
+            }
             ExitCode::SUCCESS
         }
         (Some(ran), Ok(committed)) => refuse(format!(

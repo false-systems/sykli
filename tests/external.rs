@@ -1204,11 +1204,50 @@ fn pre_commit_with_a_contract_outside_the_repository_checks_the_staged_tree() {
     git(repo, &["add", "--all"]);
     let out = hook(&contract);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("the staged tree passed"));
+    assert!(
+        text(&out.stderr).contains("the staged tree passed; kept"),
+        "the hook must say where it kept the receipt: {}",
+        text(&out.stderr)
+    );
     // That run is the evidence the push needs.
     let pushed = commit(repo, "with other");
     let out = pre_push(repo, Some(&contract), &pushed, "refs/heads/main");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // The kept receipt is what makes the commit proven where the worktree's
+    // own `.sykli/` cannot follow it: the evidence sits in the common git
+    // directory, and `verify --commit` reads it from there.
+    let kept: Vec<PathBuf> = fs::read_dir(repo.join(".git/sykli/receipts"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rcpt_") && name.ends_with(".json"))
+        })
+        .collect();
+    assert!(!kept.is_empty(), "the hook kept no receipt");
+    for receipt in kept {
+        let out = sykli(
+            repo,
+            &[
+                "verify",
+                receipt.to_str().unwrap(),
+                "--contract",
+                contract.to_str().unwrap(),
+                "--commit",
+                "HEAD",
+            ],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "the kept receipt must verify for the commit: {} | {}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+    }
 
     let out = hook(&scratch.config.join("missing.json"));
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));

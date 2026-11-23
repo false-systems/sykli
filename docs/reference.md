@@ -905,7 +905,10 @@ safe.
   names the command that supplies what is missing: `sykli run sykli.json` with
   the commit checked out, or `sykli lock` first when the contract differs from
   its lock, or `sykli review`. Cached tasks make that run quick, and the run
-  the pre-commit hook made already counts.
+  the pre-commit hook made already counts, and its receipt is kept
+  there too: a commit made through the hook is proven where `verify
+  --commit` and `status --commit` look, in the common git directory, so
+  the proof follows the commit out of the worktree.
 - When the hook accepts a push to the default branch, it copies the receipt
   that verified it into the repository's common git directory, as
   `$(git rev-parse --git-common-dir)/sykli/receipts/rcpt_<sha256>.json`, named
