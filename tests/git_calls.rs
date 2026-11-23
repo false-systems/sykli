@@ -459,6 +459,10 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
 /// `gitdir:` file in a linked worktree), never asked of git. Each run
 /// counted here is a first run in its worktree, and its task fails unless it
 /// got the directory, so each count measured a run that expanded it.
+/// Unix only: the clones registry and the budget it serves are `cfg(unix)`
+/// (Windows makes the directories but never prunes), as every test in
+/// `tests/worktree_cache.rs` is.
+#[cfg(unix)]
 #[test]
 fn a_worktree_cache_costs_no_git_process() {
     let scratch = Scratch::new("worktree-cache");
