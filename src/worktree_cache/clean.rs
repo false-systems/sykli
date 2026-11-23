@@ -1,4 +1,7 @@
-//! Explicit inspection and removal of managed build caches, never checkouts.
+//! Explicit inspection and removal of managed build caches, never checkouts:
+//! this clone's, and those of every other clone registered on the machine,
+//! which share one budget.
+use super::clones::{self, Registered};
 use super::{
     HANDED_OUT, Worktree, budget, human, is_id, measurement, move_aside, owner, present, recorded,
 };
@@ -14,6 +17,10 @@ pub(crate) struct Report {
     schema: &'static str,
     apply: bool,
     repository: PathBuf,
+    /// The common git directories whose caches were inspected: this
+    /// clone's first, then every other registered clone that still has a
+    /// store.
+    clones: Vec<PathBuf>,
     budget_bytes: u64,
     total_bytes: Option<u64>,
     reclaimable_bytes: Option<u64>,
@@ -33,6 +40,8 @@ struct Entry {
 
 struct Cache {
     entry: Entry,
+    /// The `<common>/sykli/worktrees` this cache is in.
+    store: PathBuf,
     id: String,
     worktree: Worktree,
     at: SystemTime,
@@ -58,7 +67,13 @@ fn directory(path: &Path) -> Result<fs::Metadata, String> {
     Ok(meta)
 }
 
-fn inspect(path: &Path, id: &str, pruning: bool, apply: bool) -> Result<Cache, String> {
+fn inspect(
+    store: &Path,
+    path: &Path,
+    id: &str,
+    pruning: bool,
+    apply: bool,
+) -> Result<Cache, String> {
     let meta = directory(path)?;
     let worktree = owner(path, id)?;
     if !metadata(&path.join("lease"))?.is_file() {
@@ -111,6 +126,7 @@ fn inspect(path: &Path, id: &str, pruning: bool, apply: bool) -> Result<Cache, S
     );
     Ok(Cache {
         entry,
+        store: store.to_path_buf(),
         id: id.into(),
         worktree,
         at,
@@ -120,15 +136,35 @@ fn inspect(path: &Path, id: &str, pruning: bool, apply: bool) -> Result<Cache, S
     })
 }
 
-/// The same stale-worktree and oldest-first policy as automatic retention.
-/// Sizes are measured now, not taken from a possibly old `size` record.
+/// This clone's store, `<common>/sykli/worktrees`, or `None` when it has
+/// none yet. Refused (exit 2) when a part of it is not a directory.
+fn own_store(common: &Path) -> Result<Option<PathBuf>, String> {
+    let mut parent = common.to_path_buf();
+    for part in ["sykli", "worktrees"] {
+        parent.push(part);
+        match fs::symlink_metadata(&parent) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => {
+                directory(&parent)?;
+            }
+        }
+    }
+    Ok(Some(parent))
+}
+
+/// The same stale-worktree and oldest-first policy as automatic retention,
+/// over the caches of every clone registered on the machine, this one's
+/// included. Sizes are measured now, not taken from a possibly old `size`
+/// record.
 pub(crate) fn clean(apply: bool) -> Result<Report, String> {
     let repository = crate::repo::repository()?;
-    let mut parent = repository.common_dir.clone();
+    let common = fs::canonicalize(&repository.common_dir)
+        .map_err(|e| format!("{}: {e}", repository.common_dir.display()))?;
     let mut report = Report {
         schema: "sykli-clean.v1",
         apply,
         repository: repository.root.clone(),
+        clones: vec![common.clone()],
         budget_bytes: budget(),
         total_bytes: Some(0),
         reclaimable_bytes: Some(0),
@@ -137,23 +173,78 @@ pub(crate) fn clean(apply: bool) -> Result<Report, String> {
         warnings: Vec::new(),
     };
     // No create_dir calls on this path, even with --apply on a fresh clone.
-    for part in ["sykli", "worktrees"] {
-        parent.push(part);
-        match fs::symlink_metadata(&parent) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
-            _ => {
-                directory(&parent)?;
-            }
+    let own = own_store(&common)?;
+    let mut stores: Vec<PathBuf> = own.iter().cloned().collect();
+    if apply && own.is_some() {
+        // So that runs in other clones count this one's caches too.
+        if let Err(error) = clones::register(&common) {
+            eprintln!("warning: cannot register this clone for the machine's budget: {error}");
         }
     }
-    let paths = fs::read_dir(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    match clones::registered() {
+        Ok(found) => {
+            for registered in found {
+                match registered {
+                    Registered::Unknown(error) => {
+                        report.warnings.push(format!("registered clone {error}"));
+                    }
+                    Registered::Clone { file, common } => match clones::store(&common) {
+                        Ok(Some(store)) => {
+                            if !stores.contains(&store) {
+                                stores.push(store);
+                                report.clones.push(common);
+                            }
+                        }
+                        // The clone is gone: a preview writes nothing.
+                        Ok(None) => {
+                            if apply {
+                                clones::forget(&file);
+                            }
+                        }
+                        Err(error) => report
+                            .warnings
+                            .push(format!("registered clone {}: {error}", common.display())),
+                    },
+                }
+            }
+        }
+        Err(error) => report.warnings.push(format!(
+            "the other clones on this machine are unknown: {error}"
+        )),
+    }
     let mut caches = Vec::new();
-    for path in paths {
+    for store in &stores {
+        let paths = match fs::read_dir(store) {
+            Ok(paths) => paths,
+            Err(e) if own.as_ref() == Some(store) => {
+                return Err(format!("{}: {e}", store.display()));
+            }
+            Err(e) => {
+                report.warnings.push(format!("{}: {e}", store.display()));
+                continue;
+            }
+        };
+        for path in paths {
+            inspect_entry(&mut report, &mut caches, store, path, apply);
+        }
+    }
+    finish(report, caches, apply)
+}
+
+/// Inspect one entry of `store` into `caches`, or report it as unknown.
+fn inspect_entry(
+    report: &mut Report,
+    caches: &mut Vec<Cache>,
+    store: &Path,
+    path: std::io::Result<fs::DirEntry>,
+    apply: bool,
+) {
+    {
         let path = match path {
             Ok(path) => path.path(),
             Err(e) => {
                 report.warnings.push(e.to_string());
-                continue;
+                return;
             }
         };
         let name = path
@@ -170,7 +261,7 @@ pub(crate) fn clean(apply: bool) -> Result<Report, String> {
         let id = if is_id(name) { Some(name) } else { pruning };
         let inspected = id
             .ok_or_else(|| "unrecognized or unfinished cache directory; retained".to_owned())
-            .and_then(|id| inspect(&path, id, pruning.is_some(), apply));
+            .and_then(|id| inspect(store, &path, id, pruning.is_some(), apply));
         match inspected {
             Ok(cache) => {
                 if cache.entry.bytes.is_none() {
@@ -192,6 +283,11 @@ pub(crate) fn clean(apply: bool) -> Result<Report, String> {
             }
         }
     }
+}
+
+/// Choose what goes, oldest first across every clone, and remove it when
+/// applying.
+fn finish(mut report: Report, mut caches: Vec<Cache>, apply: bool) -> Result<Report, String> {
     // Unknown sizes cannot make the total look complete. Still collect known
     // orphans, but do not guess how many other caches must go for the budget.
     let complete = report.warnings.is_empty();
@@ -239,7 +335,7 @@ pub(crate) fn clean(apply: bool) -> Result<Report, String> {
             }
         }
         if apply && cache.entry.action == "remove" {
-            match remove(&mut cache, &parent) {
+            match remove(&mut cache) {
                 Ok(()) => {
                     cache.entry.action = "removed";
                     report.removed_bytes = report
@@ -261,7 +357,7 @@ pub(crate) fn clean(apply: bool) -> Result<Report, String> {
     Ok(report)
 }
 
-fn remove(cache: &mut Cache, parent: &Path) -> Result<(), String> {
+fn remove(cache: &mut Cache) -> Result<(), String> {
     let lease = cache
         .lease
         .as_ref()
@@ -285,7 +381,7 @@ fn remove(cache: &mut Cache, parent: &Path) -> Result<(), String> {
     let path = if cache.pruning {
         cache.entry.path.clone()
     } else {
-        move_aside(parent, &cache.id, &cache.entry.path)?
+        move_aside(&cache.store, &cache.id, &cache.entry.path)?
     };
     crate::checkpoint("clean-after-rename").map_err(|e| format!("{}: {e}", path.display()))?;
     fs::remove_dir_all(&path).map_err(|e| format!("could not remove {}: {e}", path.display()))
@@ -299,7 +395,11 @@ impl Report {
                 .unwrap_or_else(|| "unknown (partial coverage)".into())
         };
         let mut out = format!(
-            "Managed build caches for {}\nTotal: {}; eligible: {}\n",
+            "Managed build caches of {} on this machine, from {}\nTotal: {}; eligible: {}\n",
+            match self.clones.len() {
+                1 => "1 clone".to_owned(),
+                n => format!("{n} clones"),
+            },
             self.repository.display(),
             size(self.total_bytes),
             size(self.reclaimable_bytes)

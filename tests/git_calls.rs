@@ -194,7 +194,8 @@ impl Scratch {
                 .args(args)
                 .current_dir(directory)
                 .env("GIT_TRACE2_EVENT", &trace)
-                .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig")),
+                .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig"))
+                .env("XDG_STATE_HOME", self.base.join("state")),
             stdin.unwrap_or_default().as_bytes(),
         )
         .unwrap();
@@ -213,6 +214,7 @@ impl Scratch {
             .current_dir(&self.repo)
             .env("GIT_TRACE2_EVENT", &trace)
             .env("GIT_CONFIG_GLOBAL", self.base.join("empty-gitconfig"))
+            .env("XDG_STATE_HOME", self.base.join("state"))
             .output()
             .unwrap();
         (out, trace.exists())
@@ -457,6 +459,10 @@ fn run_verify_and_pre_push_stay_within_their_git_budgets() {
 /// `gitdir:` file in a linked worktree), never asked of git. Each run
 /// counted here is a first run in its worktree, and its task fails unless it
 /// got the directory, so each count measured a run that expanded it.
+/// Unix only: the clones registry and the budget it serves are `cfg(unix)`
+/// (Windows makes the directories but never prunes), as every test in
+/// `tests/worktree_cache.rs` is.
+#[cfg(unix)]
 #[test]
 fn a_worktree_cache_costs_no_git_process() {
     let scratch = Scratch::new("worktree-cache");
@@ -486,11 +492,30 @@ fn a_worktree_cache_costs_no_git_process() {
             worktree.to_str().unwrap(),
         ]);
     }
+    // Another clone on the machine, with a directory of its own: a run
+    // bounds every registered clone's directories together, reading each
+    // clone's store from the file system, never asking git about it.
+    let other = scratch.base.join("other");
+    scratch.git(&[
+        "clone",
+        "--quiet",
+        scratch.repo.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    let (out, _) = scratch.counted_in(&other, &["run", "sykli.json"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
     within(
         "run, main checkout",
         scratch.counted(&["run", "sykli.json"], None),
         0,
         RUN,
+    );
+    assert_eq!(
+        fs::read_dir(scratch.base.join("state/sykli/clones"))
+            .unwrap()
+            .count(),
+        2,
+        "both clones are registered, so the counted run read both"
     );
     within(
         "run, linked worktree",
