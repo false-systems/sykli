@@ -45,7 +45,7 @@ A new source, test or fixture file goes into the `inputs` of the `fmt`, `clippy`
 - Never push to `main`; branch, push, open a PR. Never merge without the owner's explicit approval of that PR. Push a branch only when it is complete and say so: merges here have repeatedly caught branches mid-push.
 - Validate locally before pushing (the gate above, and any check your launch prompt names). CI runs the Linux gate and the Windows tests on every pull request and on `main`, on `ubuntu-latest` and `windows-latest` (the repository is public, so hosted runners are free; macOS is covered locally). Do not push a release tag (`release.yml` builds five targets) unless told to.
 - `.sykli/` and other tools' local state directories are ignored.
-- Code is Rust or Elixir/Erlang; never add Python, Go or Node.
+- Prefer Rust or Elixir/Erlang; Python and Go are allowed, not preferred.
 
 ## Lessons
 
