@@ -4,6 +4,34 @@ mod stdio;
 use std::{fs, process::Command};
 
 #[test]
+fn action_gate_requires_verification_unless_explicitly_disabled() {
+    let (_, gate) = include_str!("../action.yml")
+        .split_once("    - name: Gate\n")
+        .expect("Gate step");
+    let (_, script) = gate.split_once("      run: |\n").expect("Gate script");
+    for (verify, run, verdict, expected) in [
+        ("true", "0", "", 2),
+        ("true", "0", "3", 3),
+        ("true", "0", "0", 0),
+        ("false", "0", "", 0),
+        ("false", "1", "", 1),
+    ] {
+        let out = Command::new("sh")
+            .args(["-c", script])
+            .env("VERIFY_ENABLED", verify)
+            .env("RUN_CODE", run)
+            .env("VERIFY_CODE", verdict)
+            .output()
+            .expect("Gate script runs");
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "verify={verify}, run={run}, verdict={verdict}: {out:?}"
+        );
+    }
+}
+
+#[test]
 fn help_states_the_identity() {
     let out = Command::new(env!("CARGO_BIN_EXE_sykli"))
         .arg("--help")

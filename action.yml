@@ -138,17 +138,24 @@ runs:
       shell: sh
       env:
         RUN_CODE: ${{ steps.run.outputs.code }}
+        VERIFY_ENABLED: ${{ inputs.verify }}
         VERIFY_CODE: ${{ steps.verify.outputs.code }}
       run: |
         set -eu
         run_code=${RUN_CODE:-2}
-        verify_code=${VERIFY_CODE:-0}
         if [ "$run_code" != 0 ]; then
           echo "sykli run exited $run_code" >&2
           exit "$run_code"
         fi
-        if [ "$verify_code" != 0 ]; then
-          echo "sykli verify exited $verify_code" >&2
-          exit "$verify_code"
+        if [ "${VERIFY_ENABLED:-true}" != false ]; then
+          verify_code=${VERIFY_CODE:-}
+          if [ -z "$verify_code" ]; then
+            echo "sykli verify did not report a result" >&2
+            exit 2
+          fi
+          if [ "$verify_code" != 0 ]; then
+            echo "sykli verify exited $verify_code" >&2
+            exit "$verify_code"
+          fi
         fi
         echo "sykli gate passed"
